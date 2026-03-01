@@ -2,15 +2,15 @@ import { Link, useLocation } from "wouter";
 import { MessageSquare, Settings, Brain, Bot, Users, ChevronRight, BarChart3 } from "lucide-react";
 
 const allMenuItems = [
-  { title: "即時客服", url: "/", icon: MessageSquare, roles: ["admin", "agent"] },
-  { title: "AI 與知識庫", url: "/knowledge", icon: Brain, roles: ["admin", "agent"] },
-  { title: "數據戰情室", url: "/analytics", icon: BarChart3, roles: ["admin"] },
-  { title: "團隊管理", url: "/team", icon: Users, roles: ["admin"] },
-  { title: "系統設定", url: "/settings", icon: Settings, roles: ["admin"] },
+  { title: "即時客服", url: "/", icon: MessageSquare, roles: ["super_admin", "marketing_manager", "cs_agent"] },
+  { title: "AI 與知識庫", url: "/knowledge", icon: Brain, roles: ["super_admin", "marketing_manager"] },
+  { title: "數據戰情室", url: "/analytics", icon: BarChart3, roles: ["super_admin", "marketing_manager"] },
+  { title: "團隊管理", url: "/team", icon: Users, roles: ["super_admin"] },
+  { title: "系統設定", url: "/settings", icon: Settings, roles: ["super_admin", "marketing_manager"] },
 ];
 
 interface AppSidebarProps {
-  userRole: "admin" | "agent";
+  userRole: string;
   systemName: string;
   logoUrl: string;
 }

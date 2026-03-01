@@ -6,13 +6,24 @@ import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Send, User, Bot, Headphones, UserCheck, Search, X, Plus, Tag,
-  Circle, Zap, Star, Info,
+  Circle, Zap, Star, Info, Package, Crown, ShoppingBag, Loader2,
 } from "lucide-react";
 import { apiRequest, getQueryFn } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import type { ContactWithPreview, Message } from "@shared/schema";
+import type { ContactWithPreview, Message, OrderInfo, ORDER_STATUS_LABELS } from "@shared/schema";
+
+const ORDER_STATUS_MAP: Record<string, { label: string; color: string }> = {
+  new_order: { label: "新訂單", color: "bg-blue-50 text-blue-600 border-blue-200" },
+  shipped: { label: "已出貨", color: "bg-emerald-50 text-emerald-600 border-emerald-200" },
+  pending: { label: "待處理", color: "bg-amber-50 text-amber-600 border-amber-200" },
+  completed: { label: "已完成", color: "bg-stone-50 text-stone-600 border-stone-200" },
+  cancelled: { label: "已取消", color: "bg-red-50 text-red-600 border-red-200" },
+  delay_handling: { label: "延遲處理", color: "bg-orange-50 text-orange-600 border-orange-200" },
+  returned: { label: "已退貨", color: "bg-rose-50 text-rose-600 border-rose-200" },
+};
 
 const STATUS_MAP: Record<string, { label: string; color: string; dot: string }> = {
   pending: { label: "待處理", color: "bg-red-50 text-red-600 border-red-200", dot: "bg-red-500" },
@@ -38,6 +49,17 @@ const QUICK_REPLIES = [
   "好的，馬上為您處理，請稍候片刻。",
 ];
 
+function VipBadge({ level }: { level: number }) {
+  if (level <= 0) return null;
+  const labels = ["", "VIP", "VIP Gold", "VIP Platinum"];
+  const colors = ["", "bg-violet-100 text-violet-700 border-violet-300", "bg-amber-100 text-amber-700 border-amber-300", "bg-gradient-to-r from-stone-700 to-stone-500 text-white border-stone-400"];
+  return (
+    <span className={`inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full border ${colors[level] || colors[1]}`} data-testid="badge-vip">
+      <Crown className="w-2.5 h-2.5" />{labels[level] || "VIP"}
+    </span>
+  );
+}
+
 export default function ChatPage() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [messageInput, setMessageInput] = useState("");
@@ -45,6 +67,10 @@ export default function ChatPage() {
   const [sending, setSending] = useState(false);
   const [newTag, setNewTag] = useState("");
   const [showQuickReplies, setShowQuickReplies] = useState(false);
+  const [rightTab, setRightTab] = useState("info");
+  const [orderSearch, setOrderSearch] = useState("");
+  const [orderSearchResults, setOrderSearchResults] = useState<OrderInfo[]>([]);
+  const [orderSearching, setOrderSearching] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const quickReplyRef = useRef<HTMLDivElement>(null);
   const queryClient = useQueryClient();
@@ -145,6 +171,26 @@ export default function ChatPage() {
     } catch { toast({ title: "移除標籤失敗", variant: "destructive" }); }
   };
 
+  const handleOrderSearch = async () => {
+    if (!orderSearch.trim()) return;
+    setOrderSearching(true);
+    try {
+      const params = orderSearch.match(/^\d{4,}$/)
+        ? `phone=${encodeURIComponent(orderSearch.trim())}`
+        : `order_id=${encodeURIComponent(orderSearch.trim())}`;
+      const res = await fetch(`/api/orders/lookup?${params}`, { credentials: "include" });
+      if (!res.ok) throw new Error("Failed");
+      const data = await res.json();
+      setOrderSearchResults(data.orders || []);
+      if (data.error) {
+        toast({ title: data.message || "查詢失敗", variant: "destructive" });
+      } else if (data.orders?.length === 0) {
+        toast({ title: "未找到相關訂單" });
+      }
+    } catch { toast({ title: "查詢失敗", variant: "destructive" }); }
+    finally { setOrderSearching(false); }
+  };
+
   const handleQuickReply = (text: string) => { setMessageInput(text); setShowQuickReplies(false); };
 
   const formatTime = (dateStr: string) => new Date(dateStr.replace(" ", "T")).toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit" });
@@ -156,7 +202,7 @@ export default function ChatPage() {
 
   return (
     <div className="flex h-full bg-[#faf9f5]" data-testid="chat-page">
-      <div className="w-[320px] min-w-[320px] border-r border-stone-200 flex flex-col bg-white">
+      <div className="w-[300px] min-w-[300px] border-r border-stone-200 flex flex-col bg-white">
         <div className="p-3 border-b border-stone-200">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400" />
@@ -199,6 +245,7 @@ export default function ChatPage() {
                             <Star className={`w-3.5 h-3.5 transition-colors ${contact.is_pinned ? "fill-amber-400 text-amber-400" : "text-stone-300 hover:text-amber-400"}`} />
                           </button>
                           <span className="text-sm font-semibold text-stone-800 truncate">{contact.display_name}</span>
+                          {contact.vip_level > 0 && <VipBadge level={contact.vip_level} />}
                         </div>
                         {contact.last_message_at && <span className="text-[11px] text-stone-400 shrink-0">{formatTime(contact.last_message_at)}</span>}
                       </div>
@@ -243,10 +290,14 @@ export default function ChatPage() {
                   <div className="flex items-center gap-1.5">
                     <h3 className="text-sm font-bold text-stone-800 truncate" data-testid="text-selected-contact">{selectedContact?.display_name}</h3>
                     {selectedContact?.is_pinned ? <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400 shrink-0" /> : null}
+                    {selectedContact && selectedContact.vip_level > 0 && <VipBadge level={selectedContact.vip_level} />}
                   </div>
                   <div className="flex items-center gap-1.5">
                     <Circle className="w-2 h-2 fill-emerald-500 text-emerald-500" />
                     <span className="text-[11px] text-stone-400">LINE</span>
+                    {selectedContact && selectedContact.order_count > 0 && (
+                      <span className="text-[11px] text-stone-400 ml-1">| {selectedContact.order_count} 筆訂單 · ${selectedContact.total_spent.toLocaleString()}</span>
+                    )}
                   </div>
                 </div>
               </div>
@@ -289,18 +340,36 @@ export default function ChatPage() {
               </div>
             </div>
 
-            <ScrollArea className="flex-1 bg-[#faf9f5]">
-              <div className="p-5">
-                {messagesLoading ? (
-                  <div className="text-center text-sm text-stone-400 py-8">載入訊息中...</div>
-                ) : messages.length === 0 ? (
-                  <div className="text-center text-sm text-stone-400 py-8">尚無對話紀錄</div>
-                ) : (
-                  <div className="space-y-4 max-w-2xl mx-auto">
-                    {messages.map((msg, index) => {
-                      const showDate = index === 0 || formatDate(msg.created_at) !== formatDate(messages[index - 1].created_at);
+            <div className="flex flex-1 overflow-hidden">
+              <ScrollArea className="flex-1 bg-[#faf9f5]">
+                <div className="p-5">
+                  {messagesLoading ? (
+                    <div className="text-center text-sm text-stone-400 py-8">載入訊息中...</div>
+                  ) : messages.length === 0 ? (
+                    <div className="text-center text-sm text-stone-400 py-8">尚無對話紀錄</div>
+                  ) : (
+                    <div className="space-y-4 max-w-2xl mx-auto">
+                      {messages.map((msg, index) => {
+                        const showDate = index === 0 || formatDate(msg.created_at) !== formatDate(messages[index - 1].created_at);
 
-                      if (msg.sender_type === "system") {
+                        if (msg.sender_type === "system") {
+                          return (
+                            <div key={msg.id}>
+                              {showDate && (
+                                <div className="flex justify-center my-5">
+                                  <span className="text-[11px] text-stone-400 bg-white px-3 py-1 rounded-full shadow-sm border border-stone-100">{formatDate(msg.created_at)}</span>
+                                </div>
+                              )}
+                              <div className="flex justify-center" data-testid={`message-${msg.id}`}>
+                                <div className="flex items-center gap-1.5 bg-stone-100 text-stone-500 text-xs px-4 py-2 rounded-full">
+                                  <Info className="w-3 h-3" />
+                                  {msg.content}
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        }
+
                         return (
                           <div key={msg.id}>
                             {showDate && (
@@ -308,54 +377,139 @@ export default function ChatPage() {
                                 <span className="text-[11px] text-stone-400 bg-white px-3 py-1 rounded-full shadow-sm border border-stone-100">{formatDate(msg.created_at)}</span>
                               </div>
                             )}
-                            <div className="flex justify-center" data-testid={`message-${msg.id}`}>
-                              <div className="flex items-center gap-1.5 bg-stone-100 text-stone-500 text-xs px-4 py-2 rounded-full">
-                                <Info className="w-3 h-3" />
-                                {msg.content}
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      }
-
-                      return (
-                        <div key={msg.id}>
-                          {showDate && (
-                            <div className="flex justify-center my-5">
-                              <span className="text-[11px] text-stone-400 bg-white px-3 py-1 rounded-full shadow-sm border border-stone-100">{formatDate(msg.created_at)}</span>
-                            </div>
-                          )}
-                          <div className={`flex ${msg.sender_type === "user" ? "justify-start" : "justify-end"}`} data-testid={`message-${msg.id}`}>
-                            <div className={`flex items-end gap-2 max-w-[70%] ${msg.sender_type === "user" ? "flex-row" : "flex-row-reverse"}`}>
-                              <div className="shrink-0 mb-1">
-                                {msg.sender_type === "user" ? (
-                                  <Avatar className="w-7 h-7"><AvatarFallback className="bg-stone-200 text-stone-500 text-xs"><User className="w-3.5 h-3.5" /></AvatarFallback></Avatar>
-                                ) : msg.sender_type === "ai" ? (
-                                  <Avatar className="w-7 h-7"><AvatarFallback className="bg-emerald-100 text-emerald-600 text-xs"><Bot className="w-3.5 h-3.5" /></AvatarFallback></Avatar>
-                                ) : (
-                                  <Avatar className="w-7 h-7"><AvatarFallback className="bg-amber-600 text-white text-xs"><Headphones className="w-3.5 h-3.5" /></AvatarFallback></Avatar>
-                                )}
-                              </div>
-                              <div>
-                                <div className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow-sm ${
-                                  msg.sender_type === "user" ? "bg-white text-stone-700 rounded-bl-md border border-stone-100"
-                                    : msg.sender_type === "ai" ? "bg-emerald-50 text-emerald-900 rounded-br-md border border-emerald-100"
-                                    : "bg-amber-600 text-white rounded-br-md"
-                                }`}>{msg.content}</div>
-                                <div className={`text-[10px] text-stone-400 mt-1 ${msg.sender_type === "user" ? "text-left" : "text-right"}`}>
-                                  {msg.sender_type === "ai" ? "AI 助理 " : msg.sender_type === "admin" ? "真人客服 " : ""}{formatTime(msg.created_at)}
+                            <div className={`flex ${msg.sender_type === "user" ? "justify-start" : "justify-end"}`} data-testid={`message-${msg.id}`}>
+                              <div className={`flex items-end gap-2 max-w-[70%] ${msg.sender_type === "user" ? "flex-row" : "flex-row-reverse"}`}>
+                                <div className="shrink-0 mb-1">
+                                  {msg.sender_type === "user" ? (
+                                    <Avatar className="w-7 h-7"><AvatarFallback className="bg-stone-200 text-stone-500 text-xs"><User className="w-3.5 h-3.5" /></AvatarFallback></Avatar>
+                                  ) : msg.sender_type === "ai" ? (
+                                    <Avatar className="w-7 h-7"><AvatarFallback className="bg-emerald-100 text-emerald-600 text-xs"><Bot className="w-3.5 h-3.5" /></AvatarFallback></Avatar>
+                                  ) : (
+                                    <Avatar className="w-7 h-7"><AvatarFallback className="bg-amber-600 text-white text-xs"><Headphones className="w-3.5 h-3.5" /></AvatarFallback></Avatar>
+                                  )}
+                                </div>
+                                <div>
+                                  <div className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow-sm ${
+                                    msg.sender_type === "user" ? "bg-white text-stone-700 rounded-bl-md border border-stone-100"
+                                      : msg.sender_type === "ai" ? "bg-emerald-50 text-emerald-900 rounded-br-md border border-emerald-100"
+                                      : "bg-amber-600 text-white rounded-br-md"
+                                  }`}>{msg.content}</div>
+                                  <div className={`text-[10px] text-stone-400 mt-1 ${msg.sender_type === "user" ? "text-left" : "text-right"}`}>
+                                    {msg.sender_type === "ai" ? "AI 助理 " : msg.sender_type === "admin" ? "真人客服 " : ""}{formatTime(msg.created_at)}
+                                  </div>
                                 </div>
                               </div>
                             </div>
                           </div>
+                        );
+                      })}
+                      <div ref={messagesEndRef} />
+                    </div>
+                  )}
+                </div>
+              </ScrollArea>
+
+              <div className="w-[280px] min-w-[280px] border-l border-stone-200 bg-white flex flex-col" data-testid="panel-right">
+                <Tabs value={rightTab} onValueChange={setRightTab} className="flex flex-col h-full">
+                  <TabsList className="flex border-b border-stone-200 bg-white rounded-none px-2 pt-2 pb-0">
+                    <TabsTrigger value="info" className="flex-1 text-xs rounded-t-lg rounded-b-none data-[state=active]:bg-stone-50 data-[state=active]:shadow-none" data-testid="tab-info">客戶資訊</TabsTrigger>
+                    <TabsTrigger value="orders" className="flex-1 text-xs rounded-t-lg rounded-b-none data-[state=active]:bg-stone-50 data-[state=active]:shadow-none" data-testid="tab-orders">訂單查詢</TabsTrigger>
+                  </TabsList>
+
+                  <TabsContent value="info" className="flex-1 overflow-auto m-0">
+                    <div className="p-4 space-y-4">
+                      <div className="text-center pb-3 border-b border-stone-100">
+                        <Avatar className="w-16 h-16 mx-auto mb-2">
+                          <AvatarFallback className={`${getAvatarColor(selectedContact?.id || 0)} text-white text-xl font-bold`}>{selectedContact ? getInitials(selectedContact.display_name) : "?"}</AvatarFallback>
+                        </Avatar>
+                        <p className="font-semibold text-stone-800">{selectedContact?.display_name}</p>
+                        {selectedContact && selectedContact.vip_level > 0 && <div className="mt-1"><VipBadge level={selectedContact.vip_level} /></div>}
+                      </div>
+
+                      <div className="space-y-2">
+                        <div className="flex justify-between text-xs">
+                          <span className="text-stone-500">平台</span>
+                          <span className="text-stone-800">LINE</span>
                         </div>
-                      );
-                    })}
-                    <div ref={messagesEndRef} />
-                  </div>
-                )}
+                        <div className="flex justify-between text-xs">
+                          <span className="text-stone-500">平台 ID</span>
+                          <span className="text-stone-800 font-mono text-[11px] truncate max-w-[140px]">{selectedContact?.platform_user_id}</span>
+                        </div>
+                        {selectedContact && selectedContact.order_count > 0 && (
+                          <>
+                            <div className="flex justify-between text-xs">
+                              <span className="text-stone-500">訂單數</span>
+                              <span className="text-stone-800">{selectedContact.order_count} 筆</span>
+                            </div>
+                            <div className="flex justify-between text-xs">
+                              <span className="text-stone-500">累計消費</span>
+                              <span className="text-stone-800 font-semibold">${selectedContact.total_spent.toLocaleString()}</span>
+                            </div>
+                          </>
+                        )}
+                        <div className="flex justify-between text-xs">
+                          <span className="text-stone-500">建立日期</span>
+                          <span className="text-stone-800">{selectedContact?.created_at ? formatDate(selectedContact.created_at) : "-"}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="orders" className="flex-1 overflow-auto m-0">
+                    <div className="p-3 space-y-3">
+                      <div className="flex gap-1.5">
+                        <Input data-testid="input-order-search" placeholder="訂單號或手機號碼..." value={orderSearch} onChange={(e) => setOrderSearch(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") handleOrderSearch(); }}
+                          className="text-xs bg-stone-50 border-stone-200 h-8" />
+                        <Button size="sm" onClick={handleOrderSearch} disabled={orderSearching || !orderSearch.trim()} data-testid="button-search-order" className="h-8 text-xs bg-emerald-600 hover:bg-emerald-700 text-white shrink-0">
+                          {orderSearching ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
+                        </Button>
+                      </div>
+
+                      {orderSearchResults.length > 0 ? (
+                        <div className="space-y-2">
+                          {orderSearchResults.map((order, i) => {
+                            const statusInfo = ORDER_STATUS_MAP[order.status] || { label: order.status, color: "bg-stone-50 text-stone-600 border-stone-200" };
+                            return (
+                              <div key={i} className="rounded-xl border border-stone-200 p-3 space-y-2" data-testid={`order-card-${i}`}>
+                                <div className="flex items-center justify-between">
+                                  <span className="text-xs font-mono font-semibold text-stone-800" data-testid={`order-id-${i}`}>{order.global_order_id}</span>
+                                  <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${statusInfo.color}`}>{statusInfo.label}</span>
+                                </div>
+                                <div className="text-xs text-stone-600">
+                                  <div className="flex justify-between">
+                                    <span>金額</span>
+                                    <span className="font-semibold">${order.final_total_order_amount.toLocaleString()}</span>
+                                  </div>
+                                  {order.tracking_number && (
+                                    <div className="flex justify-between mt-0.5">
+                                      <span>物流單號</span>
+                                      <span className="font-mono text-[11px]">{order.tracking_number}</span>
+                                    </div>
+                                  )}
+                                  {order.product_list && (
+                                    <div className="mt-1.5 pt-1.5 border-t border-stone-100">
+                                      <span className="text-stone-500 text-[11px]">品項：</span>
+                                      <p className="text-[11px] text-stone-700 mt-0.5 line-clamp-3">{order.product_list}</p>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <div className="text-center py-8">
+                          <ShoppingBag className="w-8 h-8 text-stone-300 mx-auto mb-2" />
+                          <p className="text-xs text-stone-400">輸入訂單號或手機號碼查詢</p>
+                          <p className="text-[11px] text-stone-400 mt-0.5">透過一頁商店 API 即時查詢</p>
+                        </div>
+                      )}
+                    </div>
+                  </TabsContent>
+                </Tabs>
               </div>
-            </ScrollArea>
+            </div>
 
             <div className="p-4 border-t border-stone-200 bg-white">
               <div className="flex gap-2 max-w-2xl mx-auto items-center">

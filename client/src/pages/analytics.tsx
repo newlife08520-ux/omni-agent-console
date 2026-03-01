@@ -2,7 +2,12 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Calendar } from "@/components/ui/calendar";
+import { Button } from "@/components/ui/button";
 import { TrendingUp, CheckCircle2, Users, Clock, Brain, Flame, Lightbulb, BarChart3, CalendarDays } from "lucide-react";
+import { format } from "date-fns";
+import { zhTW } from "date-fns/locale/zh-TW";
 import type { AnalyticsData } from "@shared/schema";
 
 const PIE_COLORS = ["#059669", "#d97706", "#7c3aed", "#0284c7"];
@@ -11,15 +16,24 @@ const RANGE_LABELS: Record<string, string> = {
   today: "今日",
   "7d": "近 7 天",
   "30d": "近 30 天",
+  custom: "自訂區間",
 };
 
 export default function AnalyticsPage() {
   const [range, setRange] = useState("today");
+  const [customStart, setCustomStart] = useState<Date | undefined>(undefined);
+  const [customEnd, setCustomEnd] = useState<Date | undefined>(undefined);
+  const [showStartCal, setShowStartCal] = useState(false);
+  const [showEndCal, setShowEndCal] = useState(false);
+
+  const queryParams = range === "custom" && customStart && customEnd
+    ? `?range=custom&start=${format(customStart, "yyyy-MM-dd")}&end=${format(customEnd, "yyyy-MM-dd")}`
+    : `?range=${range}`;
 
   const { data, isLoading } = useQuery<AnalyticsData>({
-    queryKey: ["/api/analytics", range],
+    queryKey: ["/api/analytics", range, customStart?.toISOString(), customEnd?.toISOString()],
     queryFn: async () => {
-      const res = await fetch(`/api/analytics?range=${range}`, { credentials: "include" });
+      const res = await fetch(`/api/analytics${queryParams}`, { credentials: "include" });
       if (!res.ok) throw new Error(`${res.status}`);
       return res.json();
     },
@@ -29,18 +43,20 @@ export default function AnalyticsPage() {
     return <div className="flex items-center justify-center h-full"><p className="text-stone-400">載入數據中...</p></div>;
   }
 
-  const rangeLabel = RANGE_LABELS[range] || "今日";
+  const rangeLabel = range === "custom" && customStart && customEnd
+    ? `${format(customStart, "M/d")} - ${format(customEnd, "M/d")}`
+    : RANGE_LABELS[range] || "今日";
 
   return (
     <div className="p-6 max-w-6xl mx-auto space-y-6" data-testid="analytics-page">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-xl font-bold text-stone-800" data-testid="text-analytics-title">數據戰情室</h1>
           <p className="text-sm text-stone-500 mt-1">即時監控客服績效與 AI 洞察分析</p>
         </div>
         <div className="flex items-center gap-2">
           <CalendarDays className="w-4 h-4 text-stone-400" />
-          <Select value={range} onValueChange={setRange}>
+          <Select value={range} onValueChange={(v) => { setRange(v); if (v !== "custom") { setCustomStart(undefined); setCustomEnd(undefined); } }}>
             <SelectTrigger className="w-[140px] h-9 text-sm border-stone-200 bg-white" data-testid="select-date-range">
               <SelectValue />
             </SelectTrigger>
@@ -48,8 +64,35 @@ export default function AnalyticsPage() {
               <SelectItem value="today">今日</SelectItem>
               <SelectItem value="7d">近 7 天</SelectItem>
               <SelectItem value="30d">近 30 天</SelectItem>
+              <SelectItem value="custom">自訂區間</SelectItem>
             </SelectContent>
           </Select>
+
+          {range === "custom" && (
+            <div className="flex items-center gap-1.5">
+              <Popover open={showStartCal} onOpenChange={setShowStartCal}>
+                <PopoverTrigger asChild>
+                  <Button variant="outline" className="h-9 text-xs border-stone-200 bg-white" data-testid="button-start-date">
+                    {customStart ? format(customStart, "yyyy/MM/dd") : "起始日期"}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-auto p-0" align="start">
+                  <Calendar mode="single" selected={customStart} onSelect={(d) => { setCustomStart(d); setShowStartCal(false); }} locale={zhTW} />
+                </PopoverContent>
+              </Popover>
+              <span className="text-xs text-stone-400">~</span>
+              <Popover open={showEndCal} onOpenChange={setShowEndCal}>
+                <PopoverTrigger asChild>
+                  <Button variant="outline" className="h-9 text-xs border-stone-200 bg-white" data-testid="button-end-date">
+                    {customEnd ? format(customEnd, "yyyy/MM/dd") : "結束日期"}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-auto p-0" align="start">
+                  <Calendar mode="single" selected={customEnd} onSelect={(d) => { setCustomEnd(d); setShowEndCal(false); }} locale={zhTW} />
+                </PopoverContent>
+              </Popover>
+            </div>
+          )}
         </div>
       </div>
 
@@ -62,7 +105,6 @@ export default function AnalyticsPage() {
           <p className="text-3xl font-bold text-stone-800">{data.kpi.todayInbound}</p>
           <p className="text-xs text-stone-400 mt-1">則訊息</p>
         </div>
-
         <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="kpi-completion">
           <div className="flex items-center gap-2 mb-3">
             <div className="w-10 h-10 rounded-xl bg-sky-100 flex items-center justify-center"><CheckCircle2 className="w-5 h-5 text-sky-600" /></div>
@@ -71,7 +113,6 @@ export default function AnalyticsPage() {
           <p className="text-3xl font-bold text-stone-800">{data.kpi.completionRate}%</p>
           <p className="text-xs text-stone-400 mt-1">已處理 {data.kpi.completedCount} 則</p>
         </div>
-
         <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="kpi-ai-rate">
           <div className="flex items-center gap-2 mb-3">
             <div className="w-10 h-10 rounded-xl bg-violet-100 flex items-center justify-center"><Users className="w-5 h-5 text-violet-600" /></div>
@@ -80,7 +121,6 @@ export default function AnalyticsPage() {
           <p className="text-3xl font-bold text-stone-800">{data.kpi.aiInterceptRate}%</p>
           <p className="text-xs text-stone-400 mt-1">AI 成功處理的對話比例</p>
         </div>
-
         <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="kpi-frt">
           <div className="flex items-center gap-2 mb-3">
             <div className="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center"><Clock className="w-5 h-5 text-amber-600" /></div>
@@ -162,7 +202,6 @@ export default function AnalyticsPage() {
               ))}
             </div>
           </div>
-
           <div className="bg-emerald-50/50 rounded-2xl border border-emerald-100 p-4" data-testid="section-suggestions">
             <div className="flex items-center gap-2 mb-3">
               <Lightbulb className="w-4 h-4 text-emerald-600" />

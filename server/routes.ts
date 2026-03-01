@@ -1,6 +1,8 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
+import { fetchOrders, lookupOrdersByPhone, lookupOrderById } from "./superlanding";
+import type { SuperLandingConfig } from "./superlanding";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
@@ -28,6 +30,13 @@ const upload = multer({
   },
   limits: { fileSize: 20 * 1024 * 1024 },
 });
+
+function getSuperLandingConfig(): SuperLandingConfig {
+  return {
+    merchantNo: storage.getSetting("superlanding_merchant_no") || "",
+    accessKey: storage.getSetting("superlanding_access_key") || "",
+  };
+}
 
 export async function registerRoutes(
   httpServer: Server,
@@ -81,24 +90,44 @@ export async function registerRoutes(
     return res.status(401).json({ message: "未授權" });
   };
 
-  const adminOnly = (req: any, res: any, next: any) => {
-    if (req.session?.userRole === "admin") return next();
-    return res.status(403).json({ message: "權限不足" });
+  const superAdminOnly = (req: any, res: any, next: any) => {
+    if (req.session?.userRole === "super_admin") return next();
+    return res.status(403).json({ message: "權限不足：需要超級管理員權限" });
   };
 
-  app.get("/api/settings", authMiddleware, (_req, res) => {
-    const settings = storage.getAllSettings();
-    return res.json(settings);
+  const managerOrAbove = (req: any, res: any, next: any) => {
+    if (["super_admin", "marketing_manager"].includes(req.session?.userRole)) return next();
+    return res.status(403).json({ message: "權限不足：需要行銷經理以上權限" });
+  };
+
+  app.get("/api/settings", authMiddleware, (req: any, res) => {
+    const role = req.session?.userRole;
+    if (role === "cs_agent") {
+      const publicKeys = ["system_name", "logo_url", "test_mode"];
+      const allSettings = storage.getAllSettings();
+      return res.json(allSettings.filter((s) => publicKeys.includes(s.key)));
+    }
+    const allSettings = storage.getAllSettings();
+    if (role === "super_admin") return res.json(allSettings);
+    const sensitiveKeys = ["openai_api_key", "line_channel_secret", "line_channel_access_token", "superlanding_merchant_no", "superlanding_access_key"];
+    const filtered = allSettings.filter((s) => !sensitiveKeys.includes(s.key));
+    return res.json(filtered);
   });
 
-  app.put("/api/settings", authMiddleware, adminOnly, (req, res) => {
+  app.put("/api/settings", authMiddleware, (req: any, res) => {
     const { key, value } = req.body;
     if (!key) return res.status(400).json({ message: "key is required" });
+    const sensitiveKeys = ["openai_api_key", "line_channel_secret", "line_channel_access_token", "superlanding_merchant_no", "superlanding_access_key"];
+    if (sensitiveKeys.includes(key)) {
+      if (req.session?.userRole !== "super_admin") return res.status(403).json({ message: "僅超級管理員可修改 API 金鑰" });
+    } else {
+      if (!["super_admin", "marketing_manager"].includes(req.session?.userRole)) return res.status(403).json({ message: "權限不足" });
+    }
     storage.setSetting(key, value || "");
     return res.json({ success: true });
   });
 
-  app.post("/api/settings/test-connection", authMiddleware, adminOnly, (req, res) => {
+  app.post("/api/settings/test-connection", authMiddleware, superAdminOnly, (req, res) => {
     const { type } = req.body;
     setTimeout(() => res.json({ success: true, message: `${type} 連線測試成功` }), 1000);
   });
@@ -167,6 +196,50 @@ export async function registerRoutes(
     const message = storage.createMessage(contactId, contact.platform, "admin", content);
     storage.updateContactHumanFlag(contactId, 1);
     return res.json(message);
+  });
+
+  app.get("/api/contacts/:id/orders", authMiddleware, async (req, res) => {
+    const contactId = parseInt(req.params.id);
+    const contact = storage.getContact(contactId);
+    if (!contact) return res.status(404).json({ message: "聯絡人不存在" });
+    const config = getSuperLandingConfig();
+    if (!config.merchantNo || !config.accessKey) {
+      return res.json({ orders: [], error: "not_configured", message: "尚未設定一頁商店 API 金鑰" });
+    }
+    try {
+      const params: Record<string, string> = {};
+      if (contact.platform_user_id) params.buyer_id = contact.platform_user_id;
+      const orders = await fetchOrders(config, params);
+      return res.json({ orders });
+    } catch (err: any) {
+      const errorMap: Record<string, string> = {
+        missing_credentials: "API 金鑰未設定",
+        invalid_credentials: "API 金鑰無效",
+        connection_failed: "無法連線至一頁商店",
+      };
+      return res.json({ orders: [], error: err.message, message: errorMap[err.message] || "查詢失敗" });
+    }
+  });
+
+  app.get("/api/orders/lookup", authMiddleware, async (req, res) => {
+    const { phone, order_id } = req.query;
+    const config = getSuperLandingConfig();
+    if (!config.merchantNo || !config.accessKey) {
+      return res.json({ orders: [], error: "not_configured", message: "尚未設定一頁商店 API 金鑰" });
+    }
+    try {
+      if (order_id) {
+        const order = await lookupOrderById(config, order_id as string);
+        return res.json({ orders: order ? [order] : [] });
+      }
+      if (phone) {
+        const orders = await lookupOrdersByPhone(config, phone as string);
+        return res.json({ orders });
+      }
+      return res.status(400).json({ message: "請提供 phone 或 order_id 參數" });
+    } catch (err: any) {
+      return res.json({ orders: [], error: err.message, message: "查詢失敗" });
+    }
   });
 
   app.post("/api/webhook/line", (req, res) => {
@@ -240,13 +313,13 @@ export async function registerRoutes(
     return res.json(storage.getKnowledgeFiles());
   });
 
-  app.post("/api/knowledge-files", authMiddleware, upload.single("file"), (req, res) => {
+  app.post("/api/knowledge-files", authMiddleware, managerOrAbove, upload.single("file"), (req, res) => {
     if (!req.file) return res.status(400).json({ message: "未上傳檔案" });
     const file = storage.createKnowledgeFile(req.file.filename, req.file.originalname, req.file.size);
     return res.json(file);
   });
 
-  app.delete("/api/knowledge-files/:id", authMiddleware, (req, res) => {
+  app.delete("/api/knowledge-files/:id", authMiddleware, managerOrAbove, (req, res) => {
     const id = parseInt(req.params.id);
     const files = storage.getKnowledgeFiles();
     const file = files.find((f) => f.id === id);
@@ -258,17 +331,17 @@ export async function registerRoutes(
     return res.json({ success: true });
   });
 
-  app.get("/api/team", authMiddleware, adminOnly, (_req, res) => {
+  app.get("/api/team", authMiddleware, superAdminOnly, (_req, res) => {
     return res.json(storage.getTeamMembers());
   });
 
-  app.post("/api/team", authMiddleware, adminOnly, (req, res) => {
+  app.post("/api/team", authMiddleware, superAdminOnly, (req, res) => {
     const { username, password, display_name, role } = req.body;
     if (!username || !password || !display_name) {
       return res.status(400).json({ message: "所有欄位均為必填" });
     }
-    if (!["admin", "agent"].includes(role)) {
-      return res.status(400).json({ message: "角色必須為 admin 或 agent" });
+    if (!["super_admin", "marketing_manager", "cs_agent"].includes(role)) {
+      return res.status(400).json({ message: "角色必須為 super_admin, marketing_manager 或 cs_agent" });
     }
     try {
       const user = storage.createUser(username, password, display_name, role);
@@ -281,18 +354,18 @@ export async function registerRoutes(
     }
   });
 
-  app.put("/api/team/:id", authMiddleware, adminOnly, (req, res) => {
+  app.put("/api/team/:id", authMiddleware, superAdminOnly, (req, res) => {
     const id = parseInt(req.params.id);
     const { display_name, role, password } = req.body;
     if (!display_name) return res.status(400).json({ message: "姓名為必填" });
-    if (!["admin", "agent"].includes(role)) return res.status(400).json({ message: "角色必須為 admin 或 agent" });
+    if (!["super_admin", "marketing_manager", "cs_agent"].includes(role)) return res.status(400).json({ message: "角色無效" });
     if (!storage.updateUser(id, display_name, role, password || undefined)) {
       return res.status(404).json({ message: "成員不存在" });
     }
     return res.json({ success: true });
   });
 
-  app.delete("/api/team/:id", authMiddleware, adminOnly, (req, res) => {
+  app.delete("/api/team/:id", authMiddleware, superAdminOnly, (req, res) => {
     const id = parseInt(req.params.id);
     const s = (req as any).session;
     if (id === s.userId) {
@@ -302,8 +375,21 @@ export async function registerRoutes(
     return res.json({ success: true });
   });
 
-  app.get("/api/analytics", authMiddleware, adminOnly, (req, res) => {
+  app.get("/api/analytics", authMiddleware, managerOrAbove, (req, res) => {
     const range = (req.query.range as string) || "today";
+    const startDate = req.query.start as string;
+    const endDate = req.query.end as string;
+
+    let dataKey = range;
+    if (range === "custom" && startDate && endDate) {
+      const start = new Date(startDate);
+      const end = new Date(endDate);
+      const diffDays = Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1;
+      if (diffDays <= 1) dataKey = "today";
+      else if (diffDays <= 7) dataKey = "7d";
+      else dataKey = "30d";
+    }
+
     const mockDataMap: Record<string, any> = {
       today: {
         kpi: { todayInbound: 127, completedCount: 120, completionRate: 94.5, aiInterceptRate: 82, avgFrtAi: "2 秒", avgFrtHuman: "1 分 15 秒" },
@@ -311,8 +397,7 @@ export async function registerRoutes(
           { name: "AI 助理", cases: 104 },
           { name: "客服小李", cases: 35 },
           { name: "系統管理員", cases: 18 },
-          { name: "客服小王", cases: 12 },
-          { name: "客服小陳", cases: 8 },
+          { name: "行銷經理 Amy", cases: 8 },
         ],
         intentDistribution: [
           { name: "退換貨諮詢", value: 40 },
@@ -327,8 +412,7 @@ export async function registerRoutes(
           { name: "AI 助理", cases: 665 },
           { name: "客服小李", cases: 210 },
           { name: "系統管理員", cases: 95 },
-          { name: "客服小王", cases: 78 },
-          { name: "客服小陳", cases: 52 },
+          { name: "行銷經理 Amy", cases: 52 },
         ],
         intentDistribution: [
           { name: "退換貨諮詢", value: 35 },
@@ -343,8 +427,7 @@ export async function registerRoutes(
           { name: "AI 助理", cases: 2817 },
           { name: "客服小李", cases: 920 },
           { name: "系統管理員", cases: 405 },
-          { name: "客服小王", cases: 312 },
-          { name: "客服小陳", cases: 198 },
+          { name: "行銷經理 Amy", cases: 198 },
         ],
         intentDistribution: [
           { name: "退換貨諮詢", value: 38 },
@@ -355,7 +438,7 @@ export async function registerRoutes(
       },
     };
 
-    const data = mockDataMap[range] || mockDataMap.today;
+    const data = mockDataMap[dataKey] || mockDataMap.today;
     return res.json({
       ...data,
       aiInsights: {
@@ -377,14 +460,14 @@ export async function registerRoutes(
     return res.json(storage.getMarketingRules());
   });
 
-  app.post("/api/marketing-rules", authMiddleware, (req, res) => {
+  app.post("/api/marketing-rules", authMiddleware, managerOrAbove, (req, res) => {
     const { keyword, pitch, url } = req.body;
     if (!keyword) return res.status(400).json({ message: "關鍵字為必填" });
     const rule = storage.createMarketingRule(keyword, pitch || "", url || "");
     return res.json({ success: true, rule });
   });
 
-  app.put("/api/marketing-rules/:id", authMiddleware, (req, res) => {
+  app.put("/api/marketing-rules/:id", authMiddleware, managerOrAbove, (req, res) => {
     const id = parseInt(req.params.id);
     const { keyword, pitch, url } = req.body;
     if (!keyword) return res.status(400).json({ message: "關鍵字為必填" });
@@ -394,7 +477,7 @@ export async function registerRoutes(
     return res.json({ success: true });
   });
 
-  app.delete("/api/marketing-rules/:id", authMiddleware, (req, res) => {
+  app.delete("/api/marketing-rules/:id", authMiddleware, managerOrAbove, (req, res) => {
     const id = parseInt(req.params.id);
     if (!storage.deleteMarketingRule(id)) return res.status(404).json({ message: "規則不存在" });
     return res.json({ success: true });

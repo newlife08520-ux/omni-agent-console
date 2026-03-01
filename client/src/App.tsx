@@ -1,4 +1,4 @@
-import { Switch, Route } from "wouter";
+import { Switch, Route, useLocation, Redirect } from "wouter";
 import { queryClient, getQueryFn } from "./lib/queryClient";
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -12,28 +12,51 @@ import TeamPage from "@/pages/team";
 import AnalyticsPage from "@/pages/analytics";
 import NotFound from "@/pages/not-found";
 import { Button } from "@/components/ui/button";
-import { LogOut, User } from "lucide-react";
+import { LogOut, User, ShieldAlert } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
-import type { Setting } from "@shared/schema";
+import type { Setting, UserRole, ROLE_LABELS } from "@shared/schema";
 
-function Router() {
+const ROLE_DISPLAY: Record<string, string> = {
+  super_admin: "超級管理員",
+  marketing_manager: "行銷經理",
+  cs_agent: "客服人員",
+};
+
+const ROUTE_ACCESS: Record<string, string[]> = {
+  "/": ["super_admin", "marketing_manager", "cs_agent"],
+  "/settings": ["super_admin", "marketing_manager"],
+  "/knowledge": ["super_admin", "marketing_manager"],
+  "/team": ["super_admin"],
+  "/analytics": ["super_admin", "marketing_manager"],
+};
+
+function AccessDenied() {
   return (
-    <Switch>
-      <Route path="/" component={ChatPage} />
-      <Route path="/settings" component={SettingsPage} />
-      <Route path="/knowledge" component={KnowledgePage} />
-      <Route path="/team" component={TeamPage} />
-      <Route path="/analytics" component={AnalyticsPage} />
-      <Route component={NotFound} />
-    </Switch>
+    <div className="flex-1 flex items-center justify-center">
+      <div className="text-center">
+        <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-red-50 flex items-center justify-center">
+          <ShieldAlert className="w-8 h-8 text-red-400" />
+        </div>
+        <h3 className="text-lg font-semibold text-stone-600">權限不足</h3>
+        <p className="text-sm text-stone-400 mt-1">您沒有權限存取此頁面</p>
+      </div>
+    </div>
   );
+}
+
+function GuardedRoute({ path, component: Component, userRole }: { path: string; component: React.ComponentType; userRole: string }) {
+  const allowedRoles = ROUTE_ACCESS[path];
+  if (allowedRoles && !allowedRoles.includes(userRole)) {
+    return <Route path={path} component={AccessDenied} />;
+  }
+  return <Route path={path} component={Component} />;
 }
 
 interface AuthUser {
   id: number;
   username: string;
   display_name: string;
-  role: "admin" | "agent";
+  role: string;
 }
 
 function AuthenticatedApp({ user }: { user: AuthUser }) {
@@ -63,7 +86,7 @@ function AuthenticatedApp({ user }: { user: AuthUser }) {
             <User className="w-3.5 h-3.5" />
             <span data-testid="text-current-user">{user.display_name}</span>
             <span className="px-1.5 py-0.5 rounded bg-stone-100 text-stone-600 text-[10px] font-medium">
-              {user.role === "admin" ? "管理員" : "客服人員"}
+              {ROLE_DISPLAY[user.role] || user.role}
             </span>
           </div>
           <Button
@@ -78,7 +101,14 @@ function AuthenticatedApp({ user }: { user: AuthUser }) {
           </Button>
         </header>
         <main className="flex-1 overflow-auto">
-          <Router />
+          <Switch>
+            <GuardedRoute path="/" component={ChatPage} userRole={user.role} />
+            <GuardedRoute path="/settings" component={SettingsPage} userRole={user.role} />
+            <GuardedRoute path="/knowledge" component={KnowledgePage} userRole={user.role} />
+            <GuardedRoute path="/team" component={TeamPage} userRole={user.role} />
+            <GuardedRoute path="/analytics" component={AnalyticsPage} userRole={user.role} />
+            <Route component={NotFound} />
+          </Switch>
         </main>
       </div>
     </div>

@@ -19,6 +19,7 @@ export interface IStorage {
   updateContactStatus(id: number, status: string): void;
   updateContactTags(id: number, tags: string[]): void;
   updateContactPinned(id: number, isPinned: number): void;
+  updateContactVipData(id: number, vipLevel: number, orderCount: number, totalSpent: number): void;
   getMessages(contactId: number): Message[];
   getMessagesSince(contactId: number, sinceId: number): Message[];
   createMessage(contactId: number, platform: string, senderType: string, content: string): Message;
@@ -109,6 +110,10 @@ export class SQLiteStorage implements IStorage {
     db.prepare("UPDATE contacts SET is_pinned = ? WHERE id = ?").run(isPinned, id);
   }
 
+  updateContactVipData(id: number, vipLevel: number, orderCount: number, totalSpent: number): void {
+    db.prepare("UPDATE contacts SET vip_level = ?, order_count = ?, total_spent = ? WHERE id = ?").run(vipLevel, orderCount, totalSpent, id);
+  }
+
   getMessages(contactId: number): Message[] {
     return db.prepare("SELECT * FROM messages WHERE contact_id = ? ORDER BY created_at ASC").all(contactId) as Message[];
   }
@@ -128,8 +133,8 @@ export class SQLiteStorage implements IStorage {
     let contact = db.prepare("SELECT * FROM contacts WHERE platform = ? AND platform_user_id = ?").get(platform, platformUserId) as Contact | undefined;
     if (!contact) {
       const now = new Date().toISOString().replace("T", " ").substring(0, 19);
-      const result = db.prepare("INSERT INTO contacts (platform, platform_user_id, display_name, needs_human, is_pinned, status, tags, created_at) VALUES (?, ?, ?, 0, 0, 'pending', '[]', ?)").run(platform, platformUserId, displayName, now);
-      contact = { id: Number(result.lastInsertRowid), platform, platform_user_id: platformUserId, display_name: displayName, avatar_url: null, needs_human: 0, is_pinned: 0, status: "pending", tags: "[]", last_message_at: null, created_at: now };
+      const result = db.prepare("INSERT INTO contacts (platform, platform_user_id, display_name, needs_human, is_pinned, status, tags, vip_level, order_count, total_spent, created_at) VALUES (?, ?, ?, 0, 0, 'pending', '[]', 0, 0, 0, ?)").run(platform, platformUserId, displayName, now);
+      contact = { id: Number(result.lastInsertRowid), platform, platform_user_id: platformUserId, display_name: displayName, avatar_url: null, needs_human: 0, is_pinned: 0, status: "pending", tags: "[]", vip_level: 0, order_count: 0, total_spent: 0, last_message_at: null, created_at: now };
     }
     return contact;
   }

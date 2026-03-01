@@ -66,7 +66,10 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
               {loading ? "登入中..." : "登入系統"}
             </Button>
           </form>
-          <p className="text-[11px] text-stone-400 text-center mt-4">測試帳號：admin / admin123 或 agent / agent123</p>
+          <div className="text-[11px] text-stone-400 text-center mt-4 space-y-0.5">
+            <p>測試帳號：admin / admin123 (超級管理員)</p>
+            <p>marketing / mkt123 (行銷經理) · agent / agent123 (客服人員)</p>
+          </div>
         </div>
         <p className="text-center text-xs text-stone-400 mt-6">AI 客服管理平台 v4.0</p>
       </div>

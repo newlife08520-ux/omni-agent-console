@@ -1,9 +1,11 @@
+export type UserRole = "super_admin" | "marketing_manager" | "cs_agent";
+
 export interface User {
   id: number;
   username: string;
   password_hash: string;
   display_name: string;
-  role: "admin" | "agent";
+  role: UserRole;
   created_at: string;
 }
 
@@ -17,6 +19,9 @@ export interface Contact {
   is_pinned: number;
   status: "pending" | "processing" | "resolved";
   tags: string;
+  vip_level: number;
+  order_count: number;
+  total_spent: number;
   last_message_at: string | null;
   created_at: string;
 }
@@ -51,7 +56,7 @@ export interface TeamMember {
   id: number;
   username: string;
   display_name: string;
-  role: "admin" | "agent";
+  role: UserRole;
   created_at: string;
 }
 
@@ -60,6 +65,17 @@ export interface MarketingRule {
   keyword: string;
   pitch: string;
   url: string;
+  created_at: string;
+}
+
+export interface OrderInfo {
+  global_order_id: string;
+  status: string;
+  final_total_order_amount: number;
+  product_list: string;
+  buyer_name: string;
+  buyer_phone: string;
+  tracking_number: string;
   created_at: string;
 }
 
@@ -90,3 +106,19 @@ export interface AnalyticsData {
     suggestions: string[];
   };
 }
+
+export const ROLE_LABELS: Record<UserRole, string> = {
+  super_admin: "超級管理員",
+  marketing_manager: "行銷經理",
+  cs_agent: "客服人員",
+};
+
+export const ORDER_STATUS_LABELS: Record<string, string> = {
+  new_order: "新訂單",
+  shipped: "已出貨",
+  pending: "待處理",
+  completed: "已完成",
+  cancelled: "已取消",
+  delay_handling: "延遲處理",
+  returned: "已退貨",
+};

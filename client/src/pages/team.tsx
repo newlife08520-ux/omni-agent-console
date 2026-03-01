@@ -5,14 +5,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
-import { Users, Shield, Headphones, Mail, Plus, Trash2, UserPlus, Pencil } from "lucide-react";
+import { Users, Shield, Headphones, TrendingUp, Mail, Plus, Trash2, UserPlus, Pencil } from "lucide-react";
 import { apiRequest, getQueryFn } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import type { TeamMember } from "@shared/schema";
 
 const ROLE_MAP: Record<string, { label: string; color: string; icon: typeof Shield }> = {
-  admin: { label: "管理員", color: "bg-violet-50 text-violet-600 border-violet-200", icon: Shield },
-  agent: { label: "一般客服", color: "bg-sky-50 text-sky-600 border-sky-200", icon: Headphones },
+  super_admin: { label: "超級管理員", color: "bg-violet-50 text-violet-600 border-violet-200", icon: Shield },
+  marketing_manager: { label: "行銷經理", color: "bg-orange-50 text-orange-600 border-orange-200", icon: TrendingUp },
+  cs_agent: { label: "客服人員", color: "bg-sky-50 text-sky-600 border-sky-200", icon: Headphones },
 };
 
 export default function TeamPage() {
@@ -22,10 +23,10 @@ export default function TeamPage() {
   const [formName, setFormName] = useState("");
   const [formUsername, setFormUsername] = useState("");
   const [formPassword, setFormPassword] = useState("");
-  const [formRole, setFormRole] = useState("agent");
+  const [formRole, setFormRole] = useState("cs_agent");
   const [editName, setEditName] = useState("");
   const [editPassword, setEditPassword] = useState("");
-  const [editRole, setEditRole] = useState("agent");
+  const [editRole, setEditRole] = useState("cs_agent");
   const [creating, setCreating] = useState(false);
   const [updating, setUpdating] = useState(false);
   const queryClient = useQueryClient();
@@ -55,7 +56,7 @@ export default function TeamPage() {
       queryClient.invalidateQueries({ queryKey: ["/api/team"] });
       toast({ title: "新增成功", description: `${formName} 已加入團隊` });
       setShowAddDialog(false);
-      setFormName(""); setFormUsername(""); setFormPassword(""); setFormRole("agent");
+      setFormName(""); setFormUsername(""); setFormPassword(""); setFormRole("cs_agent");
     } catch (err: any) {
       const msg = err?.message?.includes("400") ? "該帳號已存在" : "新增失敗";
       toast({ title: msg, variant: "destructive" });
@@ -106,12 +107,20 @@ export default function TeamPage() {
     return <div className="flex items-center justify-center h-full"><p className="text-stone-400">載入中...</p></div>;
   }
 
+  const roleSelectItems = (
+    <>
+      <SelectItem value="super_admin"><span className="flex items-center gap-1.5"><Shield className="w-3 h-3" />超級管理員</span></SelectItem>
+      <SelectItem value="marketing_manager"><span className="flex items-center gap-1.5"><TrendingUp className="w-3 h-3" />行銷經理</span></SelectItem>
+      <SelectItem value="cs_agent"><span className="flex items-center gap-1.5"><Headphones className="w-3 h-3" />客服人員</span></SelectItem>
+    </>
+  );
+
   return (
     <div className="p-6 max-w-4xl mx-auto space-y-6" data-testid="team-page">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold text-stone-800" data-testid="text-team-title">團隊管理</h1>
-          <p className="text-sm text-stone-500 mt-1">管理客服團隊成員與權限設定</p>
+          <p className="text-sm text-stone-500 mt-1">管理客服團隊成員與三級權限設定</p>
         </div>
         <div className="flex items-center gap-3">
           <div className="text-sm text-stone-500">共 {members.length} 位成員</div>
@@ -121,6 +130,28 @@ export default function TeamPage() {
         </div>
       </div>
 
+      <div className="bg-stone-50 rounded-xl border border-stone-200 p-4 grid grid-cols-3 gap-3" data-testid="section-rbac-info">
+        {Object.entries(ROLE_MAP).map(([key, info]) => {
+          const RoleIcon = info.icon;
+          const descriptions: Record<string, string> = {
+            super_admin: "完整系統權限，含 API 金鑰與帳號管理",
+            marketing_manager: "管理導購規則、知識庫、數據報表",
+            cs_agent: "即時客服對話與訂單查詢",
+          };
+          return (
+            <div key={key} className="bg-white rounded-xl border border-stone-200 p-3">
+              <div className="flex items-center gap-2 mb-1">
+                <div className={`w-6 h-6 rounded-lg flex items-center justify-center ${info.color.split(" ")[0]}`}>
+                  <RoleIcon className={`w-3.5 h-3.5 ${info.color.split(" ")[1]}`} />
+                </div>
+                <span className="text-xs font-semibold text-stone-800">{info.label}</span>
+              </div>
+              <p className="text-[11px] text-stone-500 leading-relaxed">{descriptions[key]}</p>
+            </div>
+          );
+        })}
+      </div>
+
       <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
         <div className="px-5 py-3 border-b border-stone-200 flex items-center gap-2">
           <Users className="w-4 h-4 text-stone-400" />
@@ -128,7 +159,7 @@ export default function TeamPage() {
         </div>
         <div className="divide-y divide-stone-100">
           {members.map((member) => {
-            const roleInfo = ROLE_MAP[member.role] || ROLE_MAP.agent;
+            const roleInfo = ROLE_MAP[member.role] || ROLE_MAP.cs_agent;
             const RoleIcon = roleInfo.icon;
             return (
               <div key={member.id} className="flex items-center gap-4 px-5 py-4 hover:bg-stone-50 transition-colors" data-testid={`team-member-${member.id}`}>
@@ -185,10 +216,7 @@ export default function TeamPage() {
               <label className="text-xs font-medium text-stone-600 mb-1 block">角色</label>
               <Select value={formRole} onValueChange={setFormRole}>
                 <SelectTrigger className="border-stone-200" data-testid="select-member-role"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="admin"><span className="flex items-center gap-1.5"><Shield className="w-3 h-3" />管理員 (Admin)</span></SelectItem>
-                  <SelectItem value="agent"><span className="flex items-center gap-1.5"><Headphones className="w-3 h-3" />一般客服 (Agent)</span></SelectItem>
-                </SelectContent>
+                <SelectContent>{roleSelectItems}</SelectContent>
               </Select>
             </div>
           </div>
@@ -225,10 +253,7 @@ export default function TeamPage() {
               <label className="text-xs font-medium text-stone-600 mb-1 block">角色</label>
               <Select value={editRole} onValueChange={setEditRole}>
                 <SelectTrigger className="border-stone-200" data-testid="select-edit-role"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="admin"><span className="flex items-center gap-1.5"><Shield className="w-3 h-3" />管理員 (Admin)</span></SelectItem>
-                  <SelectItem value="agent"><span className="flex items-center gap-1.5"><Headphones className="w-3 h-3" />一般客服 (Agent)</span></SelectItem>
-                </SelectContent>
+                <SelectContent>{roleSelectItems}</SelectContent>
               </Select>
             </div>
           </div>

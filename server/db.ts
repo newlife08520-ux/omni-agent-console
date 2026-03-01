@@ -21,7 +21,7 @@ export function initDatabase() {
       username TEXT NOT NULL UNIQUE,
       password_hash TEXT NOT NULL,
       display_name TEXT NOT NULL,
-      role TEXT NOT NULL DEFAULT 'agent' CHECK(role IN ('admin','agent')),
+      role TEXT NOT NULL DEFAULT 'cs_agent' CHECK(role IN ('super_admin','marketing_manager','cs_agent')),
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -40,6 +40,9 @@ export function initDatabase() {
       is_pinned INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','processing','resolved')),
       tags TEXT NOT NULL DEFAULT '[]',
+      vip_level INTEGER NOT NULL DEFAULT 0,
+      order_count INTEGER NOT NULL DEFAULT 0,
+      total_spent REAL NOT NULL DEFAULT 0,
       last_message_at TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -79,8 +82,9 @@ function seedMockData() {
   if (userCount.count > 0) return;
 
   const insertUser = db.prepare("INSERT INTO users (username, password_hash, display_name, role) VALUES (?, ?, ?, ?)");
-  insertUser.run("admin", hashPassword("admin123"), "系統管理員", "admin");
-  insertUser.run("agent", hashPassword("agent123"), "客服小李", "agent");
+  insertUser.run("admin", hashPassword("admin123"), "系統管理員", "super_admin");
+  insertUser.run("marketing", hashPassword("mkt123"), "行銷經理 Amy", "marketing_manager");
+  insertUser.run("agent", hashPassword("agent123"), "客服小李", "cs_agent");
 
   const defaultSettings = [
     ["openai_api_key", ""],
@@ -90,9 +94,11 @@ function seedMockData() {
     ["test_mode", "true"],
     ["system_name", "AI 客服中控台"],
     ["logo_url", ""],
-    ["welcome_message", "哈囉！歡迎來到我們的官方帳號 🎉\n有任何問題都可以直接詢問我，我會盡快為您服務！"],
-    ["quick_buttons", "🔥最新優惠,📦查詢訂單,🙋‍♀️專人服務"],
+    ["welcome_message", "哈囉！歡迎來到我們的官方帳號\n有任何問題都可以直接詢問我，我會盡快為您服務！"],
+    ["quick_buttons", "最新優惠,查詢訂單,專人服務"],
     ["human_transfer_keywords", "真人,客服,投訴,生氣,退貨,爛"],
+    ["superlanding_merchant_no", ""],
+    ["superlanding_access_key", ""],
   ];
   const insertSetting = db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)");
   for (const [key, value] of defaultSettings) {
@@ -100,61 +106,61 @@ function seedMockData() {
   }
 
   const insertContact = db.prepare(
-    "INSERT INTO contacts (platform, platform_user_id, display_name, avatar_url, needs_human, is_pinned, status, tags, last_message_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    "INSERT INTO contacts (platform, platform_user_id, display_name, avatar_url, needs_human, is_pinned, status, tags, vip_level, order_count, total_spent, last_message_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
   );
   const insertMessage = db.prepare(
     "INSERT INTO messages (contact_id, platform, sender_type, content, created_at) VALUES (?, ?, ?, ?, ?)"
   );
 
   const contacts = [
-    { platform: "line", platform_user_id: "U1a2b3c4d5e6f7", display_name: "陳小明", avatar_url: null, needs_human: 0, is_pinned: 1, status: "resolved", tags: '["VIP"]', last_message_at: "2026-03-01T14:30:00", created_at: "2026-02-28T09:00:00" },
-    { platform: "line", platform_user_id: "U2b3c4d5e6f7a8", display_name: "林美玲", avatar_url: null, needs_human: 1, is_pinned: 0, status: "processing", tags: '["客訴","重要"]', last_message_at: "2026-03-01T14:45:00", created_at: "2026-02-27T11:30:00" },
-    { platform: "line", platform_user_id: "U3c4d5e6f7a8b9", display_name: "王大維", avatar_url: null, needs_human: 0, is_pinned: 0, status: "pending", tags: '[]', last_message_at: "2026-03-01T13:15:00", created_at: "2026-02-26T15:20:00" },
-    { platform: "line", platform_user_id: "U4d5e6f7a8b9c0", display_name: "張雅婷", avatar_url: null, needs_human: 0, is_pinned: 1, status: "resolved", tags: '["VIP","回購客戶"]', last_message_at: "2026-03-01T10:00:00", created_at: "2026-02-25T08:45:00" },
-    { platform: "line", platform_user_id: "U5e6f7a8b9c0d1", display_name: "李志豪", avatar_url: null, needs_human: 1, is_pinned: 0, status: "pending", tags: '["新客戶"]', last_message_at: "2026-03-01T15:10:00", created_at: "2026-03-01T14:50:00" },
+    { platform: "line", pid: "U1a2b3c4d5e6f7", name: "陳小明", nh: 0, pin: 1, status: "resolved", tags: '["VIP"]', vip: 2, oc: 12, ts: 38600, lma: "2026-03-01T14:30:00", ca: "2026-02-28T09:00:00" },
+    { platform: "line", pid: "U2b3c4d5e6f7a8", name: "林美玲", nh: 1, pin: 0, status: "processing", tags: '["客訴","重要"]', vip: 0, oc: 2, ts: 3200, lma: "2026-03-01T14:45:00", ca: "2026-02-27T11:30:00" },
+    { platform: "line", pid: "U3c4d5e6f7a8b9", name: "王大維", nh: 0, pin: 0, status: "pending", tags: '[]', vip: 0, oc: 0, ts: 0, lma: "2026-03-01T13:15:00", ca: "2026-02-26T15:20:00" },
+    { platform: "line", pid: "U4d5e6f7a8b9c0", name: "張雅婷", nh: 0, pin: 1, status: "resolved", tags: '["VIP","回購客戶"]', vip: 3, oc: 28, ts: 125000, lma: "2026-03-01T10:00:00", ca: "2026-02-25T08:45:00" },
+    { platform: "line", pid: "U5e6f7a8b9c0d1", name: "李志豪", nh: 1, pin: 0, status: "pending", tags: '["新客戶"]', vip: 0, oc: 1, ts: 990, lma: "2026-03-01T15:10:00", ca: "2026-03-01T14:50:00" },
   ];
 
   for (const c of contacts) {
-    insertContact.run(c.platform, c.platform_user_id, c.display_name, c.avatar_url, c.needs_human, c.is_pinned, c.status, c.tags, c.last_message_at, c.created_at);
+    insertContact.run(c.platform, c.pid, c.name, null, c.nh, c.pin, c.status, c.tags, c.vip, c.oc, c.ts, c.lma, c.ca);
   }
 
   const allMessages = [
-    { contact_id: 1, platform: "line", sender_type: "user", content: "你好，我想查詢一下我的訂單狀態", created_at: "2026-03-01T14:00:00" },
-    { contact_id: 1, platform: "line", sender_type: "ai", content: "您好！感謝您的來訊。請提供您的訂單編號或手機號碼，我將為您查詢訂單狀態。", created_at: "2026-03-01T14:00:05" },
-    { contact_id: 1, platform: "line", sender_type: "user", content: "訂單編號是 ORD-20260228-001", created_at: "2026-03-01T14:10:00" },
-    { contact_id: 1, platform: "line", sender_type: "ai", content: "查詢到您的訂單 ORD-20260228-001，目前狀態為「處理中」，預計明天出貨。", created_at: "2026-03-01T14:10:05" },
-    { contact_id: 1, platform: "line", sender_type: "user", content: "好的，謝謝你", created_at: "2026-03-01T14:30:00" },
-    { contact_id: 1, platform: "line", sender_type: "ai", content: "不客氣！如有任何問題歡迎隨時詢問，祝您有美好的一天！", created_at: "2026-03-01T14:30:05" },
-    { contact_id: 2, platform: "line", sender_type: "user", content: "請問這個商品還有貨嗎？", created_at: "2026-03-01T14:20:00" },
-    { contact_id: 2, platform: "line", sender_type: "ai", content: "您好！請問您想詢問的是哪一款商品呢？", created_at: "2026-03-01T14:20:05" },
-    { contact_id: 2, platform: "line", sender_type: "user", content: "就是你們官網首頁那個限量款包包", created_at: "2026-03-01T14:25:00" },
-    { contact_id: 2, platform: "line", sender_type: "user", content: "我要找客服", created_at: "2026-03-01T14:35:00" },
-    { contact_id: 2, platform: "line", sender_type: "ai", content: "好的，我已為您轉接真人客服，請稍候片刻。", created_at: "2026-03-01T14:35:05" },
-    { contact_id: 2, platform: "line", sender_type: "admin", content: "您好，我是客服專員小李。關於限量款包包，目前還有少量庫存，請問您需要哪個顏色？", created_at: "2026-03-01T14:45:00" },
-    { contact_id: 3, platform: "line", sender_type: "user", content: "我想退貨，怎麼辦理？", created_at: "2026-03-01T12:00:00" },
-    { contact_id: 3, platform: "line", sender_type: "ai", content: "您好！退貨流程如下：\n1. 確認商品在7天鑑賞期內\n2. 商品保持完整未使用\n3. 至會員中心申請退貨", created_at: "2026-03-01T12:00:05" },
-    { contact_id: 3, platform: "line", sender_type: "user", content: "前天買的，還沒拆封", created_at: "2026-03-01T12:30:00" },
-    { contact_id: 3, platform: "line", sender_type: "ai", content: "了解，您的商品在鑑賞期內且未拆封，符合退貨條件。請至會員中心申請退貨。", created_at: "2026-03-01T12:30:05" },
-    { contact_id: 3, platform: "line", sender_type: "user", content: "好的我去試試看，謝謝", created_at: "2026-03-01T13:15:00" },
-    { contact_id: 4, platform: "line", sender_type: "user", content: "你們營業時間是幾點到幾點？", created_at: "2026-03-01T09:30:00" },
-    { contact_id: 4, platform: "line", sender_type: "ai", content: "您好！我們的營業時間為：\n週一至週五 09:00 - 18:00\n週六 10:00 - 16:00\n週日及國定假日公休", created_at: "2026-03-01T09:30:05" },
-    { contact_id: 4, platform: "line", sender_type: "user", content: "門市地址在哪裡？", created_at: "2026-03-01T10:00:00" },
-    { contact_id: 4, platform: "line", sender_type: "ai", content: "我們的門市地址為：台北市信義區松仁路100號1樓", created_at: "2026-03-01T10:00:05" },
-    { contact_id: 5, platform: "line", sender_type: "user", content: "我剛下了一筆訂單，但地址填錯了，可以幫我修改嗎？", created_at: "2026-03-01T14:50:00" },
-    { contact_id: 5, platform: "line", sender_type: "ai", content: "您好！關於修改訂單地址，請提供您的訂單編號。", created_at: "2026-03-01T14:50:05" },
-    { contact_id: 5, platform: "line", sender_type: "user", content: "ORD-20260301-005，拜託幫我改一下，很急！找真人幫我", created_at: "2026-03-01T15:00:00" },
-    { contact_id: 5, platform: "line", sender_type: "ai", content: "了解您的急迫性，我已為您轉接真人客服。", created_at: "2026-03-01T15:00:05" },
-    { contact_id: 5, platform: "line", sender_type: "user", content: "謝謝，麻煩快一點", created_at: "2026-03-01T15:10:00" },
+    { cid: 1, p: "line", st: "user", c: "你好，我想查詢一下我的訂單狀態", ca: "2026-03-01T14:00:00" },
+    { cid: 1, p: "line", st: "ai", c: "您好！感謝您的來訊。請提供您的訂單編號或手機號碼，我將為您查詢訂單狀態。", ca: "2026-03-01T14:00:05" },
+    { cid: 1, p: "line", st: "user", c: "訂單編號是 ORD-20260228-001", ca: "2026-03-01T14:10:00" },
+    { cid: 1, p: "line", st: "ai", c: "查詢到您的訂單 ORD-20260228-001，目前狀態為「處理中」，預計明天出貨。", ca: "2026-03-01T14:10:05" },
+    { cid: 1, p: "line", st: "user", c: "好的，謝謝你", ca: "2026-03-01T14:30:00" },
+    { cid: 1, p: "line", st: "ai", c: "不客氣！如有任何問題歡迎隨時詢問，祝您有美好的一天！", ca: "2026-03-01T14:30:05" },
+    { cid: 2, p: "line", st: "user", c: "請問這個商品還有貨嗎？", ca: "2026-03-01T14:20:00" },
+    { cid: 2, p: "line", st: "ai", c: "您好！請問您想詢問的是哪一款商品呢？", ca: "2026-03-01T14:20:05" },
+    { cid: 2, p: "line", st: "user", c: "就是你們官網首頁那個限量款包包", ca: "2026-03-01T14:25:00" },
+    { cid: 2, p: "line", st: "user", c: "我要找客服", ca: "2026-03-01T14:35:00" },
+    { cid: 2, p: "line", st: "ai", c: "好的，我已為您轉接真人客服，請稍候片刻。", ca: "2026-03-01T14:35:05" },
+    { cid: 2, p: "line", st: "admin", c: "您好，我是客服專員小李。關於限量款包包，目前還有少量庫存，請問您需要哪個顏色？", ca: "2026-03-01T14:45:00" },
+    { cid: 3, p: "line", st: "user", c: "我想退貨，怎麼辦理？", ca: "2026-03-01T12:00:00" },
+    { cid: 3, p: "line", st: "ai", c: "您好！退貨流程如下：\n1. 確認商品在7天鑑賞期內\n2. 商品保持完整未使用\n3. 至會員中心申請退貨", ca: "2026-03-01T12:00:05" },
+    { cid: 3, p: "line", st: "user", c: "前天買的，還沒拆封", ca: "2026-03-01T12:30:00" },
+    { cid: 3, p: "line", st: "ai", c: "了解，您的商品在鑑賞期內且未拆封，符合退貨條件。請至會員中心申請退貨。", ca: "2026-03-01T12:30:05" },
+    { cid: 3, p: "line", st: "user", c: "好的我去試試看，謝謝", ca: "2026-03-01T13:15:00" },
+    { cid: 4, p: "line", st: "user", c: "你們營業時間是幾點到幾點？", ca: "2026-03-01T09:30:00" },
+    { cid: 4, p: "line", st: "ai", c: "您好！我們的營業時間為：\n週一至週五 09:00 - 18:00\n週六 10:00 - 16:00\n週日及國定假日公休", ca: "2026-03-01T09:30:05" },
+    { cid: 4, p: "line", st: "user", c: "門市地址在哪裡？", ca: "2026-03-01T10:00:00" },
+    { cid: 4, p: "line", st: "ai", c: "我們的門市地址為：台北市信義區松仁路100號1樓", ca: "2026-03-01T10:00:05" },
+    { cid: 5, p: "line", st: "user", c: "我剛下了一筆訂單，但地址填錯了，可以幫我修改嗎？", ca: "2026-03-01T14:50:00" },
+    { cid: 5, p: "line", st: "ai", c: "您好！關於修改訂單地址，請提供您的訂單編號。", ca: "2026-03-01T14:50:05" },
+    { cid: 5, p: "line", st: "user", c: "ORD-20260301-005，拜託幫我改一下，很急！找真人幫我", ca: "2026-03-01T15:00:00" },
+    { cid: 5, p: "line", st: "ai", c: "了解您的急迫性，我已為您轉接真人客服。", ca: "2026-03-01T15:00:05" },
+    { cid: 5, p: "line", st: "user", c: "謝謝，麻煩快一點", ca: "2026-03-01T15:10:00" },
   ];
 
   for (const m of allMessages) {
-    insertMessage.run(m.contact_id, m.platform, m.sender_type, m.content, m.created_at);
+    insertMessage.run(m.cid, m.p, m.st, m.c, m.ca);
   }
 
   const insertRule = db.prepare("INSERT INTO marketing_rules (keyword, pitch, url) VALUES (?, ?, ?)");
-  insertRule.run("限量包包", "這款限量設計師聯名包包，採用頂級義大利小牛皮，現在下單享 85 折優惠！原價 $12,800，限時特價 $10,880 🔥", "https://shop.example.com/bag-001");
-  insertRule.run("保養品", "我們的明星商品「極光煥膚精華液」30ml，含玻尿酸+維他命C，現在買一送一只要 $1,680！超過 5,000 則五星好評 ⭐", "https://shop.example.com/serum-002");
-  insertRule.run("會員方案", "加入 VIP 會員即享全站 9 折 + 免運費 + 生日禮金 $500！年費只要 $299，立即升級享受尊榮服務 👑", "https://shop.example.com/vip-membership");
+  insertRule.run("限量包包", "這款限量設計師聯名包包，採用頂級義大利小牛皮，現在下單享 85 折優惠！原價 $12,800，限時特價 $10,880", "https://shop.example.com/bag-001");
+  insertRule.run("保養品", "我們的明星商品「極光煥膚精華液」30ml，含玻尿酸+維他命C，現在買一送一只要 $1,680！超過 5,000 則五星好評", "https://shop.example.com/serum-002");
+  insertRule.run("會員方案", "加入 VIP 會員即享全站 9 折 + 免運費 + 生日禮金 $500！年費只要 $299，立即升級享受尊榮服務", "https://shop.example.com/vip-membership");
 }
 
 export default db;
