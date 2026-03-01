@@ -16,6 +16,7 @@ if (!fs.existsSync(uploadDir)) {
 
 const ALLOWED_EXTENSIONS = [".txt", ".pdf", ".csv", ".docx"];
 const ALLOWED_IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".gif", ".webp"];
+const ALLOWED_VIDEO_EXTENSIONS = [".mp4", ".mov", ".avi", ".webm"];
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -414,6 +415,83 @@ export async function registerRoutes(
     }
   });
 
+  async function downloadLineContent(messageId: string, fallbackExt: string): Promise<string | null> {
+    const token = storage.getSetting("line_channel_access_token");
+    if (!token) return null;
+    try {
+      const resp = await fetch(`https://api-data.line.me/v2/bot/message/${messageId}/content`, {
+        headers: { "Authorization": `Bearer ${token}` },
+      });
+      if (!resp.ok) {
+        console.error("LINE content download failed:", resp.status, await resp.text());
+        return null;
+      }
+      const contentType = resp.headers.get("content-type") || "";
+      const mimeExtMap: Record<string, string> = {
+        "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp",
+        "video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm",
+      };
+      const ext = mimeExtMap[contentType] || fallbackExt;
+      const buffer = Buffer.from(await resp.arrayBuffer());
+      const filename = `line-${Date.now()}-${crypto.randomUUID()}${ext}`;
+      const filePath = path.join(uploadDir, filename);
+      fs.writeFileSync(filePath, buffer);
+      return `/uploads/${filename}`;
+    } catch (err) {
+      console.error("LINE content download error:", err);
+      return null;
+    }
+  }
+
+  async function analyzeImageWithAI(imageFilePath: string, contactId: number) {
+    const apiKey = storage.getSetting("openai_api_key");
+    if (!apiKey || apiKey.trim() === "") return;
+    try {
+      const absPath = path.join(process.cwd(), imageFilePath.startsWith("/") ? imageFilePath.slice(1) : imageFilePath);
+      const imageBuffer = fs.readFileSync(absPath);
+      const base64 = imageBuffer.toString("base64");
+      const ext = path.extname(absPath).toLowerCase();
+      const mimeType = ext === ".png" ? "image/png" : ext === ".gif" ? "image/gif" : ext === ".webp" ? "image/webp" : "image/jpeg";
+      const dataUri = `data:${mimeType};base64,${base64}`;
+
+      const systemPrompt = storage.getSetting("system_prompt") || "你是一位專業的客服助理。";
+      const openai = new OpenAI({ apiKey });
+      const completion = await openai.chat.completions.create({
+        model: "gpt-5.2",
+        messages: [
+          { role: "system", content: systemPrompt },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "請以客服身分查看這張客戶上傳的圖片，判斷是否有商品瑕疵或任何問題，並給予適當的回覆。" },
+              { type: "image_url", image_url: { url: dataUri } },
+            ],
+          },
+        ],
+        max_completion_tokens: 1000,
+        temperature: 0.7,
+      });
+      const reply = completion.choices[0]?.message?.content || "已收到您的圖片，將為您進一步處理。";
+      storage.createMessage(contactId, "line", "ai", reply);
+
+      const lineToken = storage.getSetting("line_channel_access_token");
+      const contact = storage.getContact(contactId);
+      if (lineToken && contact) {
+        await fetch("https://api.line.me/v2/bot/message/push", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${lineToken}` },
+          body: JSON.stringify({
+            to: contact.platform_user_id,
+            messages: [{ type: "text", text: reply }],
+          }),
+        }).catch((err) => console.error("LINE AI image reply push failed:", err));
+      }
+    } catch (err) {
+      console.error("OpenAI Vision analysis error:", err);
+      storage.createMessage(contactId, "line", "ai", "已收到您的圖片，將為您轉交專人檢視。");
+    }
+  }
+
   async function replyToLine(replyToken: string, messages: object[]) {
     const token = storage.getSetting("line_channel_access_token");
     if (!token || !replyToken) return;
@@ -428,7 +506,7 @@ export async function registerRoutes(
     }
   }
 
-  app.post("/api/webhook/line", (req, res) => {
+  app.post("/api/webhook/line", async (req, res) => {
     const signature = req.headers["x-line-signature"] as string | undefined;
     const channelSecret = storage.getSetting("line_channel_secret");
     if (channelSecret && signature && req.rawBody) {
@@ -482,12 +560,52 @@ export async function registerRoutes(
           }
         } else if (event.type === "follow" || event.type === "unfollow" || event.type === "join" || event.type === "leave" || event.type === "memberJoined" || event.type === "memberLeft") {
           // silently ignore lifecycle events
+        } else if (event.type === "message" && event.message?.type === "image") {
+          const userId = event.source?.userId || "unknown";
+          const displayName = event.source?.displayName || "LINE用戶";
+          const contact = storage.getOrCreateContact("line", userId, displayName);
+          const messageId = event.message.id;
+          const imageUrl = await downloadLineContent(messageId, ".jpg");
+          if (imageUrl) {
+            storage.createMessage(contact.id, "line", "user", "[圖片訊息]", "image", imageUrl);
+            if (!contact.needs_human) {
+              analyzeImageWithAI(imageUrl, contact.id).catch((err) =>
+                console.error("AI image analysis background error:", err)
+              );
+            }
+          } else {
+            storage.createMessage(contact.id, "line", "user", "[圖片訊息] (下載失敗)");
+          }
+        } else if (event.type === "message" && event.message?.type === "video") {
+          const userId = event.source?.userId || "unknown";
+          const displayName = event.source?.displayName || "LINE用戶";
+          const contact = storage.getOrCreateContact("line", userId, displayName);
+          const messageId = event.message.id;
+          const videoUrl = await downloadLineContent(messageId, ".mp4");
+          if (videoUrl) {
+            storage.createMessage(contact.id, "line", "user", "[影片訊息]", "video", videoUrl);
+          } else {
+            storage.createMessage(contact.id, "line", "user", "[影片訊息] (下載失敗)");
+          }
+          storage.createMessage(contact.id, "line", "ai", "(AI 系統提示) 已收到您的影片，將為您轉交專人檢視。");
+          storage.updateContactHumanFlag(contact.id, 1);
+          const lineToken = storage.getSetting("line_channel_access_token");
+          if (lineToken && contact) {
+            await fetch("https://api.line.me/v2/bot/message/push", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Authorization": `Bearer ${lineToken}` },
+              body: JSON.stringify({
+                to: contact.platform_user_id,
+                messages: [{ type: "text", text: "已收到您的影片，將為您轉交專人檢視。" }],
+              }),
+            }).catch((err) => console.error("LINE video reply push failed:", err));
+          }
         } else if (event.type === "message" && event.message?.type !== "text") {
           const userId = event.source?.userId || "unknown";
           const displayName = event.source?.displayName || "LINE用戶";
           const contact = storage.getOrCreateContact("line", userId, displayName);
           const msgType = event.message?.type || "unknown";
-          storage.createMessage(contact.id, "line", "user", `[${msgType === "image" ? "圖片" : msgType === "sticker" ? "貼圖" : msgType === "video" ? "影片" : msgType === "audio" ? "音訊" : msgType === "location" ? "位置" : msgType === "file" ? "檔案" : msgType}訊息]`);
+          storage.createMessage(contact.id, "line", "user", `[${msgType === "sticker" ? "貼圖" : msgType === "audio" ? "音訊" : msgType === "location" ? "位置" : msgType === "file" ? "檔案" : msgType}訊息]`);
         }
       } catch (err) {
         console.error("Webhook event processing error:", err);

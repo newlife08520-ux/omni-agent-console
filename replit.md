@@ -119,8 +119,10 @@ openai_api_key, line_channel_secret, line_channel_access_token, superlanding_mer
 ## Webhook (POST /api/webhook/line)
 - Signature verification via HMAC-SHA256 (x-line-signature header)
 - Idempotency: processed_events table deduplicates by webhookEventId
-- Handles: text messages, postback (rating), sticker/image/video/audio/location/file (recorded as placeholder), follow/unfollow/join/leave (silently ignored)
+- Handles: text messages, postback (rating), image (download via LINE Content API → save to uploads/ → OpenAI Vision analysis), video (download → save → auto-flag needs_human), sticker/audio/location/file (recorded as placeholder), follow/unfollow/join/leave (silently ignored)
 - Rating postback: action=rate&ticket_id={id}&score={1-5} → updates cs_rating + reply API
+- Image analysis: downloadLineContent() fetches binary from LINE → saves to uploads/ → analyzeImageWithAI() reads file as base64 → sends to gpt-5.2 with vision payload → stores AI reply + pushes to LINE
+- Video handling: downloads video → stores as message_type="video" → auto-replies "轉交專人檢視" → sets needs_human=1
 
 ## Middleware Chain
 - authMiddleware: checks session.authenticated
