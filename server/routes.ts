@@ -183,12 +183,18 @@ export async function registerRoutes(
         if (!merchantNo || !accessKey) {
           return res.json({ success: false, message: "尚未設定一頁商店 merchant_no 或 access_key" });
         }
-        const slUrl = `https://superlanding.tw/api/orders.json?merchant_no=${encodeURIComponent(merchantNo)}&access_key=${encodeURIComponent(accessKey)}&per_page=1`;
-        const slRes = await fetch(slUrl, { headers: { Accept: "application/json" } });
-        if (slRes.ok) {
-          return res.json({ success: true, message: "一頁商店連線成功！已成功取得訂單資料" });
+        const slUrl = `https://api.www.super-landing.com/orders.json?merchant_no=${encodeURIComponent(merchantNo)}&access_key=${encodeURIComponent(accessKey)}&per_page=1`;
+        try {
+          const slRes = await fetch(slUrl, { headers: { Accept: "application/json" } });
+          if (slRes.ok) {
+            return res.json({ success: true, message: "一頁商店連線成功！已成功取得訂單資料" });
+          }
+          const errText = await slRes.text().catch(() => "");
+          return res.json({ success: false, message: `一頁商店連線失敗 (HTTP ${slRes.status})：${errText || "伺服器拒絕請求，請確認 merchant_no 與 access_key 是否正確"}` });
+        } catch (fetchErr: any) {
+          const detail = fetchErr?.cause?.code || fetchErr?.code || fetchErr?.message || "未知網路錯誤";
+          return res.json({ success: false, message: `一頁商店連線失敗（網路錯誤）：${detail}` });
         }
-        return res.json({ success: false, message: `一頁商店連線失敗 (${slRes.status})` });
       }
 
       return res.json({ success: false, message: `未知的測試類型: ${type}` });
