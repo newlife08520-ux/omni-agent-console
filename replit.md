@@ -9,7 +9,7 @@ A commercial-grade omnichannel AI customer service dashboard focused on LINE cha
 - **Database**: SQLite via better-sqlite3 (file: omnichannel.db)
 - **Auth**: Session-based with 3-tier RBAC (super_admin / marketing_manager / cs_agent), SHA-256 password hashing
 - **AI**: OpenAI API integration (gpt-5.2) for sandbox testing and auto-reply
-- **External API**: 一頁商店 (Super Landing) via https://api.super-landing.com — field mapping: recipient→buyer_name, mobile→buyer_phone, email→buyer_email, tracking_codes→tracking_number, created_date→created_at; triple-mode lookup: (1) global_order_id direct, (2) date-range + email/phone/name filter (31-day max, paginated fetch), (3) page_id + phone product-based search (paginated fetch, phone matching); auto-synced pages catalog cache (hourly refresh) with dynamic AI prompt injection for fuzzy product matching
+- **External API**: 一頁商店 (Super Landing) via https://api.super-landing.com — field mapping: recipient→buyer_name, mobile→buyer_phone, email→buyer_email, tracking_codes→tracking_number, created_date→created_at; triple-mode lookup: (1) global_order_id direct, (2) date-range + email/phone/name filter (31-day max, paginated fetch), (3) page_id + phone product-based search with smart date-windowed fallback for high-volume pages (>3000 orders); full pages catalog (~3,970 pages) fetched with pagination (133 API pages), hourly cache refresh; AI prompt shows top 100 products, server-side fuzzy matching covers all; multi-page search when product name matches multiple pages (e.g., 20+ "國王巴斯克" pages); parallel batch search (3 pages at a time)
 
 ## Test Accounts
 - **admin** / admin123 → role: super_admin, display_name: 系統管理員 (full access)
@@ -35,7 +35,7 @@ server/
   routes.ts        - All API endpoints (/api/*) with RBAC middleware
   storage.ts       - IStorage interface and SQLiteStorage implementation
   db.ts            - SQLite database setup, schema creation, mock data seeding
-  superlanding.ts  - 一頁商店 API client (fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, fetchPages, lookupOrdersByPageAndPhone)
+  superlanding.ts  - 一頁商店 API client (fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, lookupOrdersByPhone, fetchPages, lookupOrdersByPageAndPhone with smart date-window fallback)
   vite.ts          - Vite dev server integration (DO NOT MODIFY)
   static.ts        - Static file serving for production
 

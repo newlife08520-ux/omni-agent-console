@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, fetchPages, lookupOrdersByPageAndPhone, ensurePagesCacheLoaded, refreshPagesCache, getCachedPages, getCachedPagesAge, buildProductCatalogPrompt } from "./superlanding";
+import { fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, lookupOrdersByPhone, fetchPages, lookupOrdersByPageAndPhone, ensurePagesCacheLoaded, refreshPagesCache, getCachedPages, getCachedPagesAge, buildProductCatalogPrompt } from "./superlanding";
 import type { SuperLandingConfig } from "./superlanding";
 import multer from "multer";
 import path from "path";
@@ -763,7 +763,7 @@ export async function registerRoutes(
       type: "function",
       function: {
         name: "lookup_order_by_product_and_phone",
-        description: "用商品名稱和手機號碼查詢訂單。當客戶沒有訂單編號，但提供了購買的商品名稱和手機號碼時使用此工具。你可以用 product_index（商品清單中的編號，如 #3）來精確指定商品，或用 product_name 讓系統模糊匹配。",
+        description: "用商品名稱和手機號碼查詢訂單。當客戶沒有訂單編號，但提供了購買的商品名稱和手機號碼時使用此工具。你可以用 product_index（商品清單中的編號，如 #3）來精確指定商品，或用 product_name 讓系統模糊匹配。即使客戶說的商品名稱不在銷售頁清單中（例如品項名稱、口味、規格等），系統也會自動用手機號碼搜尋近期訂單並比對商品關鍵字，所以請直接呼叫此工具，不要因為商品名稱不在清單中就拒絕查詢或詢問客戶其他問題。",
         parameters: {
           type: "object",
           properties: {
@@ -873,29 +873,29 @@ export async function registerRoutes(
           .replace(/[^\p{L}\p{N}]/gu, "")
           .toLowerCase();
 
-        let matchedPage: typeof pages[0] | undefined;
+        let matchedPages: typeof pages = [];
 
         if (productIndex > 0 && productIndex <= pages.length) {
-          matchedPage = pages[productIndex - 1];
-          console.log("[AI Tool Call] 使用 product_index #" + productIndex + " 直接對應:", matchedPage.productName);
+          matchedPages = [pages[productIndex - 1]];
+          console.log("[AI Tool Call] 使用 product_index #" + productIndex + " 直接對應:", matchedPages[0].productName);
         }
 
-        if (!matchedPage && productName) {
+        if (matchedPages.length === 0 && productName) {
           const cleanInput = stripClean(productName);
           const inputTokens = productName.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, "").split(/\s+/).filter(t => t.length > 0);
           console.log("[AI Tool Call] 模糊匹配，清理後:", cleanInput, "分詞:", inputTokens);
 
-          matchedPage = pages.find(p => stripClean(p.productName) === cleanInput);
+          matchedPages = pages.filter(p => stripClean(p.productName) === cleanInput);
 
-          if (!matchedPage) {
-            matchedPage = pages.find(p => stripClean(p.productName).includes(cleanInput));
+          if (matchedPages.length === 0) {
+            matchedPages = pages.filter(p => stripClean(p.productName).includes(cleanInput));
           }
 
-          if (!matchedPage && cleanInput.length >= 2) {
-            matchedPage = pages.find(p => cleanInput.includes(stripClean(p.productName)));
+          if (matchedPages.length === 0 && cleanInput.length >= 2) {
+            matchedPages = pages.filter(p => cleanInput.includes(stripClean(p.productName)));
           }
 
-          if (!matchedPage && inputTokens.length > 0) {
+          if (matchedPages.length === 0 && inputTokens.length > 0) {
             const scored = pages.map(p => {
               const cleanName = stripClean(p.productName);
               let score = 0;
@@ -908,40 +908,86 @@ export async function registerRoutes(
               return { page: p, score };
             }).filter(s => s.score > 0).sort((a, b) => b.score - a.score);
 
-            if (scored.length === 1) {
-              matchedPage = scored[0].page;
-            } else if (scored.length > 1 && scored[0].score > scored[1].score) {
-              matchedPage = scored[0].page;
-            } else if (scored.length > 1) {
-              const topMatches = scored.filter(s => s.score === scored[0].score).slice(0, 5);
-              console.log("[AI Tool Call] 多個商品匹配:", topMatches.map(s => s.page.productName));
-              const matchList = topMatches.map((s, i) => `#${pages.indexOf(s.page) + 1}｜${s.page.productName}`).join("\n");
-              return JSON.stringify({
-                success: true,
-                found: false,
-                ambiguous: true,
-                message: `找到多個可能的商品，請請客戶確認是哪一個：\n${matchList}`,
-                candidates: topMatches.map(s => ({ index: pages.indexOf(s.page) + 1, name: s.page.productName })),
-              });
+            if (scored.length > 0) {
+              const topScore = scored[0].score;
+              const topMatches = scored.filter(s => s.score === topScore);
+              const uniqueNames = new Set(topMatches.map(s => stripClean(s.page.productName)));
+              if (uniqueNames.size <= 3) {
+                matchedPages = topMatches.map(s => s.page);
+              } else {
+                const candidates = topMatches.slice(0, 5);
+                console.log("[AI Tool Call] 多個不同商品匹配:", candidates.map(s => s.page.productName));
+                const matchList = candidates.map((s, i) => `#${pages.indexOf(s.page) + 1}｜${s.page.productName}`).join("\n");
+                return JSON.stringify({
+                  success: true,
+                  found: false,
+                  ambiguous: true,
+                  message: `找到多個可能的商品，請請客戶確認是哪一個：\n${matchList}`,
+                  candidates: candidates.map(s => ({ index: pages.indexOf(s.page) + 1, name: s.page.productName })),
+                });
+              }
             }
           }
         }
 
-        if (!matchedPage) {
-          console.log("[AI Tool Call] 找不到匹配商品:", productName || `index=${productIndex}`);
-          const allNames = pages.map((p, i) => `#${i + 1}｜${p.productName}`).join("\n");
-          return JSON.stringify({
-            success: true,
-            found: false,
-            message: `找不到與「${productName}」相符的商品。以下是所有可用商品清單，請讓客戶確認：\n${allNames}`,
-          });
+        if (matchedPages.length === 0) {
+          console.log("[AI Tool Call] 銷售頁標題無匹配，改用手機號碼直查:", phone, "關鍵字:", productName);
+
+          try {
+            const phoneResult = await lookupOrdersByPhone(config, phone, productName || undefined);
+
+            if (phoneResult.orders.length > 0) {
+              const { getStatusLabel: getSL } = await import("./superlanding");
+              const orderSummaries = phoneResult.orders.slice(0, 5).map(o => ({
+                order_id: o.global_order_id,
+                status: getSL(o.status),
+                amount: o.final_total_order_amount,
+                product_list: o.product_list,
+                buyer_name: o.buyer_name,
+                tracking_number: o.tracking_number,
+                created_at: o.created_at,
+                shipped_at: o.shipped_at,
+              }));
+              const hasKeywordMatch = productName && phoneResult.orders.some(o => o.product_list.toLowerCase().includes(productName.toLowerCase()));
+              console.log("[AI Tool Call] 手機號碼查到", phoneResult.orders.length, "筆訂單", hasKeywordMatch ? "(含關鍵字匹配)" : "(無關鍵字匹配，回傳全部)");
+              return JSON.stringify({
+                success: true,
+                found: true,
+                total: phoneResult.orders.length,
+                orders: orderSummaries,
+                note: hasKeywordMatch ? undefined : `手機號碼的訂單中未找到包含「${productName}」的商品，以下是該手機號碼的所有訂單，請協助客戶確認。`,
+              });
+            }
+
+            console.log("[AI Tool Call] 手機號碼查無訂單");
+            return JSON.stringify({
+              success: true,
+              found: false,
+              message: `查無手機號碼 ${phone} 的訂單紀錄。`,
+            });
+          } catch (err: any) {
+            console.error("[AI Tool Call] 手機號碼查詢失敗:", err.message);
+            return JSON.stringify({ success: false, error: `查詢失敗：${err.message}` });
+          }
         }
 
-        console.log("[AI Tool Call] 匹配商品:", matchedPage.productName, "pageId:", matchedPage.pageId);
-        const result = await lookupOrdersByPageAndPhone(config, matchedPage.pageId, phone);
+        console.log("[AI Tool Call] 匹配商品:", matchedPages.length, "個銷售頁:", matchedPages.slice(0, 5).map(p => `${p.productName}(${p.pageId})`).join(", "), matchedPages.length > 5 ? "..." : "");
+        let allResults: any[] = [];
+        const searchBatchSize = 3;
+        for (let bi = 0; bi < matchedPages.length; bi += searchBatchSize) {
+          const batch = matchedPages.slice(bi, bi + searchBatchSize);
+          const batchResults = await Promise.all(
+            batch.map(mp => lookupOrdersByPageAndPhone(config, mp.pageId, phone))
+          );
+          for (const br of batchResults) {
+            allResults = allResults.concat(br.orders);
+          }
+          if (allResults.length > 0) break;
+        }
+        const result = { orders: allResults, totalFetched: allResults.length, truncated: false };
 
         if (result.orders.length === 0) {
-          return JSON.stringify({ success: true, found: false, message: `在「${matchedPage.productName}」中查無此手機號碼的訂單` });
+          return JSON.stringify({ success: true, found: false, message: `在「${matchedPages[0].productName}」中查無此手機號碼的訂單（已搜尋 ${matchedPages.length} 個相關銷售頁）` });
         }
 
         const { getStatusLabel: getSL } = await import("./superlanding");
