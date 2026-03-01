@@ -108,14 +108,19 @@ export default function KnowledgePage() {
   const handleSandboxSend = async () => {
     if (!sandboxInput.trim() || sandboxLoading) return;
     const userMsg = sandboxInput.trim();
-    setSandboxMessages((prev) => [...prev, { role: "user", content: userMsg }]);
+    const updatedMessages = [...sandboxMessages, { role: "user" as const, content: userMsg }];
+    setSandboxMessages(updatedMessages);
     setSandboxInput("");
     setSandboxLoading(true);
     try {
+      const history = updatedMessages.slice(-20).map((m) => ({
+        role: m.role === "ai" ? "assistant" : "user",
+        content: m.content,
+      }));
       const res = await fetch("/api/sandbox/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: userMsg }),
+        body: JSON.stringify({ message: userMsg, history }),
         credentials: "include",
       });
       const data = await res.json();

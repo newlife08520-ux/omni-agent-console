@@ -110,7 +110,7 @@ shared/
 10. **LINE Welcome Settings**: Welcome message + 3 quick buttons
 11. **Smart Human-Transfer Keywords**: Comma-separated keywords with tag preview
 12. **Marketing Rules Hub**: Full CRUD for keyword→pitch→URL rules
-13. **Real OpenAI Integration**: gpt-5.2 sandbox + production AI reply
+13. **Real OpenAI Integration**: gpt-5.2 sandbox (with full conversation history, up to 20 turns) + production AI reply
 14. **Real API Test Connection**: POST /api/settings/test-connection for OpenAI (chat completion), LINE (bot info API), 一頁商店 (order API) — super_admin only, with detailed success/failure messages
 15. **LINE CSAT Flex Message**: Manual ⭐ button in chat toolbar sends LINE Flex Message with 5-star postback rating buttons; POST /api/contacts/:id/send-rating endpoint; webhook parses postback action=rate&ticket_id&score, stores cs_rating, replies acknowledgement via Reply API; rating displayed in contact info panel; button auto-disabled when cs_rating exists
 16. **Chat Image Upload**: Attachment button (Paperclip icon) + drag & drop with visual overlay + file preview thumbnails with remove; uploads via POST /api/chat-upload, images rendered in chat bubbles; LINE Messaging API image push support

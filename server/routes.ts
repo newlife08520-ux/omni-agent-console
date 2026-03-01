@@ -742,7 +742,7 @@ export async function registerRoutes(
   });
 
   app.post("/api/sandbox/chat", authMiddleware, async (req, res) => {
-    const { message } = req.body;
+    const { message, history } = req.body;
     if (!message) return res.status(400).json({ message: "message is required" });
     const apiKey = storage.getSetting("openai_api_key");
     if (!apiKey || apiKey.trim() === "") {
@@ -751,12 +751,24 @@ export async function registerRoutes(
     const systemPrompt = await getEnrichedSystemPrompt();
     try {
       const openai = new OpenAI({ apiKey });
+      const chatMessages: { role: "system" | "user" | "assistant"; content: string }[] = [
+        { role: "system", content: systemPrompt },
+      ];
+      if (Array.isArray(history) && history.length > 0) {
+        for (const h of history.slice(-20)) {
+          const role = h.role === "assistant" ? "assistant" as const : "user" as const;
+          if (h.content && typeof h.content === "string") {
+            chatMessages.push({ role, content: h.content });
+          }
+        }
+        console.log(`[Sandbox] 傳送 ${chatMessages.length - 1} 筆對話歷史至 OpenAI`);
+      } else {
+        chatMessages.push({ role: "user", content: message });
+        console.log("[Sandbox] 無對話歷史，僅傳送單筆訊息");
+      }
       const completion = await openai.chat.completions.create({
         model: "gpt-5.2",
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: message },
-        ],
+        messages: chatMessages,
         max_completion_tokens: 1000,
         temperature: 0.7,
       });
