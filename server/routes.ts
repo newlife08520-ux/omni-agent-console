@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter } from "./superlanding";
+import { fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, fetchPages, lookupOrdersByPageAndPhone } from "./superlanding";
 import type { SuperLandingConfig } from "./superlanding";
 import multer from "multer";
 import path from "path";
@@ -467,6 +467,55 @@ export async function registerRoutes(
         connection_failed: "無法連線至一頁商店 API",
       };
       console.error("[一頁商店] 進階查詢失敗:", err.message);
+      return res.json({ orders: [], error: err.message, message: errorMap[err.message] || `查詢失敗：${err.message}` });
+    }
+  });
+
+  app.get("/api/orders/pages", authMiddleware, async (req, res) => {
+    const config = getSuperLandingConfig();
+    if (!config.merchantNo || !config.accessKey) {
+      return res.json({ pages: [], error: "not_configured", message: "尚未設定一頁商店 API 金鑰" });
+    }
+    try {
+      const pages = await fetchPages(config);
+      return res.json({ pages });
+    } catch (err: any) {
+      const errorMap: Record<string, string> = {
+        missing_credentials: "API 金鑰未設定",
+        invalid_credentials: "API 金鑰無效",
+        connection_failed: "無法連線至一頁商店 API",
+      };
+      return res.json({ pages: [], error: err.message, message: errorMap[err.message] || `查詢失敗：${err.message}` });
+    }
+  });
+
+  app.get("/api/orders/by-product", authMiddleware, async (req, res) => {
+    const { page_id, phone } = req.query;
+    const pageId = (page_id as string || "").trim();
+    const phoneNum = (phone as string || "").trim();
+
+    if (!pageId) return res.status(400).json({ message: "請選擇產品（page_id）" });
+    if (!phoneNum) return res.status(400).json({ message: "請提供手機號碼" });
+
+    const config = getSuperLandingConfig();
+    if (!config.merchantNo || !config.accessKey) {
+      return res.json({ orders: [], error: "not_configured", message: "尚未設定一頁商店 API 金鑰" });
+    }
+
+    try {
+      console.log(`[一頁商店] 產品查詢: page_id=${pageId} phone=${phoneNum}`);
+      const result = await lookupOrdersByPageAndPhone(config, pageId, phoneNum);
+      if (result.orders.length === 0) {
+        return res.json({ orders: [], totalFetched: result.totalFetched, message: `此產品下查無符合手機號碼「${phoneNum}」的訂單（共掃描 ${result.totalFetched} 筆）` });
+      }
+      return res.json({ orders: result.orders, totalFetched: result.totalFetched, truncated: result.truncated });
+    } catch (err: any) {
+      const errorMap: Record<string, string> = {
+        missing_credentials: "API 金鑰未設定",
+        invalid_credentials: "API 金鑰無效（請確認 merchant_no 與 access_key）",
+        connection_failed: "無法連線至一頁商店 API",
+      };
+      console.error("[一頁商店] 產品查詢失敗:", err.message);
       return res.json({ orders: [], error: err.message, message: errorMap[err.message] || `查詢失敗：${err.message}` });
     }
   });

@@ -9,7 +9,7 @@ A commercial-grade omnichannel AI customer service dashboard focused on LINE cha
 - **Database**: SQLite via better-sqlite3 (file: omnichannel.db)
 - **Auth**: Session-based with 3-tier RBAC (super_admin / marketing_manager / cs_agent), SHA-256 password hashing
 - **AI**: OpenAI API integration (gpt-5.2) for sandbox testing and auto-reply
-- **External API**: 一頁商店 (Super Landing) via https://api.super-landing.com/orders.json — field mapping: recipient→buyer_name, mobile→buyer_phone, email→buyer_email, tracking_codes→tracking_number, created_date→created_at; dual-mode lookup: (1) global_order_id direct, (2) date-range + email/phone/name filter (31-day max, paginated fetch)
+- **External API**: 一頁商店 (Super Landing) via https://api.super-landing.com — field mapping: recipient→buyer_name, mobile→buyer_phone, email→buyer_email, tracking_codes→tracking_number, created_date→created_at; triple-mode lookup: (1) global_order_id direct, (2) date-range + email/phone/name filter (31-day max, paginated fetch), (3) page_id + phone product-based search (paginated fetch, phone matching)
 
 ## Test Accounts
 - **admin** / admin123 → role: super_admin, display_name: 系統管理員 (full access)
@@ -35,7 +35,7 @@ server/
   routes.ts        - All API endpoints (/api/*) with RBAC middleware
   storage.ts       - IStorage interface and SQLiteStorage implementation
   db.ts            - SQLite database setup, schema creation, mock data seeding
-  superlanding.ts  - 一頁商店 API client (fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter)
+  superlanding.ts  - 一頁商店 API client (fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, fetchPages, lookupOrdersByPageAndPhone)
   vite.ts          - Vite dev server integration (DO NOT MODIFY)
   static.ts        - Static file serving for production
 
@@ -82,6 +82,8 @@ shared/
 - GET /api/contacts/:id/orders — lookup orders for a contact
 - GET /api/orders/lookup?q= — order search by global_order_id
 - GET /api/orders/search?q=&begin_date=&end_date= — advanced search (email/phone/name + date range, 31-day max)
+- GET /api/orders/pages — list all product pages (銷售頁) from 一頁商店
+- GET /api/orders/by-product?page_id=&phone= — product-based order search (page_id + phone matching)
 
 ### Team (super_admin only)
 - GET /api/team, POST /api/team, PUT /api/team/:id, DELETE /api/team/:id
@@ -98,7 +100,7 @@ shared/
 ## Key Features (V6)
 1. **3-Tier RBAC**: super_admin, marketing_manager, cs_agent with granular access control
 2. **Custom Date Range Picker**: Calendar popover for arbitrary date ranges in analytics
-3. **一頁商店 API Integration**: Dual-mode order lookup — (1) strict global_order_id direct query, (2) advanced date-range + email/phone/name filter with 31-day cap; AI prompt v3 enforces 3-stage escalation: ask order ID → ask date+contact for advanced search → human transfer only as last resort
+3. **一頁商店 API Integration**: Triple-mode order lookup — (1) strict global_order_id direct query, (2) product + phone search via page_id, (3) date-range + email/phone/name filter with 31-day cap; AI prompt v4 enforces 3-stage escalation: ask order ID → ask product+phone (preferred) or date+contact → human transfer only as last resort
 4. **Order Lookup Panel**: Right-side tabs in chat with customer info + order search
 5. **VIP Badges**: Crown icon badges for VIP contacts (level 1-3)
 6. **Team CRUD with 3-Tier Roles**: Add/edit/delete with role descriptions

@@ -10,7 +10,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Send, User, Bot, Headphones, UserCheck, Search, X, Plus, Tag,
   Circle, Zap, Star, Info, Package, Crown, ShoppingBag, Loader2,
-  Paperclip, ImageIcon, Upload, CalendarDays, Filter,
+  Paperclip, ImageIcon, Upload, CalendarDays, Filter, Phone,
 } from "lucide-react";
 import { apiRequest, getQueryFn } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -115,10 +115,13 @@ export default function ChatPage() {
   const [orderSearch, setOrderSearch] = useState("");
   const [orderSearchResults, setOrderSearchResults] = useState<OrderInfo[]>([]);
   const [orderSearching, setOrderSearching] = useState(false);
-  const [advancedSearch, setAdvancedSearch] = useState(false);
+  const [searchMode, setSearchMode] = useState<"simple" | "advanced" | "product">("simple");
   const [advSearchQuery, setAdvSearchQuery] = useState("");
   const [advSearchBegin, setAdvSearchBegin] = useState("");
   const [advSearchEnd, setAdvSearchEnd] = useState("");
+  const [productPages, setProductPages] = useState<{ pageId: string; prefix: string; productName: string }[]>([]);
+  const [selectedPageId, setSelectedPageId] = useState("");
+  const [productPhone, setProductPhone] = useState("");
   const [pendingFiles, setPendingFiles] = useState<{ file: File; preview: string }[]>([]);
   const [uploading, setUploading] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -267,6 +270,48 @@ export default function ChatPage() {
         end_date: advSearchEnd,
       });
       const res = await fetch(`/api/orders/search?${params}`, { credentials: "include" });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        toast({ title: errData.message || "查詢失敗", variant: "destructive" });
+        return;
+      }
+      const data = await res.json();
+      setOrderSearchResults(data.orders || []);
+      if (data.error) {
+        toast({ title: data.message || "查詢失敗", variant: "destructive" });
+      } else if (data.orders?.length === 0) {
+        toast({ title: data.message || "未找到相關訂單" });
+      } else {
+        toast({ title: `找到 ${data.orders.length} 筆訂單` });
+      }
+    } catch { toast({ title: "查詢失敗", variant: "destructive" }); }
+    finally { setOrderSearching(false); }
+  };
+
+  const loadProductPages = async () => {
+    try {
+      const res = await fetch("/api/orders/pages", { credentials: "include" });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.error) {
+          toast({ title: data.message || "無法載入銷售頁", variant: "destructive" });
+        }
+        setProductPages(data.pages || []);
+      }
+    } catch {
+      toast({ title: "無法載入銷售頁列表", variant: "destructive" });
+    }
+  };
+
+  const handleProductSearch = async () => {
+    if (!selectedPageId || !productPhone.trim()) return;
+    setOrderSearching(true);
+    try {
+      const params = new URLSearchParams({
+        page_id: selectedPageId,
+        phone: productPhone.trim(),
+      });
+      const res = await fetch(`/api/orders/by-product?${params}`, { credentials: "include" });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
         toast({ title: errData.message || "查詢失敗", variant: "destructive" });
@@ -691,24 +736,31 @@ export default function ChatPage() {
 
                   <TabsContent value="orders" className="flex-1 overflow-auto m-0">
                     <div className="p-3 space-y-3">
-                      <div className="flex items-center gap-1 mb-1">
+                      <div className="flex items-center gap-1 mb-1 flex-wrap">
                         <button
-                          onClick={() => { setAdvancedSearch(false); setOrderSearchResults([]); }}
-                          className={`text-[11px] px-2 py-1 rounded-md font-medium transition-colors ${!advancedSearch ? "bg-emerald-100 text-emerald-700" : "text-stone-400 hover:text-stone-600"}`}
+                          onClick={() => { setSearchMode("simple"); setOrderSearchResults([]); }}
+                          className={`text-[11px] px-2 py-1 rounded-md font-medium transition-colors ${searchMode === "simple" ? "bg-emerald-100 text-emerald-700" : "text-stone-400 hover:text-stone-600"}`}
                           data-testid="btn-search-mode-simple"
                         >
-                          訂單編號查詢
+                          訂單編號
                         </button>
                         <button
-                          onClick={() => { setAdvancedSearch(true); setOrderSearchResults([]); }}
-                          className={`text-[11px] px-2 py-1 rounded-md font-medium transition-colors flex items-center gap-1 ${advancedSearch ? "bg-emerald-100 text-emerald-700" : "text-stone-400 hover:text-stone-600"}`}
+                          onClick={() => { setSearchMode("product"); setOrderSearchResults([]); if (productPages.length === 0) loadProductPages(); }}
+                          className={`text-[11px] px-2 py-1 rounded-md font-medium transition-colors flex items-center gap-1 ${searchMode === "product" ? "bg-emerald-100 text-emerald-700" : "text-stone-400 hover:text-stone-600"}`}
+                          data-testid="btn-search-mode-product"
+                        >
+                          <Package className="w-3 h-3" />商品+電話
+                        </button>
+                        <button
+                          onClick={() => { setSearchMode("advanced"); setOrderSearchResults([]); }}
+                          className={`text-[11px] px-2 py-1 rounded-md font-medium transition-colors flex items-center gap-1 ${searchMode === "advanced" ? "bg-emerald-100 text-emerald-700" : "text-stone-400 hover:text-stone-600"}`}
                           data-testid="btn-search-mode-advanced"
                         >
-                          <Filter className="w-3 h-3" />進階查詢
+                          <Filter className="w-3 h-3" />日期+個資
                         </button>
                       </div>
 
-                      {!advancedSearch ? (
+                      {searchMode === "simple" ? (
                         <div className="flex gap-1.5">
                           <Input data-testid="input-order-search" placeholder="請輸入訂單編號（如 KBT...）" value={orderSearch} onChange={(e) => setOrderSearch(e.target.value)}
                             onKeyDown={(e) => { if (e.key === "Enter") handleOrderSearch(); }}
@@ -716,6 +768,42 @@ export default function ChatPage() {
                           <Button size="sm" onClick={handleOrderSearch} disabled={orderSearching || !orderSearch.trim()} data-testid="button-search-order" className="h-8 text-xs bg-emerald-600 hover:bg-emerald-700 text-white shrink-0">
                             {orderSearching ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
                           </Button>
+                        </div>
+                      ) : searchMode === "product" ? (
+                        <div className="space-y-2 p-2.5 rounded-lg bg-stone-50 border border-stone-200">
+                          <div>
+                            <label className="text-[10px] font-medium text-stone-500 mb-1 flex items-center gap-1"><Package className="w-3 h-3" />選擇商品（銷售頁）</label>
+                            <Select value={selectedPageId} onValueChange={setSelectedPageId}>
+                              <SelectTrigger className="text-xs bg-white border-stone-200 h-8" data-testid="select-product-page">
+                                <SelectValue placeholder="請選擇商品..." />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {productPages.length === 0 ? (
+                                  <SelectItem value="_empty" disabled>載入中或無銷售頁...</SelectItem>
+                                ) : (
+                                  productPages.map((p) => (
+                                    <SelectItem key={p.pageId} value={p.pageId} data-testid={`product-page-${p.pageId}`}>
+                                      {p.prefix ? `[${p.prefix}] ` : ""}{p.productName}
+                                    </SelectItem>
+                                  ))
+                                )}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-medium text-stone-500 mb-1 flex items-center gap-1"><Phone className="w-3 h-3" />客戶手機號碼</label>
+                            <Input data-testid="input-product-phone" placeholder="例如：0912345678"
+                              value={productPhone} onChange={(e) => setProductPhone(e.target.value)}
+                              onKeyDown={(e) => { if (e.key === "Enter") handleProductSearch(); }}
+                              className="text-xs bg-white border-stone-200 h-8" />
+                          </div>
+                          <Button size="sm" onClick={handleProductSearch}
+                            disabled={orderSearching || !selectedPageId || !productPhone.trim()}
+                            data-testid="button-product-search"
+                            className="w-full h-8 text-xs bg-emerald-600 hover:bg-emerald-700 text-white">
+                            {orderSearching ? <><Loader2 className="w-3.5 h-3.5 animate-spin mr-1" />查詢中...</> : <><Search className="w-3.5 h-3.5 mr-1" />以商品+電話搜尋</>}
+                          </Button>
+                          <p className="text-[10px] text-stone-400 text-center">依銷售頁 (page_id) 限縮範圍，再比對電話</p>
                         </div>
                       ) : (
                         <div className="space-y-2 p-2.5 rounded-lg bg-stone-50 border border-stone-200">
@@ -849,8 +937,8 @@ export default function ChatPage() {
                       ) : (
                         <div className="text-center py-8">
                           <ShoppingBag className="w-8 h-8 text-stone-300 mx-auto mb-2" />
-                          <p className="text-xs text-stone-400">{advancedSearch ? "輸入條件並選擇日期範圍" : "輸入訂單編號查詢"}</p>
-                          <p className="text-[11px] text-stone-400 mt-0.5">{advancedSearch ? "以電話/Email/姓名 + 日期限縮搜尋" : "請輸入訂單編號進行精準查詢"}</p>
+                          <p className="text-xs text-stone-400">{searchMode === "product" ? "選擇商品並輸入電話" : searchMode === "advanced" ? "輸入條件並選擇日期範圍" : "輸入訂單編號查詢"}</p>
+                          <p className="text-[11px] text-stone-400 mt-0.5">{searchMode === "product" ? "以銷售頁限縮範圍 + 電話比對" : searchMode === "advanced" ? "以電話/Email/姓名 + 日期限縮搜尋" : "請輸入訂單編號進行精準查詢"}</p>
                         </div>
                       )}
                     </div>

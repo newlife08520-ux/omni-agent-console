@@ -166,6 +166,94 @@ export async function lookupOrdersByDateAndFilter(
   return { orders: matched, totalFetched: allOrders.length, truncated };
 }
 
+export interface ProductPageMapping {
+  id: string;
+  pageId: string;
+  prefix: string;
+  productName: string;
+}
+
+export const DEFAULT_PRODUCT_PAGES: ProductPageMapping[] = [];
+
+export async function fetchPages(config: SuperLandingConfig): Promise<ProductPageMapping[]> {
+  if (!config.merchantNo || !config.accessKey) {
+    throw new Error("missing_credentials");
+  }
+
+  const queryParams = new URLSearchParams({
+    merchant_no: config.merchantNo,
+    access_key: config.accessKey,
+  });
+
+  const url = `${SUPERLANDING_API_BASE}/pages.json?${queryParams.toString()}`;
+  console.log("[一頁商店] 正在取得銷售頁列表...");
+
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { "Accept": "application/json" },
+    });
+
+    if (!res.ok) {
+      if (res.status === 401) throw new Error("invalid_credentials");
+      throw new Error(`api_error_${res.status}`);
+    }
+
+    const data = await res.json();
+    const pages = Array.isArray(data) ? data : data?.pages || [];
+    console.log(`[一頁商店] 取得 ${pages.length} 個銷售頁`);
+
+    return pages.map((p: any) => ({
+      id: String(p.id),
+      pageId: String(p.id),
+      prefix: p.id_prefix || "",
+      productName: p.title || p.name || `銷售頁 ${p.id}`,
+    }));
+  } catch (err: any) {
+    if (err.message === "missing_credentials" || err.message === "invalid_credentials") throw err;
+    if (err.message?.startsWith("api_error_")) throw err;
+    console.error("[一頁商店] 取得銷售頁失敗:", err);
+    throw new Error("connection_failed");
+  }
+}
+
+export async function lookupOrdersByPageAndPhone(
+  config: SuperLandingConfig,
+  pageId: string,
+  phone: string
+): Promise<DateFilterResult> {
+  let page = 1;
+  const perPage = 200;
+  const maxPages = 15;
+  let allOrders: OrderInfo[] = [];
+  let truncated = false;
+
+  while (true) {
+    const orders = await fetchOrders(config, {
+      page_id: pageId,
+      per_page: String(perPage),
+      page: String(page),
+    });
+    allOrders = allOrders.concat(orders);
+    if (orders.length < perPage) break;
+    page++;
+    if (page > maxPages) {
+      truncated = true;
+      break;
+    }
+  }
+
+  console.log(`[一頁商店] page_id=${pageId} 共取得 ${allOrders.length} 筆${truncated ? "（已截斷）" : ""}，開始比對電話 "${phone}"`);
+
+  const normalizedPhone = phone.replace(/[-\s]/g, "");
+  const matched = allOrders.filter((o) => {
+    const orderPhone = o.buyer_phone.replace(/[-\s]/g, "");
+    return orderPhone.includes(normalizedPhone) || normalizedPhone.includes(orderPhone);
+  });
+
+  return { orders: matched, totalFetched: allOrders.length, truncated };
+}
+
 export async function lookupOrderById(
   config: SuperLandingConfig,
   orderId: string
