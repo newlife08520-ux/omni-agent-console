@@ -2,9 +2,70 @@ import type { OrderInfo } from "@shared/schema";
 
 const SUPERLANDING_API_BASE = "https://api.super-landing.com";
 
+const ORDER_STATUS_MAP: Record<string, string> = {
+  new_order: "新訂單",
+  confirming: "確認中",
+  confirmed: "已確認",
+  awaiting_for_shipment: "待出貨",
+  shipping: "出貨中",
+  shipped: "已出貨",
+  delay_handling: "延遲出貨",
+  other: "其他",
+  refunding: "退款中",
+  refunded: "已退款",
+  replacement: "換貨中",
+  temp: "臨時",
+  returned: "已退貨",
+  pending: "待處理",
+  canceled: "已取消",
+};
+
 export interface SuperLandingConfig {
   merchantNo: string;
   accessKey: string;
+}
+
+function mapOrder(o: any): OrderInfo {
+  let trackingNumber = "";
+  if (Array.isArray(o.tracking_codes) && o.tracking_codes.length > 0) {
+    trackingNumber = o.tracking_codes.map((t: any) => t.tracking_code || t).join(", ");
+  }
+
+  let productListStr = "";
+  if (Array.isArray(o.product_list)) {
+    productListStr = JSON.stringify(o.product_list);
+  } else if (typeof o.product_list === "string") {
+    productListStr = o.product_list;
+  }
+
+  let address = "";
+  if (typeof o.address === "string") {
+    try {
+      const parsed = JSON.parse(o.address);
+      address = [parsed.state, parsed.city, parsed.addr1, parsed.addr2].filter(Boolean).join("");
+    } catch {
+      address = o.address;
+    }
+  }
+
+  return {
+    global_order_id: o.global_order_id || String(o.id || ""),
+    status: o.status || "unknown",
+    final_total_order_amount: Number(o.final_total_order_amount || 0),
+    product_list: productListStr,
+    buyer_name: o.recipient || "",
+    buyer_phone: o.mobile || "",
+    tracking_number: trackingNumber,
+    created_at: o.created_date || o.order_created_at || "",
+    shipping_method: o.shipping_method || "",
+    payment_method: o.payment_method || "",
+    address,
+    note: o.note || "",
+  };
+}
+
+export function getStatusLabel(status: string): string {
+  return ORDER_STATUS_MAP[status] || status;
 }
 
 export async function fetchOrders(
@@ -22,6 +83,7 @@ export async function fetchOrders(
   });
 
   const url = `${SUPERLANDING_API_BASE}/orders.json?${queryParams.toString()}`;
+  console.log("[一頁商店] 正在查詢訂單，請求網址為:", url.replace(config.accessKey, "***"));
 
   try {
     const res = await fetch(url, {
@@ -30,26 +92,22 @@ export async function fetchOrders(
     });
 
     if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      console.error("[一頁商店] API 回傳錯誤:", res.status, errText);
       if (res.status === 401) throw new Error("invalid_credentials");
       throw new Error(`api_error_${res.status}`);
     }
 
     const data = await res.json();
-    const orders = Array.isArray(data) ? data : data?.orders || data?.data || [];
+    console.log("[一頁商店] 回傳結果: current_page=", data.current_page, "total_entries=", data.total_entries, "orders count=", Array.isArray(data.orders) ? data.orders.length : "N/A");
 
-    return orders.map((o: any) => ({
-      global_order_id: o.global_order_id || o.id || "",
-      status: o.status || "unknown",
-      final_total_order_amount: Number(o.final_total_order_amount || o.total || 0),
-      product_list: typeof o.product_list === "string" ? o.product_list : JSON.stringify(o.product_list || o.items || []),
-      buyer_name: o.buyer_name || o.name || "",
-      buyer_phone: o.buyer_phone || o.phone || "",
-      tracking_number: o.tracking_number || o.tracking_no || "",
-      created_at: o.created_at || o.order_date || "",
-    }));
+    const orders = Array.isArray(data) ? data : data?.orders || [];
+
+    return orders.map(mapOrder);
   } catch (err: any) {
     if (err.message === "missing_credentials" || err.message === "invalid_credentials") throw err;
     if (err.message?.startsWith("api_error_")) throw err;
+    console.error("[一頁商店] 連線失敗:", err);
     throw new Error("connection_failed");
   }
 }
@@ -58,7 +116,12 @@ export async function lookupOrdersByPhone(
   config: SuperLandingConfig,
   phone: string
 ): Promise<OrderInfo[]> {
-  return fetchOrders(config, { buyer_phone: phone });
+  const allOrders = await fetchOrders(config, { per_page: "200" });
+  const normalizedPhone = phone.replace(/[-\s]/g, "");
+  return allOrders.filter((o) => {
+    const orderPhone = o.buyer_phone.replace(/[-\s]/g, "");
+    return orderPhone.includes(normalizedPhone) || normalizedPhone.includes(orderPhone);
+  });
 }
 
 export async function lookupOrderById(
@@ -66,5 +129,6 @@ export async function lookupOrderById(
   orderId: string
 ): Promise<OrderInfo | null> {
   const orders = await fetchOrders(config, { global_order_id: orderId });
+  console.log("[一頁商店] 依訂單編號查詢:", orderId, "結果:", orders.length, "筆");
   return orders.length > 0 ? orders[0] : null;
 }

@@ -80,6 +80,10 @@ export interface OrderInfo {
   buyer_phone: string;
   tracking_number: string;
   created_at: string;
+  shipping_method?: string;
+  payment_method?: string;
+  address?: string;
+  note?: string;
 }
 
 export interface LoginRequest {
@@ -118,10 +122,18 @@ export const ROLE_LABELS: Record<UserRole, string> = {
 
 export const ORDER_STATUS_LABELS: Record<string, string> = {
   new_order: "新訂單",
+  confirming: "確認中",
+  confirmed: "已確認",
+  awaiting_for_shipment: "待出貨",
+  shipping: "出貨中",
   shipped: "已出貨",
-  pending: "待處理",
-  completed: "已完成",
-  cancelled: "已取消",
-  delay_handling: "延遲處理",
+  delay_handling: "延遲出貨",
+  other: "其他",
+  refunding: "退款中",
+  refunded: "已退款",
+  replacement: "換貨中",
+  temp: "臨時",
   returned: "已退貨",
+  pending: "待處理",
+  canceled: "已取消",
 };

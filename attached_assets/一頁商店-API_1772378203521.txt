@@ -1,0 +1,322 @@
+---
+API 文件
+
+認證方式
+
+所有 API 請求都需要透過以下參數進行認證：
+┌─────────────┬────────┬──────┬──────────┐
+│    參數     │  類型  │ 必填 │   說明   │
+├─────────────┼────────┼──────┼──────────┤
+│ merchant_no │ String │ ✅   │ 廠商編號 │
+├─────────────┼────────┼──────┼──────────┤
+│ access_key  │ String │ ✅   │ 存取金鑰 │
+└─────────────┴────────┴──────┴──────────┘
+認證失敗回應 (401):
+{
+  "status": false,
+  "messages": "Auth faild"
+}
+
+---
+1. Orders API
+
+1.1 GET /api/orders.json - 查詢訂單列表
+
+查詢廠商的訂單列表，支援多種篩選條件。
+
+參數說明
+┌─────────────────┬─────────┬──────┬───────────────────────────────────────────────────────┐
+│      參數       │  類型   │ 必填 │                         說明                          │
+├─────────────────┼─────────┼──────┼───────────────────────────────────────────────────────┤
+│ merchant_no     │ String  │ ✅   │ 廠商編號                                              │
+├─────────────────┼─────────┼──────┼───────────────────────────────────────────────────────┤
+│ access_key      │ String  │ ✅   │ 存取金鑰                                              │
+├─────────────────┼─────────┼──────┼───────────────────────────────────────────────────────┤
+│ member_base_id  │ Integer │ ❌   │ 事業群 ID                                             │
+├─────────────────┼─────────┼──────┼───────────────────────────────────────────────────────┤
+│ page_id         │ Integer │ ❌   │ 銷售頁 ID                                             │
+├─────────────────┼─────────┼──────┼───────────────────────────────────────────────────────┤
+│ status          │ String  │ ❌   │ 訂單狀態 (見下方狀態表)                               │
+├─────────────────┼─────────┼──────┼───────────────────────────────────────────────────────┤
+│ begin_date      │ Date    │ ❌   │ 開始日期 (需與 end_date 一起使用，格式: YYYY-MM-DD)   │
+├─────────────────┼─────────┼──────┼───────────────────────────────────────────────────────┤
+│ end_date        │ Date    │ ❌   │ 結束日期 (需與 begin_date 一起使用，格式: YYYY-MM-DD) │
+├─────────────────┼─────────┼──────┼───────────────────────────────────────────────────────┤
+│ global_order_id │ String  │ ❌   │ 全域訂單編號                                          │
+├─────────────────┼─────────┼──────┼───────────────────────────────────────────────────────┤
+│ per_page        │ Integer │ ❌   │ 每頁筆數 (預設: 50)                                   │
+├─────────────────┼─────────┼──────┼───────────────────────────────────────────────────────┤
+│ page            │ Integer │ ❌   │ 頁碼 (預設: 1)                                        │
+└─────────────────┴─────────┴──────┴───────────────────────────────────────────────────────┘
+訂單狀態 (status) 對照表
+┌───────────────────────┬──────────┐
+│       status 值       │   說明   │
+├───────────────────────┼──────────┤
+│ new_order             │ 新訂單   │
+├───────────────────────┼──────────┤
+│ confirming            │ 確認中   │
+├───────────────────────┼──────────┤
+│ confirmed             │ 已確認   │
+├───────────────────────┼──────────┤
+│ awaiting_for_shipment │ 待出貨   │
+├───────────────────────┼──────────┤
+│ shipping              │ 出貨中   │
+├───────────────────────┼──────────┤
+│ shipped               │ 已出貨   │
+├───────────────────────┼──────────┤
+│ delay_handling        │ 延遲出貨 │
+├───────────────────────┼──────────┤
+│ other                 │ 其他     │
+├───────────────────────┼──────────┤
+│ refunding             │ 退款中   │
+├───────────────────────┼──────────┤
+│ refunded              │ 已退款   │
+├───────────────────────┼──────────┤
+│ replacement           │ 換貨     │
+├───────────────────────┼──────────┤
+│ temp                  │ 臨時     │
+├───────────────────────┼──────────┤
+│ returned              │ 已退貨   │
+├───────────────────────┼──────────┤
+│ pending               │ 待處理   │
+├───────────────────────┼──────────┤
+│ canceled              │ 已取消   │
+└───────────────────────┴──────────┘
+curl 範例
+
+# 基本查詢
+curl -X GET "https://api.super-landing.com/orders.json?merchant_no=YOUR_MERCHANT_NO&access_key=YOUR_ACCESS_KEY"
+
+# 搭配篩選條件
+curl -X GET "https://api.super-landing.com/orders.json?\
+merchant_no=YOUR_MERCHANT_NO&\
+access_key=YOUR_ACCESS_KEY&\
+status=new_order&\
+begin_date=2024-01-01&\
+end_date=2024-01-31&\
+per_page=20&\
+page=1"
+
+# 搜尋特定銷售頁的訂單
+curl -X GET "https://api.super-landing.com/orders.json?\
+merchant_no=YOUR_MERCHANT_NO&\
+access_key=YOUR_ACCESS_KEY&\
+page_id=123"
+
+# 搜尋特定訂單編號
+curl -X GET "https://api.super-landing.com/orders.json?\
+merchant_no=YOUR_MERCHANT_NO&\
+access_key=YOUR_ACCESS_KEY&\
+global_order_id=ABC12345"
+
+成功回應 (200)
+
+{
+  "current_page": 1,
+  "total_pages": 5,
+  "per_page": 50,
+  "total_entries": 230,
+  "orders": [
+    {
+      "id": 12345,
+      "order_id": 1001,
+      "global_order_id": "ABC1001",
+      "tracking_codes": [
+        { "tracking_code": "123456789", "shipping_method": "to_home" }
+      ],
+      "payment_method": "credit_card",
+      "shipping_method": "to_home",
+      "recipient": "王小明",
+      "mobile": "0912345678",
+      "receive_date": "2024-01-15",
+      "convenient_store": "",
+      "address": "台北市中正區某某路100號",
+      "zip_code_from_address": "100",
+      "note": "請小心輕放",
+      "note_shipping": "",
+      "page_id": 123,
+      "prepaid": true,
+      "final_total_order_amount": 1500,
+      "customize_total_order_amount": 0,
+      "total_order_amount": 1500,
+      "total_order_amount_with_discount": 1500,
+      "created_date": "2024-01-10",
+      "updated_at": "2024-01-10T10:30:00.000+08:00",
+      "order_created_at": "2024-01-10T10:00:00.000+08:00",
+      "shipped_at": null,
+      "access_key": 1704855600,
+      "product_list": [
+        { "code": "PROD001", "qty": 2 },
+        { "code": "PROD002", "qty": 1 }
+      ],
+      "status": "new_order",
+      "receive_time": "non_specified",
+      "birthday": "1990-01-01",
+      "line_id": "",
+      "customer_age": 34,
+      "delivery_orders_count": 0,
+      "member": {
+        "id": 5678,
+        "member_base_id": 100,
+        "last_purchase_at": "2024-01-10T10:00:00.000+08:00"
+      },
+      "order_history_count": 5,
+      "gender": "male",
+      "payment_transaction_id": "TXN123456",
+      "coupon": { "id": 10, "code": "DISCOUNT10" },
+      "coupon_code": "DISCOUNT10",
+      "tag": "",
+      "warehouse_items": [
+        { "code": "WH001", "qty": 2 }
+      ],
+      "paid_at": "2024-01-10T10:05:00.000+08:00",
+      "system_note": false,
+      "invoice": {
+        "no": "AB12345678",
+        "transaction_id": "INV123",
+        "status": "created",
+        "type": "email",
+        "target": "customer@example.com",
+        "buyer_name": "王小明",
+        "amount": 1500,
+        "created_at": "2024-01-10T10:30:00.000+08:00"
+      },
+      "email": "customer@example.com",
+      "invoice_setting": { "delivery_type": "device", "device_type": "email" },
+      "is_outlying_islands": false,
+      "created_ip": "203.0.113.1"
+    }
+  ]
+}
+
+---
+1.2 POST /api/orders/update_status.json - 批次更新訂單狀態
+
+批次更新多筆訂單的狀態。
+
+參數說明
+┌─────────────┬────────┬──────┬─────────────────────────────────┐
+│    參數     │  類型  │ 必填 │              說明               │
+├─────────────┼────────┼──────┼─────────────────────────────────┤
+│ merchant_no │ String │ ✅   │ 廠商編號                        │
+├─────────────┼────────┼──────┼─────────────────────────────────┤
+│ access_key  │ String │ ✅   │ 存取金鑰                        │
+├─────────────┼────────┼──────┼─────────────────────────────────┤
+│ ids         │ Array  │ ✅   │ 訂單 ID 陣列                    │
+├─────────────┼────────┼──────┼─────────────────────────────────┤
+│ status      │ String │ ✅   │ 要更新的訂單狀態 (見上方狀態表) │
+└─────────────┴────────┴──────┴─────────────────────────────────┘
+curl 範例
+
+# 將多筆訂單更新為「已出貨」狀態
+curl -X POST "https://api.super-landing.com/orders/update_status.json" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "merchant_no": "YOUR_MERCHANT_NO",
+    "access_key": "YOUR_ACCESS_KEY",
+    "ids": [12345, 12346, 12347],
+    "status": "shipped"
+  }'
+
+# 使用 form data 格式
+curl -X POST "https://api.super-landing.com/orders/update_status.json" \
+  -d "merchant_no=YOUR_MERCHANT_NO" \
+  -d "access_key=YOUR_ACCESS_KEY" \
+  -d "ids[]=12345" \
+  -d "ids[]=12346" \
+  -d "status=shipped"
+
+成功回應 (200)
+
+{}
+
+失敗回應 (400)
+
+{
+  "errors": {
+    "status": ["is not included in the list"]
+  }
+}
+
+---
+2. Pages API
+
+2.1 GET /api/pages.json - 查詢銷售頁列表
+
+查詢廠商的銷售頁列表。
+
+參數說明
+┌─────────────┬─────────┬──────┬────────────────────┐
+│    參數     │  類型   │ 必填 │        說明        │
+├─────────────┼─────────┼──────┼────────────────────┤
+│ merchant_no │ String  │ ✅   │ 廠商編號           │
+├─────────────┼─────────┼──────┼────────────────────┤
+│ access_key  │ String  │ ✅   │ 存取金鑰           │
+├─────────────┼─────────┼──────┼────────────────────┤
+│ page_prefix │ String  │ ❌   │ 銷售頁 ID 前綴篩選 │
+├─────────────┼─────────┼──────┼────────────────────┤
+│ alias_name  │ String  │ ❌   │ 銷售頁別名篩選     │
+├─────────────┼─────────┼──────┼────────────────────┤
+│ page        │ Integer │ ❌   │ 頁碼 (分頁用)      │
+└─────────────┴─────────┴──────┴────────────────────┘
+curl 範例
+
+# 查詢所有銷售頁
+curl -X GET "https://api.super-landing.com/pages.json?\
+merchant_no=YOUR_MERCHANT_NO&\
+access_key=YOUR_ACCESS_KEY"
+
+# 依據 page_prefix 篩選
+curl -X GET "https://api.super-landing.com/pages.json?\
+merchant_no=YOUR_MERCHANT_NO&\
+access_key=YOUR_ACCESS_KEY&\
+page_prefix=ABC"
+
+# 依據 alias_name 篩選
+curl -X GET "https://api.super-landing.com/pages.json?\
+merchant_no=YOUR_MERCHANT_NO&\
+access_key=YOUR_ACCESS_KEY&\
+alias_name=summer-sale"
+
+# 分頁查詢
+curl -X GET "https://api.super-landing.com/pages.json?\
+merchant_no=YOUR_MERCHANT_NO&\
+access_key=YOUR_ACCESS_KEY&\
+page=2"
+
+成功回應 (200)
+
+{
+  "current_page": 1,
+  "total_pages": 3,
+  "per_page": 25,
+  "total_entries": 75,
+  "pages": [
+    {
+      "id": 123,
+      "title": "夏季特賣銷售頁",
+      "alias_name": "summer-sale",
+      "id_prefix": "ABC"
+    },
+    {
+      "id": 124,
+      "title": "週年慶活動頁",
+      "alias_name": "anniversary",
+      "id_prefix": "DEF"
+    }
+  ]
+}
+
+---
+錯誤回應說明
+┌─────────────┬───────────────────────────────────────────┐
+│ HTTP Status │                   說明                    │
+├─────────────┼───────────────────────────────────────────┤
+│ 200         │ 成功                                      │
+├─────────────┼───────────────────────────────────────────┤
+│ 400         │ 請求參數錯誤 (如 status 值不在允許範圍內) │
+├─────────────┼───────────────────────────────────────────┤
+│ 401         │ 認證失敗 (merchant_no 或 access_key 錯誤) │
+├─────────────┼───────────────────────────────────────────┤
+│ 404         │ 找不到資源                                │
+└─────────────┴───────────────────────────────────────────┘

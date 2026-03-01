@@ -386,17 +386,16 @@ export async function registerRoutes(
       return res.json({ orders: [], error: "not_configured", message: "尚未設定一頁商店 API 金鑰" });
     }
     try {
-      const params: Record<string, string> = {};
-      if (contact.platform_user_id) params.buyer_id = contact.platform_user_id;
-      const orders = await fetchOrders(config, params);
+      const orders = await fetchOrders(config, { per_page: "50" });
       return res.json({ orders });
     } catch (err: any) {
       const errorMap: Record<string, string> = {
         missing_credentials: "API 金鑰未設定",
-        invalid_credentials: "API 金鑰無效",
-        connection_failed: "無法連線至一頁商店",
+        invalid_credentials: "API 金鑰無效（請確認 merchant_no 與 access_key）",
+        connection_failed: "無法連線至一頁商店 API",
       };
-      return res.json({ orders: [], error: err.message, message: errorMap[err.message] || "查詢失敗" });
+      console.error("[一頁商店] 聯絡人訂單查詢失敗:", err.message);
+      return res.json({ orders: [], error: err.message, message: errorMap[err.message] || `查詢失敗：${err.message}` });
     }
   });
 
@@ -408,16 +407,30 @@ export async function registerRoutes(
     }
     try {
       if (order_id) {
+        console.log("[一頁商店] 手動查詢訂單編號:", order_id);
         const order = await lookupOrderById(config, order_id as string);
-        return res.json({ orders: order ? [order] : [] });
+        if (!order) {
+          return res.json({ orders: [], message: "於一頁商店查無此訂單編號，請確認編號是否正確" });
+        }
+        return res.json({ orders: [order] });
       }
       if (phone) {
+        console.log("[一頁商店] 手動查詢電話:", phone);
         const orders = await lookupOrdersByPhone(config, phone as string);
+        if (orders.length === 0) {
+          return res.json({ orders: [], message: "於一頁商店查無此電話號碼的訂單紀錄" });
+        }
         return res.json({ orders });
       }
       return res.status(400).json({ message: "請提供 phone 或 order_id 參數" });
     } catch (err: any) {
-      return res.json({ orders: [], error: err.message, message: "查詢失敗" });
+      const errorMap: Record<string, string> = {
+        missing_credentials: "API 金鑰未設定",
+        invalid_credentials: "API 金鑰無效（請確認 merchant_no 與 access_key）",
+        connection_failed: "無法連線至一頁商店 API",
+      };
+      console.error("[一頁商店] 訂單查詢失敗:", err.message);
+      return res.json({ orders: [], error: err.message, message: errorMap[err.message] || `查詢失敗：${err.message}` });
     }
   });
 

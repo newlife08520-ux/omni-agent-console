@@ -9,7 +9,7 @@ A commercial-grade omnichannel AI customer service dashboard focused on LINE cha
 - **Database**: SQLite via better-sqlite3 (file: omnichannel.db)
 - **Auth**: Session-based with 3-tier RBAC (super_admin / marketing_manager / cs_agent), SHA-256 password hashing
 - **AI**: OpenAI API integration (gpt-5.2) for sandbox testing and auto-reply
-- **External API**: 一頁商店 (Super Landing) order lookup via GET /api/orders.json
+- **External API**: 一頁商店 (Super Landing) via https://api.super-landing.com/orders.json — field mapping: recipient→buyer_name, mobile→buyer_phone, tracking_codes→tracking_number, created_date→created_at; phone search filters client-side since API has no phone query param
 
 ## Test Accounts
 - **admin** / admin123 → role: super_admin, display_name: 系統管理員 (full access)
