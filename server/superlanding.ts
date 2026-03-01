@@ -411,77 +411,96 @@ export async function lookupOrdersByPhone(
   productKeyword?: string
 ): Promise<DateFilterResult> {
   const normalizedPhone = phone.replace(/[-\s]/g, "");
-  console.log("[一頁商店] 以手機號碼跨頁搜尋:", normalizedPhone, productKeyword ? `關鍵字: ${productKeyword}` : "");
-
-  const pages = getCachedPages();
-  if (pages.length === 0) {
-    console.log("[一頁商店] 無快取銷售頁，無法搜尋");
-    return { orders: [], totalFetched: 0, truncated: false };
-  }
+  console.log("[一頁商店] 以手機號碼全域搜尋:", normalizedPhone, productKeyword ? `關鍵字: ${productKeyword}` : "");
 
   let allMatched: OrderInfo[] = [];
   let totalScanned = 0;
-  let truncated = false;
+  let wasTruncated = false;
   const perPage = 200;
+  const parallelBatch = 5;
 
-  const batchSize = 5;
-  for (let i = 0; i < pages.length; i += batchSize) {
-    const batch = pages.slice(i, i + batchSize);
-    const results = await Promise.all(
-      batch.map(async (page) => {
-        const orders = await fetchOrders(config, {
-          page_id: page.pageId,
-          per_page: String(perPage),
+  const dateWindows = [
+    { days: 1, label: "今天" },
+    { days: 3, label: "3天" },
+    { days: 7, label: "7天" },
+    { days: 30, label: "30天" },
+    { days: 90, label: "90天" },
+  ];
+
+  for (const window of dateWindows) {
+    const today = new Date();
+    const start = new Date(today.getTime() - (window.days - 1) * 24 * 60 * 60 * 1000);
+    const endDate = today.toISOString().split("T")[0];
+    const beginDate = start.toISOString().split("T")[0];
+
+    let totalEntries = 0;
+    try {
+      const probeRes = await fetch(
+        `${SUPERLANDING_API_BASE}/orders.json?${new URLSearchParams({
+          merchant_no: config.merchantNo,
+          access_key: config.accessKey,
+          begin_date: beginDate,
+          end_date: endDate,
+          per_page: "1",
           page: "1",
-        });
-        return { page, orders };
-      })
-    );
-
-    for (const { page, orders } of results) {
-      totalScanned += orders.length;
-      const phoneMatches = orders.filter(o => {
-        const orderPhone = o.buyer_phone.replace(/[-\s]/g, "");
-        return orderPhone === normalizedPhone;
-      });
-      if (phoneMatches.length > 0) {
-        console.log(`[一頁商店] 銷售頁 ${page.pageId}（${page.productName}）找到 ${phoneMatches.length} 筆匹配`);
-        allMatched = allMatched.concat(phoneMatches);
-      }
+        }).toString()}`,
+        { method: "GET", headers: { "Accept": "application/json" } }
+      );
+      const probeData = await probeRes.json();
+      totalEntries = probeData.total_entries || 0;
+    } catch (err: any) {
+      console.error(`[一頁商店] ${window.label}窗口探測失敗:`, err.message);
+      continue;
     }
+    const totalPages = Math.ceil(totalEntries / perPage);
+    const maxPages = Math.min(totalPages, 150);
+    if (totalPages > maxPages) wasTruncated = true;
 
-    if (allMatched.length >= 10) break;
-  }
+    console.log(`[一頁商店] ${window.label}窗口（${beginDate}~${endDate}）: ${totalEntries} 筆，${totalPages} 頁，掃描 ${maxPages} 頁${totalPages > maxPages ? "（截斷）" : ""}`);
 
-  if (allMatched.length > 0) {
-    const matchedPageIds = [...new Set(allMatched.map(o => {
-      const prefix = o.global_order_id.replace(/\d+$/, "");
-      return pages.find(p => p.prefix === prefix)?.pageId;
-    }).filter(Boolean))];
+    if (totalEntries === 0) continue;
 
-    for (const pageId of matchedPageIds) {
-      const page = pages.find(p => p.pageId === pageId);
-      if (!page) continue;
-      for (let pNum = 2; pNum <= 5; pNum++) {
-        const orders = await fetchOrders(config, {
-          page_id: pageId,
-          per_page: String(perPage),
-          page: String(pNum),
-        });
+    let windowMatched: OrderInfo[] = [];
+
+    for (let batchStart = 1; batchStart <= maxPages; batchStart += parallelBatch) {
+      const pageNums = [];
+      for (let p = batchStart; p < batchStart + parallelBatch && p <= maxPages; p++) {
+        pageNums.push(p);
+      }
+
+      const batchResults = await Promise.all(
+        pageNums.map(p =>
+          fetchOrders(config, {
+            begin_date: beginDate,
+            end_date: endDate,
+            per_page: String(perPage),
+            page: String(p),
+          })
+        )
+      );
+
+      for (const orders of batchResults) {
         totalScanned += orders.length;
         const phoneMatches = orders.filter(o => {
           const orderPhone = o.buyer_phone.replace(/[-\s]/g, "");
           return orderPhone === normalizedPhone;
         });
         if (phoneMatches.length > 0) {
-          allMatched = allMatched.concat(phoneMatches);
+          windowMatched = windowMatched.concat(phoneMatches);
         }
-        if (orders.length < perPage) break;
       }
-    }
-  }
 
-  console.log(`[一頁商店] 跨頁搜尋完成：掃描 ${totalScanned} 筆，找到 ${allMatched.length} 筆`);
+      if (windowMatched.length > 0) break;
+    }
+
+    if (windowMatched.length > 0) {
+      allMatched = windowMatched;
+      console.log(`[一頁商店] ${window.label}窗口找到 ${allMatched.length} 筆匹配`);
+      break;
+    }
+
+    console.log(`[一頁商店] ${window.label}窗口無匹配（本窗口掃描 ${totalScanned} 筆）`);
+  }
 
   const uniqueOrders = Array.from(
     new Map(allMatched.map(o => [o.global_order_id, o])).values()
@@ -492,10 +511,11 @@ export async function lookupOrdersByPhone(
     const filtered = uniqueOrders.filter(o => o.product_list.toLowerCase().includes(kw));
     if (filtered.length > 0) {
       console.log(`[一頁商店] 關鍵字「${productKeyword}」篩選後 ${filtered.length} 筆`);
-      return { orders: filtered, totalFetched: uniqueOrders.length, truncated };
+      return { orders: filtered, totalFetched: totalScanned, truncated: false };
     }
     console.log(`[一頁商店] 關鍵字「${productKeyword}」無匹配，回傳全部 ${uniqueOrders.length} 筆`);
   }
 
-  return { orders: uniqueOrders, totalFetched: uniqueOrders.length, truncated };
+  console.log(`[一頁商店] 全域搜尋完成：掃描 ${totalScanned} 筆，找到 ${uniqueOrders.length} 筆`);
+  return { orders: uniqueOrders, totalFetched: totalScanned, truncated: wasTruncated };
 }

@@ -763,7 +763,7 @@ export async function registerRoutes(
       type: "function",
       function: {
         name: "lookup_order_by_product_and_phone",
-        description: "用商品名稱和手機號碼查詢訂單。當客戶沒有訂單編號，但提供了購買的商品名稱和手機號碼時使用此工具。你可以用 product_index（商品清單中的編號，如 #3）來精確指定商品，或用 product_name 讓系統模糊匹配。即使客戶說的商品名稱不在銷售頁清單中（例如品項名稱、口味、規格等），系統也會自動用手機號碼搜尋近期訂單並比對商品關鍵字，所以請直接呼叫此工具，不要因為商品名稱不在清單中就拒絕查詢或詢問客戶其他問題。",
+        description: "用手機號碼查詢訂單，可選搭配商品名稱縮小範圍。三種用法：(1) 只有手機號碼：直接用手機搜尋近期訂單（今天→3天→7天→30天→90天，自動擴大），無需商品名稱；(2) 手機＋商品名稱：先比對銷售頁再搜尋；(3) 手機＋product_index：精確指定商品。客戶只要提供手機號碼就能查詢，不需要額外提供商品名稱。",
         parameters: {
           type: "object",
           properties: {
@@ -863,6 +863,33 @@ export async function registerRoutes(
 
         if (!phone) {
           return JSON.stringify({ success: false, error: "請提供手機號碼" });
+        }
+
+        if (!productName && !productIndex) {
+          console.log("[AI Tool Call] 僅手機號碼，進行全域日期範圍搜尋");
+          try {
+            const phoneResult = await lookupOrdersByPhone(config, phone);
+            if (phoneResult.orders.length > 0) {
+              const { getStatusLabel: getSL } = await import("./superlanding");
+              const orderSummaries = phoneResult.orders.slice(0, 5).map(o => ({
+                order_id: o.global_order_id,
+                status: getSL(o.status),
+                amount: o.final_total_order_amount,
+                product_list: o.product_list,
+                buyer_name: o.buyer_name,
+                tracking_number: o.tracking_number,
+                created_at: o.created_at,
+                shipped_at: o.shipped_at,
+              }));
+              console.log("[AI Tool Call] 手機號碼查到", phoneResult.orders.length, "筆訂單");
+              return JSON.stringify({ success: true, found: true, total: phoneResult.orders.length, orders: orderSummaries });
+            }
+            console.log("[AI Tool Call] 手機號碼查無訂單");
+            return JSON.stringify({ success: true, found: false, message: `以手機號碼 ${phone} 搜尋近期訂單（最多90天），查無紀錄。` });
+          } catch (err: any) {
+            console.error("[AI Tool Call] 手機號碼全域搜尋失敗:", err.message);
+            return JSON.stringify({ success: false, error: `查詢失敗：${err.message}` });
+          }
         }
 
         const pages = getCachedPages();
