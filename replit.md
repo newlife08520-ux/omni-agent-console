@@ -8,7 +8,7 @@ A commercial-grade omnichannel AI customer service dashboard focused on LINE cha
 - **Backend**: Express.js API server (port 5000)
 - **Database**: SQLite via better-sqlite3 (file: omnichannel.db)
 - **Auth**: Session-based with 3-tier RBAC (super_admin / marketing_manager / cs_agent), SHA-256 password hashing
-- **AI**: OpenAI API integration (gpt-4o-mini) for sandbox testing
+- **AI**: OpenAI API integration (gpt-5.2) for sandbox testing and auto-reply
 - **External API**: 一頁商店 (Super Landing) order lookup via GET /api/orders.json
 
 ## Test Accounts
@@ -107,8 +107,9 @@ shared/
 10. **LINE Welcome Settings**: Welcome message + 3 quick buttons
 11. **Smart Human-Transfer Keywords**: Comma-separated keywords with tag preview
 12. **Marketing Rules Hub**: Full CRUD for keyword→pitch→URL rules
-13. **Real OpenAI Integration**: gpt-4o-mini sandbox
-14. **CSAT Trigger**: Status→resolved auto-inserts satisfaction survey system message
+13. **Real OpenAI Integration**: gpt-5.2 sandbox + production AI reply
+14. **Real API Test Connection**: POST /api/settings/test-connection for OpenAI (chat completion), LINE (bot info API), 一頁商店 (order API) — super_admin only, with detailed success/failure messages
+15. **CSAT Trigger**: Status→resolved auto-inserts satisfaction survey system message
 
 ## Sensitive Settings (super_admin only)
 openai_api_key, line_channel_secret, line_channel_access_token, superlanding_merchant_no, superlanding_access_key

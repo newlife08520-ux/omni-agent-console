@@ -68,9 +68,19 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
   const handleTestConnection = async (type: string) => {
     setTesting(type);
     try {
-      await apiRequest("POST", "/api/settings/test-connection", { type });
-      toast({ title: "連線成功", description: `${type} 連線測試通過` });
-    } catch { toast({ title: "連線失敗", variant: "destructive" }); }
+      const res = await fetch("/api/settings/test-connection", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type }),
+        credentials: "include",
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast({ title: "連線成功", description: data.message });
+      } else {
+        toast({ title: "連線失敗", description: data.message, variant: "destructive" });
+      }
+    } catch { toast({ title: "連線失敗", description: "無法連線至伺服器", variant: "destructive" }); }
     finally { setTesting(""); }
   };
 
@@ -98,14 +108,14 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
   }
 
   const apiKeyFields = [
-    { key: "openai_api_key", label: "OpenAI API 金鑰", icon: Key, placeholder: "sk-...", description: "用於 AI 自動回覆功能", testLabel: "OpenAI" },
-    { key: "line_channel_secret", label: "LINE 頻道密鑰", icon: Shield, placeholder: "輸入頻道密鑰", description: "LINE Developers 主控台中的 Channel Secret", testLabel: "LINE Secret" },
-    { key: "line_channel_access_token", label: "LINE 頻道存取權杖", icon: MessageSquare, placeholder: "輸入存取權杖", description: "LINE Developers 主控台中的長效存取權杖", testLabel: "LINE Token" },
+    { key: "openai_api_key", label: "OpenAI API 金鑰", icon: Key, placeholder: "sk-...", description: "用於 AI 自動回覆功能 (模型: gpt-5.2)", testType: "openai" },
+    { key: "line_channel_secret", label: "LINE 頻道密鑰", icon: Shield, placeholder: "輸入頻道密鑰", description: "LINE Developers 主控台中的 Channel Secret", testType: null },
+    { key: "line_channel_access_token", label: "LINE 頻道存取權杖", icon: MessageSquare, placeholder: "輸入存取權杖", description: "LINE Developers 主控台中的長效存取權杖（用於驗證 Bot 連線）", testType: "line" },
   ];
 
   const superLandingFields = [
-    { key: "superlanding_merchant_no", label: "一頁商店 Merchant No", icon: ShoppingBag, placeholder: "輸入商店編號", description: "一頁商店 (Super Landing) 的 merchant_no", testLabel: "一頁商店" },
-    { key: "superlanding_access_key", label: "一頁商店 Access Key", icon: Key, placeholder: "輸入存取金鑰", description: "一頁商店 (Super Landing) 的 access_key", testLabel: "一頁商店 Key" },
+    { key: "superlanding_merchant_no", label: "一頁商店 Merchant No", icon: ShoppingBag, placeholder: "輸入商店編號", description: "一頁商店 (Super Landing) 的 merchant_no" },
+    { key: "superlanding_access_key", label: "一頁商店 Access Key", icon: Key, placeholder: "輸入存取金鑰", description: "一頁商店 (Super Landing) 的 access_key" },
   ];
 
   return (
@@ -269,9 +279,11 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
                       {showKeys[field.key] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                     </button>
                   </div>
-                  <Button variant="secondary" onClick={() => handleTestConnection(field.testLabel)} disabled={testing === field.testLabel} data-testid={`button-test-${field.key}`} className="text-xs shrink-0 bg-stone-100 hover:bg-stone-200">
-                    {testing === field.testLabel ? <><Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />測試中</> : <><Plug className="w-3.5 h-3.5 mr-1" />測試連線</>}
-                  </Button>
+                  {field.testType && (
+                    <Button variant="secondary" onClick={() => handleTestConnection(field.testType!)} disabled={testing === field.testType} data-testid={`button-test-${field.key}`} className="text-xs shrink-0 bg-stone-100 hover:bg-stone-200">
+                      {testing === field.testType ? <><Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />測試中</> : <><Plug className="w-3.5 h-3.5 mr-1" />測試連線</>}
+                    </Button>
+                  )}
                   <Button onClick={() => handleSave(field.key)} disabled={saving === field.key} data-testid={`button-save-${field.key}`} className="text-xs shrink-0 bg-emerald-600 hover:bg-emerald-700 text-white">
                     <Save className="w-3.5 h-3.5 mr-1" />{saving === field.key ? "儲存中" : "儲存"}
                   </Button>
@@ -311,6 +323,11 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
                   </div>
                 </div>
               ))}
+              <div className="pt-2 flex justify-end">
+                <Button variant="secondary" onClick={() => handleTestConnection("superlanding")} disabled={testing === "superlanding"} data-testid="button-test-superlanding" className="text-xs bg-stone-100 hover:bg-stone-200">
+                  {testing === "superlanding" ? <><Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />測試中...</> : <><Plug className="w-3.5 h-3.5 mr-1" />測試一頁商店連線</>}
+                </Button>
+              </div>
             </div>
           </div>
         </>

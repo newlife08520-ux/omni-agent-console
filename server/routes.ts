@@ -127,9 +127,58 @@ export async function registerRoutes(
     return res.json({ success: true });
   });
 
-  app.post("/api/settings/test-connection", authMiddleware, superAdminOnly, (req, res) => {
+  app.post("/api/settings/test-connection", authMiddleware, superAdminOnly, async (req, res) => {
     const { type } = req.body;
-    setTimeout(() => res.json({ success: true, message: `${type} 連線測試成功` }), 1000);
+    try {
+      if (type === "openai") {
+        const apiKey = storage.getSetting("openai_api_key");
+        if (!apiKey || apiKey.trim() === "") {
+          return res.json({ success: false, message: "尚未設定 OpenAI API 金鑰" });
+        }
+        const openai = new OpenAI({ apiKey });
+        await openai.chat.completions.create({
+          model: "gpt-5.2",
+          messages: [{ role: "user", content: "hi" }],
+          max_tokens: 5,
+        });
+        return res.json({ success: true, message: "OpenAI 連線成功 (模型: gpt-5.2)" });
+      }
+
+      if (type === "line") {
+        const token = storage.getSetting("line_channel_access_token");
+        if (!token || token.trim() === "") {
+          return res.json({ success: false, message: "尚未設定 LINE Channel Access Token" });
+        }
+        const verifyRes = await fetch("https://api.line.me/v2/bot/info", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (verifyRes.ok) {
+          const botInfo = await verifyRes.json();
+          return res.json({ success: true, message: `LINE 連線成功！Bot 名稱: ${botInfo.displayName || botInfo.basicId || "OK"}` });
+        }
+        const errBody = await verifyRes.text();
+        return res.json({ success: false, message: `LINE 驗證失敗 (${verifyRes.status}): ${errBody}` });
+      }
+
+      if (type === "superlanding") {
+        const merchantNo = storage.getSetting("superlanding_merchant_no");
+        const accessKey = storage.getSetting("superlanding_access_key");
+        if (!merchantNo || !accessKey) {
+          return res.json({ success: false, message: "尚未設定一頁商店 merchant_no 或 access_key" });
+        }
+        const slUrl = `https://superlanding.tw/api/orders.json?merchant_no=${encodeURIComponent(merchantNo)}&access_key=${encodeURIComponent(accessKey)}&per_page=1`;
+        const slRes = await fetch(slUrl, { headers: { Accept: "application/json" } });
+        if (slRes.ok) {
+          return res.json({ success: true, message: "一頁商店連線成功！已成功取得訂單資料" });
+        }
+        return res.json({ success: false, message: `一頁商店連線失敗 (${slRes.status})` });
+      }
+
+      return res.json({ success: false, message: `未知的測試類型: ${type}` });
+    } catch (err: any) {
+      const msg = err?.message || "未知錯誤";
+      return res.json({ success: false, message: `連線測試失敗: ${msg}` });
+    }
   });
 
   app.get("/api/contacts", authMiddleware, (_req, res) => {
@@ -290,7 +339,7 @@ export async function registerRoutes(
     try {
       const openai = new OpenAI({ apiKey });
       const completion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
+        model: "gpt-5.2",
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: message },
