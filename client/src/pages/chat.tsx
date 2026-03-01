@@ -10,7 +10,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Send, User, Bot, Headphones, UserCheck, Search, X, Plus, Tag,
   Circle, Zap, Star, Info, Package, Crown, ShoppingBag, Loader2,
-  Paperclip, ImageIcon, Upload, CalendarDays, Filter, Phone,
+  Paperclip, ImageIcon, Upload, CalendarDays, Filter, Phone, MessageSquare,
 } from "lucide-react";
 import { apiRequest, getQueryFn } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -126,6 +126,9 @@ export default function ChatPage() {
   const [uploading, setUploading] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
   const [sendingRating, setSendingRating] = useState(false);
+  const [messageSearchResults, setMessageSearchResults] = useState<{ contact_id: number; contact_name: string; message_id: number; content: string; sender_type: string; created_at: string }[]>([]);
+  const [messageSearching, setMessageSearching] = useState(false);
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatViewportRef = useRef<HTMLDivElement>(null);
   const quickReplyRef = useRef<HTMLDivElement>(null);
@@ -187,6 +190,27 @@ export default function ChatPage() {
 
   const selectedContact = contacts.find((c) => c.id === selectedId);
   const filteredContacts = contacts.filter((c) => c.display_name.toLowerCase().includes(searchQuery.toLowerCase()));
+
+  const handleSearchChange = useCallback((value: string) => {
+    setSearchQuery(value);
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    if (value.trim().length >= 2) {
+      setMessageSearching(true);
+      searchTimerRef.current = setTimeout(async () => {
+        try {
+          const res = await fetch(`/api/messages/search?q=${encodeURIComponent(value.trim())}`, { credentials: "include" });
+          if (res.ok) {
+            const data = await res.json();
+            setMessageSearchResults(data);
+          }
+        } catch {}
+        setMessageSearching(false);
+      }, 400);
+    } else {
+      setMessageSearchResults([]);
+      setMessageSearching(false);
+    }
+  }, []);
 
   const handleSendMessage = useCallback(async () => {
     if (!messageInput.trim() || !selectedId || sending) return;
@@ -448,14 +472,63 @@ export default function ChatPage() {
         <div className="p-3 border-b border-stone-200">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400" />
-            <Input data-testid="input-search-contacts" placeholder="搜尋聯絡人..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="pl-9 bg-stone-50 border-stone-200" />
+            <Input data-testid="input-search-contacts" placeholder="搜尋聯絡人或對話內容..." value={searchQuery} onChange={(e) => handleSearchChange(e.target.value)} className="pl-9 bg-stone-50 border-stone-200" />
+            {searchQuery && (
+              <button onClick={() => { setSearchQuery(""); setMessageSearchResults([]); }} className="absolute right-3 top-1/2 -translate-y-1/2">
+                <X className="w-3.5 h-3.5 text-stone-400 hover:text-stone-600" />
+              </button>
+            )}
           </div>
         </div>
         <ScrollArea className="flex-1">
           {contactsLoading ? (
             <div className="p-6 text-center text-sm text-stone-400">載入中...</div>
+          ) : searchQuery.trim().length >= 2 && (messageSearchResults.length > 0 || messageSearching) ? (
+            <div className="p-2">
+              {filteredContacts.length > 0 && (
+                <div className="mb-2">
+                  <div className="px-3 py-1.5 text-[10px] font-semibold text-stone-400 uppercase tracking-wider">聯絡人</div>
+                  {filteredContacts.slice(0, 5).map((contact) => (
+                    <button key={contact.id} onClick={() => { setSelectedId(contact.id); lastMessageIdRef.current = 0; setSearchQuery(""); setMessageSearchResults([]); }}
+                      className={`w-full flex items-center gap-2.5 p-2.5 rounded-xl text-left transition-all hover:bg-stone-50`}
+                      data-testid={`search-contact-${contact.id}`}
+                    >
+                      <Avatar className="w-8 h-8 shrink-0">
+                        <AvatarFallback className={`${getAvatarColor(contact.id)} text-white text-xs font-semibold`}>{getInitials(contact.display_name)}</AvatarFallback>
+                      </Avatar>
+                      <span className="text-sm font-medium text-stone-700 truncate">{contact.display_name}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div>
+                <div className="px-3 py-1.5 text-[10px] font-semibold text-stone-400 uppercase tracking-wider flex items-center gap-1">
+                  <MessageSquare className="w-3 h-3" />對話紀錄 {messageSearching && <Loader2 className="w-3 h-3 animate-spin" />}
+                </div>
+                {messageSearchResults.map((r) => (
+                  <button key={r.message_id} onClick={() => { setSelectedId(r.contact_id); lastMessageIdRef.current = 0; setSearchQuery(""); setMessageSearchResults([]); }}
+                    className="w-full flex items-start gap-2.5 p-2.5 rounded-xl text-left transition-all hover:bg-stone-50"
+                    data-testid={`search-message-${r.message_id}`}
+                  >
+                    <div className="w-8 h-8 shrink-0 rounded-full bg-stone-100 flex items-center justify-center">
+                      {r.sender_type === "user" ? <User className="w-3.5 h-3.5 text-stone-500" /> : r.sender_type === "ai" ? <Bot className="w-3.5 h-3.5 text-emerald-500" /> : <UserCheck className="w-3.5 h-3.5 text-blue-500" />}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-1 mb-0.5">
+                        <span className="text-xs font-semibold text-stone-700 truncate">{r.contact_name}</span>
+                        <span className="text-[10px] text-stone-400 shrink-0">{r.created_at.substring(5, 16)}</span>
+                      </div>
+                      <p className="text-xs text-stone-500 line-clamp-2 leading-relaxed">{r.content}</p>
+                    </div>
+                  </button>
+                ))}
+                {messageSearchResults.length === 0 && !messageSearching && (
+                  <div className="px-3 py-2 text-xs text-stone-400">無符合的對話紀錄</div>
+                )}
+              </div>
+            </div>
           ) : filteredContacts.length === 0 ? (
-            <div className="p-6 text-center text-sm text-stone-400">無聯絡人</div>
+            <div className="p-6 text-center text-sm text-stone-400">{searchQuery ? "查無結果" : "無聯絡人"}</div>
           ) : (
             <div className="p-2 space-y-0.5">
               {filteredContacts.map((contact) => {

@@ -95,7 +95,7 @@ shared/
 - GET /api/marketing-rules, POST /api/marketing-rules, PUT /api/marketing-rules/:id, DELETE /api/marketing-rules/:id
 
 ### Other
-- POST /api/webhook/line, POST /api/sandbox/chat, GET/POST/DELETE /api/knowledge-files
+- POST /api/webhook/line, POST /api/sandbox/chat, POST /api/sandbox/upload, GET /api/messages/search?q=, GET/POST/DELETE /api/knowledge-files
 
 ## Key Features (V6)
 1. **3-Tier RBAC**: super_admin, marketing_manager, cs_agent with granular access control
@@ -110,11 +110,13 @@ shared/
 10. **LINE Welcome Settings**: Welcome message + 3 quick buttons
 11. **Smart Human-Transfer Keywords**: Comma-separated keywords with tag preview
 12. **Marketing Rules Hub**: Full CRUD for keyword→pitch→URL rules
-13. **Real OpenAI Integration**: gpt-5.2 sandbox with Function Calling (3 tools: lookup_order_by_id, lookup_order_by_product_and_phone, lookup_order_by_date_and_contact) + full conversation history (up to 20 turns) + tool-calling loop (max 3 rounds) + production AI reply
+13. **Real OpenAI Integration**: gpt-5.2 sandbox with Function Calling (3 tools: lookup_order_by_id, lookup_order_by_product_and_phone, lookup_order_by_date_and_contact) + full conversation history (up to 20 turns) + tool-calling loop (max 3 rounds) + production AI reply + sandbox file upload (image→OpenAI Vision analysis, video→simulated human transfer)
 14. **Real API Test Connection**: POST /api/settings/test-connection for OpenAI (chat completion), LINE (bot info API), 一頁商店 (order API) — super_admin only, with detailed success/failure messages
 15. **LINE CSAT Flex Message**: Manual ⭐ button in chat toolbar sends LINE Flex Message with 5-star postback rating buttons; POST /api/contacts/:id/send-rating endpoint; webhook parses postback action=rate&ticket_id&score, stores cs_rating, replies acknowledgement via Reply API; rating displayed in contact info panel; button auto-disabled when cs_rating exists
 16. **Chat Image Upload**: Attachment button (Paperclip icon) + drag & drop with visual overlay + file preview thumbnails with remove; uploads via POST /api/chat-upload, images rendered in chat bubbles; LINE Messaging API image push support
 17. **Messages Schema**: message_type (text/image/file) + image_url columns with auto-migration
+18. **Chat Message Search**: Search contacts AND message content simultaneously; GET /api/messages/search?q=keyword (SQLite LIKE, max 50 results); debounced 400ms; shows contacts section + message results section; clicking result navigates to that contact
+19. **Sandbox File Upload**: POST /api/sandbox/upload (multipart, MIME+extension validation); images→OpenAI Vision analysis; videos→simulated human-transfer response; file preview with send/cancel
 
 ## Sensitive Settings (super_admin only)
 openai_api_key, line_channel_secret, line_channel_access_token, superlanding_merchant_no, superlanding_access_key

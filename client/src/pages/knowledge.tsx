@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import {
   Brain, Upload, Trash2, FileText, Save, FlaskConical, Send, Bot, User,
   AlertTriangle, ShoppingCart, Plus, Pencil, ExternalLink, Lightbulb, Tag,
+  Paperclip, ImageIcon, Film, X, Loader2,
 } from "lucide-react";
 import { apiRequest, getQueryFn } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -18,6 +19,8 @@ import type { Setting, KnowledgeFile, MarketingRule } from "@shared/schema";
 interface SandboxMessage {
   role: "user" | "ai";
   content: string;
+  fileUrl?: string;
+  fileType?: "image" | "video";
 }
 
 export default function KnowledgePage() {
@@ -35,7 +38,10 @@ export default function KnowledgePage() {
   const [rulePitch, setRulePitch] = useState("");
   const [ruleUrl, setRuleUrl] = useState("");
   const [ruleSaving, setRuleSaving] = useState(false);
+  const [sandboxUploading, setSandboxUploading] = useState(false);
+  const [sandboxPendingFile, setSandboxPendingFile] = useState<{ file: File; preview: string; type: "image" | "video" } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const sandboxFileRef = useRef<HTMLInputElement>(null);
   const sandboxEndRef = useRef<HTMLDivElement>(null);
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -133,6 +139,62 @@ export default function KnowledgePage() {
       setSandboxMessages((prev) => [...prev, { role: "ai", content: "⚠️ 連線失敗，請稍後再試。" }]);
     } finally {
       setSandboxLoading(false);
+      setTimeout(() => sandboxEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
+    }
+  };
+
+  const handleSandboxFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const ext = file.name.split(".").pop()?.toLowerCase() || "";
+    const imageExts = ["jpg", "jpeg", "png", "gif", "webp"];
+    const videoExts = ["mp4", "mov", "avi", "webm"];
+    if (!imageExts.includes(ext) && !videoExts.includes(ext)) {
+      toast({ title: "不支援的檔案格式", description: "支援圖片（JPG/PNG/GIF/WebP）和影片（MP4/MOV）", variant: "destructive" });
+      return;
+    }
+    const type = videoExts.includes(ext) ? "video" as const : "image" as const;
+    const preview = type === "image" ? URL.createObjectURL(file) : "";
+    setSandboxPendingFile({ file, preview, type });
+    if (sandboxFileRef.current) sandboxFileRef.current.value = "";
+  };
+
+  const handleSandboxUpload = async () => {
+    if (!sandboxPendingFile || sandboxUploading) return;
+    const { file, type } = sandboxPendingFile;
+    setSandboxUploading(true);
+    setSandboxMessages(prev => [...prev, {
+      role: "user",
+      content: type === "image" ? `[上傳圖片] ${file.name}` : `[上傳影片] ${file.name}`,
+      fileUrl: sandboxPendingFile.preview || undefined,
+      fileType: type,
+    }]);
+    setSandboxPendingFile(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const history = sandboxMessages.slice(-20).map(m => ({
+        role: m.role === "ai" ? "assistant" : "user",
+        content: m.content,
+      }));
+      formData.append("history", JSON.stringify(history));
+
+      const res = await fetch("/api/sandbox/upload", {
+        method: "POST",
+        body: formData,
+        credentials: "include",
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setSandboxMessages(prev => [...prev, { role: "ai", content: `⚠️ ${data.message}` }]);
+      } else {
+        setSandboxMessages(prev => [...prev, { role: "ai", content: data.reply }]);
+      }
+    } catch {
+      setSandboxMessages(prev => [...prev, { role: "ai", content: "⚠️ 上傳失敗，請稍後再試。" }]);
+    } finally {
+      setSandboxUploading(false);
       setTimeout(() => sandboxEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
     }
   };
@@ -386,6 +448,15 @@ export default function KnowledgePage() {
                           ? "bg-red-50 text-red-700 rounded-bl-md border border-red-200"
                           : "bg-white text-stone-700 rounded-bl-md border border-stone-100"
                       }`}>
+                        {msg.fileType === "image" && msg.fileUrl && (
+                          <img src={msg.fileUrl} alt="uploaded" className="max-w-[200px] rounded-lg mb-2" />
+                        )}
+                        {msg.fileType === "video" && (
+                          <div className="flex items-center gap-2 mb-1">
+                            <Film className="w-4 h-4" />
+                            <span className="text-xs opacity-80">影片檔案</span>
+                          </div>
+                        )}
                         {msg.content}
                       </div>
                     </div>
@@ -412,21 +483,61 @@ export default function KnowledgePage() {
               </div>
             </ScrollArea>
 
+            {sandboxUploading && (
+              <div className="flex justify-start px-5 pb-2">
+                <div className="flex items-end gap-2">
+                  <Avatar className="w-7 h-7"><AvatarFallback className="bg-emerald-100 text-emerald-600"><Bot className="w-3.5 h-3.5" /></AvatarFallback></Avatar>
+                  <div className="bg-white rounded-2xl rounded-bl-md px-4 py-3 shadow-sm border border-stone-100">
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="w-4 h-4 animate-spin text-stone-400" />
+                      <span className="text-xs text-stone-400">AI 分析檔案中...</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div className="p-4 border-t border-stone-200 bg-white">
+              {sandboxPendingFile && (
+                <div className="mb-3 flex items-center gap-2 bg-stone-50 rounded-xl p-2.5 border border-stone-200">
+                  {sandboxPendingFile.type === "image" && sandboxPendingFile.preview ? (
+                    <img src={sandboxPendingFile.preview} alt="preview" className="w-12 h-12 object-cover rounded-lg" />
+                  ) : (
+                    <div className="w-12 h-12 rounded-lg bg-stone-200 flex items-center justify-center"><Film className="w-5 h-5 text-stone-500" /></div>
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-medium text-stone-700 truncate">{sandboxPendingFile.file.name}</p>
+                    <p className="text-[10px] text-stone-400">{(sandboxPendingFile.file.size / 1024 / 1024).toFixed(1)} MB · {sandboxPendingFile.type === "image" ? "圖片" : "影片"}</p>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <Button size="sm" onClick={handleSandboxUpload} disabled={sandboxUploading} data-testid="button-sandbox-upload-send" className="bg-emerald-600 hover:bg-emerald-700 text-white h-8 px-3 text-xs">
+                      <Send className="w-3 h-3 mr-1" />傳送
+                    </Button>
+                    <button onClick={() => setSandboxPendingFile(null)} className="p-1 hover:bg-stone-200 rounded-full">
+                      <X className="w-3.5 h-3.5 text-stone-400" />
+                    </button>
+                  </div>
+                </div>
+              )}
               <div className="flex gap-2">
+                <input ref={sandboxFileRef} type="file" accept=".jpg,.jpeg,.png,.gif,.webp,.mp4,.mov,.avi,.webm" onChange={handleSandboxFileSelect} className="hidden" data-testid="input-sandbox-file" />
+                <Button variant="ghost" size="icon" onClick={() => sandboxFileRef.current?.click()} disabled={sandboxLoading || sandboxUploading} data-testid="button-sandbox-attach" className="shrink-0 text-stone-400 hover:text-stone-600 hover:bg-stone-100 h-10 w-10">
+                  <Paperclip className="w-4 h-4" />
+                </Button>
                 <Input
                   data-testid="input-sandbox-message"
                   placeholder="輸入測試訊息..."
                   value={sandboxInput}
                   onChange={(e) => setSandboxInput(e.target.value)}
                   onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSandboxSend(); } }}
-                  disabled={sandboxLoading}
+                  disabled={sandboxLoading || sandboxUploading}
                   className="bg-stone-50 border-stone-200"
                 />
-                <Button onClick={handleSandboxSend} disabled={!sandboxInput.trim() || sandboxLoading} data-testid="button-sandbox-send" className="bg-emerald-600 hover:bg-emerald-700 text-white px-4">
+                <Button onClick={handleSandboxSend} disabled={(!sandboxInput.trim() && !sandboxPendingFile) || sandboxLoading || sandboxUploading} data-testid="button-sandbox-send" className="bg-emerald-600 hover:bg-emerald-700 text-white px-4">
                   <Send className="w-4 h-4 mr-1.5" />測試
                 </Button>
               </div>
+              <p className="text-[10px] text-stone-400 mt-1.5 pl-12">支援圖片（JPG/PNG/GIF/WebP）和影片（MP4/MOV）上傳測試</p>
             </div>
           </div>
         </TabsContent>

@@ -48,6 +48,24 @@ const chatUpload = multer({
   limits: { fileSize: 10 * 1024 * 1024 },
 });
 
+const ALLOWED_MEDIA_EXTENSIONS = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".mov", ".avi", ".webm"];
+const ALLOWED_MEDIA_MIMES = ["image/jpeg", "image/png", "image/gif", "image/webp", "video/mp4", "video/quicktime", "video/x-msvideo", "video/webm"];
+const sandboxUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, uploadDir),
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname);
+      cb(null, `sandbox-${Date.now()}-${crypto.randomUUID()}${ext}`);
+    },
+  }),
+  fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    const mimeOk = ALLOWED_MEDIA_MIMES.includes(file.mimetype);
+    cb(null, ALLOWED_MEDIA_EXTENSIONS.includes(ext) && mimeOk);
+  },
+  limits: { fileSize: 20 * 1024 * 1024 },
+});
+
 function getSuperLandingConfig(): SuperLandingConfig {
   return {
     merchantNo: storage.getSetting("superlanding_merchant_no") || "",
@@ -347,6 +365,12 @@ export async function registerRoutes(
     const { is_pinned } = req.body;
     storage.updateContactPinned(id, is_pinned ? 1 : 0);
     return res.json({ success: true });
+  });
+
+  app.get("/api/messages/search", authMiddleware, (req, res) => {
+    const q = (req.query.q as string || "").trim();
+    if (!q || q.length < 2) return res.json([]);
+    return res.json(storage.searchMessages(q));
   });
 
   app.get("/api/contacts/:id/messages", authMiddleware, (req, res) => {
@@ -1161,6 +1185,76 @@ export async function registerRoutes(
       console.error("[Sandbox] AI 回覆失敗:", errorMessage);
       return res.status(500).json({ success: false, error: "api_error", message: `AI 回覆失敗：${errorMessage}` });
     }
+  });
+
+  app.post("/api/sandbox/upload", authMiddleware, sandboxUpload.single("file"), async (req, res) => {
+    if (!req.file) return res.status(400).json({ message: "未上傳檔案" });
+    const apiKey = storage.getSetting("openai_api_key");
+    if (!apiKey || apiKey.trim() === "") {
+      return res.status(400).json({ success: false, message: "請先至系統設定填寫有效的 OpenAI API Key" });
+    }
+
+    const ext = path.extname(req.file.originalname).toLowerCase();
+    const isVideo = [".mp4", ".mov", ".avi", ".webm"].includes(ext);
+    const isImage = [".jpg", ".jpeg", ".png", ".gif", ".webp"].includes(ext);
+    const fileUrl = `/uploads/${req.file.filename}`;
+    const historyRaw = req.body.history;
+    let history: { role: string; content: string }[] = [];
+    try { history = JSON.parse(historyRaw || "[]"); } catch {}
+
+    if (isVideo) {
+      return res.json({
+        success: true,
+        reply: `已收到您上傳的影片（${req.file.originalname}）。\n\n在實際 LINE 對話中，系統會自動將影片訊息標記為「需要真人客服」，並通知專人檢視。\n\n📋 模擬結果：\n- 檔案類型：影片\n- 動作：自動轉接真人客服\n- 回覆：「已收到您的影片，將為您轉交專人檢視。」`,
+        fileUrl,
+        fileType: "video",
+      });
+    }
+
+    if (isImage) {
+      try {
+        const filePath = path.join(uploadDir, req.file.filename);
+        const fileBuffer = fs.readFileSync(filePath);
+        const base64 = fileBuffer.toString("base64");
+        const mimeType = ext === ".png" ? "image/png" : ext === ".gif" ? "image/gif" : ext === ".webp" ? "image/webp" : "image/jpeg";
+        const dataUri = `data:${mimeType};base64,${base64}`;
+
+        const systemPrompt = await getEnrichedSystemPrompt();
+        const openai = new OpenAI({ apiKey });
+        const chatMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+          { role: "system", content: systemPrompt },
+        ];
+        if (history.length > 0) {
+          for (const h of history.slice(-20)) {
+            const role = h.role === "assistant" ? "assistant" as const : "user" as const;
+            if (h.content && typeof h.content === "string") {
+              chatMessages.push({ role, content: h.content });
+            }
+          }
+        }
+        chatMessages.push({
+          role: "user",
+          content: [
+            { type: "text", text: "請以客服身分查看這張客戶上傳的圖片，判斷是否有商品瑕疵或任何問題，並給予適當的回覆。" },
+            { type: "image_url", image_url: { url: dataUri } },
+          ],
+        });
+
+        const completion = await openai.chat.completions.create({
+          model: "gpt-5.2",
+          messages: chatMessages,
+          max_completion_tokens: 1000,
+          temperature: 0.7,
+        });
+        const reply = completion.choices[0]?.message?.content || "已收到您的圖片，將為您進一步處理。";
+        return res.json({ success: true, reply, fileUrl, fileType: "image" });
+      } catch (err: any) {
+        console.error("[Sandbox Upload] AI Vision error:", err.message);
+        return res.json({ success: true, reply: "已收到您的圖片，AI 分析暫時無法使用，將為您轉交專人檢視。", fileUrl, fileType: "image" });
+      }
+    }
+
+    return res.status(400).json({ message: "不支援的檔案格式" });
   });
 
   app.get("/api/knowledge-files", authMiddleware, (_req, res) => {

@@ -26,6 +26,7 @@ export interface IStorage {
   markEventProcessed(eventId: string): void;
   getMessages(contactId: number): Message[];
   getMessagesSince(contactId: number, sinceId: number): Message[];
+  searchMessages(query: string): { contact_id: number; contact_name: string; message_id: number; content: string; sender_type: string; created_at: string }[];
   createMessage(contactId: number, platform: string, senderType: string, content: string, messageType?: string, imageUrl?: string | null): Message;
   getOrCreateContact(platform: string, platformUserId: string, displayName: string): Contact;
   getKnowledgeFiles(): KnowledgeFile[];
@@ -141,6 +142,19 @@ export class SQLiteStorage implements IStorage {
 
   getMessagesSince(contactId: number, sinceId: number): Message[] {
     return db.prepare("SELECT * FROM messages WHERE contact_id = ? AND id > ? ORDER BY id ASC").all(contactId, sinceId) as Message[];
+  }
+
+  searchMessages(query: string): { contact_id: number; contact_name: string; message_id: number; content: string; sender_type: string; created_at: string }[] {
+    const pattern = `%${query}%`;
+    return db.prepare(`
+      SELECT m.id as message_id, m.contact_id, m.content, m.sender_type, m.created_at,
+             c.display_name as contact_name
+      FROM messages m
+      JOIN contacts c ON m.contact_id = c.id
+      WHERE m.content LIKE ? AND m.sender_type != 'system'
+      ORDER BY m.created_at DESC
+      LIMIT 50
+    `).all(pattern) as any[];
   }
 
   createMessage(contactId: number, platform: string, senderType: string, content: string, messageType: string = "text", imageUrl: string | null = null): Message {
