@@ -29,8 +29,6 @@ const upload = multer({
   limits: { fileSize: 20 * 1024 * 1024 },
 });
 
-const HUMAN_KEYWORDS = ["找客服", "真人", "轉人工", "人工客服", "真人客服"];
-
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -179,6 +177,12 @@ export async function registerRoutes(
       const hash = crypto.createHmac("SHA256", channelSecret).update(rawBody).digest("base64");
       if (hash !== signature) return res.status(403).json({ message: "簽名驗證失敗" });
     }
+
+    const humanKeywordsSetting = storage.getSetting("human_transfer_keywords");
+    const HUMAN_KEYWORDS = humanKeywordsSetting
+      ? humanKeywordsSetting.split(",").map((k) => k.trim()).filter(Boolean)
+      : ["找客服", "真人", "轉人工", "人工客服", "真人客服"];
+
     const events = req.body?.events || [];
     for (const event of events) {
       if (event.type === "message" && event.message?.type === "text") {
@@ -277,6 +281,17 @@ export async function registerRoutes(
     }
   });
 
+  app.put("/api/team/:id", authMiddleware, adminOnly, (req, res) => {
+    const id = parseInt(req.params.id);
+    const { display_name, role, password } = req.body;
+    if (!display_name) return res.status(400).json({ message: "姓名為必填" });
+    if (!["admin", "agent"].includes(role)) return res.status(400).json({ message: "角色必須為 admin 或 agent" });
+    if (!storage.updateUser(id, display_name, role, password || undefined)) {
+      return res.status(404).json({ message: "成員不存在" });
+    }
+    return res.json({ success: true });
+  });
+
   app.delete("/api/team/:id", authMiddleware, adminOnly, (req, res) => {
     const id = parseInt(req.params.id);
     const s = (req as any).session;
@@ -287,26 +302,62 @@ export async function registerRoutes(
     return res.json({ success: true });
   });
 
-  app.get("/api/analytics", authMiddleware, adminOnly, (_req, res) => {
-    return res.json({
-      kpi: {
-        todayInbound: 127,
-        aiInterceptRate: 82,
-        csatScore: 4.8,
+  app.get("/api/analytics", authMiddleware, adminOnly, (req, res) => {
+    const range = (req.query.range as string) || "today";
+    const mockDataMap: Record<string, any> = {
+      today: {
+        kpi: { todayInbound: 127, completedCount: 120, completionRate: 94.5, aiInterceptRate: 82, avgFrtAi: "2 秒", avgFrtHuman: "1 分 15 秒" },
+        agentPerformance: [
+          { name: "AI 助理", cases: 104 },
+          { name: "客服小李", cases: 35 },
+          { name: "系統管理員", cases: 18 },
+          { name: "客服小王", cases: 12 },
+          { name: "客服小陳", cases: 8 },
+        ],
+        intentDistribution: [
+          { name: "退換貨諮詢", value: 40 },
+          { name: "產品諮詢", value: 30 },
+          { name: "物流追蹤", value: 20 },
+          { name: "帳號問題", value: 10 },
+        ],
       },
-      agentPerformance: [
-        { name: "AI 助理", cases: 104 },
-        { name: "客服小李", cases: 35 },
-        { name: "系統管理員", cases: 18 },
-        { name: "客服小王", cases: 12 },
-        { name: "客服小陳", cases: 8 },
-      ],
-      intentDistribution: [
-        { name: "退換貨諮詢", value: 40 },
-        { name: "產品諮詢", value: 30 },
-        { name: "物流追蹤", value: 20 },
-        { name: "帳號問題", value: 10 },
-      ],
+      "7d": {
+        kpi: { todayInbound: 843, completedCount: 798, completionRate: 94.7, aiInterceptRate: 79, avgFrtAi: "2 秒", avgFrtHuman: "1 分 32 秒" },
+        agentPerformance: [
+          { name: "AI 助理", cases: 665 },
+          { name: "客服小李", cases: 210 },
+          { name: "系統管理員", cases: 95 },
+          { name: "客服小王", cases: 78 },
+          { name: "客服小陳", cases: 52 },
+        ],
+        intentDistribution: [
+          { name: "退換貨諮詢", value: 35 },
+          { name: "產品諮詢", value: 28 },
+          { name: "物流追蹤", value: 22 },
+          { name: "帳號問題", value: 15 },
+        ],
+      },
+      "30d": {
+        kpi: { todayInbound: 3521, completedCount: 3310, completionRate: 94.0, aiInterceptRate: 80, avgFrtAi: "3 秒", avgFrtHuman: "1 分 48 秒" },
+        agentPerformance: [
+          { name: "AI 助理", cases: 2817 },
+          { name: "客服小李", cases: 920 },
+          { name: "系統管理員", cases: 405 },
+          { name: "客服小王", cases: 312 },
+          { name: "客服小陳", cases: 198 },
+        ],
+        intentDistribution: [
+          { name: "退換貨諮詢", value: 38 },
+          { name: "產品諮詢", value: 25 },
+          { name: "物流追蹤", value: 23 },
+          { name: "帳號問題", value: 14 },
+        ],
+      },
+    };
+
+    const data = mockDataMap[range] || mockDataMap.today;
+    return res.json({
+      ...data,
       aiInsights: {
         painPoints: [
           "退換貨流程不夠直覺 — 本週有 40% 的進線與退換貨相關，多數客戶反映在會員中心找不到退貨入口，建議優化退貨按鈕的 UI 位置。",
@@ -320,6 +371,33 @@ export async function registerRoutes(
         ],
       },
     });
+  });
+
+  app.get("/api/marketing-rules", authMiddleware, (_req, res) => {
+    return res.json(storage.getMarketingRules());
+  });
+
+  app.post("/api/marketing-rules", authMiddleware, (req, res) => {
+    const { keyword, pitch, url } = req.body;
+    if (!keyword) return res.status(400).json({ message: "關鍵字為必填" });
+    const rule = storage.createMarketingRule(keyword, pitch || "", url || "");
+    return res.json({ success: true, rule });
+  });
+
+  app.put("/api/marketing-rules/:id", authMiddleware, (req, res) => {
+    const id = parseInt(req.params.id);
+    const { keyword, pitch, url } = req.body;
+    if (!keyword) return res.status(400).json({ message: "關鍵字為必填" });
+    if (!storage.updateMarketingRule(id, keyword, pitch || "", url || "")) {
+      return res.status(404).json({ message: "規則不存在" });
+    }
+    return res.json({ success: true });
+  });
+
+  app.delete("/api/marketing-rules/:id", authMiddleware, (req, res) => {
+    const id = parseInt(req.params.id);
+    if (!storage.deleteMarketingRule(id)) return res.status(404).json({ message: "規則不存在" });
+    return res.json({ success: true });
   });
 
   return httpServer;

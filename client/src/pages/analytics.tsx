@@ -1,36 +1,75 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { getQueryFn } from "@/lib/queryClient";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
-import { TrendingUp, Users, Star, Brain, Flame, Lightbulb, BarChart3 } from "lucide-react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { TrendingUp, CheckCircle2, Users, Clock, Brain, Flame, Lightbulb, BarChart3, CalendarDays } from "lucide-react";
 import type { AnalyticsData } from "@shared/schema";
 
 const PIE_COLORS = ["#059669", "#d97706", "#7c3aed", "#0284c7"];
 
+const RANGE_LABELS: Record<string, string> = {
+  today: "今日",
+  "7d": "近 7 天",
+  "30d": "近 30 天",
+};
+
 export default function AnalyticsPage() {
+  const [range, setRange] = useState("today");
+
   const { data, isLoading } = useQuery<AnalyticsData>({
-    queryKey: ["/api/analytics"],
-    queryFn: getQueryFn({ on401: "throw" }),
+    queryKey: ["/api/analytics", range],
+    queryFn: async () => {
+      const res = await fetch(`/api/analytics?range=${range}`, { credentials: "include" });
+      if (!res.ok) throw new Error(`${res.status}`);
+      return res.json();
+    },
   });
 
   if (isLoading || !data) {
     return <div className="flex items-center justify-center h-full"><p className="text-stone-400">載入數據中...</p></div>;
   }
 
+  const rangeLabel = RANGE_LABELS[range] || "今日";
+
   return (
     <div className="p-6 max-w-6xl mx-auto space-y-6" data-testid="analytics-page">
-      <div>
-        <h1 className="text-xl font-bold text-stone-800" data-testid="text-analytics-title">數據戰情室</h1>
-        <p className="text-sm text-stone-500 mt-1">即時監控客服績效與 AI 洞察分析</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-bold text-stone-800" data-testid="text-analytics-title">數據戰情室</h1>
+          <p className="text-sm text-stone-500 mt-1">即時監控客服績效與 AI 洞察分析</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <CalendarDays className="w-4 h-4 text-stone-400" />
+          <Select value={range} onValueChange={setRange}>
+            <SelectTrigger className="w-[140px] h-9 text-sm border-stone-200 bg-white" data-testid="select-date-range">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="today">今日</SelectItem>
+              <SelectItem value="7d">近 7 天</SelectItem>
+              <SelectItem value="30d">近 30 天</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-4 gap-4">
         <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="kpi-inbound">
           <div className="flex items-center gap-2 mb-3">
             <div className="w-10 h-10 rounded-xl bg-emerald-100 flex items-center justify-center"><TrendingUp className="w-5 h-5 text-emerald-600" /></div>
-            <span className="text-xs font-medium text-stone-500">今日總進線量</span>
+            <span className="text-xs font-medium text-stone-500">{rangeLabel}總進線量</span>
           </div>
           <p className="text-3xl font-bold text-stone-800">{data.kpi.todayInbound}</p>
-          <p className="text-xs text-stone-400 mt-1">相較昨日 +12%</p>
+          <p className="text-xs text-stone-400 mt-1">則訊息</p>
+        </div>
+
+        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="kpi-completion">
+          <div className="flex items-center gap-2 mb-3">
+            <div className="w-10 h-10 rounded-xl bg-sky-100 flex items-center justify-center"><CheckCircle2 className="w-5 h-5 text-sky-600" /></div>
+            <span className="text-xs font-medium text-stone-500">處理完成率</span>
+          </div>
+          <p className="text-3xl font-bold text-stone-800">{data.kpi.completionRate}%</p>
+          <p className="text-xs text-stone-400 mt-1">已處理 {data.kpi.completedCount} 則</p>
         </div>
 
         <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="kpi-ai-rate">
@@ -42,13 +81,15 @@ export default function AnalyticsPage() {
           <p className="text-xs text-stone-400 mt-1">AI 成功處理的對話比例</p>
         </div>
 
-        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="kpi-csat">
+        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="kpi-frt">
           <div className="flex items-center gap-2 mb-3">
-            <div className="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center"><Star className="w-5 h-5 text-amber-600" /></div>
-            <span className="text-xs font-medium text-stone-500">客戶滿意度 CSAT</span>
+            <div className="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center"><Clock className="w-5 h-5 text-amber-600" /></div>
+            <span className="text-xs font-medium text-stone-500">平均首次回覆時間</span>
           </div>
-          <p className="text-3xl font-bold text-stone-800">{data.kpi.csatScore} <span className="text-lg">/ 5</span></p>
-          <p className="text-xs text-stone-400 mt-1">本週平均評分</p>
+          <div className="flex items-baseline gap-2">
+            <p className="text-lg font-bold text-stone-800">AI {data.kpi.avgFrtAi}</p>
+          </div>
+          <p className="text-xs text-stone-400 mt-1">真人 {data.kpi.avgFrtHuman}</p>
         </div>
       </div>
 
@@ -57,7 +98,7 @@ export default function AnalyticsPage() {
           <div className="flex items-center gap-2 mb-4">
             <div className="w-8 h-8 rounded-xl bg-emerald-100 flex items-center justify-center"><BarChart3 className="w-4 h-4 text-emerald-600" /></div>
             <div>
-              <span className="text-sm font-semibold text-stone-800">本週績效比較</span>
+              <span className="text-sm font-semibold text-stone-800">{rangeLabel}績效比較</span>
               <p className="text-xs text-stone-500">各客服專員解決案件數量</p>
             </div>
           </div>
@@ -68,7 +109,7 @@ export default function AnalyticsPage() {
                 <XAxis dataKey="name" tick={{ fontSize: 12, fill: "#78716c" }} />
                 <YAxis tick={{ fontSize: 12, fill: "#78716c" }} />
                 <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #e7e5e4", fontSize: "13px" }} />
-                <Bar dataKey="cases" fill="#059669" radius={[8, 8, 0, 0]} name="解決案件數" />
+                <Bar dataKey="cases" fill="#059669" radius={[8, 8, 0, 0]} name="解決案件數" animationDuration={800} />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -79,19 +120,19 @@ export default function AnalyticsPage() {
             <div className="w-8 h-8 rounded-xl bg-violet-100 flex items-center justify-center"><Brain className="w-4 h-4 text-violet-600" /></div>
             <div>
               <span className="text-sm font-semibold text-stone-800">客戶進線意圖分佈</span>
-              <p className="text-xs text-stone-500">本週各類型諮詢佔比</p>
+              <p className="text-xs text-stone-500">{rangeLabel}各類型諮詢佔比</p>
             </div>
           </div>
           <div className="h-[280px]" data-testid="chart-intent-distribution">
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
-                <Pie data={data.intentDistribution} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={4} dataKey="value" nameKey="name" label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`} labelLine={false}>
+                <Pie data={data.intentDistribution} cx="50%" cy="45%" innerRadius={55} outerRadius={90} paddingAngle={4} dataKey="value" nameKey="name" animationDuration={800}>
                   {data.intentDistribution.map((_entry, index) => (
                     <Cell key={`cell-${index}`} fill={PIE_COLORS[index % PIE_COLORS.length]} />
                   ))}
                 </Pie>
-                <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #e7e5e4", fontSize: "13px" }} />
-                <Legend wrapperStyle={{ fontSize: "12px" }} />
+                <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #e7e5e4", fontSize: "13px" }} formatter={(value: number) => [`${value}%`, "佔比"]} />
+                <Legend verticalAlign="bottom" height={36} iconType="circle" iconSize={10} wrapperStyle={{ fontSize: "12px", paddingTop: "8px" }} formatter={(value: string) => <span className="text-stone-600">{value}</span>} />
               </PieChart>
             </ResponsiveContainer>
           </div>

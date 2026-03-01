@@ -55,6 +55,14 @@ export interface TeamMember {
   created_at: string;
 }
 
+export interface MarketingRule {
+  id: number;
+  keyword: string;
+  pitch: string;
+  url: string;
+  created_at: string;
+}
+
 export interface LoginRequest {
   username: string;
   password: string;
@@ -69,8 +77,11 @@ export interface LoginResponse {
 export interface AnalyticsData {
   kpi: {
     todayInbound: number;
+    completedCount: number;
+    completionRate: number;
     aiInterceptRate: number;
-    csatScore: number;
+    avgFrtAi: string;
+    avgFrtHuman: string;
   };
   agentPerformance: { name: string; cases: number }[];
   intentDistribution: { name: string; value: number }[];

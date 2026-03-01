@@ -6,21 +6,14 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import {
-  Brain,
-  Upload,
-  Trash2,
-  FileText,
-  Save,
-  FlaskConical,
-  Send,
-  Bot,
-  User,
-  AlertTriangle,
+  Brain, Upload, Trash2, FileText, Save, FlaskConical, Send, Bot, User,
+  AlertTriangle, ShoppingCart, Plus, Pencil, ExternalLink, Lightbulb, Tag,
 } from "lucide-react";
 import { apiRequest, getQueryFn } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import type { Setting, KnowledgeFile } from "@shared/schema";
+import type { Setting, KnowledgeFile, MarketingRule } from "@shared/schema";
 
 interface SandboxMessage {
   role: "user" | "ai";
@@ -36,6 +29,12 @@ export default function KnowledgePage() {
   const [sandboxMessages, setSandboxMessages] = useState<SandboxMessage[]>([]);
   const [sandboxInput, setSandboxInput] = useState("");
   const [sandboxLoading, setSandboxLoading] = useState(false);
+  const [showRuleDialog, setShowRuleDialog] = useState(false);
+  const [editingRule, setEditingRule] = useState<MarketingRule | null>(null);
+  const [ruleKeyword, setRuleKeyword] = useState("");
+  const [rulePitch, setRulePitch] = useState("");
+  const [ruleUrl, setRuleUrl] = useState("");
+  const [ruleSaving, setRuleSaving] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const sandboxEndRef = useRef<HTMLDivElement>(null);
   const queryClient = useQueryClient();
@@ -53,6 +52,11 @@ export default function KnowledgePage() {
 
   const { data: files = [], isLoading: filesLoading } = useQuery<KnowledgeFile[]>({
     queryKey: ["/api/knowledge-files"],
+    queryFn: getQueryFn({ on401: "throw" }),
+  });
+
+  const { data: marketingRules = [] } = useQuery<MarketingRule[]>({
+    queryKey: ["/api/marketing-rules"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
 
@@ -116,13 +120,7 @@ export default function KnowledgePage() {
       });
       const data = await res.json();
       if (!res.ok) {
-        if (data.error === "no_api_key" || data.error === "invalid_api_key") {
-          toast({ title: "API Key 錯誤", description: data.message, variant: "destructive" });
-          setSandboxMessages((prev) => [...prev, { role: "ai", content: `⚠️ ${data.message}` }]);
-        } else {
-          toast({ title: "回覆失敗", description: data.message, variant: "destructive" });
-          setSandboxMessages((prev) => [...prev, { role: "ai", content: `⚠️ ${data.message}` }]);
-        }
+        setSandboxMessages((prev) => [...prev, { role: "ai", content: `⚠️ ${data.message}` }]);
       } else {
         setSandboxMessages((prev) => [...prev, { role: "ai", content: data.reply }]);
       }
@@ -132,6 +130,47 @@ export default function KnowledgePage() {
       setSandboxLoading(false);
       setTimeout(() => sandboxEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
     }
+  };
+
+  const openAddRule = () => {
+    setEditingRule(null);
+    setRuleKeyword(""); setRulePitch(""); setRuleUrl("");
+    setShowRuleDialog(true);
+  };
+
+  const openEditRule = (rule: MarketingRule) => {
+    setEditingRule(rule);
+    setRuleKeyword(rule.keyword);
+    setRulePitch(rule.pitch);
+    setRuleUrl(rule.url);
+    setShowRuleDialog(true);
+  };
+
+  const handleSaveRule = async () => {
+    if (!ruleKeyword.trim()) {
+      toast({ title: "關鍵字為必填", variant: "destructive" });
+      return;
+    }
+    setRuleSaving(true);
+    try {
+      if (editingRule) {
+        await apiRequest("PUT", `/api/marketing-rules/${editingRule.id}`, { keyword: ruleKeyword.trim(), pitch: rulePitch.trim(), url: ruleUrl.trim() });
+      } else {
+        await apiRequest("POST", "/api/marketing-rules", { keyword: ruleKeyword.trim(), pitch: rulePitch.trim(), url: ruleUrl.trim() });
+      }
+      queryClient.invalidateQueries({ queryKey: ["/api/marketing-rules"] });
+      toast({ title: editingRule ? "更新成功" : "新增成功" });
+      setShowRuleDialog(false);
+    } catch { toast({ title: "操作失敗", variant: "destructive" }); }
+    finally { setRuleSaving(false); }
+  };
+
+  const handleDeleteRule = async (id: number) => {
+    try {
+      await apiRequest("DELETE", `/api/marketing-rules/${id}`);
+      queryClient.invalidateQueries({ queryKey: ["/api/marketing-rules"] });
+      toast({ title: "刪除成功" });
+    } catch { toast({ title: "刪除失敗", variant: "destructive" }); }
   };
 
   const formatFileSize = (bytes: number) => {
@@ -150,13 +189,16 @@ export default function KnowledgePage() {
     <div className="p-6 max-w-4xl mx-auto space-y-6" data-testid="knowledge-page">
       <div>
         <h1 className="text-xl font-bold text-stone-800" data-testid="text-knowledge-title">AI 與知識庫</h1>
-        <p className="text-sm text-stone-500 mt-1">管理 AI 行為指令、知識庫文件與測試沙盒</p>
+        <p className="text-sm text-stone-500 mt-1">管理 AI 行為指令、知識庫文件、產品導購與測試沙盒</p>
       </div>
 
       <Tabs defaultValue="prompt" className="space-y-4">
         <TabsList className="bg-white border border-stone-200 p-1 rounded-xl">
           <TabsTrigger value="prompt" className="text-xs rounded-lg" data-testid="tab-prompt">
             <Brain className="w-3.5 h-3.5 mr-1.5" />系統指令與知識庫
+          </TabsTrigger>
+          <TabsTrigger value="marketing" className="text-xs rounded-lg" data-testid="tab-marketing">
+            <ShoppingCart className="w-3.5 h-3.5 mr-1.5" />產品導購庫
           </TabsTrigger>
           <TabsTrigger value="sandbox" className="text-xs rounded-lg" data-testid="tab-sandbox">
             <FlaskConical className="w-3.5 h-3.5 mr-1.5" />AI 測試沙盒
@@ -195,6 +237,13 @@ export default function KnowledgePage() {
               </div>
             </div>
 
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-4 flex items-start gap-2" data-testid="tip-csv-format">
+              <Lightbulb className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <p className="text-xs text-amber-800 leading-relaxed">
+                <span className="font-semibold">確保 AI 報價精準的黃金格式：</span>強烈建議將產品建置成 .csv 表格 (包含產品名、價格、網址、特色) 上傳。請勿上傳無排版的長篇 PDF，以免 AI 判斷錯誤。
+              </p>
+            </div>
+
             <div
               className={`border-2 border-dashed rounded-2xl p-8 text-center transition-all cursor-pointer ${dragOver ? "border-emerald-400 bg-emerald-50" : "border-stone-200 hover:border-stone-300"}`}
               onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
@@ -230,6 +279,68 @@ export default function KnowledgePage() {
           </div>
         </TabsContent>
 
+        <TabsContent value="marketing" className="mt-4">
+          <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="section-marketing-rules">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-orange-100 flex items-center justify-center"><ShoppingCart className="w-4 h-4 text-orange-600" /></div>
+                <div>
+                  <span className="text-sm font-semibold text-stone-800">產品導購與快捷回覆庫</span>
+                  <p className="text-xs text-stone-500">設定觸發關鍵字，AI 將自動推薦產品並附上購買連結</p>
+                </div>
+              </div>
+              <Button onClick={openAddRule} className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs" data-testid="button-add-rule">
+                <Plus className="w-3.5 h-3.5 mr-1.5" />新增導購規則
+              </Button>
+            </div>
+
+            {marketingRules.length === 0 ? (
+              <div className="text-center py-8">
+                <div className="w-14 h-14 mx-auto mb-3 rounded-2xl bg-stone-100 flex items-center justify-center"><ShoppingCart className="w-7 h-7 text-stone-300" /></div>
+                <p className="text-sm text-stone-500">尚未建立導購規則</p>
+                <p className="text-xs text-stone-400 mt-1">新增規則讓 AI 自動推薦產品給客戶</p>
+              </div>
+            ) : (
+              <div className="border border-stone-200 rounded-xl overflow-hidden">
+                <div className="grid grid-cols-[1fr_2fr_auto_auto] gap-4 px-4 py-2.5 bg-stone-50 border-b border-stone-200">
+                  <span className="text-xs font-semibold text-stone-500">觸發關鍵字 / 產品</span>
+                  <span className="text-xs font-semibold text-stone-500">推廣話術</span>
+                  <span className="text-xs font-semibold text-stone-500">結帳連結</span>
+                  <span className="text-xs font-semibold text-stone-500">操作</span>
+                </div>
+                <div className="divide-y divide-stone-100">
+                  {marketingRules.map((rule) => (
+                    <div key={rule.id} className="grid grid-cols-[1fr_2fr_auto_auto] gap-4 px-4 py-3 items-center hover:bg-stone-50 transition-colors" data-testid={`rule-item-${rule.id}`}>
+                      <div className="flex items-center gap-1.5">
+                        <Tag className="w-3.5 h-3.5 text-orange-500 shrink-0" />
+                        <span className="text-sm font-medium text-stone-800 truncate">{rule.keyword}</span>
+                      </div>
+                      <p className="text-xs text-stone-600 line-clamp-2 leading-relaxed">{rule.pitch}</p>
+                      <div>
+                        {rule.url ? (
+                          <a href={rule.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-emerald-600 hover:text-emerald-700">
+                            <ExternalLink className="w-3 h-3" />連結
+                          </a>
+                        ) : (
+                          <span className="text-xs text-stone-400">—</span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <Button size="icon" variant="ghost" onClick={() => openEditRule(rule)} data-testid={`button-edit-rule-${rule.id}`} className="h-7 w-7 text-stone-400 hover:text-emerald-600 hover:bg-emerald-50">
+                          <Pencil className="w-3.5 h-3.5" />
+                        </Button>
+                        <Button size="icon" variant="ghost" onClick={() => handleDeleteRule(rule.id)} data-testid={`button-delete-rule-${rule.id}`} className="h-7 w-7 text-red-400 hover:text-red-600 hover:bg-red-50">
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </TabsContent>
+
         <TabsContent value="sandbox" className="mt-4">
           <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
             <div className="px-5 py-3 border-b border-stone-200 flex items-center justify-between">
@@ -242,7 +353,7 @@ export default function KnowledgePage() {
               </div>
               <div className="flex items-center gap-1.5 text-xs text-amber-600 bg-amber-50 px-2.5 py-1 rounded-full border border-amber-200">
                 <AlertTriangle className="w-3 h-3" />
-                此區僅供內部測試，不會發送真實 LINE 訊息
+                此區僅供內部測試
               </div>
             </div>
 
@@ -315,6 +426,36 @@ export default function KnowledgePage() {
           </div>
         </TabsContent>
       </Tabs>
+
+      <Dialog open={showRuleDialog} onOpenChange={setShowRuleDialog}>
+        <DialogContent className="bg-white border-stone-200 rounded-2xl" data-testid="dialog-marketing-rule">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-stone-800">
+              <ShoppingCart className="w-5 h-5 text-orange-600" />{editingRule ? "編輯導購規則" : "新增導購規則"}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div>
+              <label className="text-xs font-medium text-stone-600 mb-1 block">觸發關鍵字 / 產品名稱</label>
+              <Input data-testid="input-rule-keyword" placeholder="例如：限量包包" value={ruleKeyword} onChange={(e) => setRuleKeyword(e.target.value)} className="bg-stone-50 border-stone-200" />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-stone-600 mb-1 block">推廣話術</label>
+              <Textarea data-testid="input-rule-pitch" placeholder="輸入推廣話術，包含價格、賣點與促銷資訊..." value={rulePitch} onChange={(e) => setRulePitch(e.target.value)} className="min-h-[80px] resize-y text-sm bg-stone-50 border-stone-200" />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-stone-600 mb-1 block">引導結帳網址 (URL)</label>
+              <Input data-testid="input-rule-url" placeholder="https://shop.example.com/product" value={ruleUrl} onChange={(e) => setRuleUrl(e.target.value)} className="bg-stone-50 border-stone-200" />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setShowRuleDialog(false)} className="text-stone-500">取消</Button>
+            <Button onClick={handleSaveRule} disabled={ruleSaving} data-testid="button-confirm-rule" className="bg-emerald-600 hover:bg-emerald-700 text-white">
+              {ruleSaving ? "儲存中..." : editingRule ? "儲存變更" : "確認新增"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

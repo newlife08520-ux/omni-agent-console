@@ -1,5 +1,5 @@
 import db, { initDatabase, hashPassword } from "./db";
-import type { User, Contact, ContactWithPreview, Message, Setting, KnowledgeFile, TeamMember } from "@shared/schema";
+import type { User, Contact, ContactWithPreview, Message, Setting, KnowledgeFile, TeamMember, MarketingRule } from "@shared/schema";
 
 initDatabase();
 
@@ -7,6 +7,7 @@ export interface IStorage {
   authenticateUser(username: string, password: string): User | null;
   getUserById(id: number): User | undefined;
   createUser(username: string, password: string, displayName: string, role: string): User;
+  updateUser(id: number, displayName: string, role: string, password?: string): boolean;
   deleteUser(id: number): boolean;
   getTeamMembers(): TeamMember[];
   getSetting(key: string): string | null;
@@ -25,6 +26,10 @@ export interface IStorage {
   getKnowledgeFiles(): KnowledgeFile[];
   createKnowledgeFile(filename: string, originalName: string, size: number): KnowledgeFile;
   deleteKnowledgeFile(id: number): boolean;
+  getMarketingRules(): MarketingRule[];
+  createMarketingRule(keyword: string, pitch: string, url: string): MarketingRule;
+  updateMarketingRule(id: number, keyword: string, pitch: string, url: string): boolean;
+  deleteMarketingRule(id: number): boolean;
 }
 
 export class SQLiteStorage implements IStorage {
@@ -42,6 +47,16 @@ export class SQLiteStorage implements IStorage {
     const hash = hashPassword(password);
     const result = db.prepare("INSERT INTO users (username, password_hash, display_name, role) VALUES (?, ?, ?, ?)").run(username, hash, displayName, role);
     return db.prepare("SELECT * FROM users WHERE id = ?").get(Number(result.lastInsertRowid)) as User;
+  }
+
+  updateUser(id: number, displayName: string, role: string, password?: string): boolean {
+    if (password && password.trim()) {
+      const hash = hashPassword(password);
+      const result = db.prepare("UPDATE users SET display_name = ?, role = ?, password_hash = ? WHERE id = ?").run(displayName, role, hash, id);
+      return result.changes > 0;
+    }
+    const result = db.prepare("UPDATE users SET display_name = ?, role = ? WHERE id = ?").run(displayName, role, id);
+    return result.changes > 0;
   }
 
   deleteUser(id: number): boolean {
@@ -131,6 +146,26 @@ export class SQLiteStorage implements IStorage {
 
   deleteKnowledgeFile(id: number): boolean {
     const result = db.prepare("DELETE FROM knowledge_files WHERE id = ?").run(id);
+    return result.changes > 0;
+  }
+
+  getMarketingRules(): MarketingRule[] {
+    return db.prepare("SELECT * FROM marketing_rules ORDER BY created_at DESC").all() as MarketingRule[];
+  }
+
+  createMarketingRule(keyword: string, pitch: string, url: string): MarketingRule {
+    const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+    const result = db.prepare("INSERT INTO marketing_rules (keyword, pitch, url, created_at) VALUES (?, ?, ?, ?)").run(keyword, pitch, url, now);
+    return { id: Number(result.lastInsertRowid), keyword, pitch, url, created_at: now };
+  }
+
+  updateMarketingRule(id: number, keyword: string, pitch: string, url: string): boolean {
+    const result = db.prepare("UPDATE marketing_rules SET keyword = ?, pitch = ?, url = ? WHERE id = ?").run(keyword, pitch, url, id);
+    return result.changes > 0;
+  }
+
+  deleteMarketingRule(id: number): boolean {
+    const result = db.prepare("DELETE FROM marketing_rules WHERE id = ?").run(id);
     return result.changes > 0;
   }
 }

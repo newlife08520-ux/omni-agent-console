@@ -2,8 +2,9 @@ import { useState, useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
-import { Eye, EyeOff, Save, Key, Shield, MessageSquare, Plug, Loader2, Palette, Type, Image } from "lucide-react";
+import { Eye, EyeOff, Save, Key, Shield, MessageSquare, Plug, Loader2, Palette, Type, Image, MessageCircle, Zap, AlertTriangle } from "lucide-react";
 import { apiRequest, getQueryFn } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import type { Setting } from "@shared/schema";
@@ -39,6 +40,19 @@ export default function SettingsPage() {
     finally { setSaving(""); }
   };
 
+  const handleSaveMultiple = async (keys: string[]) => {
+    const firstKey = keys[0];
+    setSaving(firstKey);
+    try {
+      for (const key of keys) {
+        await apiRequest("PUT", "/api/settings", { key, value: formValues[key] || "" });
+      }
+      queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
+      toast({ title: "儲存成功", description: "所有設定已更新" });
+    } catch { toast({ title: "儲存失敗", variant: "destructive" }); }
+    finally { setSaving(""); }
+  };
+
   const handleTestConnection = async (type: string) => {
     setTesting(type);
     try {
@@ -65,6 +79,8 @@ export default function SettingsPage() {
     return value.substring(0, 4) + "*".repeat(Math.min(value.length - 8, 20)) + value.substring(value.length - 4);
   };
 
+  const quickButtons = (formValues.quick_buttons || "").split(",").map((s) => s.trim()).filter(Boolean);
+
   if (isLoading) {
     return <div className="flex items-center justify-center h-full"><p className="text-stone-400">載入設定中...</p></div>;
   }
@@ -79,7 +95,7 @@ export default function SettingsPage() {
     <div className="p-6 max-w-3xl mx-auto space-y-6" data-testid="settings-page">
       <div>
         <h1 className="text-xl font-bold text-stone-800" data-testid="text-settings-title">系統設定</h1>
-        <p className="text-sm text-stone-500 mt-1">管理 API 金鑰、品牌外觀與系統環境設定</p>
+        <p className="text-sm text-stone-500 mt-1">管理 API 金鑰、品牌外觀、LINE 迎賓與轉人工設定</p>
       </div>
 
       <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
@@ -133,6 +149,79 @@ export default function SettingsPage() {
                 <span className="text-xs text-stone-400">預覽</span>
               </div>
             )}
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="section-welcome-settings">
+        <div className="flex items-center gap-2 mb-4">
+          <div className="w-8 h-8 rounded-xl bg-emerald-100 flex items-center justify-center"><MessageCircle className="w-4 h-4 text-emerald-600" /></div>
+          <div>
+            <span className="text-sm font-semibold text-stone-800">LINE 迎賓與快捷按鈕設定</span>
+            <p className="text-xs text-stone-500">設定新客戶首次進線時的歡迎詞與快速按鈕選項</p>
+          </div>
+        </div>
+        <div className="space-y-4">
+          <div>
+            <label className="text-xs font-medium text-stone-600 mb-1.5 block">首次進線歡迎詞</label>
+            <Textarea data-testid="input-welcome-message" placeholder="輸入歡迎詞..." value={formValues.welcome_message || ""} onChange={(e) => setFormValues((prev) => ({ ...prev, welcome_message: e.target.value }))} className="min-h-[80px] resize-y text-sm bg-stone-50 border-stone-200" />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-stone-600 mb-1.5 block">快速按鈕 (Quick Replies)</label>
+            <div className="space-y-2">
+              {[0, 1, 2].map((i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <div className="w-6 h-6 rounded-lg bg-emerald-100 flex items-center justify-center shrink-0">
+                    <Zap className="w-3 h-3 text-emerald-600" />
+                  </div>
+                  <Input
+                    data-testid={`input-quick-button-${i}`}
+                    placeholder={`快速按鈕 ${i + 1}`}
+                    value={quickButtons[i] || ""}
+                    onChange={(e) => {
+                      const newButtons = [...quickButtons];
+                      while (newButtons.length <= i) newButtons.push("");
+                      newButtons[i] = e.target.value;
+                      setFormValues((prev) => ({ ...prev, quick_buttons: newButtons.filter(Boolean).join(",") }));
+                    }}
+                    className="bg-stone-50 border-stone-200 text-sm"
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="flex justify-end">
+            <Button onClick={() => handleSaveMultiple(["welcome_message", "quick_buttons"])} disabled={saving === "welcome_message"} data-testid="button-save-welcome" className="text-xs bg-emerald-600 hover:bg-emerald-700 text-white">
+              <Save className="w-3.5 h-3.5 mr-1" />{saving === "welcome_message" ? "儲存中..." : "儲存迎賓設定"}
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="section-human-transfer">
+        <div className="flex items-center gap-2 mb-4">
+          <div className="w-8 h-8 rounded-xl bg-red-100 flex items-center justify-center"><AlertTriangle className="w-4 h-4 text-red-600" /></div>
+          <div>
+            <span className="text-sm font-semibold text-stone-800">智能轉人工觸發設定</span>
+            <p className="text-xs text-stone-500">當客戶訊息包含這些字眼時，系統將自動停止 AI 回覆，並將該聯絡人標記為紅色「需人工處理」</p>
+          </div>
+        </div>
+        <div className="space-y-3">
+          <div>
+            <label className="text-xs font-medium text-stone-600 mb-1.5 block">觸發關鍵字 (以逗號分隔)</label>
+            <Input data-testid="input-human-keywords" placeholder="真人, 客服, 投訴, 生氣, 退貨, 爛" value={formValues.human_transfer_keywords || ""} onChange={(e) => setFormValues((prev) => ({ ...prev, human_transfer_keywords: e.target.value }))} className="bg-stone-50 border-stone-200" />
+          </div>
+          {formValues.human_transfer_keywords && (
+            <div className="flex flex-wrap gap-1.5">
+              {formValues.human_transfer_keywords.split(",").map((kw) => kw.trim()).filter(Boolean).map((kw, i) => (
+                <span key={i} className="text-xs font-medium px-2 py-0.5 rounded-full bg-red-50 text-red-600 border border-red-200">{kw}</span>
+              ))}
+            </div>
+          )}
+          <div className="flex justify-end">
+            <Button onClick={() => handleSave("human_transfer_keywords")} disabled={saving === "human_transfer_keywords"} data-testid="button-save-human-keywords" className="text-xs bg-emerald-600 hover:bg-emerald-700 text-white">
+              <Save className="w-3.5 h-3.5 mr-1" />{saving === "human_transfer_keywords" ? "儲存中..." : "儲存關鍵字"}
+            </Button>
           </div>
         </div>
       </div>

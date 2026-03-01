@@ -61,6 +61,14 @@ export function initDatabase() {
       size INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS marketing_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      keyword TEXT NOT NULL,
+      pitch TEXT NOT NULL DEFAULT '',
+      url TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   seedMockData();
@@ -78,10 +86,13 @@ function seedMockData() {
     ["openai_api_key", ""],
     ["line_channel_secret", ""],
     ["line_channel_access_token", ""],
-    ["system_prompt", "你是一位專業且友善的客服助理。請用繁體中文回答用戶的問題，保持禮貌和耐心。如果遇到無法解答的問題，請建議用戶聯繫真人客服。"],
+    ["system_prompt", "你是一位熱情的品牌購物顧問。當客戶詢問產品時，必須提供『價格』與『購買連結』引導結帳。若客戶情緒憤怒或要求找真人，請安撫並轉接專人。"],
     ["test_mode", "true"],
     ["system_name", "AI 客服中控台"],
     ["logo_url", ""],
+    ["welcome_message", "哈囉！歡迎來到我們的官方帳號 🎉\n有任何問題都可以直接詢問我，我會盡快為您服務！"],
+    ["quick_buttons", "🔥最新優惠,📦查詢訂單,🙋‍♀️專人服務"],
+    ["human_transfer_keywords", "真人,客服,投訴,生氣,退貨,爛"],
   ];
   const insertSetting = db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)");
   for (const [key, value] of defaultSettings) {
@@ -139,6 +150,11 @@ function seedMockData() {
   for (const m of allMessages) {
     insertMessage.run(m.contact_id, m.platform, m.sender_type, m.content, m.created_at);
   }
+
+  const insertRule = db.prepare("INSERT INTO marketing_rules (keyword, pitch, url) VALUES (?, ?, ?)");
+  insertRule.run("限量包包", "這款限量設計師聯名包包，採用頂級義大利小牛皮，現在下單享 85 折優惠！原價 $12,800，限時特價 $10,880 🔥", "https://shop.example.com/bag-001");
+  insertRule.run("保養品", "我們的明星商品「極光煥膚精華液」30ml，含玻尿酸+維他命C，現在買一送一只要 $1,680！超過 5,000 則五星好評 ⭐", "https://shop.example.com/serum-002");
+  insertRule.run("會員方案", "加入 VIP 會員即享全站 9 折 + 免運費 + 生日禮金 $500！年費只要 $299，立即升級享受尊榮服務 👑", "https://shop.example.com/vip-membership");
 }
 
 export default db;
