@@ -1,6 +1,6 @@
 import type { OrderInfo } from "@shared/schema";
 
-const SUPERLANDING_API_BASE = "https://api.www.super-landing.com";
+const SUPERLANDING_API_BASE = "https://api.super-landing.com";
 
 export interface SuperLandingConfig {
   merchantNo: string;

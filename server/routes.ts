@@ -183,7 +183,7 @@ export async function registerRoutes(
         if (!merchantNo || !accessKey) {
           return res.json({ success: false, message: "尚未設定一頁商店 merchant_no 或 access_key" });
         }
-        const slUrl = `https://api.www.super-landing.com/orders.json?merchant_no=${encodeURIComponent(merchantNo)}&access_key=${encodeURIComponent(accessKey)}&per_page=1`;
+        const slUrl = `https://api.super-landing.com/orders.json?merchant_no=${encodeURIComponent(merchantNo)}&access_key=${encodeURIComponent(accessKey)}&per_page=1`;
         try {
           const slRes = await fetch(slUrl, { headers: { Accept: "application/json" } });
           if (slRes.ok) {
