@@ -155,7 +155,7 @@ export async function registerRoutes(
         await openai.chat.completions.create({
           model: "gpt-5.2",
           messages: [{ role: "user", content: "hi" }],
-          max_tokens: 5,
+          max_completion_tokens: 5,
         });
         return res.json({ success: true, message: "OpenAI 連線成功 (模型: gpt-5.2)" });
       }
@@ -502,7 +502,7 @@ export async function registerRoutes(
           { role: "system", content: systemPrompt },
           { role: "user", content: message },
         ],
-        max_tokens: 1000,
+        max_completion_tokens: 1000,
         temperature: 0.7,
       });
       const reply = completion.choices[0]?.message?.content || "抱歉，AI 無法生成回覆。";
