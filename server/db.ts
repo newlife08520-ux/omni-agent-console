@@ -99,7 +99,17 @@ export function initDatabase() {
     );
   `);
 
+  migrateSystemPrompt();
   seedMockData();
+}
+
+function migrateSystemPrompt() {
+  const row = db.prepare("SELECT value FROM settings WHERE key = 'system_prompt'").get() as { value: string } | undefined;
+  if (row && row.value && !row.value.includes("訂單查詢鐵律")) {
+    const orderRules = `\n\n## 訂單查詢鐵律（Strict Rules）\n1. 當客戶意圖為「查詢訂單」、「查物流」、「查出貨進度」時，你必須且只能向客戶索取「訂單編號」（通常為 KBT 開頭的英數組合）。\n2. 嚴禁接受電話號碼、姓名、Email 作為查詢依據。\n3. 若客戶提供電話號碼、姓名或 Email 想查訂單，你必須委婉拒絕並引導：\n   回覆範例：「您好！為了保護您的個資並提供最精準的查詢，本系統目前僅支援以『訂單編號』查詢。再麻煩您至下單時留的 Email 信箱或手機簡訊中，尋找您的訂單編號（通常為 KBT 開頭的英數組合），提供給我為您查詢唷！😊」\n4. 若客戶表示找不到訂單編號，可建議：「您可以試試在 Email 中搜尋關鍵字『訂單確認』或『出貨通知』，或者聯繫我們的真人客服為您進一步協助。」\n5. 取得訂單編號後，直接使用系統查詢功能回覆訂單狀態、物流進度等資訊。`;
+    db.prepare("UPDATE settings SET value = ? WHERE key = 'system_prompt'").run(row.value + orderRules);
+    console.log("[DB] 已自動將「訂單查詢鐵律」附加至系統提示詞");
+  }
 }
 
 function seedMockData() {
@@ -115,7 +125,7 @@ function seedMockData() {
     ["openai_api_key", ""],
     ["line_channel_secret", ""],
     ["line_channel_access_token", ""],
-    ["system_prompt", "你是一位熱情的品牌購物顧問。當客戶詢問產品時，必須提供『價格』與『購買連結』引導結帳。若客戶情緒憤怒或要求找真人，請安撫並轉接專人。"],
+    ["system_prompt", "你是一位熱情的品牌購物顧問。當客戶詢問產品時，必須提供『價格』與『購買連結』引導結帳。若客戶情緒憤怒或要求找真人，請安撫並轉接專人。\n\n## 訂單查詢鐵律（Strict Rules）\n1. 當客戶意圖為「查詢訂單」、「查物流」、「查出貨進度」時，你必須且只能向客戶索取「訂單編號」（通常為 KBT 開頭的英數組合）。\n2. 嚴禁接受電話號碼、姓名、Email 作為查詢依據。\n3. 若客戶提供電話號碼、姓名或 Email 想查訂單，你必須委婉拒絕並引導：\n   回覆範例：「您好！為了保護您的個資並提供最精準的查詢，本系統目前僅支援以『訂單編號』查詢。再麻煩您至下單時留的 Email 信箱或手機簡訊中，尋找您的訂單編號（通常為 KBT 開頭的英數組合），提供給我為您查詢唷！😊」\n4. 若客戶表示找不到訂單編號，可建議：「您可以試試在 Email 中搜尋關鍵字『訂單確認』或『出貨通知』，或者聯繫我們的真人客服為您進一步協助。」\n5. 取得訂單編號後，直接使用系統查詢功能回覆訂單狀態、物流進度等資訊。"],
     ["test_mode", "true"],
     ["system_name", "AI 客服中控台"],
     ["logo_url", ""],
@@ -151,7 +161,7 @@ function seedMockData() {
 
   const allMessages = [
     { cid: 1, p: "line", st: "user", c: "你好，我想查詢一下我的訂單狀態", ca: "2026-03-01T14:00:00" },
-    { cid: 1, p: "line", st: "ai", c: "您好！感謝您的來訊。請提供您的訂單編號或手機號碼，我將為您查詢訂單狀態。", ca: "2026-03-01T14:00:05" },
+    { cid: 1, p: "line", st: "ai", c: "您好！感謝您的來訊。請提供您的訂單編號（通常為 KBT 開頭），我將為您查詢訂單狀態。", ca: "2026-03-01T14:00:05" },
     { cid: 1, p: "line", st: "user", c: "訂單編號是 ORD-20260228-001", ca: "2026-03-01T14:10:00" },
     { cid: 1, p: "line", st: "ai", c: "查詢到您的訂單 ORD-20260228-001，目前狀態為「處理中」，預計明天出貨。", ca: "2026-03-01T14:10:05" },
     { cid: 1, p: "line", st: "user", c: "好的，謝謝你", ca: "2026-03-01T14:30:00" },

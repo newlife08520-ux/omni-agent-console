@@ -660,7 +660,7 @@ export default function ChatPage() {
                   <TabsContent value="orders" className="flex-1 overflow-auto m-0">
                     <div className="p-3 space-y-3">
                       <div className="flex gap-1.5">
-                        <Input data-testid="input-order-search" placeholder="訂單號或手機號碼..." value={orderSearch} onChange={(e) => setOrderSearch(e.target.value)}
+                        <Input data-testid="input-order-search" placeholder="請輸入訂單編號（如 KBT...）" value={orderSearch} onChange={(e) => setOrderSearch(e.target.value)}
                           onKeyDown={(e) => { if (e.key === "Enter") handleOrderSearch(); }}
                           className="text-xs bg-stone-50 border-stone-200 h-8" />
                         <Button size="sm" onClick={handleOrderSearch} disabled={orderSearching || !orderSearch.trim()} data-testid="button-search-order" className="h-8 text-xs bg-emerald-600 hover:bg-emerald-700 text-white shrink-0">
@@ -670,7 +670,7 @@ export default function ChatPage() {
 
                       {orderSearchResults.length > 0 ? (
                         <div className="space-y-2">
-                          <p className="text-[10px] text-stone-400">共 {orderSearchResults.length} 筆訂單</p>
+                          <p className="text-[10px] text-stone-400">查詢結果：{orderSearchResults.length} 筆</p>
                           {orderSearchResults.map((order, i) => {
                             const statusInfo = ORDER_STATUS_MAP[order.status] || { label: order.status, color: "bg-stone-50 text-stone-600 border-stone-200" };
                             const parsedProducts = parseProductList(order.product_list);
@@ -741,8 +741,8 @@ export default function ChatPage() {
                       ) : (
                         <div className="text-center py-8">
                           <ShoppingBag className="w-8 h-8 text-stone-300 mx-auto mb-2" />
-                          <p className="text-xs text-stone-400">輸入訂單號或手機號碼查詢</p>
-                          <p className="text-[11px] text-stone-400 mt-0.5">透過一頁商店 API 即時查詢</p>
+                          <p className="text-xs text-stone-400">輸入訂單編號查詢</p>
+                          <p className="text-[11px] text-stone-400 mt-0.5">請輸入訂單編號進行精準查詢</p>
                         </div>
                       )}
                     </div>

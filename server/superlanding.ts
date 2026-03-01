@@ -114,13 +114,19 @@ export async function fetchOrders(
   }
 }
 
-export async function lookupOrdersByPhone(
+export async function lookupOrdersByDateAndPhone(
   config: SuperLandingConfig,
-  phone: string
+  phone: string,
+  beginDate: string,
+  endDate: string
 ): Promise<OrderInfo[]> {
-  const allOrders = await fetchOrders(config, { per_page: "200" });
+  const orders = await fetchOrders(config, {
+    begin_date: beginDate,
+    end_date: endDate,
+    per_page: "100",
+  });
   const normalizedPhone = phone.replace(/[-\s]/g, "");
-  return allOrders.filter((o) => {
+  return orders.filter((o) => {
     const orderPhone = o.buyer_phone.replace(/[-\s]/g, "");
     return orderPhone.includes(normalizedPhone) || normalizedPhone.includes(orderPhone);
   });

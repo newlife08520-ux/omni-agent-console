@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { fetchOrders, lookupOrdersByPhone, lookupOrderById } from "./superlanding";
+import { fetchOrders, lookupOrderById } from "./superlanding";
 import type { SuperLandingConfig } from "./superlanding";
 import multer from "multer";
 import path from "path";
@@ -402,28 +402,18 @@ export async function registerRoutes(
   app.get("/api/orders/lookup", authMiddleware, async (req, res) => {
     const { q } = req.query;
     const query = (q as string || "").trim();
-    if (!query) return res.status(400).json({ message: "請提供搜尋關鍵字" });
+    if (!query) return res.status(400).json({ message: "請提供訂單編號" });
     const config = getSuperLandingConfig();
     if (!config.merchantNo || !config.accessKey) {
       return res.json({ orders: [], error: "not_configured", message: "尚未設定一頁商店 API 金鑰" });
     }
-    const isPhone = /^0\d{8,9}$/.test(query.replace(/[-\s]/g, ""));
     try {
-      if (isPhone) {
-        console.log("[一頁商店] 以電話號碼查詢:", query);
-        const orders = await lookupOrdersByPhone(config, query);
-        if (orders.length === 0) {
-          return res.json({ orders: [], message: "於一頁商店查無此電話號碼的訂單紀錄" });
-        }
-        return res.json({ orders });
-      } else {
-        console.log("[一頁商店] 以訂單編號查詢:", query);
-        const order = await lookupOrderById(config, query);
-        if (!order) {
-          return res.json({ orders: [], message: "於一頁商店查無此訂單編號，請確認編號是否正確" });
-        }
-        return res.json({ orders: [order] });
+      console.log("[一頁商店] 以訂單編號查詢:", query);
+      const order = await lookupOrderById(config, query);
+      if (!order) {
+        return res.json({ orders: [], message: "於一頁商店查無此訂單編號，請確認編號是否正確" });
       }
+      return res.json({ orders: [order] });
     } catch (err: any) {
       const errorMap: Record<string, string> = {
         missing_credentials: "API 金鑰未設定",
