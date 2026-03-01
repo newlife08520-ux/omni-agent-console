@@ -22,6 +22,7 @@ export interface Contact {
   vip_level: number;
   order_count: number;
   total_spent: number;
+  cs_rating: number | null;
   last_message_at: string | null;
   created_at: string;
 }

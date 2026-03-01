@@ -43,6 +43,7 @@ export function initDatabase() {
       vip_level INTEGER NOT NULL DEFAULT 0,
       order_count INTEGER NOT NULL DEFAULT 0,
       total_spent REAL NOT NULL DEFAULT 0,
+      cs_rating INTEGER,
       last_message_at TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -76,14 +77,27 @@ export function initDatabase() {
     );
   `);
 
-  const cols = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
-  const colNames = cols.map((c) => c.name);
-  if (!colNames.includes("message_type")) {
+  const msgCols = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
+  const msgColNames = msgCols.map((c) => c.name);
+  if (!msgColNames.includes("message_type")) {
     db.exec("ALTER TABLE messages ADD COLUMN message_type TEXT NOT NULL DEFAULT 'text'");
   }
-  if (!colNames.includes("image_url")) {
+  if (!msgColNames.includes("image_url")) {
     db.exec("ALTER TABLE messages ADD COLUMN image_url TEXT");
   }
+
+  const contactCols = db.prepare("PRAGMA table_info(contacts)").all() as { name: string }[];
+  const contactColNames = contactCols.map((c) => c.name);
+  if (!contactColNames.includes("cs_rating")) {
+    db.exec("ALTER TABLE contacts ADD COLUMN cs_rating INTEGER");
+  }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS processed_events (
+      event_id TEXT PRIMARY KEY,
+      processed_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
 
   seedMockData();
 }

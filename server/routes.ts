@@ -214,6 +214,71 @@ export async function registerRoutes(
     return res.json({ success: true });
   });
 
+  function buildRatingFlexMessage(contactId: number): object {
+    const stars = [1, 2, 3, 4, 5].map((score) => ({
+      type: "button",
+      action: {
+        type: "postback",
+        label: "⭐",
+        data: `action=rate&ticket_id=${contactId}&score=${score}`,
+        displayText: `${"⭐".repeat(score)}`,
+      },
+      style: "link",
+      height: "sm",
+      flex: 1,
+    }));
+
+    return {
+      type: "flex",
+      altText: "滿意度調查",
+      contents: {
+        type: "bubble",
+        size: "kilo",
+        header: {
+          type: "box",
+          layout: "vertical",
+          contents: [
+            { type: "text", text: "感謝您的詢問！", weight: "bold", size: "lg", color: "#1DB446", align: "center" },
+          ],
+          paddingAll: "16px",
+          backgroundColor: "#F7FFF7",
+        },
+        body: {
+          type: "box",
+          layout: "vertical",
+          contents: [
+            { type: "text", text: "為了提供更優質的服務，請為本次客服體驗評分：", size: "sm", color: "#555555", wrap: true, align: "center" },
+            { type: "separator", margin: "lg" },
+            { type: "text", text: "點擊星星評分（1~5 顆星）", size: "xs", color: "#AAAAAA", align: "center", margin: "md" },
+          ],
+          paddingAll: "16px",
+        },
+        footer: {
+          type: "box",
+          layout: "horizontal",
+          contents: stars,
+          spacing: "none",
+          paddingAll: "8px",
+        },
+      },
+    };
+  }
+
+  async function sendRatingFlexMessage(contact: { id: number; platform_user_id: string }) {
+    const token = storage.getSetting("line_channel_access_token");
+    if (!token) return;
+    try {
+      const flexMsg = buildRatingFlexMessage(contact.id);
+      await fetch("https://api.line.me/v2/bot/message/push", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+        body: JSON.stringify({ to: contact.platform_user_id, messages: [flexMsg] }),
+      });
+    } catch (err) {
+      console.error("LINE rating flex message push failed:", err);
+    }
+  }
+
   app.put("/api/contacts/:id/status", authMiddleware, (req, res) => {
     const id = parseInt(req.params.id);
     const { status } = req.body;
@@ -225,6 +290,9 @@ export async function registerRoutes(
       const contact = storage.getContact(id);
       if (contact) {
         storage.createMessage(id, contact.platform, "system", "(系統提示) 已自動發送 LINE 滿意度 1~5 星調查卡片給客戶");
+        if (contact.platform === "line") {
+          sendRatingFlexMessage(contact);
+        }
       }
     }
     return res.json({ success: true });
@@ -332,6 +400,20 @@ export async function registerRoutes(
     }
   });
 
+  async function replyToLine(replyToken: string, messages: object[]) {
+    const token = storage.getSetting("line_channel_access_token");
+    if (!token || !replyToken) return;
+    try {
+      await fetch("https://api.line.me/v2/bot/message/reply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+        body: JSON.stringify({ replyToken, messages }),
+      });
+    } catch (err) {
+      console.error("LINE reply failed:", err);
+    }
+  }
+
   app.post("/api/webhook/line", (req, res) => {
     const signature = req.headers["x-line-signature"] as string | undefined;
     const channelSecret = storage.getSetting("line_channel_secret");
@@ -348,22 +430,57 @@ export async function registerRoutes(
 
     const events = req.body?.events || [];
     for (const event of events) {
-      if (event.type === "message" && event.message?.type === "text") {
-        const userId = event.source?.userId || "unknown";
-        const displayName = event.source?.displayName || "LINE用戶";
-        const text = event.message.text;
-        const contact = storage.getOrCreateContact("line", userId, displayName);
-        storage.createMessage(contact.id, "line", "user", text);
-        const needsHuman = HUMAN_KEYWORDS.some((kw) => text.includes(kw));
-        if (needsHuman) {
-          storage.updateContactHumanFlag(contact.id, 1);
-          storage.createMessage(contact.id, "line", "ai", "好的，我已為您轉接真人客服，請稍候片刻。");
-        } else if (!contact.needs_human) {
-          const testMode = storage.getSetting("test_mode");
-          if (testMode === "true") {
-            storage.createMessage(contact.id, "line", "ai", `[測試模式] 收到您的訊息：「${text}」。`);
+      const webhookEventId = event.webhookEventId || event.timestamp?.toString();
+      if (webhookEventId && storage.isEventProcessed(webhookEventId)) {
+        continue;
+      }
+
+      try {
+        if (event.type === "message" && event.message?.type === "text") {
+          const userId = event.source?.userId || "unknown";
+          const displayName = event.source?.displayName || "LINE用戶";
+          const text = event.message.text;
+          const contact = storage.getOrCreateContact("line", userId, displayName);
+          storage.createMessage(contact.id, "line", "user", text);
+          const needsHuman = HUMAN_KEYWORDS.some((kw) => text.includes(kw));
+          if (needsHuman) {
+            storage.updateContactHumanFlag(contact.id, 1);
+            storage.createMessage(contact.id, "line", "ai", "好的，我已為您轉接真人客服，請稍候片刻。");
+          } else if (!contact.needs_human) {
+            const testMode = storage.getSetting("test_mode");
+            if (testMode === "true") {
+              storage.createMessage(contact.id, "line", "ai", `[測試模式] 收到您的訊息：「${text}」。`);
+            }
           }
+        } else if (event.type === "postback") {
+          const data = event.postback?.data || "";
+          const params = new URLSearchParams(data);
+          if (params.get("action") === "rate") {
+            const ticketId = parseInt(params.get("ticket_id") || "0");
+            const score = parseInt(params.get("score") || "0");
+            if (ticketId > 0 && score >= 1 && score <= 5) {
+              storage.updateContactRating(ticketId, score);
+              storage.createMessage(ticketId, "line", "system", `(系統提示) 客戶評分：${"⭐".repeat(score)}（${score} 分）`);
+              replyToLine(event.replyToken, [
+                { type: "text", text: `已收到您的 ${"⭐".repeat(score)} 評分，感謝您的寶貴意見！祝您有美好的一天。` },
+              ]);
+            }
+          }
+        } else if (event.type === "follow" || event.type === "unfollow" || event.type === "join" || event.type === "leave" || event.type === "memberJoined" || event.type === "memberLeft") {
+          // silently ignore lifecycle events
+        } else if (event.type === "message" && event.message?.type !== "text") {
+          const userId = event.source?.userId || "unknown";
+          const displayName = event.source?.displayName || "LINE用戶";
+          const contact = storage.getOrCreateContact("line", userId, displayName);
+          const msgType = event.message?.type || "unknown";
+          storage.createMessage(contact.id, "line", "user", `[${msgType === "image" ? "圖片" : msgType === "sticker" ? "貼圖" : msgType === "video" ? "影片" : msgType === "audio" ? "音訊" : msgType === "location" ? "位置" : msgType === "file" ? "檔案" : msgType}訊息]`);
         }
+      } catch (err) {
+        console.error("Webhook event processing error:", err);
+      }
+
+      if (webhookEventId) {
+        storage.markEventProcessed(webhookEventId);
       }
     }
     return res.status(200).json({ success: true });

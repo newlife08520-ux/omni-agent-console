@@ -109,12 +109,18 @@ shared/
 12. **Marketing Rules Hub**: Full CRUD for keyword→pitch→URL rules
 13. **Real OpenAI Integration**: gpt-5.2 sandbox + production AI reply
 14. **Real API Test Connection**: POST /api/settings/test-connection for OpenAI (chat completion), LINE (bot info API), 一頁商店 (order API) — super_admin only, with detailed success/failure messages
-15. **CSAT Trigger**: Status→resolved auto-inserts satisfaction survey system message
+15. **LINE CSAT Flex Message**: Status→resolved sends LINE Flex Message with 5-star postback rating buttons; webhook parses postback action=rate&ticket_id&score, stores cs_rating, replies acknowledgement via Reply API; rating displayed in contact info panel
 16. **Chat Image Upload**: Attachment button (Paperclip icon) + drag & drop with visual overlay + file preview thumbnails with remove; uploads via POST /api/chat-upload, images rendered in chat bubbles; LINE Messaging API image push support
 17. **Messages Schema**: message_type (text/image/file) + image_url columns with auto-migration
 
 ## Sensitive Settings (super_admin only)
 openai_api_key, line_channel_secret, line_channel_access_token, superlanding_merchant_no, superlanding_access_key
+
+## Webhook (POST /api/webhook/line)
+- Signature verification via HMAC-SHA256 (x-line-signature header)
+- Idempotency: processed_events table deduplicates by webhookEventId
+- Handles: text messages, postback (rating), sticker/image/video/audio/location/file (recorded as placeholder), follow/unfollow/join/leave (silently ignored)
+- Rating postback: action=rate&ticket_id={id}&score={1-5} → updates cs_rating + reply API
 
 ## Middleware Chain
 - authMiddleware: checks session.authenticated

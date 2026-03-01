@@ -20,6 +20,10 @@ export interface IStorage {
   updateContactTags(id: number, tags: string[]): void;
   updateContactPinned(id: number, isPinned: number): void;
   updateContactVipData(id: number, vipLevel: number, orderCount: number, totalSpent: number): void;
+  updateContactRating(id: number, rating: number): void;
+  getContactByPlatformUser(platform: string, platformUserId: string): Contact | undefined;
+  isEventProcessed(eventId: string): boolean;
+  markEventProcessed(eventId: string): void;
   getMessages(contactId: number): Message[];
   getMessagesSince(contactId: number, sinceId: number): Message[];
   createMessage(contactId: number, platform: string, senderType: string, content: string, messageType?: string, imageUrl?: string | null): Message;
@@ -114,6 +118,23 @@ export class SQLiteStorage implements IStorage {
     db.prepare("UPDATE contacts SET vip_level = ?, order_count = ?, total_spent = ? WHERE id = ?").run(vipLevel, orderCount, totalSpent, id);
   }
 
+  updateContactRating(id: number, rating: number): void {
+    db.prepare("UPDATE contacts SET cs_rating = ? WHERE id = ?").run(rating, id);
+  }
+
+  getContactByPlatformUser(platform: string, platformUserId: string): Contact | undefined {
+    return db.prepare("SELECT * FROM contacts WHERE platform = ? AND platform_user_id = ?").get(platform, platformUserId) as Contact | undefined;
+  }
+
+  isEventProcessed(eventId: string): boolean {
+    const row = db.prepare("SELECT 1 FROM processed_events WHERE event_id = ?").get(eventId);
+    return !!row;
+  }
+
+  markEventProcessed(eventId: string): void {
+    db.prepare("INSERT OR IGNORE INTO processed_events (event_id) VALUES (?)").run(eventId);
+  }
+
   getMessages(contactId: number): Message[] {
     return db.prepare("SELECT * FROM messages WHERE contact_id = ? ORDER BY created_at ASC").all(contactId) as Message[];
   }
@@ -134,7 +155,7 @@ export class SQLiteStorage implements IStorage {
     if (!contact) {
       const now = new Date().toISOString().replace("T", " ").substring(0, 19);
       const result = db.prepare("INSERT INTO contacts (platform, platform_user_id, display_name, needs_human, is_pinned, status, tags, vip_level, order_count, total_spent, created_at) VALUES (?, ?, ?, 0, 0, 'pending', '[]', 0, 0, 0, ?)").run(platform, platformUserId, displayName, now);
-      contact = { id: Number(result.lastInsertRowid), platform, platform_user_id: platformUserId, display_name: displayName, avatar_url: null, needs_human: 0, is_pinned: 0, status: "pending", tags: "[]", vip_level: 0, order_count: 0, total_spent: 0, last_message_at: null, created_at: now };
+      contact = { id: Number(result.lastInsertRowid), platform, platform_user_id: platformUserId, display_name: displayName, avatar_url: null, needs_human: 0, is_pinned: 0, status: "pending", tags: "[]", vip_level: 0, order_count: 0, total_spent: 0, cs_rating: null, last_message_at: null, created_at: now };
     }
     return contact;
   }

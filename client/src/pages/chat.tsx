@@ -554,6 +554,12 @@ export default function ChatPage() {
                           <span className="text-stone-500">建立日期</span>
                           <span className="text-stone-800">{selectedContact?.created_at ? formatDate(selectedContact.created_at) : "-"}</span>
                         </div>
+                        {selectedContact?.cs_rating != null && (
+                          <div className="flex justify-between text-xs" data-testid="text-cs-rating">
+                            <span className="text-stone-500">滿意度評分</span>
+                            <span className="text-amber-500 font-semibold">{"⭐".repeat(selectedContact.cs_rating)}</span>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </TabsContent>
