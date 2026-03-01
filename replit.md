@@ -1,7 +1,7 @@
-# 全通路 AI 客服中控台 (Omnichannel AI Agent Dashboard)
+# 全通路 AI 客服中控台 (Omnichannel AI Agent Dashboard) V2
 
 ## Overview
-A business-grade omnichannel AI customer service dashboard focused on LINE channel integration. Built with Express + React (Vite) + SQLite.
+A commercial-grade omnichannel AI customer service dashboard focused on LINE channel integration. Built with Express + React (Vite) + Tailwind CSS + SQLite. All UI is 100% Traditional Chinese.
 
 ## Architecture
 - **Frontend**: React + Vite + Tailwind CSS + shadcn/ui components
@@ -22,42 +22,56 @@ server/
 client/src/
   App.tsx              - Main app with auth guard, routing, sidebar layout
   pages/
-    login.tsx          - Password login page
-    chat.tsx           - Real-time chat dashboard (main feature)
-    settings.tsx       - API key management & test mode toggle
-    knowledge.tsx      - System prompt & knowledge file management
+    login.tsx          - Password login page (dark theme)
+    chat.tsx           - Real-time chat with CRM panel (status, tags)
+    settings.tsx       - API key management, test mode, test connection buttons
+    knowledge.tsx      - System prompt, knowledge files, AI sandbox tab
+    team.tsx           - Team member management page
     not-found.tsx      - 404 page
   components/
-    app-sidebar.tsx    - Navigation sidebar
+    app-sidebar.tsx    - Dark sidebar navigation (bg-slate-900)
     ui/                - shadcn/ui components
 
 shared/
-  schema.ts            - TypeScript interfaces for Contact, Message, Setting, KnowledgeFile
+  schema.ts            - TypeScript interfaces for all data models
 ```
 
 ## Database Schema
 - **settings**: key-value store for API keys, system prompt, test mode
-- **contacts**: LINE contacts with platform_user_id, needs_human flag
+- **contacts**: LINE contacts with status (pending/processing/resolved), tags (JSON array), needs_human flag
 - **messages**: Chat messages with sender_type (user/ai/admin)
-- **knowledge_files**: Uploaded .txt files for RAG (future)
+- **knowledge_files**: Uploaded files (.txt, .pdf, .csv, .docx) for RAG (future)
+- **team_members**: Team member list with name, email, role (super_admin/agent), status (online/offline)
 
 ## API Endpoints
 - POST /api/auth/login - Login with password
 - GET /api/auth/check - Check auth status
+- POST /api/auth/logout - Logout
 - GET/PUT /api/settings - Settings CRUD
-- GET /api/contacts - List contacts
-- GET/PUT /api/contacts/:id/human - Toggle human mode
+- POST /api/settings/test-connection - Mock connection test (1s delay)
+- GET /api/contacts - List contacts with last message preview
+- GET /api/contacts/:id - Get single contact
+- PUT /api/contacts/:id/human - Toggle human mode
+- PUT /api/contacts/:id/status - Update contact status
+- PUT /api/contacts/:id/tags - Update contact tags
 - GET/POST /api/contacts/:id/messages - Messages CRUD
-- POST /api/webhook/line - LINE webhook receiver
+- POST /api/webhook/line - LINE webhook receiver with signature verification
+- POST /api/ai/sandbox - AI sandbox mock reply
 - GET/POST/DELETE /api/knowledge-files - Knowledge file management
+- GET /api/team - List team members
 - GET /api/order-status - Mock order status API
 
-## Key Features
+## Key Features (V2)
+- Premium SaaS UI with dark sidebar (bg-slate-900) and light main area (bg-gray-50)
 - Admin password authentication (default: admin123)
-- Test mode toggle for safe development
-- Real-time chat with 3s polling
-- Human takeover detection (keywords: 找客服, 真人, etc.)
-- Admin manual reply capability
+- Real-time chat with CRM panel (contact status dropdown, custom tags)
+- Message input box for admin replies (shown as blue bubble "真人客服")
+- AI sandbox for testing system prompt responses
+- Test connection buttons for API keys (mock 1s loading)
+- Knowledge file upload (.txt, .pdf, .csv, .docx)
+- Team management page with 5 mock members
 - LINE webhook with signature verification
-- Knowledge file upload (.txt)
-- System prompt management
+- 3-second polling for real-time updates
+- Contact avatars with color-coded initials
+- Contact search functionality
+- 5 mock contacts with multi-turn conversations seeded

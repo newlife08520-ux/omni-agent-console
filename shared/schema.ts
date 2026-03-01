@@ -5,8 +5,14 @@ export interface Contact {
   display_name: string;
   avatar_url: string | null;
   needs_human: number;
+  status: "pending" | "processing" | "resolved";
+  tags: string;
   last_message_at: string | null;
   created_at: string;
+}
+
+export interface ContactWithPreview extends Contact {
+  last_message?: string;
 }
 
 export interface Message {
@@ -28,6 +34,16 @@ export interface KnowledgeFile {
   filename: string;
   original_name: string;
   size: number;
+  created_at: string;
+}
+
+export interface TeamMember {
+  id: number;
+  name: string;
+  email: string;
+  role: "super_admin" | "agent";
+  avatar_url: string | null;
+  status: "online" | "offline";
   created_at: string;
 }
 

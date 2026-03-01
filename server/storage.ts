@@ -1,5 +1,5 @@
 import db, { initDatabase } from "./db";
-import type { Contact, Message, Setting, KnowledgeFile } from "@shared/schema";
+import type { Contact, ContactWithPreview, Message, Setting, KnowledgeFile, TeamMember } from "@shared/schema";
 
 initDatabase();
 
@@ -8,9 +8,11 @@ export interface IStorage {
   getSetting(key: string): string | null;
   getAllSettings(): Setting[];
   setSetting(key: string, value: string): void;
-  getContacts(): Contact[];
+  getContacts(): ContactWithPreview[];
   getContact(id: number): Contact | undefined;
   updateContactHumanFlag(id: number, needsHuman: number): void;
+  updateContactStatus(id: number, status: string): void;
+  updateContactTags(id: number, tags: string[]): void;
   getMessages(contactId: number): Message[];
   getMessagesSince(contactId: number, sinceId: number): Message[];
   createMessage(contactId: number, platform: string, senderType: string, content: string): Message;
@@ -18,6 +20,7 @@ export interface IStorage {
   getKnowledgeFiles(): KnowledgeFile[];
   createKnowledgeFile(filename: string, originalName: string, size: number): KnowledgeFile;
   deleteKnowledgeFile(id: number): boolean;
+  getTeamMembers(): TeamMember[];
 }
 
 export class SQLiteStorage implements IStorage {
@@ -39,7 +42,7 @@ export class SQLiteStorage implements IStorage {
     db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(key, value);
   }
 
-  getContacts(): (Contact & { last_message?: string })[] {
+  getContacts(): ContactWithPreview[] {
     const contacts = db.prepare("SELECT * FROM contacts ORDER BY last_message_at DESC").all() as Contact[];
     return contacts.map((c) => {
       const lastMsg = db.prepare(
@@ -55,6 +58,14 @@ export class SQLiteStorage implements IStorage {
 
   updateContactHumanFlag(id: number, needsHuman: number): void {
     db.prepare("UPDATE contacts SET needs_human = ? WHERE id = ?").run(needsHuman, id);
+  }
+
+  updateContactStatus(id: number, status: string): void {
+    db.prepare("UPDATE contacts SET status = ? WHERE id = ?").run(status, id);
+  }
+
+  updateContactTags(id: number, tags: string[]): void {
+    db.prepare("UPDATE contacts SET tags = ? WHERE id = ?").run(JSON.stringify(tags), id);
   }
 
   getMessages(contactId: number): Message[] {
@@ -88,7 +99,7 @@ export class SQLiteStorage implements IStorage {
     if (!contact) {
       const now = new Date().toISOString().replace("T", " ").substring(0, 19);
       const result = db.prepare(
-        "INSERT INTO contacts (platform, platform_user_id, display_name, needs_human, created_at) VALUES (?, ?, ?, 0, ?)"
+        "INSERT INTO contacts (platform, platform_user_id, display_name, needs_human, status, tags, created_at) VALUES (?, ?, ?, 0, 'pending', '[]', ?)"
       ).run(platform, platformUserId, displayName, now);
       contact = {
         id: Number(result.lastInsertRowid),
@@ -97,6 +108,8 @@ export class SQLiteStorage implements IStorage {
         display_name: displayName,
         avatar_url: null,
         needs_human: 0,
+        status: "pending",
+        tags: "[]",
         last_message_at: null,
         created_at: now,
       };
@@ -125,6 +138,10 @@ export class SQLiteStorage implements IStorage {
   deleteKnowledgeFile(id: number): boolean {
     const result = db.prepare("DELETE FROM knowledge_files WHERE id = ?").run(id);
     return result.changes > 0;
+  }
+
+  getTeamMembers(): TeamMember[] {
+    return db.prepare("SELECT * FROM team_members ORDER BY created_at ASC").all() as TeamMember[];
   }
 }
 
