@@ -98,7 +98,7 @@ shared/
 ## Key Features (V6)
 1. **3-Tier RBAC**: super_admin, marketing_manager, cs_agent with granular access control
 2. **Custom Date Range Picker**: Calendar popover for arbitrary date ranges in analytics
-3. **一頁商店 API Integration**: Dual-mode order lookup — (1) strict global_order_id direct query, (2) advanced date-range + email/phone/name filter with 31-day cap; AI prompt v2 enforces order-ID-first, date-required-for-contact-info policy
+3. **一頁商店 API Integration**: Dual-mode order lookup — (1) strict global_order_id direct query, (2) advanced date-range + email/phone/name filter with 31-day cap; AI prompt v3 enforces 3-stage escalation: ask order ID → ask date+contact for advanced search → human transfer only as last resort
 4. **Order Lookup Panel**: Right-side tabs in chat with customer info + order search
 5. **VIP Badges**: Crown icon badges for VIP contacts (level 1-3)
 6. **Team CRUD with 3-Tier Roles**: Add/edit/delete with role descriptions
