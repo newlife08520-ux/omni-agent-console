@@ -763,20 +763,24 @@ export async function registerRoutes(
       type: "function",
       function: {
         name: "lookup_order_by_product_and_phone",
-        description: "用商品名稱和手機號碼查詢訂單。當客戶沒有訂單編號，但提供了購買的商品名稱和手機號碼時使用此工具。",
+        description: "用商品名稱和手機號碼查詢訂單。當客戶沒有訂單編號，但提供了購買的商品名稱和手機號碼時使用此工具。你可以用 product_index（商品清單中的編號，如 #3）來精確指定商品，或用 product_name 讓系統模糊匹配。",
         parameters: {
           type: "object",
           properties: {
+            product_index: {
+              type: "integer",
+              description: "商品在內部清單中的編號（如清單中 #3 就填 3）。如果你能從商品清單中確定對應的商品，請優先使用此欄位。",
+            },
             product_name: {
               type: "string",
-              description: "客戶購買的商品名稱（可以是簡稱或俗稱）",
+              description: "客戶購買的商品名稱（可以是簡稱、俗稱、關鍵字片段皆可）。當無法確定 product_index 時使用。",
             },
             phone: {
               type: "string",
               description: "客戶下單時留的手機號碼",
             },
           },
-          required: ["product_name", "phone"],
+          required: ["phone"],
         },
       },
     },
@@ -853,23 +857,84 @@ export async function registerRoutes(
 
       if (toolName === "lookup_order_by_product_and_phone") {
         const productName = (args.product_name || "").trim();
+        const productIndex = args.product_index ? parseInt(String(args.product_index)) : 0;
         const phone = (args.phone || "").trim();
-        console.log("[AI Tool Call] lookup_order_by_product_and_phone，商品:", productName, "電話:", phone);
+        console.log("[AI Tool Call] lookup_order_by_product_and_phone，商品:", productName, "index:", productIndex, "電話:", phone);
 
-        if (!productName || !phone) {
-          return JSON.stringify({ success: false, error: "請提供商品名稱和手機號碼" });
+        if (!phone) {
+          return JSON.stringify({ success: false, error: "請提供手機號碼" });
         }
 
         const pages = getCachedPages();
-        const normalizedInput = productName.toLowerCase().replace(/\s+/g, "");
-        let matchedPage = pages.find(p => p.productName.toLowerCase().replace(/\s+/g, "") === normalizedInput);
-        if (!matchedPage) {
-          matchedPage = pages.find(p => p.productName.toLowerCase().replace(/\s+/g, "").includes(normalizedInput) || normalizedInput.includes(p.productName.toLowerCase().replace(/\s+/g, "")));
+
+        const stripClean = (s: string) => s
+          .replace(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{27BF}\u{FE00}-\u{FE0F}\u{200D}\u{20E3}\u{E0020}-\u{E007F}]/gu, "")
+          .replace(/[●✨💕💎🔴❄✔✵🛏💦🎨🥘🎩🔥✈💥]/g, "")
+          .replace(/[^\p{L}\p{N}]/gu, "")
+          .toLowerCase();
+
+        let matchedPage: typeof pages[0] | undefined;
+
+        if (productIndex > 0 && productIndex <= pages.length) {
+          matchedPage = pages[productIndex - 1];
+          console.log("[AI Tool Call] 使用 product_index #" + productIndex + " 直接對應:", matchedPage.productName);
+        }
+
+        if (!matchedPage && productName) {
+          const cleanInput = stripClean(productName);
+          const inputTokens = productName.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, "").split(/\s+/).filter(t => t.length > 0);
+          console.log("[AI Tool Call] 模糊匹配，清理後:", cleanInput, "分詞:", inputTokens);
+
+          matchedPage = pages.find(p => stripClean(p.productName) === cleanInput);
+
+          if (!matchedPage) {
+            matchedPage = pages.find(p => stripClean(p.productName).includes(cleanInput));
+          }
+
+          if (!matchedPage && cleanInput.length >= 2) {
+            matchedPage = pages.find(p => cleanInput.includes(stripClean(p.productName)));
+          }
+
+          if (!matchedPage && inputTokens.length > 0) {
+            const scored = pages.map(p => {
+              const cleanName = stripClean(p.productName);
+              let score = 0;
+              for (const token of inputTokens) {
+                const cleanToken = stripClean(token);
+                if (cleanToken.length >= 2 && cleanName.includes(cleanToken)) {
+                  score += cleanToken.length;
+                }
+              }
+              return { page: p, score };
+            }).filter(s => s.score > 0).sort((a, b) => b.score - a.score);
+
+            if (scored.length === 1) {
+              matchedPage = scored[0].page;
+            } else if (scored.length > 1 && scored[0].score > scored[1].score) {
+              matchedPage = scored[0].page;
+            } else if (scored.length > 1) {
+              const topMatches = scored.filter(s => s.score === scored[0].score).slice(0, 5);
+              console.log("[AI Tool Call] 多個商品匹配:", topMatches.map(s => s.page.productName));
+              const matchList = topMatches.map((s, i) => `#${pages.indexOf(s.page) + 1}｜${s.page.productName}`).join("\n");
+              return JSON.stringify({
+                success: true,
+                found: false,
+                ambiguous: true,
+                message: `找到多個可能的商品，請請客戶確認是哪一個：\n${matchList}`,
+                candidates: topMatches.map(s => ({ index: pages.indexOf(s.page) + 1, name: s.page.productName })),
+              });
+            }
+          }
         }
 
         if (!matchedPage) {
-          console.log("[AI Tool Call] 找不到匹配商品:", productName);
-          return JSON.stringify({ success: true, found: false, message: `找不到與「${productName}」相符的商品` });
+          console.log("[AI Tool Call] 找不到匹配商品:", productName || `index=${productIndex}`);
+          const allNames = pages.map((p, i) => `#${i + 1}｜${p.productName}`).join("\n");
+          return JSON.stringify({
+            success: true,
+            found: false,
+            message: `找不到與「${productName}」相符的商品。以下是所有可用商品清單，請讓客戶確認：\n${allNames}`,
+          });
         }
 
         console.log("[AI Tool Call] 匹配商品:", matchedPage.productName, "pageId:", matchedPage.pageId);
