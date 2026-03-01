@@ -13,6 +13,7 @@ import {
   Paperclip, ImageIcon, Upload, CalendarDays, Filter, Phone, MessageSquare,
 } from "lucide-react";
 import { apiRequest, getQueryFn } from "@/lib/queryClient";
+import { useBrand } from "@/lib/brand-context";
 import { useToast } from "@/hooks/use-toast";
 import type { ContactWithPreview, Message, OrderInfo, ORDER_STATUS_LABELS } from "@shared/schema";
 
@@ -128,6 +129,7 @@ export default function ChatPage() {
   const [sendingRating, setSendingRating] = useState(false);
   const [messageSearchResults, setMessageSearchResults] = useState<{ contact_id: number; contact_name: string; message_id: number; content: string; sender_type: string; created_at: string }[]>([]);
   const [messageSearching, setMessageSearching] = useState(false);
+  const [platformFilter, setPlatformFilter] = useState<"all" | "line" | "messenger">("all");
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatViewportRef = useRef<HTMLDivElement>(null);
@@ -136,10 +138,16 @@ export default function ChatPage() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const lastMessageIdRef = useRef<number>(0);
+  const { selectedBrandId } = useBrand();
 
   const { data: contacts = [], isLoading: contactsLoading } = useQuery<ContactWithPreview[]>({
-    queryKey: ["/api/contacts"],
-    queryFn: getQueryFn({ on401: "throw" }),
+    queryKey: ["/api/contacts", selectedBrandId],
+    queryFn: async () => {
+      const url = selectedBrandId ? `/api/contacts?brand_id=${selectedBrandId}` : "/api/contacts";
+      const res = await fetch(url, { credentials: "include" });
+      if (!res.ok) throw new Error("Failed");
+      return res.json();
+    },
     refetchInterval: 3000,
   });
 
@@ -189,7 +197,9 @@ export default function ChatPage() {
   }, []);
 
   const selectedContact = contacts.find((c) => c.id === selectedId);
-  const filteredContacts = contacts.filter((c) => c.display_name.toLowerCase().includes(searchQuery.toLowerCase()));
+  const filteredContacts = contacts
+    .filter((c) => c.display_name.toLowerCase().includes(searchQuery.toLowerCase()))
+    .filter((c) => platformFilter === "all" || c.platform === platformFilter);
 
   const handleSearchChange = useCallback((value: string) => {
     setSearchQuery(value);
@@ -478,6 +488,22 @@ export default function ChatPage() {
                 <X className="w-3.5 h-3.5 text-stone-400 hover:text-stone-600" />
               </button>
             )}
+          </div>
+          <div className="flex gap-1 mt-2">
+            {(["all", "line", "messenger"] as const).map((pf) => (
+              <button
+                key={pf}
+                onClick={() => setPlatformFilter(pf)}
+                className={`flex-1 text-[10px] font-medium py-1 rounded-lg transition-all ${
+                  platformFilter === pf
+                    ? pf === "line" ? "bg-green-50 text-green-600 border border-green-200" : pf === "messenger" ? "bg-blue-50 text-blue-600 border border-blue-200" : "bg-emerald-50 text-emerald-600 border border-emerald-200"
+                    : "text-stone-400 hover:bg-stone-50 border border-transparent"
+                }`}
+                data-testid={`button-filter-${pf}`}
+              >
+                {pf === "all" ? "全部" : pf === "line" ? "LINE" : "FB"}
+              </button>
+            ))}
           </div>
         </div>
         <ScrollArea className="flex-1">

@@ -99,8 +99,77 @@ export function initDatabase() {
     );
   `);
 
+  migrateBrandsAndChannels();
   migrateSystemPrompt();
   seedMockData();
+}
+
+function migrateBrandsAndChannels() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS brands (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      slug TEXT NOT NULL UNIQUE,
+      logo_url TEXT NOT NULL DEFAULT '',
+      description TEXT NOT NULL DEFAULT '',
+      system_prompt TEXT NOT NULL DEFAULT '',
+      superlanding_merchant_no TEXT NOT NULL DEFAULT '',
+      superlanding_access_key TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS channels (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      brand_id INTEGER NOT NULL,
+      platform TEXT NOT NULL DEFAULT 'line' CHECK(platform IN ('line','messenger')),
+      channel_name TEXT NOT NULL,
+      bot_id TEXT NOT NULL DEFAULT '',
+      access_token TEXT NOT NULL DEFAULT '',
+      channel_secret TEXT NOT NULL DEFAULT '',
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (brand_id) REFERENCES brands(id)
+    );
+  `);
+
+  const contactCols2 = db.prepare("PRAGMA table_info(contacts)").all() as { name: string }[];
+  const contactColNames2 = contactCols2.map((c) => c.name);
+  if (!contactColNames2.includes("brand_id")) {
+    db.exec("ALTER TABLE contacts ADD COLUMN brand_id INTEGER");
+  }
+  if (!contactColNames2.includes("channel_id")) {
+    db.exec("ALTER TABLE contacts ADD COLUMN channel_id INTEGER");
+  }
+
+  const kfCols = db.prepare("PRAGMA table_info(knowledge_files)").all() as { name: string }[];
+  if (!kfCols.map(c => c.name).includes("brand_id")) {
+    db.exec("ALTER TABLE knowledge_files ADD COLUMN brand_id INTEGER");
+  }
+
+  const mrCols = db.prepare("PRAGMA table_info(marketing_rules)").all() as { name: string }[];
+  if (!mrCols.map(c => c.name).includes("brand_id")) {
+    db.exec("ALTER TABLE marketing_rules ADD COLUMN brand_id INTEGER");
+  }
+
+  const brandCount = db.prepare("SELECT COUNT(*) as count FROM brands").get() as { count: number };
+  if (brandCount.count === 0) {
+    const result = db.prepare("INSERT INTO brands (name, slug, description) VALUES (?, ?, ?)").run("預設品牌", "default", "系統預設品牌工作區");
+    const defaultBrandId = Number(result.lastInsertRowid);
+
+    const lineToken = db.prepare("SELECT value FROM settings WHERE key = 'line_channel_access_token'").get() as { value: string } | undefined;
+    const lineSecret = db.prepare("SELECT value FROM settings WHERE key = 'line_channel_secret'").get() as { value: string } | undefined;
+    if (lineToken?.value || lineSecret?.value) {
+      db.prepare("INSERT INTO channels (brand_id, platform, channel_name, access_token, channel_secret) VALUES (?, ?, ?, ?, ?)").run(
+        defaultBrandId, "line", "預設 LINE 頻道", lineToken?.value || "", lineSecret?.value || ""
+      );
+    }
+
+    db.prepare("UPDATE contacts SET brand_id = ? WHERE brand_id IS NULL").run(defaultBrandId);
+    db.prepare("UPDATE knowledge_files SET brand_id = ? WHERE brand_id IS NULL").run(defaultBrandId);
+    db.prepare("UPDATE marketing_rules SET brand_id = ? WHERE brand_id IS NULL").run(defaultBrandId);
+
+    console.log("[DB] 已建立多品牌架構：預設品牌 + 頻道已遷移");
+  }
 }
 
 function migrateSystemPrompt() {

@@ -1,7 +1,7 @@
-# 全通路 AI 客服中控台 (Omnichannel AI Agent Dashboard) V6 Enterprise
+# 全通路 AI 客服中控台 (Omnichannel AI Agent Dashboard) V7 Multi-Brand
 
 ## Overview
-A commercial-grade omnichannel AI customer service dashboard focused on LINE channel integration. Built with Express + React (Vite) + Tailwind CSS + SQLite. All UI is 100% Traditional Chinese with warm cozy SaaS design (bg-[#faf9f5] cream, bg-stone-800 sidebar, emerald-600 accents).
+A commercial-grade **Multi-Brand Omnichannel Helpdesk** (多品牌全通路客服中心) built with Express + React (Vite) + Tailwind CSS + SQLite. Supports multiple LINE accounts + Facebook pages organized under Brand Workspaces, with per-brand AI persona and knowledge base. All UI is 100% Traditional Chinese with warm cozy SaaS design (bg-[#faf9f5] cream, bg-stone-800 sidebar, emerald-600 accents).
 
 ## Architecture
 - **Frontend**: React + Vite + Tailwind CSS + shadcn/ui components + recharts + react-day-picker + date-fns
@@ -56,17 +56,33 @@ shared/
   schema.ts            - TypeScript interfaces, ROLE_LABELS, ORDER_STATUS_LABELS
 ```
 
+## Multi-Brand Architecture
+- **brands** table: id, name, slug, logo_url, description, system_prompt, superlanding_merchant_no, superlanding_access_key, created_at
+- **channels** table: id, brand_id (FK→brands), platform (line/messenger), channel_name, bot_id (LINE userId / FB page_id), access_token, channel_secret, is_active, created_at
+- **Dynamic webhook routing**: LINE webhook reads `destination` field → looks up channel by bot_id → uses per-channel credentials for signature verification and reply
+- **Per-brand AI persona**: Each brand can have its own system_prompt that gets appended to the global system prompt
+- **Frontend**: BrandProvider context provides selected brand across all pages; sidebar brand workspace selector; chat platform filter tabs (全部/LINE/FB)
+- Auto-migration on startup: creates default "預設品牌" brand with existing LINE settings migrated as a channel
+
 ## Database Schema (SQLite)
 - **users**: id, username, password_hash, display_name, role (super_admin/marketing_manager/cs_agent), created_at
-- **settings**: key-value store (openai_api_key, line_channel_secret, line_channel_access_token, system_prompt, test_mode, system_name, logo_url, welcome_message, quick_buttons, human_transfer_keywords, superlanding_merchant_no, superlanding_access_key)
-- **contacts**: id, platform, platform_user_id, display_name, avatar_url, needs_human, is_pinned, status, tags (JSON), vip_level, order_count, total_spent, last_message_at, created_at
-- **messages**: id, contact_id, platform, sender_type (user/ai/admin/system), content, created_at
-- **knowledge_files**: id, filename, original_name, size, created_at
-- **marketing_rules**: id, keyword, pitch, url, created_at
+- **brands**: id, name, slug, logo_url, description, system_prompt, superlanding_merchant_no, superlanding_access_key, created_at
+- **channels**: id, brand_id (FK), platform, channel_name, bot_id, access_token, channel_secret, is_active, created_at
+- **settings**: key-value store (openai_api_key, system_prompt, test_mode, system_name, logo_url, welcome_message, quick_buttons, human_transfer_keywords, superlanding_merchant_no, superlanding_access_key)
+- **contacts**: id, platform, platform_user_id, display_name, avatar_url, needs_human, is_pinned, status, tags (JSON), vip_level, order_count, total_spent, last_message_at, created_at, brand_id (FK), channel_id (FK)
+- **messages**: id, contact_id, platform, sender_type (user/ai/admin/system), content, message_type, image_url, created_at
+- **knowledge_files**: id, filename, original_name, size, created_at, brand_id (FK, nullable)
+- **marketing_rules**: id, keyword, pitch, url, created_at, brand_id (FK, nullable)
 
 ## API Endpoints
 ### Auth
 - POST /api/auth/login, GET /api/auth/check, POST /api/auth/logout
+
+### Brands & Channels (super_admin for CUD, all authenticated for R)
+- GET /api/brands, POST /api/brands, GET /api/brands/:id, PUT /api/brands/:id, DELETE /api/brands/:id
+- GET /api/brands/:id/channels, POST /api/brands/:id/channels
+- GET /api/channels, PUT /api/channels/:id, DELETE /api/channels/:id
+- POST /api/channels/:id/test
 
 ### Settings (RBAC: super_admin full, marketing_manager partial, sensitive keys super_admin only)
 - GET /api/settings, PUT /api/settings, POST /api/settings/test-connection

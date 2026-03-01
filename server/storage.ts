@@ -1,5 +1,5 @@
 import db, { initDatabase, hashPassword } from "./db";
-import type { User, Contact, ContactWithPreview, Message, Setting, KnowledgeFile, TeamMember, MarketingRule } from "@shared/schema";
+import type { User, Contact, ContactWithPreview, Message, Setting, KnowledgeFile, TeamMember, MarketingRule, Brand, Channel, ChannelWithBrand } from "@shared/schema";
 
 initDatabase();
 
@@ -13,7 +13,19 @@ export interface IStorage {
   getSetting(key: string): string | null;
   getAllSettings(): Setting[];
   setSetting(key: string, value: string): void;
-  getContacts(): ContactWithPreview[];
+  getBrands(): Brand[];
+  getBrand(id: number): Brand | undefined;
+  createBrand(name: string, slug: string, logoUrl?: string, description?: string, systemPrompt?: string, superlandingMerchantNo?: string, superlandingAccessKey?: string): Brand;
+  updateBrand(id: number, data: Partial<Omit<Brand, "id" | "created_at">>): boolean;
+  deleteBrand(id: number): boolean;
+  getChannels(): ChannelWithBrand[];
+  getChannelsByBrand(brandId: number): Channel[];
+  getChannel(id: number): Channel | undefined;
+  getChannelByBotId(botId: string): ChannelWithBrand | undefined;
+  createChannel(brandId: number, platform: string, channelName: string, botId?: string, accessToken?: string, channelSecret?: string): Channel;
+  updateChannel(id: number, data: Partial<Omit<Channel, "id" | "created_at">>): boolean;
+  deleteChannel(id: number): boolean;
+  getContacts(brandId?: number): ContactWithPreview[];
   getContact(id: number): Contact | undefined;
   updateContactHumanFlag(id: number, needsHuman: number): void;
   updateContactStatus(id: number, status: string): void;
@@ -28,12 +40,12 @@ export interface IStorage {
   getMessagesSince(contactId: number, sinceId: number): Message[];
   searchMessages(query: string): { contact_id: number; contact_name: string; message_id: number; content: string; sender_type: string; created_at: string }[];
   createMessage(contactId: number, platform: string, senderType: string, content: string, messageType?: string, imageUrl?: string | null): Message;
-  getOrCreateContact(platform: string, platformUserId: string, displayName: string): Contact;
-  getKnowledgeFiles(): KnowledgeFile[];
-  createKnowledgeFile(filename: string, originalName: string, size: number): KnowledgeFile;
+  getOrCreateContact(platform: string, platformUserId: string, displayName: string, brandId?: number, channelId?: number): Contact;
+  getKnowledgeFiles(brandId?: number): KnowledgeFile[];
+  createKnowledgeFile(filename: string, originalName: string, size: number, brandId?: number): KnowledgeFile;
   deleteKnowledgeFile(id: number): boolean;
-  getMarketingRules(): MarketingRule[];
-  createMarketingRule(keyword: string, pitch: string, url: string): MarketingRule;
+  getMarketingRules(brandId?: number): MarketingRule[];
+  createMarketingRule(keyword: string, pitch: string, url: string, brandId?: number): MarketingRule;
   updateMarketingRule(id: number, keyword: string, pitch: string, url: string): boolean;
   deleteMarketingRule(id: number): boolean;
 }
@@ -87,8 +99,102 @@ export class SQLiteStorage implements IStorage {
     db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(key, value);
   }
 
-  getContacts(): ContactWithPreview[] {
-    const contacts = db.prepare("SELECT * FROM contacts ORDER BY is_pinned DESC, last_message_at DESC").all() as Contact[];
+  getBrands(): Brand[] {
+    return db.prepare("SELECT * FROM brands ORDER BY created_at ASC").all() as Brand[];
+  }
+
+  getBrand(id: number): Brand | undefined {
+    return db.prepare("SELECT * FROM brands WHERE id = ?").get(id) as Brand | undefined;
+  }
+
+  createBrand(name: string, slug: string, logoUrl?: string, description?: string, systemPrompt?: string, superlandingMerchantNo?: string, superlandingAccessKey?: string): Brand {
+    const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+    const result = db.prepare("INSERT INTO brands (name, slug, logo_url, description, system_prompt, superlanding_merchant_no, superlanding_access_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+      name, slug, logoUrl || "", description || "", systemPrompt || "", superlandingMerchantNo || "", superlandingAccessKey || "", now
+    );
+    return db.prepare("SELECT * FROM brands WHERE id = ?").get(Number(result.lastInsertRowid)) as Brand;
+  }
+
+  updateBrand(id: number, data: Partial<Omit<Brand, "id" | "created_at">>): boolean {
+    const fields: string[] = [];
+    const values: any[] = [];
+    for (const [key, val] of Object.entries(data)) {
+      fields.push(`${key} = ?`);
+      values.push(val);
+    }
+    if (fields.length === 0) return false;
+    values.push(id);
+    const result = db.prepare(`UPDATE brands SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+    return result.changes > 0;
+  }
+
+  deleteBrand(id: number): boolean {
+    db.prepare("DELETE FROM channels WHERE brand_id = ?").run(id);
+    const result = db.prepare("DELETE FROM brands WHERE id = ?").run(id);
+    return result.changes > 0;
+  }
+
+  getChannels(): ChannelWithBrand[] {
+    return db.prepare(`
+      SELECT c.*, b.name as brand_name, b.slug as brand_slug
+      FROM channels c
+      LEFT JOIN brands b ON c.brand_id = b.id
+      ORDER BY c.created_at ASC
+    `).all() as ChannelWithBrand[];
+  }
+
+  getChannelsByBrand(brandId: number): Channel[] {
+    return db.prepare("SELECT * FROM channels WHERE brand_id = ? ORDER BY created_at ASC").all(brandId) as Channel[];
+  }
+
+  getChannel(id: number): Channel | undefined {
+    return db.prepare("SELECT * FROM channels WHERE id = ?").get(id) as Channel | undefined;
+  }
+
+  getChannelByBotId(botId: string): ChannelWithBrand | undefined {
+    return db.prepare(`
+      SELECT c.*, b.name as brand_name, b.slug as brand_slug
+      FROM channels c
+      LEFT JOIN brands b ON c.brand_id = b.id
+      WHERE c.bot_id = ? AND c.is_active = 1
+    `).get(botId) as ChannelWithBrand | undefined;
+  }
+
+  createChannel(brandId: number, platform: string, channelName: string, botId?: string, accessToken?: string, channelSecret?: string): Channel {
+    const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+    const result = db.prepare("INSERT INTO channels (brand_id, platform, channel_name, bot_id, access_token, channel_secret, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+      brandId, platform, channelName, botId || "", accessToken || "", channelSecret || "", now
+    );
+    return db.prepare("SELECT * FROM channels WHERE id = ?").get(Number(result.lastInsertRowid)) as Channel;
+  }
+
+  updateChannel(id: number, data: Partial<Omit<Channel, "id" | "created_at">>): boolean {
+    const fields: string[] = [];
+    const values: any[] = [];
+    for (const [key, val] of Object.entries(data)) {
+      fields.push(`${key} = ?`);
+      values.push(val);
+    }
+    if (fields.length === 0) return false;
+    values.push(id);
+    const result = db.prepare(`UPDATE channels SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+    return result.changes > 0;
+  }
+
+  deleteChannel(id: number): boolean {
+    const result = db.prepare("DELETE FROM channels WHERE id = ?").run(id);
+    return result.changes > 0;
+  }
+
+  getContacts(brandId?: number): ContactWithPreview[] {
+    let query = "SELECT c.*, b.name as brand_name, ch.channel_name FROM contacts c LEFT JOIN brands b ON c.brand_id = b.id LEFT JOIN channels ch ON c.channel_id = ch.id";
+    const params: any[] = [];
+    if (brandId) {
+      query += " WHERE c.brand_id = ?";
+      params.push(brandId);
+    }
+    query += " ORDER BY c.is_pinned DESC, c.last_message_at DESC";
+    const contacts = db.prepare(query).all(...params) as (Contact & { brand_name?: string; channel_name?: string })[];
     return contacts.map((c) => {
       const lastMsg = db.prepare("SELECT content FROM messages WHERE contact_id = ? ORDER BY created_at DESC LIMIT 1").get(c.id) as { content: string } | undefined;
       return { ...c, last_message: lastMsg?.content || "" };
@@ -164,24 +270,31 @@ export class SQLiteStorage implements IStorage {
     return { id: Number(result.lastInsertRowid), contact_id: contactId, platform, sender_type: senderType as any, content, message_type: messageType as any, image_url: imageUrl, created_at: now };
   }
 
-  getOrCreateContact(platform: string, platformUserId: string, displayName: string): Contact {
+  getOrCreateContact(platform: string, platformUserId: string, displayName: string, brandId?: number, channelId?: number): Contact {
     let contact = db.prepare("SELECT * FROM contacts WHERE platform = ? AND platform_user_id = ?").get(platform, platformUserId) as Contact | undefined;
     if (!contact) {
       const now = new Date().toISOString().replace("T", " ").substring(0, 19);
-      const result = db.prepare("INSERT INTO contacts (platform, platform_user_id, display_name, needs_human, is_pinned, status, tags, vip_level, order_count, total_spent, created_at) VALUES (?, ?, ?, 0, 0, 'pending', '[]', 0, 0, 0, ?)").run(platform, platformUserId, displayName, now);
-      contact = { id: Number(result.lastInsertRowid), platform, platform_user_id: platformUserId, display_name: displayName, avatar_url: null, needs_human: 0, is_pinned: 0, status: "pending", tags: "[]", vip_level: 0, order_count: 0, total_spent: 0, cs_rating: null, last_message_at: null, created_at: now };
+      const result = db.prepare("INSERT INTO contacts (platform, platform_user_id, display_name, needs_human, is_pinned, status, tags, vip_level, order_count, total_spent, brand_id, channel_id, created_at) VALUES (?, ?, ?, 0, 0, 'pending', '[]', 0, 0, 0, ?, ?, ?)").run(platform, platformUserId, displayName, brandId || null, channelId || null, now);
+      contact = { id: Number(result.lastInsertRowid), platform, platform_user_id: platformUserId, display_name: displayName, avatar_url: null, needs_human: 0, is_pinned: 0, status: "pending", tags: "[]", vip_level: 0, order_count: 0, total_spent: 0, cs_rating: null, last_message_at: null, created_at: now, brand_id: brandId || null, channel_id: channelId || null };
+    } else if (brandId && !contact.brand_id) {
+      db.prepare("UPDATE contacts SET brand_id = ?, channel_id = ? WHERE id = ?").run(brandId, channelId || null, contact.id);
+      contact.brand_id = brandId;
+      contact.channel_id = channelId || null;
     }
     return contact;
   }
 
-  getKnowledgeFiles(): KnowledgeFile[] {
+  getKnowledgeFiles(brandId?: number): KnowledgeFile[] {
+    if (brandId) {
+      return db.prepare("SELECT * FROM knowledge_files WHERE brand_id = ? ORDER BY created_at DESC").all(brandId) as KnowledgeFile[];
+    }
     return db.prepare("SELECT * FROM knowledge_files ORDER BY created_at DESC").all() as KnowledgeFile[];
   }
 
-  createKnowledgeFile(filename: string, originalName: string, size: number): KnowledgeFile {
+  createKnowledgeFile(filename: string, originalName: string, size: number, brandId?: number): KnowledgeFile {
     const now = new Date().toISOString().replace("T", " ").substring(0, 19);
-    const result = db.prepare("INSERT INTO knowledge_files (filename, original_name, size, created_at) VALUES (?, ?, ?, ?)").run(filename, originalName, size, now);
-    return { id: Number(result.lastInsertRowid), filename, original_name: originalName, size, created_at: now };
+    const result = db.prepare("INSERT INTO knowledge_files (filename, original_name, size, brand_id, created_at) VALUES (?, ?, ?, ?, ?)").run(filename, originalName, size, brandId || null, now);
+    return { id: Number(result.lastInsertRowid), filename, original_name: originalName, size, created_at: now, brand_id: brandId || null };
   }
 
   deleteKnowledgeFile(id: number): boolean {
@@ -189,14 +302,17 @@ export class SQLiteStorage implements IStorage {
     return result.changes > 0;
   }
 
-  getMarketingRules(): MarketingRule[] {
+  getMarketingRules(brandId?: number): MarketingRule[] {
+    if (brandId) {
+      return db.prepare("SELECT * FROM marketing_rules WHERE brand_id = ? ORDER BY created_at DESC").all(brandId) as MarketingRule[];
+    }
     return db.prepare("SELECT * FROM marketing_rules ORDER BY created_at DESC").all() as MarketingRule[];
   }
 
-  createMarketingRule(keyword: string, pitch: string, url: string): MarketingRule {
+  createMarketingRule(keyword: string, pitch: string, url: string, brandId?: number): MarketingRule {
     const now = new Date().toISOString().replace("T", " ").substring(0, 19);
-    const result = db.prepare("INSERT INTO marketing_rules (keyword, pitch, url, created_at) VALUES (?, ?, ?, ?)").run(keyword, pitch, url, now);
-    return { id: Number(result.lastInsertRowid), keyword, pitch, url, created_at: now };
+    const result = db.prepare("INSERT INTO marketing_rules (keyword, pitch, url, brand_id, created_at) VALUES (?, ?, ?, ?, ?)").run(keyword, pitch, url, brandId || null, now);
+    return { id: Number(result.lastInsertRowid), keyword, pitch, url, created_at: now, brand_id: brandId || null };
   }
 
   updateMarketingRule(id: number, keyword: string, pitch: string, url: string): boolean {

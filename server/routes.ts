@@ -73,12 +73,19 @@ function getSuperLandingConfig(): SuperLandingConfig {
   };
 }
 
-async function getEnrichedSystemPrompt(): Promise<string> {
+async function getEnrichedSystemPrompt(brandId?: number): Promise<string> {
   const basePrompt = storage.getSetting("system_prompt") || "你是一位專業的客服助理。";
+  let brandBlock = "";
+  if (brandId) {
+    const brand = storage.getBrand(brandId);
+    if (brand?.system_prompt) {
+      brandBlock = "\n\n--- 品牌專屬指令 ---\n" + brand.system_prompt;
+    }
+  }
   const config = getSuperLandingConfig();
   const pages = await ensurePagesCacheLoaded(config);
   const catalogBlock = buildProductCatalogPrompt(pages);
-  return basePrompt + catalogBlock;
+  return basePrompt + brandBlock + catalogBlock;
 }
 
 export async function registerRoutes(
@@ -237,8 +244,123 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/contacts", authMiddleware, (_req, res) => {
-    const contacts = storage.getContacts();
+  app.get("/api/brands", authMiddleware, (_req, res) => {
+    const brands = storage.getBrands();
+    return res.json(brands);
+  });
+
+  app.get("/api/brands/:id", authMiddleware, (req, res) => {
+    const brand = storage.getBrand(parseInt(req.params.id));
+    if (!brand) return res.status(404).json({ message: "品牌不存在" });
+    return res.json(brand);
+  });
+
+  app.post("/api/brands", authMiddleware, superAdminOnly, (req, res) => {
+    const { name, slug, logo_url, description, system_prompt, superlanding_merchant_no, superlanding_access_key } = req.body;
+    if (!name || !slug) return res.status(400).json({ message: "品牌名稱與代碼為必填" });
+    try {
+      const brand = storage.createBrand(name, slug, logo_url, description, system_prompt, superlanding_merchant_no, superlanding_access_key);
+      return res.json({ success: true, brand });
+    } catch (err: any) {
+      if (err.message?.includes("UNIQUE constraint")) {
+        return res.status(400).json({ message: "品牌代碼已存在" });
+      }
+      return res.status(500).json({ message: "建立失敗" });
+    }
+  });
+
+  app.put("/api/brands/:id", authMiddleware, superAdminOnly, (req, res) => {
+    const id = parseInt(req.params.id);
+    const { name, slug, logo_url, description, system_prompt, superlanding_merchant_no, superlanding_access_key } = req.body;
+    const data: Record<string, string> = {};
+    if (name !== undefined) data.name = name;
+    if (slug !== undefined) data.slug = slug;
+    if (logo_url !== undefined) data.logo_url = logo_url;
+    if (description !== undefined) data.description = description;
+    if (system_prompt !== undefined) data.system_prompt = system_prompt;
+    if (superlanding_merchant_no !== undefined) data.superlanding_merchant_no = superlanding_merchant_no;
+    if (superlanding_access_key !== undefined) data.superlanding_access_key = superlanding_access_key;
+    if (!storage.updateBrand(id, data)) return res.status(404).json({ message: "品牌不存在" });
+    return res.json({ success: true });
+  });
+
+  app.delete("/api/brands/:id", authMiddleware, superAdminOnly, (req, res) => {
+    const id = parseInt(req.params.id);
+    if (!storage.deleteBrand(id)) return res.status(404).json({ message: "品牌不存在" });
+    return res.json({ success: true });
+  });
+
+  app.get("/api/brands/:id/channels", authMiddleware, (req, res) => {
+    const brandId = parseInt(req.params.id);
+    const channels = storage.getChannelsByBrand(brandId);
+    return res.json(channels);
+  });
+
+  app.get("/api/channels", authMiddleware, (_req, res) => {
+    const channels = storage.getChannels();
+    return res.json(channels);
+  });
+
+  app.post("/api/brands/:id/channels", authMiddleware, superAdminOnly, (req, res) => {
+    const brandId = parseInt(req.params.id);
+    const { platform, channel_name, bot_id, access_token, channel_secret } = req.body;
+    if (!platform || !channel_name) return res.status(400).json({ message: "平台與頻道名稱為必填" });
+    if (!["line", "messenger"].includes(platform)) return res.status(400).json({ message: "平台須為 line 或 messenger" });
+    const channel = storage.createChannel(brandId, platform, channel_name, bot_id, access_token, channel_secret);
+    return res.json({ success: true, channel });
+  });
+
+  app.put("/api/channels/:id", authMiddleware, superAdminOnly, (req, res) => {
+    const id = parseInt(req.params.id);
+    const { platform, channel_name, bot_id, access_token, channel_secret, is_active, brand_id } = req.body;
+    const data: Record<string, any> = {};
+    if (platform !== undefined) data.platform = platform;
+    if (channel_name !== undefined) data.channel_name = channel_name;
+    if (bot_id !== undefined) data.bot_id = bot_id;
+    if (access_token !== undefined) data.access_token = access_token;
+    if (channel_secret !== undefined) data.channel_secret = channel_secret;
+    if (is_active !== undefined) data.is_active = is_active;
+    if (brand_id !== undefined) data.brand_id = brand_id;
+    if (!storage.updateChannel(id, data)) return res.status(404).json({ message: "頻道不存在" });
+    return res.json({ success: true });
+  });
+
+  app.delete("/api/channels/:id", authMiddleware, superAdminOnly, (req, res) => {
+    const id = parseInt(req.params.id);
+    if (!storage.deleteChannel(id)) return res.status(404).json({ message: "頻道不存在" });
+    return res.json({ success: true });
+  });
+
+  app.post("/api/channels/:id/test", authMiddleware, superAdminOnly, async (req, res) => {
+    const id = parseInt(req.params.id);
+    const channel = storage.getChannel(id);
+    if (!channel) return res.status(404).json({ message: "頻道不存在" });
+    if (channel.platform === "line") {
+      if (!channel.access_token) return res.json({ success: false, message: "尚未設定 Access Token" });
+      try {
+        const verifyRes = await fetch("https://api.line.me/v2/bot/info", {
+          headers: { Authorization: `Bearer ${channel.access_token}` },
+        });
+        if (verifyRes.ok) {
+          const botInfo = await verifyRes.json();
+          const botUserId = botInfo.userId || "";
+          if (botUserId && !channel.bot_id) {
+            storage.updateChannel(id, { bot_id: botUserId });
+          }
+          return res.json({ success: true, message: `LINE 連線成功！Bot: ${botInfo.displayName || botInfo.basicId || "OK"}`, botUserId });
+        }
+        const errBody = await verifyRes.text();
+        return res.json({ success: false, message: `LINE 驗證失敗 (${verifyRes.status}): ${errBody}` });
+      } catch (err: any) {
+        return res.json({ success: false, message: `連線失敗: ${err.message}` });
+      }
+    }
+    return res.json({ success: false, message: `暫不支援 ${channel.platform} 頻道測試` });
+  });
+
+  app.get("/api/contacts", authMiddleware, (req: any, res) => {
+    const brandId = req.query.brand_id ? parseInt(req.query.brand_id as string) : undefined;
+    const contacts = storage.getContacts(brandId);
     return res.json(contacts);
   });
 
@@ -304,8 +426,16 @@ export async function registerRoutes(
     };
   }
 
-  async function sendRatingFlexMessage(contact: { id: number; platform_user_id: string }) {
-    const token = storage.getSetting("line_channel_access_token");
+  function getLineTokenForContact(contact: { channel_id?: number | null }): string | null {
+    if (contact.channel_id) {
+      const channel = storage.getChannel(contact.channel_id);
+      if (channel?.access_token) return channel.access_token;
+    }
+    return storage.getSetting("line_channel_access_token");
+  }
+
+  async function sendRatingFlexMessage(contact: { id: number; platform_user_id: string; channel_id?: number | null }) {
+    const token = getLineTokenForContact(contact);
     if (!token) return;
     try {
       const flexMsg = buildRatingFlexMessage(contact.id);
@@ -339,7 +469,7 @@ export async function registerRoutes(
     if (contact.platform !== "line") {
       return res.status(400).json({ message: "僅支援 LINE 平台" });
     }
-    const token = storage.getSetting("line_channel_access_token");
+    const token = getLineTokenForContact(contact);
     if (!token) {
       return res.status(400).json({ message: "尚未設定 LINE Channel Access Token" });
     }
@@ -391,7 +521,7 @@ export async function registerRoutes(
     storage.updateContactHumanFlag(contactId, 1);
 
     if (image_url && contact.platform === "line") {
-      const token = storage.getSetting("line_channel_access_token");
+      const token = getLineTokenForContact(contact);
       if (token) {
         const protocol = req.headers["x-forwarded-proto"] || req.protocol;
         const host = req.headers["x-forwarded-host"] || req.headers.host;
@@ -590,7 +720,7 @@ export async function registerRoutes(
     }
   }
 
-  async function analyzeImageWithAI(imageFilePath: string, contactId: number) {
+  async function analyzeImageWithAI(imageFilePath: string, contactId: number, lineToken?: string | null) {
     const apiKey = storage.getSetting("openai_api_key");
     if (!apiKey || apiKey.trim() === "") return;
     try {
@@ -601,7 +731,9 @@ export async function registerRoutes(
       const mimeType = ext === ".png" ? "image/png" : ext === ".gif" ? "image/gif" : ext === ".webp" ? "image/webp" : "image/jpeg";
       const dataUri = `data:${mimeType};base64,${base64}`;
 
-      const systemPrompt = await getEnrichedSystemPrompt();
+      const contact = storage.getContact(contactId);
+      let systemPrompt = await getEnrichedSystemPrompt(contact?.brand_id || undefined);
+
       const openai = new OpenAI({ apiKey });
       const completion = await openai.chat.completions.create({
         model: "gpt-5.2",
@@ -621,12 +753,11 @@ export async function registerRoutes(
       const reply = completion.choices[0]?.message?.content || "已收到您的圖片，將為您進一步處理。";
       storage.createMessage(contactId, "line", "ai", reply);
 
-      const lineToken = storage.getSetting("line_channel_access_token");
-      const contact = storage.getContact(contactId);
-      if (lineToken && contact) {
+      const token = lineToken || getLineTokenForContact(contact || {});
+      if (token && contact) {
         await fetch("https://api.line.me/v2/bot/message/push", {
           method: "POST",
-          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${lineToken}` },
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
           body: JSON.stringify({
             to: contact.platform_user_id,
             messages: [{ type: "text", text: reply }],
@@ -639,13 +770,13 @@ export async function registerRoutes(
     }
   }
 
-  async function replyToLine(replyToken: string, messages: object[]) {
-    const token = storage.getSetting("line_channel_access_token");
-    if (!token || !replyToken) return;
+  async function replyToLine(replyToken: string, messages: object[], token?: string | null) {
+    const resolvedToken = token || storage.getSetting("line_channel_access_token");
+    if (!resolvedToken || !replyToken) return;
     try {
       await fetch("https://api.line.me/v2/bot/message/reply", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${resolvedToken}` },
         body: JSON.stringify({ replyToken, messages }),
       });
     } catch (err) {
@@ -653,12 +784,49 @@ export async function registerRoutes(
     }
   }
 
+  async function pushLineMessage(userId: string, messages: object[], token?: string | null) {
+    const resolvedToken = token || storage.getSetting("line_channel_access_token");
+    if (!resolvedToken) return;
+    try {
+      await fetch("https://api.line.me/v2/bot/message/push", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${resolvedToken}` },
+        body: JSON.stringify({ to: userId, messages }),
+      });
+    } catch (err) {
+      console.error("LINE push failed:", err);
+    }
+  }
+
   app.post("/api/webhook/line", async (req, res) => {
     const signature = req.headers["x-line-signature"] as string | undefined;
-    const channelSecret = storage.getSetting("line_channel_secret");
-    if (channelSecret && signature && req.rawBody) {
+    const destination = req.body?.destination as string | undefined;
+
+    let channelToken: string | null = null;
+    let channelSecretVal: string | null = null;
+    let matchedChannel: import("@shared/schema").ChannelWithBrand | undefined;
+    let matchedBrandId: number | undefined;
+
+    if (destination) {
+      matchedChannel = storage.getChannelByBotId(destination);
+      if (matchedChannel) {
+        channelToken = matchedChannel.access_token || null;
+        channelSecretVal = matchedChannel.channel_secret || null;
+        matchedBrandId = matchedChannel.brand_id;
+        console.log(`[Webhook] 動態路由 → 品牌: ${matchedChannel.brand_name}, 頻道: ${matchedChannel.channel_name}`);
+      }
+    }
+
+    if (!channelSecretVal) {
+      channelSecretVal = storage.getSetting("line_channel_secret");
+    }
+    if (!channelToken) {
+      channelToken = storage.getSetting("line_channel_access_token");
+    }
+
+    if (channelSecretVal && signature && req.rawBody) {
       const rawBody = Buffer.isBuffer(req.rawBody) ? req.rawBody : Buffer.from(req.rawBody as string);
-      const hash = crypto.createHmac("SHA256", channelSecret).update(rawBody).digest("base64");
+      const hash = crypto.createHmac("SHA256", channelSecretVal).update(rawBody).digest("base64");
       if (hash !== signature) return res.status(403).json({ message: "簽名驗證失敗" });
     }
 
@@ -679,7 +847,7 @@ export async function registerRoutes(
           const userId = event.source?.userId || "unknown";
           const displayName = event.source?.displayName || "LINE用戶";
           const text = event.message.text;
-          const contact = storage.getOrCreateContact("line", userId, displayName);
+          const contact = storage.getOrCreateContact("line", userId, displayName, matchedBrandId, matchedChannel?.id);
           storage.createMessage(contact.id, "line", "user", text);
           const needsHuman = HUMAN_KEYWORDS.some((kw) => text.includes(kw));
           if (needsHuman) {
@@ -702,7 +870,7 @@ export async function registerRoutes(
               storage.createMessage(ticketId, "line", "system", `(系統提示) 客戶評分：${"⭐".repeat(score)}（${score} 分）`);
               replyToLine(event.replyToken, [
                 { type: "text", text: `已收到您的 ${"⭐".repeat(score)} 評分，感謝您的寶貴意見！祝您有美好的一天。` },
-              ]);
+              ], channelToken);
             }
           }
         } else if (event.type === "follow" || event.type === "unfollow" || event.type === "join" || event.type === "leave" || event.type === "memberJoined" || event.type === "memberLeft") {
@@ -710,13 +878,13 @@ export async function registerRoutes(
         } else if (event.type === "message" && event.message?.type === "image") {
           const userId = event.source?.userId || "unknown";
           const displayName = event.source?.displayName || "LINE用戶";
-          const contact = storage.getOrCreateContact("line", userId, displayName);
+          const contact = storage.getOrCreateContact("line", userId, displayName, matchedBrandId, matchedChannel?.id);
           const messageId = event.message.id;
           const imageUrl = await downloadLineContent(messageId, ".jpg");
           if (imageUrl) {
             storage.createMessage(contact.id, "line", "user", "[圖片訊息]", "image", imageUrl);
             if (!contact.needs_human) {
-              analyzeImageWithAI(imageUrl, contact.id).catch((err) =>
+              analyzeImageWithAI(imageUrl, contact.id, channelToken).catch((err) =>
                 console.error("AI image analysis background error:", err)
               );
             }
@@ -726,7 +894,7 @@ export async function registerRoutes(
         } else if (event.type === "message" && event.message?.type === "video") {
           const userId = event.source?.userId || "unknown";
           const displayName = event.source?.displayName || "LINE用戶";
-          const contact = storage.getOrCreateContact("line", userId, displayName);
+          const contact = storage.getOrCreateContact("line", userId, displayName, matchedBrandId, matchedChannel?.id);
           const messageId = event.message.id;
           const videoUrl = await downloadLineContent(messageId, ".mp4");
           if (videoUrl) {
@@ -736,21 +904,11 @@ export async function registerRoutes(
           }
           storage.createMessage(contact.id, "line", "ai", "(AI 系統提示) 已收到您的影片，將為您轉交專人檢視。");
           storage.updateContactHumanFlag(contact.id, 1);
-          const lineToken = storage.getSetting("line_channel_access_token");
-          if (lineToken && contact) {
-            await fetch("https://api.line.me/v2/bot/message/push", {
-              method: "POST",
-              headers: { "Content-Type": "application/json", "Authorization": `Bearer ${lineToken}` },
-              body: JSON.stringify({
-                to: contact.platform_user_id,
-                messages: [{ type: "text", text: "已收到您的影片，將為您轉交專人檢視。" }],
-              }),
-            }).catch((err) => console.error("LINE video reply push failed:", err));
-          }
+          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: "已收到您的影片，將為您轉交專人檢視。" }], channelToken);
         } else if (event.type === "message" && event.message?.type !== "text") {
           const userId = event.source?.userId || "unknown";
           const displayName = event.source?.displayName || "LINE用戶";
-          const contact = storage.getOrCreateContact("line", userId, displayName);
+          const contact = storage.getOrCreateContact("line", userId, displayName, matchedBrandId, matchedChannel?.id);
           const msgType = event.message?.type || "unknown";
           storage.createMessage(contact.id, "line", "user", `[${msgType === "sticker" ? "貼圖" : msgType === "audio" ? "音訊" : msgType === "location" ? "位置" : msgType === "file" ? "檔案" : msgType}訊息]`);
         }
@@ -1096,13 +1254,13 @@ export async function registerRoutes(
   }
 
   app.post("/api/sandbox/chat", authMiddleware, async (req, res) => {
-    const { message, history } = req.body;
+    const { message, history, brand_id } = req.body;
     if (!message) return res.status(400).json({ message: "message is required" });
     const apiKey = storage.getSetting("openai_api_key");
     if (!apiKey || apiKey.trim() === "") {
       return res.status(400).json({ success: false, error: "no_api_key", message: "請先至系統設定填寫有效的 OpenAI API Key" });
     }
-    const systemPrompt = await getEnrichedSystemPrompt();
+    const systemPrompt = await getEnrichedSystemPrompt(brand_id ? parseInt(brand_id) : undefined);
     try {
       const openai = new OpenAI({ apiKey });
       const chatMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
@@ -1263,7 +1421,8 @@ export async function registerRoutes(
 
   app.post("/api/knowledge-files", authMiddleware, managerOrAbove, upload.single("file"), (req, res) => {
     if (!req.file) return res.status(400).json({ message: "未上傳檔案" });
-    const file = storage.createKnowledgeFile(req.file.filename, req.file.originalname, req.file.size);
+    const brandId = req.body.brand_id ? parseInt(req.body.brand_id) : undefined;
+    const file = storage.createKnowledgeFile(req.file.filename, req.file.originalname, req.file.size, brandId);
     return res.json(file);
   });
 

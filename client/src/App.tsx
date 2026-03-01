@@ -4,6 +4,7 @@ import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppSidebar } from "@/components/app-sidebar";
+import { BrandProvider } from "@/lib/brand-context";
 import LoginPage from "@/pages/login";
 import ChatPage from "@/pages/chat";
 import SettingsPage from "@/pages/settings";
@@ -74,44 +75,46 @@ function AuthenticatedApp({ user }: { user: AuthUser }) {
   settings.forEach((s) => { settingsMap[s.key] = s.value; });
 
   return (
-    <div className="flex h-screen w-full bg-[#faf9f5]">
-      <AppSidebar
-        userRole={user.role}
-        systemName={settingsMap.system_name || "AI 客服中控台"}
-        logoUrl={settingsMap.logo_url || ""}
-      />
-      <div className="flex flex-col flex-1 min-w-0">
-        <header className="flex items-center justify-end gap-3 px-5 py-2.5 border-b border-stone-200 bg-white/80 backdrop-blur-sm">
-          <div className="flex items-center gap-2 text-xs text-stone-500">
-            <User className="w-3.5 h-3.5" />
-            <span data-testid="text-current-user">{user.display_name}</span>
-            <span className="px-1.5 py-0.5 rounded bg-stone-100 text-stone-600 text-[10px] font-medium">
-              {ROLE_DISPLAY[user.role] || user.role}
-            </span>
-          </div>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={handleLogout}
-            data-testid="button-logout"
-            className="text-xs text-stone-500 hover:text-stone-700 hover:bg-stone-100"
-          >
-            <LogOut className="w-3.5 h-3.5 mr-1.5" />
-            登出
-          </Button>
-        </header>
-        <main className="flex-1 overflow-auto">
-          <Switch>
-            <GuardedRoute path="/" component={ChatPage} userRole={user.role} />
-            <GuardedRoute path="/settings" component={SettingsPage} userRole={user.role} />
-            <GuardedRoute path="/knowledge" component={KnowledgePage} userRole={user.role} />
-            <GuardedRoute path="/team" component={TeamPage} userRole={user.role} />
-            <GuardedRoute path="/analytics" component={AnalyticsPage} userRole={user.role} />
-            <Route component={NotFound} />
-          </Switch>
-        </main>
+    <BrandProvider>
+      <div className="flex h-screen w-full bg-[#faf9f5]">
+        <AppSidebar
+          userRole={user.role}
+          systemName={settingsMap.system_name || "AI 客服中控台"}
+          logoUrl={settingsMap.logo_url || ""}
+        />
+        <div className="flex flex-col flex-1 min-w-0">
+          <header className="flex items-center justify-end gap-3 px-5 py-2.5 border-b border-stone-200 bg-white/80 backdrop-blur-sm">
+            <div className="flex items-center gap-2 text-xs text-stone-500">
+              <User className="w-3.5 h-3.5" />
+              <span data-testid="text-current-user">{user.display_name}</span>
+              <span className="px-1.5 py-0.5 rounded bg-stone-100 text-stone-600 text-[10px] font-medium">
+                {ROLE_DISPLAY[user.role] || user.role}
+              </span>
+            </div>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={handleLogout}
+              data-testid="button-logout"
+              className="text-xs text-stone-500 hover:text-stone-700 hover:bg-stone-100"
+            >
+              <LogOut className="w-3.5 h-3.5 mr-1.5" />
+              登出
+            </Button>
+          </header>
+          <main className="flex-1 overflow-auto">
+            <Switch>
+              <GuardedRoute path="/" component={ChatPage} userRole={user.role} />
+              <GuardedRoute path="/settings" component={SettingsPage} userRole={user.role} />
+              <GuardedRoute path="/knowledge" component={KnowledgePage} userRole={user.role} />
+              <GuardedRoute path="/team" component={TeamPage} userRole={user.role} />
+              <GuardedRoute path="/analytics" component={AnalyticsPage} userRole={user.role} />
+              <Route component={NotFound} />
+            </Switch>
+          </main>
+        </div>
       </div>
-    </div>
+    </BrandProvider>
   );
 }
 

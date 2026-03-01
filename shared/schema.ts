@@ -1,4 +1,5 @@
 export type UserRole = "super_admin" | "marketing_manager" | "cs_agent";
+export type ChannelPlatform = "line" | "messenger";
 
 export interface User {
   id: number;
@@ -7,6 +8,35 @@ export interface User {
   display_name: string;
   role: UserRole;
   created_at: string;
+}
+
+export interface Brand {
+  id: number;
+  name: string;
+  slug: string;
+  logo_url: string;
+  description: string;
+  system_prompt: string;
+  superlanding_merchant_no: string;
+  superlanding_access_key: string;
+  created_at: string;
+}
+
+export interface Channel {
+  id: number;
+  brand_id: number;
+  platform: ChannelPlatform;
+  channel_name: string;
+  bot_id: string;
+  access_token: string;
+  channel_secret: string;
+  is_active: number;
+  created_at: string;
+}
+
+export interface ChannelWithBrand extends Channel {
+  brand_name?: string;
+  brand_slug?: string;
 }
 
 export interface Contact {
@@ -25,10 +55,14 @@ export interface Contact {
   cs_rating: number | null;
   last_message_at: string | null;
   created_at: string;
+  brand_id: number | null;
+  channel_id: number | null;
 }
 
 export interface ContactWithPreview extends Contact {
   last_message?: string;
+  brand_name?: string;
+  channel_name?: string;
 }
 
 export interface Message {
@@ -53,6 +87,7 @@ export interface KnowledgeFile {
   original_name: string;
   size: number;
   created_at: string;
+  brand_id: number | null;
 }
 
 export interface TeamMember {
@@ -69,6 +104,7 @@ export interface MarketingRule {
   pitch: string;
   url: string;
   created_at: string;
+  brand_id: number | null;
 }
 
 export interface OrderInfo {
