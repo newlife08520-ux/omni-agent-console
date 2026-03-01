@@ -741,6 +741,198 @@ export async function registerRoutes(
     return res.status(200).json({ success: true });
   });
 
+  const orderLookupTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
+    {
+      type: "function",
+      function: {
+        name: "lookup_order_by_id",
+        description: "用訂單編號直接查詢訂單狀態。當客戶提供了訂單編號（如 KBT58265、DEN12345、MRQ00001 等格式）時使用此工具。",
+        parameters: {
+          type: "object",
+          properties: {
+            order_id: {
+              type: "string",
+              description: "客戶提供的訂單編號，例如 KBT58265",
+            },
+          },
+          required: ["order_id"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "lookup_order_by_product_and_phone",
+        description: "用商品名稱和手機號碼查詢訂單。當客戶沒有訂單編號，但提供了購買的商品名稱和手機號碼時使用此工具。",
+        parameters: {
+          type: "object",
+          properties: {
+            product_name: {
+              type: "string",
+              description: "客戶購買的商品名稱（可以是簡稱或俗稱）",
+            },
+            phone: {
+              type: "string",
+              description: "客戶下單時留的手機號碼",
+            },
+          },
+          required: ["product_name", "phone"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "lookup_order_by_date_and_contact",
+        description: "用下單日期範圍和聯絡資訊查詢訂單。當客戶無法提供單號和商品名稱，但能提供下單日期區間和 Email/手機/姓名時使用。",
+        parameters: {
+          type: "object",
+          properties: {
+            contact: {
+              type: "string",
+              description: "客戶的聯絡資訊（Email、手機號碼或姓名）",
+            },
+            begin_date: {
+              type: "string",
+              description: "開始日期，格式 YYYY-MM-DD",
+            },
+            end_date: {
+              type: "string",
+              description: "結束日期，格式 YYYY-MM-DD",
+            },
+          },
+          required: ["contact", "begin_date", "end_date"],
+        },
+      },
+    },
+  ];
+
+  async function executeToolCall(
+    toolName: string,
+    args: Record<string, string>
+  ): Promise<string> {
+    const config = getSuperLandingConfig();
+    if (!config.merchantNo || !config.accessKey) {
+      return JSON.stringify({ success: false, error: "系統尚未設定一頁商店 API 金鑰，無法查詢訂單。" });
+    }
+
+    try {
+      if (toolName === "lookup_order_by_id") {
+        const orderId = (args.order_id || "").trim();
+        console.log("[AI Tool Call] lookup_order_by_id，單號:", orderId);
+
+        if (!orderId) {
+          return JSON.stringify({ success: false, error: "訂單編號為空" });
+        }
+
+        const order = await lookupOrderById(config, orderId);
+        if (!order) {
+          console.log("[AI Tool Call] 查無訂單:", orderId);
+          return JSON.stringify({ success: true, found: false, message: `查無訂單編號 ${orderId} 的紀錄` });
+        }
+
+        const statusLabel = (await import("./superlanding")).getStatusLabel(order.status);
+        console.log("[AI Tool Call] 查到訂單:", orderId, "狀態:", statusLabel);
+        return JSON.stringify({
+          success: true,
+          found: true,
+          order: {
+            order_id: order.global_order_id,
+            status: statusLabel,
+            amount: order.final_total_order_amount,
+            product_list: order.product_list,
+            buyer_name: order.buyer_name,
+            tracking_number: order.tracking_number,
+            created_at: order.created_at,
+            shipped_at: order.shipped_at,
+            shipping_method: order.shipping_method,
+            payment_method: order.payment_method,
+          },
+        });
+      }
+
+      if (toolName === "lookup_order_by_product_and_phone") {
+        const productName = (args.product_name || "").trim();
+        const phone = (args.phone || "").trim();
+        console.log("[AI Tool Call] lookup_order_by_product_and_phone，商品:", productName, "電話:", phone);
+
+        if (!productName || !phone) {
+          return JSON.stringify({ success: false, error: "請提供商品名稱和手機號碼" });
+        }
+
+        const pages = getCachedPages();
+        const normalizedInput = productName.toLowerCase().replace(/\s+/g, "");
+        let matchedPage = pages.find(p => p.productName.toLowerCase().replace(/\s+/g, "") === normalizedInput);
+        if (!matchedPage) {
+          matchedPage = pages.find(p => p.productName.toLowerCase().replace(/\s+/g, "").includes(normalizedInput) || normalizedInput.includes(p.productName.toLowerCase().replace(/\s+/g, "")));
+        }
+
+        if (!matchedPage) {
+          console.log("[AI Tool Call] 找不到匹配商品:", productName);
+          return JSON.stringify({ success: true, found: false, message: `找不到與「${productName}」相符的商品` });
+        }
+
+        console.log("[AI Tool Call] 匹配商品:", matchedPage.productName, "pageId:", matchedPage.pageId);
+        const result = await lookupOrdersByPageAndPhone(config, matchedPage.pageId, phone);
+
+        if (result.orders.length === 0) {
+          return JSON.stringify({ success: true, found: false, message: `在「${matchedPage.productName}」中查無此手機號碼的訂單` });
+        }
+
+        const { getStatusLabel: getSL } = await import("./superlanding");
+        const orderSummaries = result.orders.slice(0, 5).map(o => ({
+          order_id: o.global_order_id,
+          status: getSL(o.status),
+          amount: o.final_total_order_amount,
+          product_list: o.product_list,
+          buyer_name: o.buyer_name,
+          tracking_number: o.tracking_number,
+          created_at: o.created_at,
+          shipped_at: o.shipped_at,
+        }));
+
+        console.log("[AI Tool Call] 查到", result.orders.length, "筆訂單");
+        return JSON.stringify({ success: true, found: true, total: result.orders.length, orders: orderSummaries });
+      }
+
+      if (toolName === "lookup_order_by_date_and_contact") {
+        const contact = (args.contact || "").trim();
+        const beginDate = (args.begin_date || "").trim();
+        const endDate = (args.end_date || "").trim();
+        console.log("[AI Tool Call] lookup_order_by_date_and_contact，聯絡:", contact, "日期:", beginDate, "~", endDate);
+
+        if (!contact || !beginDate || !endDate) {
+          return JSON.stringify({ success: false, error: "請提供聯絡資訊和日期範圍" });
+        }
+
+        const result = await lookupOrdersByDateAndFilter(config, contact, beginDate, endDate);
+
+        if (result.orders.length === 0) {
+          return JSON.stringify({ success: true, found: false, message: "在指定日期範圍內查無相符紀錄" });
+        }
+
+        const { getStatusLabel: getSL2 } = await import("./superlanding");
+        const orderSummaries = result.orders.slice(0, 5).map(o => ({
+          order_id: o.global_order_id,
+          status: getSL2(o.status),
+          amount: o.final_total_order_amount,
+          product_list: o.product_list,
+          buyer_name: o.buyer_name,
+          tracking_number: o.tracking_number,
+          created_at: o.created_at,
+        }));
+
+        console.log("[AI Tool Call] 查到", result.orders.length, "筆訂單");
+        return JSON.stringify({ success: true, found: true, total: result.orders.length, orders: orderSummaries, truncated: result.truncated });
+      }
+
+      return JSON.stringify({ success: false, error: `未知的工具: ${toolName}` });
+    } catch (err: any) {
+      console.error("[AI Tool Call] 執行失敗:", toolName, err.message);
+      return JSON.stringify({ success: false, error: `查詢失敗：${err.message}` });
+    }
+  }
+
   app.post("/api/sandbox/chat", authMiddleware, async (req, res) => {
     const { message, history } = req.body;
     if (!message) return res.status(400).json({ message: "message is required" });
@@ -751,7 +943,7 @@ export async function registerRoutes(
     const systemPrompt = await getEnrichedSystemPrompt();
     try {
       const openai = new OpenAI({ apiKey });
-      const chatMessages: { role: "system" | "user" | "assistant"; content: string }[] = [
+      const chatMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
         { role: "system", content: systemPrompt },
       ];
       if (Array.isArray(history) && history.length > 0) {
@@ -761,24 +953,74 @@ export async function registerRoutes(
             chatMessages.push({ role, content: h.content });
           }
         }
-        console.log(`[Sandbox] 傳送 ${chatMessages.length - 1} 筆對話歷史至 OpenAI`);
+        console.log(`[Sandbox] 傳送 ${chatMessages.length - 1} 筆對話歷史至 OpenAI（含 Function Calling Tools）`);
       } else {
         chatMessages.push({ role: "user", content: message });
-        console.log("[Sandbox] 無對話歷史，僅傳送單筆訊息");
+        console.log("[Sandbox] 無對話歷史，僅傳送單筆訊息（含 Function Calling Tools）");
       }
-      const completion = await openai.chat.completions.create({
+
+      let completion = await openai.chat.completions.create({
         model: "gpt-5.2",
         messages: chatMessages,
+        tools: orderLookupTools,
         max_completion_tokens: 1000,
         temperature: 0.7,
       });
-      const reply = completion.choices[0]?.message?.content || "抱歉，AI 無法生成回覆。";
+
+      let responseMessage = completion.choices[0]?.message;
+      let loopCount = 0;
+      const maxToolLoops = 3;
+
+      while (responseMessage?.tool_calls && responseMessage.tool_calls.length > 0 && loopCount < maxToolLoops) {
+        loopCount++;
+        console.log(`[Sandbox] AI 觸發 ${responseMessage.tool_calls.length} 個 Tool Call（第 ${loopCount} 輪）`);
+
+        chatMessages.push(responseMessage as OpenAI.Chat.Completions.ChatCompletionMessageParam);
+
+        for (const toolCall of responseMessage.tool_calls) {
+          const fnName = toolCall.function.name;
+          let fnArgs: Record<string, string> = {};
+          try {
+            fnArgs = JSON.parse(toolCall.function.arguments);
+          } catch {
+            console.error("[Sandbox] Tool Call 參數解析失敗:", toolCall.function.arguments);
+            chatMessages.push({
+              role: "tool",
+              tool_call_id: toolCall.id,
+              content: JSON.stringify({ success: false, error: "參數格式錯誤，無法解析" }),
+            });
+            continue;
+          }
+
+          console.log(`[Sandbox] 執行 Tool: ${fnName}，參數:`, fnArgs);
+          const toolResult = await executeToolCall(fnName, fnArgs);
+          console.log(`[Sandbox] Tool 回傳結果長度: ${toolResult.length} 字元`);
+
+          chatMessages.push({
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: toolResult,
+          });
+        }
+
+        completion = await openai.chat.completions.create({
+          model: "gpt-5.2",
+          messages: chatMessages,
+          tools: orderLookupTools,
+          max_completion_tokens: 1000,
+          temperature: 0.7,
+        });
+        responseMessage = completion.choices[0]?.message;
+      }
+
+      const reply = responseMessage?.content || "抱歉，AI 無法生成回覆。";
       return res.json({ success: true, reply });
     } catch (err: any) {
       const errorMessage = err?.message || "未知錯誤";
       if (errorMessage.includes("401") || errorMessage.includes("Incorrect API key") || errorMessage.includes("invalid_api_key")) {
         return res.status(400).json({ success: false, error: "invalid_api_key", message: "OpenAI API Key 無效，請至系統設定更新您的金鑰" });
       }
+      console.error("[Sandbox] AI 回覆失敗:", errorMessage);
       return res.status(500).json({ success: false, error: "api_error", message: `AI 回覆失敗：${errorMessage}` });
     }
   });
