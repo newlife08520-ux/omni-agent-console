@@ -78,6 +78,7 @@ export interface OrderInfo {
   product_list: string;
   buyer_name: string;
   buyer_phone: string;
+  buyer_email: string;
   tracking_number: string;
   created_at: string;
   shipped_at?: string;

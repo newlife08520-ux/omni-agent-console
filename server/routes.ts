@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { fetchOrders, lookupOrderById } from "./superlanding";
+import { fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter } from "./superlanding";
 import type { SuperLandingConfig } from "./superlanding";
 import multer from "multer";
 import path from "path";
@@ -421,6 +421,52 @@ export async function registerRoutes(
         connection_failed: "無法連線至一頁商店 API",
       };
       console.error("[一頁商店] 訂單查詢失敗:", err.message);
+      return res.json({ orders: [], error: err.message, message: errorMap[err.message] || `查詢失敗：${err.message}` });
+    }
+  });
+
+  app.get("/api/orders/search", authMiddleware, async (req, res) => {
+    const { q, begin_date, end_date } = req.query;
+    const query = (q as string || "").trim();
+    const beginDate = (begin_date as string || "").trim();
+    const endDate = (end_date as string || "").trim();
+
+    if (!query) return res.status(400).json({ message: "請提供查詢條件（Email、電話或姓名）" });
+    if (!beginDate || !endDate) return res.status(400).json({ message: "請提供日期區間（begin_date 與 end_date）" });
+
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(beginDate) || !dateRegex.test(endDate)) {
+      return res.status(400).json({ message: "日期格式須為 YYYY-MM-DD" });
+    }
+
+    const begin = new Date(beginDate + "T00:00:00");
+    const end = new Date(endDate + "T00:00:00");
+    if (isNaN(begin.getTime()) || isNaN(end.getTime())) {
+      return res.status(400).json({ message: "無效的日期，請確認日期是否正確" });
+    }
+    const diffDays = Math.round((end.getTime() - begin.getTime()) / (1000 * 60 * 60 * 24));
+    if (diffDays < 0) return res.status(400).json({ message: "結束日期不可早於開始日期" });
+    if (diffDays >= 31) return res.status(400).json({ message: "日期範圍不可超過 31 天，請縮小查詢範圍" });
+
+    const config = getSuperLandingConfig();
+    if (!config.merchantNo || !config.accessKey) {
+      return res.json({ orders: [], error: "not_configured", message: "尚未設定一頁商店 API 金鑰" });
+    }
+
+    try {
+      console.log(`[一頁商店] 進階查詢: q="${query}" ${beginDate}~${endDate}`);
+      const result = await lookupOrdersByDateAndFilter(config, query, beginDate, endDate);
+      if (result.orders.length === 0) {
+        return res.json({ orders: [], totalFetched: result.totalFetched, message: `在 ${beginDate} ~ ${endDate} 期間查無符合「${query}」的訂單（共掃描 ${result.totalFetched} 筆）` });
+      }
+      return res.json({ orders: result.orders, totalFetched: result.totalFetched, truncated: result.truncated });
+    } catch (err: any) {
+      const errorMap: Record<string, string> = {
+        missing_credentials: "API 金鑰未設定",
+        invalid_credentials: "API 金鑰無效（請確認 merchant_no 與 access_key）",
+        connection_failed: "無法連線至一頁商店 API",
+      };
+      console.error("[一頁商店] 進階查詢失敗:", err.message);
       return res.json({ orders: [], error: err.message, message: errorMap[err.message] || `查詢失敗：${err.message}` });
     }
   });

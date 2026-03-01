@@ -55,6 +55,7 @@ function mapOrder(o: any): OrderInfo {
     product_list: productListStr,
     buyer_name: o.recipient || "",
     buyer_phone: o.mobile || "",
+    buyer_email: o.email || "",
     tracking_number: trackingNumber,
     created_at: o.created_date || o.order_created_at || "",
     shipped_at: o.shipped_at || "",
@@ -114,22 +115,55 @@ export async function fetchOrders(
   }
 }
 
-export async function lookupOrdersByDateAndPhone(
+export interface DateFilterResult {
+  orders: OrderInfo[];
+  totalFetched: number;
+  truncated: boolean;
+}
+
+export async function lookupOrdersByDateAndFilter(
   config: SuperLandingConfig,
-  phone: string,
+  query: string,
   beginDate: string,
   endDate: string
-): Promise<OrderInfo[]> {
-  const orders = await fetchOrders(config, {
-    begin_date: beginDate,
-    end_date: endDate,
-    per_page: "100",
+): Promise<DateFilterResult> {
+  let page = 1;
+  const perPage = 200;
+  const maxPages = 25;
+  let allOrders: OrderInfo[] = [];
+  let truncated = false;
+
+  while (true) {
+    const orders = await fetchOrders(config, {
+      begin_date: beginDate,
+      end_date: endDate,
+      per_page: String(perPage),
+      page: String(page),
+    });
+    allOrders = allOrders.concat(orders);
+    if (orders.length < perPage) break;
+    page++;
+    if (page > maxPages) {
+      truncated = true;
+      break;
+    }
+  }
+
+  console.log(`[一頁商店] 日期範圍 ${beginDate}~${endDate} 共取得 ${allOrders.length} 筆${truncated ? "（已截斷）" : ""}，開始比對 "${query}"`);
+
+  const normalizedQuery = query.replace(/[-\s]/g, "").toLowerCase();
+  const matched = allOrders.filter((o) => {
+    const phone = o.buyer_phone.replace(/[-\s]/g, "").toLowerCase();
+    const email = o.buyer_email.toLowerCase();
+    const name = o.buyer_name.toLowerCase();
+    return (
+      (phone && (phone.includes(normalizedQuery) || normalizedQuery.includes(phone))) ||
+      (email && email === normalizedQuery) ||
+      (name && name.includes(normalizedQuery))
+    );
   });
-  const normalizedPhone = phone.replace(/[-\s]/g, "");
-  return orders.filter((o) => {
-    const orderPhone = o.buyer_phone.replace(/[-\s]/g, "");
-    return orderPhone.includes(normalizedPhone) || normalizedPhone.includes(orderPhone);
-  });
+
+  return { orders: matched, totalFetched: allOrders.length, truncated };
 }
 
 export async function lookupOrderById(
