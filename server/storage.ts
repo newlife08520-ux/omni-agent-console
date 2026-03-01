@@ -136,11 +136,11 @@ export class SQLiteStorage implements IStorage {
   }
 
   getMessages(contactId: number): Message[] {
-    return db.prepare("SELECT * FROM messages WHERE contact_id = ? ORDER BY created_at ASC").all(contactId) as Message[];
+    return db.prepare("SELECT * FROM messages WHERE contact_id = ? ORDER BY id ASC").all(contactId) as Message[];
   }
 
   getMessagesSince(contactId: number, sinceId: number): Message[] {
-    return db.prepare("SELECT * FROM messages WHERE contact_id = ? AND id > ? ORDER BY created_at ASC").all(contactId, sinceId) as Message[];
+    return db.prepare("SELECT * FROM messages WHERE contact_id = ? AND id > ? ORDER BY id ASC").all(contactId, sinceId) as Message[];
   }
 
   createMessage(contactId: number, platform: string, senderType: string, content: string, messageType: string = "text", imageUrl: string | null = null): Message {

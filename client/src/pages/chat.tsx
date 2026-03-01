@@ -75,7 +75,9 @@ export default function ChatPage() {
   const [pendingFiles, setPendingFiles] = useState<{ file: File; preview: string }[]>([]);
   const [uploading, setUploading] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
+  const [sendingRating, setSendingRating] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const chatViewportRef = useRef<HTMLDivElement>(null);
   const quickReplyRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const queryClient = useQueryClient();
@@ -100,15 +102,30 @@ export default function ChatPage() {
     refetchInterval: 3000,
   });
 
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
+    requestAnimationFrame(() => {
+      const viewport = chatViewportRef.current;
+      if (viewport) {
+        viewport.scrollTo({ top: viewport.scrollHeight, behavior });
+      }
+    });
+  }, []);
+
   useEffect(() => {
     if (messages.length > 0) {
       const latestId = messages[messages.length - 1].id;
       if (latestId > lastMessageIdRef.current) {
+        const isFirstLoad = lastMessageIdRef.current === 0;
         lastMessageIdRef.current = latestId;
-        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+        scrollToBottom(isFirstLoad ? "auto" : "smooth");
       }
     }
-  }, [messages]);
+  }, [messages, scrollToBottom]);
+
+  useEffect(() => {
+    lastMessageIdRef.current = 0;
+    scrollToBottom("auto");
+  }, [selectedId, scrollToBottom]);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -197,6 +214,31 @@ export default function ChatPage() {
   };
 
   const handleQuickReply = (text: string) => { setMessageInput(text); setShowQuickReplies(false); };
+
+  const handleSendRating = useCallback(async () => {
+    if (!selectedId || sendingRating) return;
+    if (selectedContact?.cs_rating != null) {
+      toast({ title: "客戶已評分過", description: "此客戶已完成滿意度評分，無法重複發送", variant: "destructive" });
+      return;
+    }
+    setSendingRating(true);
+    try {
+      const res = await fetch(`/api/contacts/${selectedId}/send-rating`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+      });
+      const data = await res.json();
+      if (res.ok) {
+        toast({ title: "已發送評價卡片", description: "滿意度調查已傳送給客戶" });
+        queryClient.invalidateQueries({ queryKey: ["/api/contacts", selectedId, "messages"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
+      } else {
+        toast({ title: "發送失敗", description: data.message, variant: "destructive" });
+      }
+    } catch { toast({ title: "發送失敗", variant: "destructive" }); }
+    finally { setSendingRating(false); }
+  }, [selectedId, sendingRating, selectedContact, queryClient, toast]);
 
   const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"];
   const MAX_FILE_SIZE = 10 * 1024 * 1024;
@@ -434,7 +476,7 @@ export default function ChatPage() {
                   </div>
                 </div>
               )}
-              <ScrollArea className="flex-1 bg-[#faf9f5]">
+              <div ref={chatViewportRef} className="flex-1 bg-[#faf9f5] overflow-y-auto">
                 <div className="p-5">
                   {messagesLoading ? (
                     <div className="text-center text-sm text-stone-400 py-8">載入訊息中...</div>
@@ -510,7 +552,7 @@ export default function ChatPage() {
                     </div>
                   )}
                 </div>
-              </ScrollArea>
+              </div>
 
               <div className="w-[280px] min-w-[280px] border-l border-stone-200 bg-white flex flex-col" data-testid="panel-right">
                 <Tabs value={rightTab} onValueChange={setRightTab} className="flex flex-col h-full">
@@ -655,6 +697,17 @@ export default function ChatPage() {
                   <input type="file" ref={fileInputRef} accept="image/jpeg,image/png,image/gif,image/webp" multiple onChange={handleFileSelect} className="hidden" data-testid="input-file-upload" />
                   <Button size="icon" variant="ghost" className="h-10 w-10 text-stone-400 hover:text-emerald-600 hover:bg-emerald-50" onClick={() => fileInputRef.current?.click()} data-testid="button-attach-file">
                     <Paperclip className="w-5 h-5" />
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-10 w-10 text-amber-400 hover:text-amber-500 hover:bg-amber-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                    onClick={handleSendRating}
+                    disabled={sendingRating || !selectedContact || selectedContact.platform !== "line" || selectedContact.cs_rating != null}
+                    title={selectedContact?.cs_rating != null ? "客戶已評分過" : "發送滿意度評價卡片"}
+                    data-testid="button-send-rating"
+                  >
+                    {sendingRating ? <Loader2 className="w-5 h-5 animate-spin" /> : <Star className="w-5 h-5 fill-current" />}
                   </Button>
                   <Input data-testid="input-message" placeholder="輸入訊息以真人客服身分回覆..." value={messageInput} onChange={(e) => setMessageInput(e.target.value)}
                     onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSendAll(); } }} disabled={sending || uploading} className="bg-stone-50 border-stone-200" />

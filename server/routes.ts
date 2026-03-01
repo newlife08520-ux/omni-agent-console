@@ -286,16 +286,30 @@ export async function registerRoutes(
       return res.status(400).json({ message: "Invalid status" });
     }
     storage.updateContactStatus(id, status);
-    if (status === "resolved") {
-      const contact = storage.getContact(id);
-      if (contact) {
-        storage.createMessage(id, contact.platform, "system", "(系統提示) 已自動發送 LINE 滿意度 1~5 星調查卡片給客戶");
-        if (contact.platform === "line") {
-          sendRatingFlexMessage(contact);
-        }
-      }
-    }
     return res.json({ success: true });
+  });
+
+  app.post("/api/contacts/:id/send-rating", authMiddleware, async (req, res) => {
+    const id = parseInt(req.params.id);
+    const contact = storage.getContact(id);
+    if (!contact) return res.status(404).json({ message: "聯絡人不存在" });
+    if (contact.cs_rating != null) {
+      return res.status(400).json({ message: "此客戶已評分過，無法重複發送" });
+    }
+    if (contact.platform !== "line") {
+      return res.status(400).json({ message: "僅支援 LINE 平台" });
+    }
+    const token = storage.getSetting("line_channel_access_token");
+    if (!token) {
+      return res.status(400).json({ message: "尚未設定 LINE Channel Access Token" });
+    }
+    try {
+      await sendRatingFlexMessage(contact);
+      storage.createMessage(id, contact.platform, "system", "(系統提示) 已手動發送滿意度調查卡片給客戶");
+      return res.json({ success: true });
+    } catch (err) {
+      return res.status(500).json({ message: "發送失敗" });
+    }
   });
 
   app.put("/api/contacts/:id/tags", authMiddleware, (req, res) => {
