@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { Switch, Route } from "wouter";
 import { queryClient, getQueryFn } from "./lib/queryClient";
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
@@ -10,10 +9,12 @@ import ChatPage from "@/pages/chat";
 import SettingsPage from "@/pages/settings";
 import KnowledgePage from "@/pages/knowledge";
 import TeamPage from "@/pages/team";
+import AnalyticsPage from "@/pages/analytics";
 import NotFound from "@/pages/not-found";
 import { Button } from "@/components/ui/button";
 import { LogOut, User } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
+import type { Setting } from "@shared/schema";
 
 function Router() {
   return (
@@ -22,6 +23,7 @@ function Router() {
       <Route path="/settings" component={SettingsPage} />
       <Route path="/knowledge" component={KnowledgePage} />
       <Route path="/team" component={TeamPage} />
+      <Route path="/analytics" component={AnalyticsPage} />
       <Route component={NotFound} />
     </Switch>
   );
@@ -30,6 +32,7 @@ function Router() {
 interface AuthUser {
   id: number;
   username: string;
+  display_name: string;
   role: "admin" | "agent";
 }
 
@@ -39,14 +42,26 @@ function AuthenticatedApp({ user }: { user: AuthUser }) {
     queryClient.invalidateQueries({ queryKey: ["/api/auth/check"] });
   };
 
+  const { data: settings = [] } = useQuery<Setting[]>({
+    queryKey: ["/api/settings"],
+    queryFn: getQueryFn({ on401: "throw" }),
+  });
+
+  const settingsMap: Record<string, string> = {};
+  settings.forEach((s) => { settingsMap[s.key] = s.value; });
+
   return (
     <div className="flex h-screen w-full bg-[#faf9f5]">
-      <AppSidebar userRole={user.role} />
+      <AppSidebar
+        userRole={user.role}
+        systemName={settingsMap.system_name || "AI 客服中控台"}
+        logoUrl={settingsMap.logo_url || ""}
+      />
       <div className="flex flex-col flex-1 min-w-0">
         <header className="flex items-center justify-end gap-3 px-5 py-2.5 border-b border-stone-200 bg-white/80 backdrop-blur-sm">
           <div className="flex items-center gap-2 text-xs text-stone-500">
             <User className="w-3.5 h-3.5" />
-            <span data-testid="text-current-user">{user.username}</span>
+            <span data-testid="text-current-user">{user.display_name}</span>
             <span className="px-1.5 py-0.5 rounded bg-stone-100 text-stone-600 text-[10px] font-medium">
               {user.role === "admin" ? "管理員" : "客服人員"}
             </span>
@@ -77,9 +92,6 @@ function AppContent() {
     staleTime: 0,
   });
 
-  const authenticated = data?.authenticated === true;
-  const user = data?.user;
-
   if (isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#faf9f5]">
@@ -91,11 +103,11 @@ function AppContent() {
     );
   }
 
-  if (!authenticated || !user) {
+  if (!data?.authenticated || !data?.user) {
     return <LoginPage onLogin={() => queryClient.invalidateQueries({ queryKey: ["/api/auth/check"] })} />;
   }
 
-  return <AuthenticatedApp user={user} />;
+  return <AuthenticatedApp user={data.user} />;
 }
 
 function App() {

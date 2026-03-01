@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { Eye, EyeOff, Save, Key, Shield, MessageSquare, Plug, Loader2 } from "lucide-react";
+import { Eye, EyeOff, Save, Key, Shield, MessageSquare, Plug, Loader2, Palette, Type, Image } from "lucide-react";
 import { apiRequest, getQueryFn } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import type { Setting } from "@shared/schema";
@@ -57,9 +57,7 @@ export default function SettingsPage() {
     } catch { toast({ title: "設定失敗", variant: "destructive" }); }
   };
 
-  const toggleKeyVisibility = (key: string) => {
-    setShowKeys((prev) => ({ ...prev, [key]: !prev[key] }));
-  };
+  const toggleKeyVisibility = (key: string) => setShowKeys((prev) => ({ ...prev, [key]: !prev[key] }));
 
   const maskValue = (value: string) => {
     if (!value) return "";
@@ -81,7 +79,7 @@ export default function SettingsPage() {
     <div className="p-6 max-w-3xl mx-auto space-y-6" data-testid="settings-page">
       <div>
         <h1 className="text-xl font-bold text-stone-800" data-testid="text-settings-title">系統設定</h1>
-        <p className="text-sm text-stone-500 mt-1">管理 API 金鑰與系統環境設定</p>
+        <p className="text-sm text-stone-500 mt-1">管理 API 金鑰、品牌外觀與系統環境設定</p>
       </div>
 
       <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
@@ -97,6 +95,48 @@ export default function SettingsPage() {
         </div>
       </div>
 
+      <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
+        <div className="flex items-center gap-2 mb-4">
+          <div className="w-8 h-8 rounded-xl bg-violet-100 flex items-center justify-center"><Palette className="w-4 h-4 text-violet-600" /></div>
+          <div>
+            <span className="text-sm font-semibold text-stone-800">品牌外觀設定</span>
+            <p className="text-xs text-stone-500">自訂系統名稱與品牌 Logo，變更即時生效</p>
+          </div>
+        </div>
+        <div className="space-y-3">
+          <div>
+            <div className="flex items-center gap-1.5 mb-1.5">
+              <Type className="w-3.5 h-3.5 text-stone-400" />
+              <label className="text-xs font-medium text-stone-600">系統名稱</label>
+            </div>
+            <div className="flex gap-2">
+              <Input data-testid="input-system-name" placeholder="AI 客服中控台" value={formValues.system_name || ""} onChange={(e) => setFormValues((prev) => ({ ...prev, system_name: e.target.value }))} className="bg-stone-50 border-stone-200" />
+              <Button onClick={() => handleSave("system_name")} disabled={saving === "system_name"} data-testid="button-save-system-name" className="text-xs shrink-0 bg-emerald-600 hover:bg-emerald-700 text-white">
+                <Save className="w-3.5 h-3.5 mr-1" />{saving === "system_name" ? "儲存中" : "儲存"}
+              </Button>
+            </div>
+          </div>
+          <div>
+            <div className="flex items-center gap-1.5 mb-1.5">
+              <Image className="w-3.5 h-3.5 text-stone-400" />
+              <label className="text-xs font-medium text-stone-600">Logo 圖片網址</label>
+            </div>
+            <div className="flex gap-2">
+              <Input data-testid="input-logo-url" placeholder="https://example.com/logo.png" value={formValues.logo_url || ""} onChange={(e) => setFormValues((prev) => ({ ...prev, logo_url: e.target.value }))} className="bg-stone-50 border-stone-200" />
+              <Button onClick={() => handleSave("logo_url")} disabled={saving === "logo_url"} data-testid="button-save-logo-url" className="text-xs shrink-0 bg-emerald-600 hover:bg-emerald-700 text-white">
+                <Save className="w-3.5 h-3.5 mr-1" />{saving === "logo_url" ? "儲存中" : "儲存"}
+              </Button>
+            </div>
+            {formValues.logo_url && (
+              <div className="mt-2 flex items-center gap-2">
+                <img src={formValues.logo_url} alt="Logo preview" className="w-8 h-8 rounded-lg object-cover border border-stone-200" onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
+                <span className="text-xs text-stone-400">預覽</span>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
       <div className="space-y-4">
         {settingsFields.map((field) => (
           <div key={field.key} className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
@@ -109,15 +149,10 @@ export default function SettingsPage() {
             </div>
             <div className="flex gap-2 mt-3">
               <div className="relative flex-1">
-                <Input
-                  data-testid={`input-${field.key}`}
-                  type={showKeys[field.key] ? "text" : "password"}
-                  placeholder={field.placeholder}
+                <Input data-testid={`input-${field.key}`} type={showKeys[field.key] ? "text" : "password"} placeholder={field.placeholder}
                   value={showKeys[field.key] ? (formValues[field.key] || "") : (formValues[field.key] ? maskValue(formValues[field.key]) : "")}
                   onChange={(e) => { if (showKeys[field.key]) setFormValues((prev) => ({ ...prev, [field.key]: e.target.value })); }}
-                  readOnly={!showKeys[field.key]}
-                  className="pr-10 bg-stone-50 border-stone-200"
-                />
+                  readOnly={!showKeys[field.key]} className="pr-10 bg-stone-50 border-stone-200" />
                 <button type="button" onClick={() => toggleKeyVisibility(field.key)} className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-600" data-testid={`button-toggle-${field.key}`}>
                   {showKeys[field.key] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>

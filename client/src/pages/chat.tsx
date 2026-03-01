@@ -7,17 +7,8 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
-  Send,
-  User,
-  Bot,
-  Headphones,
-  UserCheck,
-  Search,
-  X,
-  Plus,
-  Tag,
-  Circle,
-  Zap,
+  Send, User, Bot, Headphones, UserCheck, Search, X, Plus, Tag,
+  Circle, Zap, Star, Info,
 } from "lucide-react";
 import { apiRequest, getQueryFn } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -90,18 +81,14 @@ export default function ChatPage() {
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
-      if (quickReplyRef.current && !quickReplyRef.current.contains(e.target as Node)) {
-        setShowQuickReplies(false);
-      }
+      if (quickReplyRef.current && !quickReplyRef.current.contains(e.target as Node)) setShowQuickReplies(false);
     };
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
   const selectedContact = contacts.find((c) => c.id === selectedId);
-  const filteredContacts = contacts.filter((c) =>
-    c.display_name.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const filteredContacts = contacts.filter((c) => c.display_name.toLowerCase().includes(searchQuery.toLowerCase()));
 
   const handleSendMessage = useCallback(async () => {
     if (!messageInput.trim() || !selectedId || sending) return;
@@ -111,20 +98,15 @@ export default function ChatPage() {
       setMessageInput("");
       queryClient.invalidateQueries({ queryKey: ["/api/contacts", selectedId, "messages"] });
       queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
-    } catch {
-      toast({ title: "傳送失敗", variant: "destructive" });
-    } finally {
-      setSending(false);
-    }
+    } catch { toast({ title: "傳送失敗", variant: "destructive" }); }
+    finally { setSending(false); }
   }, [messageInput, selectedId, sending, queryClient, toast]);
 
   const handleToggleHuman = async (contactId: number, currentFlag: number) => {
     try {
       await apiRequest("PUT", `/api/contacts/${contactId}/human`, { needs_human: currentFlag ? 0 : 1 });
       queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
-    } catch {
-      toast({ title: "操作失敗", variant: "destructive" });
-    }
+    } catch { toast({ title: "操作失敗", variant: "destructive" }); }
   };
 
   const handleStatusChange = async (status: string) => {
@@ -132,57 +114,44 @@ export default function ChatPage() {
     try {
       await apiRequest("PUT", `/api/contacts/${selectedId}/status`, { status });
       queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
-    } catch {
-      toast({ title: "操作失敗", variant: "destructive" });
-    }
+      queryClient.invalidateQueries({ queryKey: ["/api/contacts", selectedId, "messages"] });
+    } catch { toast({ title: "操作失敗", variant: "destructive" }); }
+  };
+
+  const handleTogglePin = async (contactId: number, currentPinned: number) => {
+    try {
+      await apiRequest("PUT", `/api/contacts/${contactId}/pinned`, { is_pinned: currentPinned ? 0 : 1 });
+      queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
+    } catch { toast({ title: "操作失敗", variant: "destructive" }); }
   };
 
   const handleAddTag = async () => {
     if (!newTag.trim() || !selectedContact) return;
     const currentTags: string[] = JSON.parse(selectedContact.tags || "[]");
     if (currentTags.includes(newTag.trim())) { setNewTag(""); return; }
-    const updatedTags = [...currentTags, newTag.trim()];
     try {
-      await apiRequest("PUT", `/api/contacts/${selectedId}/tags`, { tags: updatedTags });
+      await apiRequest("PUT", `/api/contacts/${selectedId}/tags`, { tags: [...currentTags, newTag.trim()] });
       queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
       setNewTag("");
-    } catch {
-      toast({ title: "新增標籤失敗", variant: "destructive" });
-    }
+    } catch { toast({ title: "新增標籤失敗", variant: "destructive" }); }
   };
 
   const handleRemoveTag = async (tagToRemove: string) => {
     if (!selectedContact) return;
     const currentTags: string[] = JSON.parse(selectedContact.tags || "[]");
-    const updatedTags = currentTags.filter((t) => t !== tagToRemove);
     try {
-      await apiRequest("PUT", `/api/contacts/${selectedId}/tags`, { tags: updatedTags });
+      await apiRequest("PUT", `/api/contacts/${selectedId}/tags`, { tags: currentTags.filter((t) => t !== tagToRemove) });
       queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
-    } catch {
-      toast({ title: "移除標籤失敗", variant: "destructive" });
-    }
+    } catch { toast({ title: "移除標籤失敗", variant: "destructive" }); }
   };
 
-  const handleQuickReply = (text: string) => {
-    setMessageInput(text);
-    setShowQuickReplies(false);
-  };
+  const handleQuickReply = (text: string) => { setMessageInput(text); setShowQuickReplies(false); };
 
-  const formatTime = (dateStr: string) => {
-    const d = new Date(dateStr.replace(" ", "T"));
-    return d.toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit" });
-  };
-
-  const formatDate = (dateStr: string) => {
-    const d = new Date(dateStr.replace(" ", "T"));
-    return d.toLocaleDateString("zh-TW", { month: "short", day: "numeric" });
-  };
-
+  const formatTime = (dateStr: string) => new Date(dateStr.replace(" ", "T")).toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit" });
+  const formatDate = (dateStr: string) => new Date(dateStr.replace(" ", "T")).toLocaleDateString("zh-TW", { month: "short", day: "numeric" });
   const getInitials = (name: string) => name.charAt(0);
-
   const avatarColors = ["bg-emerald-500", "bg-amber-500", "bg-violet-500", "bg-sky-500", "bg-rose-400", "bg-teal-500", "bg-orange-400"];
   const getAvatarColor = (id: number) => avatarColors[id % avatarColors.length];
-
   const contactTags = selectedContact ? JSON.parse(selectedContact.tags || "[]") as string[] : [];
 
   return (
@@ -191,16 +160,9 @@ export default function ChatPage() {
         <div className="p-3 border-b border-stone-200">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400" />
-            <Input
-              data-testid="input-search-contacts"
-              placeholder="搜尋聯絡人..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-9 bg-stone-50 border-stone-200"
-            />
+            <Input data-testid="input-search-contacts" placeholder="搜尋聯絡人..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="pl-9 bg-stone-50 border-stone-200" />
           </div>
         </div>
-
         <ScrollArea className="flex-1">
           {contactsLoading ? (
             <div className="p-6 text-center text-sm text-stone-400">載入中...</div>
@@ -212,21 +174,13 @@ export default function ChatPage() {
                 const tags: string[] = JSON.parse(contact.tags || "[]");
                 const statusInfo = STATUS_MAP[contact.status] || STATUS_MAP.pending;
                 return (
-                  <button
-                    key={contact.id}
-                    onClick={() => { setSelectedId(contact.id); lastMessageIdRef.current = 0; }}
-                    className={`w-full flex items-start gap-3 p-3 rounded-2xl text-left transition-all ${
-                      selectedId === contact.id
-                        ? "bg-emerald-50/70 ring-1 ring-emerald-200"
-                        : "hover:bg-stone-50"
-                    }`}
+                  <button key={contact.id} onClick={() => { setSelectedId(contact.id); lastMessageIdRef.current = 0; }}
+                    className={`w-full flex items-start gap-3 p-3 rounded-2xl text-left transition-all ${selectedId === contact.id ? "bg-emerald-50/70 ring-1 ring-emerald-200" : "hover:bg-stone-50"}`}
                     data-testid={`contact-item-${contact.id}`}
                   >
                     <div className="relative shrink-0">
                       <Avatar className="w-11 h-11">
-                        <AvatarFallback className={`${getAvatarColor(contact.id)} text-white text-sm font-semibold`}>
-                          {getInitials(contact.display_name)}
-                        </AvatarFallback>
+                        <AvatarFallback className={`${getAvatarColor(contact.id)} text-white text-sm font-semibold`}>{getInitials(contact.display_name)}</AvatarFallback>
                       </Avatar>
                       {contact.needs_human ? (
                         <div className="absolute -bottom-0.5 -right-0.5 w-4 h-4 bg-red-500 rounded-full border-2 border-white flex items-center justify-center">
@@ -236,18 +190,22 @@ export default function ChatPage() {
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center justify-between gap-1">
-                        <span className="text-sm font-semibold text-stone-800 truncate">{contact.display_name}</span>
-                        {contact.last_message_at && (
-                          <span className="text-[11px] text-stone-400 shrink-0">{formatTime(contact.last_message_at)}</span>
-                        )}
+                        <div className="flex items-center gap-1 min-w-0">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleTogglePin(contact.id, contact.is_pinned); }}
+                            className="shrink-0"
+                            data-testid={`button-pin-${contact.id}`}
+                          >
+                            <Star className={`w-3.5 h-3.5 transition-colors ${contact.is_pinned ? "fill-amber-400 text-amber-400" : "text-stone-300 hover:text-amber-400"}`} />
+                          </button>
+                          <span className="text-sm font-semibold text-stone-800 truncate">{contact.display_name}</span>
+                        </div>
+                        {contact.last_message_at && <span className="text-[11px] text-stone-400 shrink-0">{formatTime(contact.last_message_at)}</span>}
                       </div>
-                      {contact.last_message && (
-                        <p className="text-xs text-stone-500 truncate mt-0.5">{contact.last_message}</p>
-                      )}
+                      {contact.last_message && <p className="text-xs text-stone-500 truncate mt-0.5">{contact.last_message}</p>}
                       <div className="flex items-center gap-1 mt-1.5 flex-wrap">
                         <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${statusInfo.color}`}>
-                          <span className={`w-1.5 h-1.5 rounded-full ${statusInfo.dot}`} />
-                          {statusInfo.label}
+                          <span className={`w-1.5 h-1.5 rounded-full ${statusInfo.dot}`} />{statusInfo.label}
                         </span>
                         {tags.slice(0, 2).map((tag) => (
                           <span key={tag} className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${getTagColor(tag)}`}>{tag}</span>
@@ -279,41 +237,34 @@ export default function ChatPage() {
             <div className="flex items-center justify-between gap-3 px-5 py-3 border-b border-stone-200 bg-white">
               <div className="flex items-center gap-3 min-w-0">
                 <Avatar className="w-9 h-9 shrink-0">
-                  <AvatarFallback className={`${getAvatarColor(selectedContact?.id || 0)} text-white text-sm`}>
-                    {selectedContact ? getInitials(selectedContact.display_name) : "?"}
-                  </AvatarFallback>
+                  <AvatarFallback className={`${getAvatarColor(selectedContact?.id || 0)} text-white text-sm`}>{selectedContact ? getInitials(selectedContact.display_name) : "?"}</AvatarFallback>
                 </Avatar>
                 <div className="min-w-0">
-                  <h3 className="text-sm font-bold text-stone-800 truncate" data-testid="text-selected-contact">
-                    {selectedContact?.display_name}
-                  </h3>
+                  <div className="flex items-center gap-1.5">
+                    <h3 className="text-sm font-bold text-stone-800 truncate" data-testid="text-selected-contact">{selectedContact?.display_name}</h3>
+                    {selectedContact?.is_pinned ? <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400 shrink-0" /> : null}
+                  </div>
                   <div className="flex items-center gap-1.5">
                     <Circle className="w-2 h-2 fill-emerald-500 text-emerald-500" />
                     <span className="text-[11px] text-stone-400">LINE</span>
                   </div>
                 </div>
               </div>
-
               <div className="flex items-center gap-2 shrink-0">
                 <Select value={selectedContact?.status || "pending"} onValueChange={handleStatusChange}>
-                  <SelectTrigger className="w-[130px] h-8 text-xs border-stone-200" data-testid="select-contact-status">
-                    <SelectValue />
-                  </SelectTrigger>
+                  <SelectTrigger className="w-[130px] h-8 text-xs border-stone-200" data-testid="select-contact-status"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="pending"><span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-red-500" />待處理</span></SelectItem>
                     <SelectItem value="processing"><span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-amber-500" />處理中</span></SelectItem>
                     <SelectItem value="resolved"><span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-emerald-500" />已解決</span></SelectItem>
                   </SelectContent>
                 </Select>
-
                 {selectedContact?.needs_human ? (
                   <Badge variant="destructive" className="gap-1 text-xs"><Headphones className="w-3 h-3" />人工模式</Badge>
                 ) : (
                   <Badge variant="secondary" className="gap-1 text-xs bg-stone-100 text-stone-600"><Bot className="w-3 h-3" />AI 模式</Badge>
                 )}
-                <Button
-                  size="sm"
-                  variant={selectedContact?.needs_human ? "secondary" : "default"}
+                <Button size="sm" variant={selectedContact?.needs_human ? "secondary" : "default"}
                   onClick={() => selectedContact && handleToggleHuman(selectedContact.id, selectedContact.needs_human)}
                   data-testid="button-toggle-human"
                   className={`text-xs ${!selectedContact?.needs_human ? "bg-emerald-600 hover:bg-emerald-700 text-white" : ""}`}
@@ -327,19 +278,13 @@ export default function ChatPage() {
               <Tag className="w-3.5 h-3.5 text-stone-400 shrink-0" />
               {contactTags.map((tag) => (
                 <span key={tag} className={`inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full border ${getTagColor(tag)}`}>
-                  {tag}
-                  <button onClick={() => handleRemoveTag(tag)} className="hover:opacity-70" data-testid={`button-remove-tag-${tag}`}><X className="w-3 h-3" /></button>
+                  {tag}<button onClick={() => handleRemoveTag(tag)} className="hover:opacity-70" data-testid={`button-remove-tag-${tag}`}><X className="w-3 h-3" /></button>
                 </span>
               ))}
               <div className="flex items-center gap-1">
-                <Input
-                  data-testid="input-add-tag"
-                  placeholder="新增標籤..."
-                  value={newTag}
-                  onChange={(e) => setNewTag(e.target.value)}
+                <Input data-testid="input-add-tag" placeholder="新增標籤..." value={newTag} onChange={(e) => setNewTag(e.target.value)}
                   onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleAddTag(); } }}
-                  className="h-6 w-24 text-xs bg-transparent border-stone-200 px-2"
-                />
+                  className="h-6 w-24 text-xs bg-transparent border-stone-200 px-2" />
                 <Button size="icon" variant="ghost" className="h-6 w-6" onClick={handleAddTag} data-testid="button-add-tag"><Plus className="w-3 h-3" /></Button>
               </div>
             </div>
@@ -354,6 +299,25 @@ export default function ChatPage() {
                   <div className="space-y-4 max-w-2xl mx-auto">
                     {messages.map((msg, index) => {
                       const showDate = index === 0 || formatDate(msg.created_at) !== formatDate(messages[index - 1].created_at);
+
+                      if (msg.sender_type === "system") {
+                        return (
+                          <div key={msg.id}>
+                            {showDate && (
+                              <div className="flex justify-center my-5">
+                                <span className="text-[11px] text-stone-400 bg-white px-3 py-1 rounded-full shadow-sm border border-stone-100">{formatDate(msg.created_at)}</span>
+                              </div>
+                            )}
+                            <div className="flex justify-center" data-testid={`message-${msg.id}`}>
+                              <div className="flex items-center gap-1.5 bg-stone-100 text-stone-500 text-xs px-4 py-2 rounded-full">
+                                <Info className="w-3 h-3" />
+                                {msg.content}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      }
+
                       return (
                         <div key={msg.id}>
                           {showDate && (
@@ -374,17 +338,12 @@ export default function ChatPage() {
                               </div>
                               <div>
                                 <div className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow-sm ${
-                                  msg.sender_type === "user"
-                                    ? "bg-white text-stone-700 rounded-bl-md border border-stone-100"
-                                    : msg.sender_type === "ai"
-                                    ? "bg-emerald-50 text-emerald-900 rounded-br-md border border-emerald-100"
+                                  msg.sender_type === "user" ? "bg-white text-stone-700 rounded-bl-md border border-stone-100"
+                                    : msg.sender_type === "ai" ? "bg-emerald-50 text-emerald-900 rounded-br-md border border-emerald-100"
                                     : "bg-amber-600 text-white rounded-br-md"
-                                }`}>
-                                  {msg.content}
-                                </div>
+                                }`}>{msg.content}</div>
                                 <div className={`text-[10px] text-stone-400 mt-1 ${msg.sender_type === "user" ? "text-left" : "text-right"}`}>
-                                  {msg.sender_type === "ai" ? "AI 助理 " : msg.sender_type === "admin" ? "真人客服 " : ""}
-                                  {formatTime(msg.created_at)}
+                                  {msg.sender_type === "ai" ? "AI 助理 " : msg.sender_type === "admin" ? "真人客服 " : ""}{formatTime(msg.created_at)}
                                 </div>
                               </div>
                             </div>
@@ -401,48 +360,23 @@ export default function ChatPage() {
             <div className="p-4 border-t border-stone-200 bg-white">
               <div className="flex gap-2 max-w-2xl mx-auto items-center">
                 <div className="relative" ref={quickReplyRef}>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    className="h-10 w-10 text-amber-500 hover:text-amber-600 hover:bg-amber-50"
-                    onClick={() => setShowQuickReplies(!showQuickReplies)}
-                    data-testid="button-quick-reply"
-                  >
+                  <Button size="icon" variant="ghost" className="h-10 w-10 text-amber-500 hover:text-amber-600 hover:bg-amber-50"
+                    onClick={() => setShowQuickReplies(!showQuickReplies)} data-testid="button-quick-reply">
                     <Zap className="w-5 h-5" />
                   </Button>
                   {showQuickReplies && (
                     <div className="absolute bottom-12 left-0 w-72 bg-white rounded-2xl shadow-lg border border-stone-200 py-2 z-50" data-testid="quick-reply-menu">
                       <p className="text-[11px] text-stone-400 px-3 pb-1.5 font-medium">快捷回覆</p>
                       {QUICK_REPLIES.map((text, i) => (
-                        <button
-                          key={i}
-                          onClick={() => handleQuickReply(text)}
-                          className="w-full text-left px-3 py-2 text-sm text-stone-700 hover:bg-stone-50 transition-colors"
-                          data-testid={`quick-reply-${i}`}
-                        >
-                          {text}
-                        </button>
+                        <button key={i} onClick={() => handleQuickReply(text)} className="w-full text-left px-3 py-2 text-sm text-stone-700 hover:bg-stone-50 transition-colors" data-testid={`quick-reply-${i}`}>{text}</button>
                       ))}
                     </div>
                   )}
                 </div>
-                <Input
-                  data-testid="input-message"
-                  placeholder="輸入訊息以真人客服身分回覆..."
-                  value={messageInput}
-                  onChange={(e) => setMessageInput(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSendMessage(); } }}
-                  disabled={sending}
-                  className="bg-stone-50 border-stone-200"
-                />
-                <Button
-                  onClick={handleSendMessage}
-                  disabled={!messageInput.trim() || sending}
-                  data-testid="button-send-message"
-                  className="bg-emerald-600 hover:bg-emerald-700 text-white px-4"
-                >
-                  <Send className="w-4 h-4 mr-1.5" />
-                  傳送
+                <Input data-testid="input-message" placeholder="輸入訊息以真人客服身分回覆..." value={messageInput} onChange={(e) => setMessageInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSendMessage(); } }} disabled={sending} className="bg-stone-50 border-stone-200" />
+                <Button onClick={handleSendMessage} disabled={!messageInput.trim() || sending} data-testid="button-send-message" className="bg-emerald-600 hover:bg-emerald-700 text-white px-4">
+                  <Send className="w-4 h-4 mr-1.5" />傳送
                 </Button>
               </div>
               <p className="text-[10px] text-stone-400 text-center mt-2">以管理員身分發送訊息，將以真人客服樣式顯示</p>

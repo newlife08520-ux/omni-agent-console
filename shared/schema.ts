@@ -2,6 +2,7 @@ export interface User {
   id: number;
   username: string;
   password_hash: string;
+  display_name: string;
   role: "admin" | "agent";
   created_at: string;
 }
@@ -13,6 +14,7 @@ export interface Contact {
   display_name: string;
   avatar_url: string | null;
   needs_human: number;
+  is_pinned: number;
   status: "pending" | "processing" | "resolved";
   tags: string;
   last_message_at: string | null;
@@ -27,7 +29,7 @@ export interface Message {
   id: number;
   contact_id: number;
   platform: string;
-  sender_type: "user" | "ai" | "admin";
+  sender_type: "user" | "ai" | "admin" | "system";
   content: string;
   created_at: string;
 }
@@ -47,11 +49,9 @@ export interface KnowledgeFile {
 
 export interface TeamMember {
   id: number;
-  name: string;
-  email: string;
-  role: "super_admin" | "agent";
-  avatar_url: string | null;
-  status: "online" | "offline";
+  username: string;
+  display_name: string;
+  role: "admin" | "agent";
   created_at: string;
 }
 
@@ -63,5 +63,19 @@ export interface LoginRequest {
 export interface LoginResponse {
   success: boolean;
   message: string;
-  user?: { id: number; username: string; role: string };
+  user?: { id: number; username: string; display_name: string; role: string };
+}
+
+export interface AnalyticsData {
+  kpi: {
+    todayInbound: number;
+    aiInterceptRate: number;
+    csatScore: number;
+  };
+  agentPerformance: { name: string; cases: number }[];
+  intentDistribution: { name: string; value: number }[];
+  aiInsights: {
+    painPoints: string[];
+    suggestions: string[];
+  };
 }

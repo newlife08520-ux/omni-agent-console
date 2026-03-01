@@ -1,16 +1,30 @@
-import { useQuery } from "@tanstack/react-query";
-import { Badge } from "@/components/ui/badge";
+import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Users, Shield, Headphones, Circle, Mail } from "lucide-react";
-import { getQueryFn } from "@/lib/queryClient";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { Users, Shield, Headphones, Mail, Plus, Trash2, UserPlus } from "lucide-react";
+import { apiRequest, getQueryFn } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
 import type { TeamMember } from "@shared/schema";
 
 const ROLE_MAP: Record<string, { label: string; color: string; icon: typeof Shield }> = {
-  super_admin: { label: "超級管理員", color: "bg-violet-50 text-violet-600 border-violet-200", icon: Shield },
+  admin: { label: "管理員", color: "bg-violet-50 text-violet-600 border-violet-200", icon: Shield },
   agent: { label: "一般客服", color: "bg-sky-50 text-sky-600 border-sky-200", icon: Headphones },
 };
 
 export default function TeamPage() {
+  const [showDialog, setShowDialog] = useState(false);
+  const [formName, setFormName] = useState("");
+  const [formUsername, setFormUsername] = useState("");
+  const [formPassword, setFormPassword] = useState("");
+  const [formRole, setFormRole] = useState("agent");
+  const [creating, setCreating] = useState(false);
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+
   const { data: members = [], isLoading } = useQuery<TeamMember[]>({
     queryKey: ["/api/team"],
     queryFn: getQueryFn({ on401: "throw" }),
@@ -19,11 +33,48 @@ export default function TeamPage() {
   const avatarColors = ["bg-emerald-500", "bg-amber-500", "bg-violet-500", "bg-sky-500", "bg-rose-400", "bg-teal-500", "bg-orange-400"];
   const getAvatarColor = (id: number) => avatarColors[id % avatarColors.length];
 
+  const handleCreate = async () => {
+    if (!formName.trim() || !formUsername.trim() || !formPassword.trim()) {
+      toast({ title: "請填寫所有欄位", variant: "destructive" });
+      return;
+    }
+    setCreating(true);
+    try {
+      await apiRequest("POST", "/api/team", {
+        display_name: formName.trim(),
+        username: formUsername.trim(),
+        password: formPassword.trim(),
+        role: formRole,
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/team"] });
+      toast({ title: "新增成功", description: `${formName} 已加入團隊` });
+      setShowDialog(false);
+      setFormName("");
+      setFormUsername("");
+      setFormPassword("");
+      setFormRole("agent");
+    } catch (err: any) {
+      const msg = err?.message?.includes("400") ? "該帳號已存在" : "新增失敗";
+      toast({ title: msg, variant: "destructive" });
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleDelete = async (id: number, name: string) => {
+    try {
+      await apiRequest("DELETE", `/api/team/${id}`);
+      queryClient.invalidateQueries({ queryKey: ["/api/team"] });
+      toast({ title: "刪除成功", description: `${name} 已移出團隊` });
+    } catch (err: any) {
+      const msg = err?.message?.includes("400") ? "無法刪除目前登入的帳號" : "刪除失敗";
+      toast({ title: msg, variant: "destructive" });
+    }
+  };
+
   if (isLoading) {
     return <div className="flex items-center justify-center h-full"><p className="text-stone-400">載入中...</p></div>;
   }
-
-  const onlineCount = members.filter((m) => m.status === "online").length;
 
   return (
     <div className="p-6 max-w-4xl mx-auto space-y-6" data-testid="team-page">
@@ -33,11 +84,10 @@ export default function TeamPage() {
           <p className="text-sm text-stone-500 mt-1">管理客服團隊成員與權限設定</p>
         </div>
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5 text-sm text-stone-500">
-            <div className="w-2 h-2 rounded-full bg-emerald-400" />
-            <span>{onlineCount} 人在線</span>
-          </div>
           <div className="text-sm text-stone-500">共 {members.length} 位成員</div>
+          <Button onClick={() => setShowDialog(true)} className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs" data-testid="button-add-member">
+            <Plus className="w-3.5 h-3.5 mr-1.5" />新增成員
+          </Button>
         </div>
       </div>
 
@@ -46,39 +96,75 @@ export default function TeamPage() {
           <Users className="w-4 h-4 text-stone-400" />
           <span className="text-sm font-semibold text-stone-800">團隊成員列表</span>
         </div>
-
         <div className="divide-y divide-stone-100">
           {members.map((member) => {
             const roleInfo = ROLE_MAP[member.role] || ROLE_MAP.agent;
             const RoleIcon = roleInfo.icon;
             return (
               <div key={member.id} className="flex items-center gap-4 px-5 py-4 hover:bg-stone-50 transition-colors" data-testid={`team-member-${member.id}`}>
-                <div className="relative shrink-0">
-                  <Avatar className="w-12 h-12">
-                    <AvatarFallback className={`${getAvatarColor(member.id)} text-white font-semibold text-base`}>{member.name.charAt(0)}</AvatarFallback>
-                  </Avatar>
-                  <div className={`absolute bottom-0 right-0 w-3.5 h-3.5 rounded-full border-2 border-white ${member.status === "online" ? "bg-emerald-400" : "bg-stone-300"}`} />
-                </div>
+                <Avatar className="w-12 h-12 shrink-0">
+                  <AvatarFallback className={`${getAvatarColor(member.id)} text-white font-semibold text-base`}>{member.display_name.charAt(0)}</AvatarFallback>
+                </Avatar>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
-                    <span className="text-sm font-semibold text-stone-800">{member.name}</span>
+                    <span className="text-sm font-semibold text-stone-800">{member.display_name}</span>
                     <span className={`inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-full border ${roleInfo.color}`}>
                       <RoleIcon className="w-3 h-3" />{roleInfo.label}
                     </span>
                   </div>
                   <div className="flex items-center gap-1.5 mt-0.5">
-                    <Mail className="w-3 h-3 text-stone-400" /><span className="text-xs text-stone-500">{member.email}</span>
+                    <Mail className="w-3 h-3 text-stone-400" />
+                    <span className="text-xs text-stone-500">@{member.username}</span>
                   </div>
                 </div>
-                <div className="shrink-0 flex items-center gap-1.5">
-                  <Circle className={`w-2 h-2 ${member.status === "online" ? "fill-emerald-500 text-emerald-500" : "fill-stone-300 text-stone-300"}`} />
-                  <span className="text-xs text-stone-500">{member.status === "online" ? "在線" : "離線"}</span>
-                </div>
+                <Button size="icon" variant="ghost" onClick={() => handleDelete(member.id, member.display_name)} data-testid={`button-delete-member-${member.id}`} className="text-red-400 hover:text-red-600 hover:bg-red-50">
+                  <Trash2 className="w-4 h-4" />
+                </Button>
               </div>
             );
           })}
         </div>
       </div>
+
+      <Dialog open={showDialog} onOpenChange={setShowDialog}>
+        <DialogContent className="bg-white border-stone-200 rounded-2xl" data-testid="dialog-add-member">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-stone-800">
+              <UserPlus className="w-5 h-5 text-emerald-600" />新增團隊成員
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div>
+              <label className="text-xs font-medium text-stone-600 mb-1 block">姓名</label>
+              <Input data-testid="input-member-name" placeholder="輸入姓名" value={formName} onChange={(e) => setFormName(e.target.value)} className="bg-stone-50 border-stone-200" />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-stone-600 mb-1 block">帳號 (Username)</label>
+              <Input data-testid="input-member-username" placeholder="輸入帳號" value={formUsername} onChange={(e) => setFormUsername(e.target.value)} className="bg-stone-50 border-stone-200" />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-stone-600 mb-1 block">密碼</label>
+              <Input data-testid="input-member-password" type="password" placeholder="輸入密碼" value={formPassword} onChange={(e) => setFormPassword(e.target.value)} className="bg-stone-50 border-stone-200" />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-stone-600 mb-1 block">角色</label>
+              <Select value={formRole} onValueChange={setFormRole}>
+                <SelectTrigger className="border-stone-200" data-testid="select-member-role"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="admin"><span className="flex items-center gap-1.5"><Shield className="w-3 h-3" />管理員 (Admin)</span></SelectItem>
+                  <SelectItem value="agent"><span className="flex items-center gap-1.5"><Headphones className="w-3 h-3" />一般客服 (Agent)</span></SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setShowDialog(false)} className="text-stone-500">取消</Button>
+            <Button onClick={handleCreate} disabled={creating} data-testid="button-confirm-add-member" className="bg-emerald-600 hover:bg-emerald-700 text-white">
+              {creating ? "建立中..." : "確認新增"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

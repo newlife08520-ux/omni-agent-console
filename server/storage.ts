@@ -6,6 +6,9 @@ initDatabase();
 export interface IStorage {
   authenticateUser(username: string, password: string): User | null;
   getUserById(id: number): User | undefined;
+  createUser(username: string, password: string, displayName: string, role: string): User;
+  deleteUser(id: number): boolean;
+  getTeamMembers(): TeamMember[];
   getSetting(key: string): string | null;
   getAllSettings(): Setting[];
   setSetting(key: string, value: string): void;
@@ -14,6 +17,7 @@ export interface IStorage {
   updateContactHumanFlag(id: number, needsHuman: number): void;
   updateContactStatus(id: number, status: string): void;
   updateContactTags(id: number, tags: string[]): void;
+  updateContactPinned(id: number, isPinned: number): void;
   getMessages(contactId: number): Message[];
   getMessagesSince(contactId: number, sinceId: number): Message[];
   createMessage(contactId: number, platform: string, senderType: string, content: string): Message;
@@ -21,7 +25,6 @@ export interface IStorage {
   getKnowledgeFiles(): KnowledgeFile[];
   createKnowledgeFile(filename: string, originalName: string, size: number): KnowledgeFile;
   deleteKnowledgeFile(id: number): boolean;
-  getTeamMembers(): TeamMember[];
 }
 
 export class SQLiteStorage implements IStorage {
@@ -33,6 +36,21 @@ export class SQLiteStorage implements IStorage {
 
   getUserById(id: number): User | undefined {
     return db.prepare("SELECT * FROM users WHERE id = ?").get(id) as User | undefined;
+  }
+
+  createUser(username: string, password: string, displayName: string, role: string): User {
+    const hash = hashPassword(password);
+    const result = db.prepare("INSERT INTO users (username, password_hash, display_name, role) VALUES (?, ?, ?, ?)").run(username, hash, displayName, role);
+    return db.prepare("SELECT * FROM users WHERE id = ?").get(Number(result.lastInsertRowid)) as User;
+  }
+
+  deleteUser(id: number): boolean {
+    const result = db.prepare("DELETE FROM users WHERE id = ?").run(id);
+    return result.changes > 0;
+  }
+
+  getTeamMembers(): TeamMember[] {
+    return db.prepare("SELECT id, username, display_name, role, created_at FROM users ORDER BY created_at ASC").all() as TeamMember[];
   }
 
   getSetting(key: string): string | null {
@@ -49,7 +67,7 @@ export class SQLiteStorage implements IStorage {
   }
 
   getContacts(): ContactWithPreview[] {
-    const contacts = db.prepare("SELECT * FROM contacts ORDER BY last_message_at DESC").all() as Contact[];
+    const contacts = db.prepare("SELECT * FROM contacts ORDER BY is_pinned DESC, last_message_at DESC").all() as Contact[];
     return contacts.map((c) => {
       const lastMsg = db.prepare("SELECT content FROM messages WHERE contact_id = ? ORDER BY created_at DESC LIMIT 1").get(c.id) as { content: string } | undefined;
       return { ...c, last_message: lastMsg?.content || "" };
@@ -72,6 +90,10 @@ export class SQLiteStorage implements IStorage {
     db.prepare("UPDATE contacts SET tags = ? WHERE id = ?").run(JSON.stringify(tags), id);
   }
 
+  updateContactPinned(id: number, isPinned: number): void {
+    db.prepare("UPDATE contacts SET is_pinned = ? WHERE id = ?").run(isPinned, id);
+  }
+
   getMessages(contactId: number): Message[] {
     return db.prepare("SELECT * FROM messages WHERE contact_id = ? ORDER BY created_at ASC").all(contactId) as Message[];
   }
@@ -84,15 +106,15 @@ export class SQLiteStorage implements IStorage {
     const now = new Date().toISOString().replace("T", " ").substring(0, 19);
     const result = db.prepare("INSERT INTO messages (contact_id, platform, sender_type, content, created_at) VALUES (?, ?, ?, ?, ?)").run(contactId, platform, senderType, content, now);
     db.prepare("UPDATE contacts SET last_message_at = ? WHERE id = ?").run(now, contactId);
-    return { id: Number(result.lastInsertRowid), contact_id: contactId, platform, sender_type: senderType as "user" | "ai" | "admin", content, created_at: now };
+    return { id: Number(result.lastInsertRowid), contact_id: contactId, platform, sender_type: senderType as any, content, created_at: now };
   }
 
   getOrCreateContact(platform: string, platformUserId: string, displayName: string): Contact {
     let contact = db.prepare("SELECT * FROM contacts WHERE platform = ? AND platform_user_id = ?").get(platform, platformUserId) as Contact | undefined;
     if (!contact) {
       const now = new Date().toISOString().replace("T", " ").substring(0, 19);
-      const result = db.prepare("INSERT INTO contacts (platform, platform_user_id, display_name, needs_human, status, tags, created_at) VALUES (?, ?, ?, 0, 'pending', '[]', ?)").run(platform, platformUserId, displayName, now);
-      contact = { id: Number(result.lastInsertRowid), platform, platform_user_id: platformUserId, display_name: displayName, avatar_url: null, needs_human: 0, status: "pending", tags: "[]", last_message_at: null, created_at: now };
+      const result = db.prepare("INSERT INTO contacts (platform, platform_user_id, display_name, needs_human, is_pinned, status, tags, created_at) VALUES (?, ?, ?, 0, 0, 'pending', '[]', ?)").run(platform, platformUserId, displayName, now);
+      contact = { id: Number(result.lastInsertRowid), platform, platform_user_id: platformUserId, display_name: displayName, avatar_url: null, needs_human: 0, is_pinned: 0, status: "pending", tags: "[]", last_message_at: null, created_at: now };
     }
     return contact;
   }
@@ -111,17 +133,6 @@ export class SQLiteStorage implements IStorage {
     const result = db.prepare("DELETE FROM knowledge_files WHERE id = ?").run(id);
     return result.changes > 0;
   }
-
-  getTeamMembers(): TeamMember[] {
-    return db.prepare("SELECT * FROM team_members ORDER BY created_at ASC").all() as TeamMember[];
-  }
 }
 
 export const storage = new SQLiteStorage();
-
-export function getOrderStatus(phone: string): { status: string; order_id: string } {
-  const statuses = ["處理中", "已出貨", "配送中", "已送達"];
-  const status = statuses[Math.floor(Math.random() * statuses.length)];
-  const orderId = `ORD-${Date.now().toString().slice(-8)}`;
-  return { status, order_id: orderId };
-}
