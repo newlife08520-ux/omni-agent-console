@@ -9,7 +9,7 @@ A commercial-grade omnichannel AI customer service dashboard focused on LINE cha
 - **Database**: SQLite via better-sqlite3 (file: omnichannel.db)
 - **Auth**: Session-based with 3-tier RBAC (super_admin / marketing_manager / cs_agent), SHA-256 password hashing
 - **AI**: OpenAI API integration (gpt-5.2) for sandbox testing and auto-reply
-- **External API**: 一頁商店 (Super Landing) via https://api.super-landing.com — field mapping: recipient→buyer_name, mobile→buyer_phone, email→buyer_email, tracking_codes→tracking_number, created_date→created_at; triple-mode lookup: (1) global_order_id direct, (2) date-range + email/phone/name filter (31-day max, paginated fetch), (3) page_id + phone product-based search (paginated fetch, phone matching)
+- **External API**: 一頁商店 (Super Landing) via https://api.super-landing.com — field mapping: recipient→buyer_name, mobile→buyer_phone, email→buyer_email, tracking_codes→tracking_number, created_date→created_at; triple-mode lookup: (1) global_order_id direct, (2) date-range + email/phone/name filter (31-day max, paginated fetch), (3) page_id + phone product-based search (paginated fetch, phone matching); auto-synced pages catalog cache (hourly refresh) with dynamic AI prompt injection for fuzzy product matching
 
 ## Test Accounts
 - **admin** / admin123 → role: super_admin, display_name: 系統管理員 (full access)
@@ -100,7 +100,7 @@ shared/
 ## Key Features (V6)
 1. **3-Tier RBAC**: super_admin, marketing_manager, cs_agent with granular access control
 2. **Custom Date Range Picker**: Calendar popover for arbitrary date ranges in analytics
-3. **一頁商店 API Integration**: Triple-mode order lookup — (1) strict global_order_id direct query, (2) product + phone search via page_id, (3) date-range + email/phone/name filter with 31-day cap; AI prompt v4 enforces 3-stage escalation: ask order ID → ask product+phone (preferred) or date+contact → human transfer only as last resort
+3. **一頁商店 API Integration**: Triple-mode order lookup — (1) strict global_order_id direct query, (2) product + phone search via page_id, (3) date-range + email/phone/name filter with 31-day cap; AI prompt v4.1 enforces 3-stage escalation with fuzzy product matching: ask order ID → ask product+phone (AI auto-matches from cached catalog using semantic understanding, handles typos/slang/nicknames, disambiguation when ambiguous) → human transfer only as last resort; pages catalog auto-synced hourly and dynamically injected into system prompt before every OpenAI call
 4. **Order Lookup Panel**: Right-side tabs in chat with customer info + order search
 5. **VIP Badges**: Crown icon badges for VIP contacts (level 1-3)
 6. **Team CRUD with 3-Tier Roles**: Add/edit/delete with role descriptions

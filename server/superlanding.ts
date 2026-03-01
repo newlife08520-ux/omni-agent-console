@@ -173,7 +173,48 @@ export interface ProductPageMapping {
   productName: string;
 }
 
-export const DEFAULT_PRODUCT_PAGES: ProductPageMapping[] = [];
+let cachedPages: ProductPageMapping[] = [];
+let cacheTimestamp = 0;
+const CACHE_TTL_MS = 60 * 60 * 1000;
+
+export function getCachedPages(): ProductPageMapping[] {
+  return cachedPages;
+}
+
+export function getCachedPagesAge(): number {
+  return cacheTimestamp > 0 ? Date.now() - cacheTimestamp : Infinity;
+}
+
+export async function refreshPagesCache(config: SuperLandingConfig): Promise<ProductPageMapping[]> {
+  if (!config.merchantNo || !config.accessKey) {
+    console.log("[銷售頁快取] 尚未設定 API 金鑰，略過同步");
+    return cachedPages;
+  }
+  try {
+    const pages = await fetchPages(config);
+    cachedPages = pages;
+    cacheTimestamp = Date.now();
+    console.log(`[銷售頁快取] 同步完成，共 ${pages.length} 個銷售頁`);
+    return pages;
+  } catch (err: any) {
+    console.error("[銷售頁快取] 同步失敗:", err.message);
+    cacheTimestamp = Date.now();
+    return cachedPages;
+  }
+}
+
+export async function ensurePagesCacheLoaded(config: SuperLandingConfig): Promise<ProductPageMapping[]> {
+  if (cachedPages.length > 0 && (Date.now() - cacheTimestamp) < CACHE_TTL_MS) {
+    return cachedPages;
+  }
+  return refreshPagesCache(config);
+}
+
+export function buildProductCatalogPrompt(pages: ProductPageMapping[]): string {
+  if (pages.length === 0) return "";
+  const lines = pages.map((p) => `- page_id=${p.pageId}｜${p.productName}`);
+  return `\n\n## 🛍️ 目前商店產品對應表（自動同步，共 ${pages.length} 項）\n以下是目前所有可查詢的產品與其對應的 page_id，AI 必須依此表進行模糊匹配：\n${lines.join("\n")}\n\n## 🔍 產品模糊匹配規則\n1. 當客戶提到購買的產品時（可能包含錯字、簡稱、俗稱、用途描述，如「洗馬桶的」→潔廁泡泡、「蛋糕」→巴斯克），你必須從上方「產品對應表」中，使用語意理解推論出最符合的正確產品名稱與 page_id。\n2. **二次確認（防呆）**：如果客戶的描述太過模糊，可能對應到多個商品（例如只說「筋膜」，但對應表中有多款筋膜類產品），你必須主動列出所有可能的選項讓客戶確認，例如：「請問您購買的是『日本懶人舒壓筋膜圈』還是『雲感筋膜 SPA 軸』呢？」\n3. **自動觸發查詢**：當你成功推論出唯一的產品後，提取該產品的 page_id，連同客戶提供的手機號碼，呼叫「商品+電話」進階查詢功能來搜尋訂單。\n4. 若客戶描述的產品完全無法在對應表中找到任何匹配，請告知客戶「目前查無此商品，請確認商品名稱或提供訂單編號」。`;
+}
 
 export async function fetchPages(config: SuperLandingConfig): Promise<ProductPageMapping[]> {
   if (!config.merchantNo || !config.accessKey) {

@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, fetchPages, lookupOrdersByPageAndPhone } from "./superlanding";
+import { fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, fetchPages, lookupOrdersByPageAndPhone, ensurePagesCacheLoaded, refreshPagesCache, getCachedPages, getCachedPagesAge, buildProductCatalogPrompt } from "./superlanding";
 import type { SuperLandingConfig } from "./superlanding";
 import multer from "multer";
 import path from "path";
@@ -55,10 +55,25 @@ function getSuperLandingConfig(): SuperLandingConfig {
   };
 }
 
+async function getEnrichedSystemPrompt(): Promise<string> {
+  const basePrompt = storage.getSetting("system_prompt") || "你是一位專業的客服助理。";
+  const config = getSuperLandingConfig();
+  const pages = await ensurePagesCacheLoaded(config);
+  const catalogBlock = buildProductCatalogPrompt(pages);
+  return basePrompt + catalogBlock;
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+
+  const config = getSuperLandingConfig();
+  refreshPagesCache(config).catch(() => {});
+  setInterval(() => {
+    const freshConfig = getSuperLandingConfig();
+    refreshPagesCache(freshConfig).catch(() => {});
+  }, 60 * 60 * 1000);
 
   app.post("/api/auth/login", (req, res) => {
     const { username, password } = req.body;
@@ -477,8 +492,11 @@ export async function registerRoutes(
       return res.json({ pages: [], error: "not_configured", message: "尚未設定一頁商店 API 金鑰" });
     }
     try {
-      const pages = await fetchPages(config);
-      return res.json({ pages });
+      const forceRefresh = req.query.refresh === "1";
+      const pages = forceRefresh
+        ? await refreshPagesCache(config)
+        : await ensurePagesCacheLoaded(config);
+      return res.json({ pages, cached: !forceRefresh, cacheAge: Math.round(getCachedPagesAge() / 1000) });
     } catch (err: any) {
       const errorMap: Record<string, string> = {
         missing_credentials: "API 金鑰未設定",
@@ -559,7 +577,7 @@ export async function registerRoutes(
       const mimeType = ext === ".png" ? "image/png" : ext === ".gif" ? "image/gif" : ext === ".webp" ? "image/webp" : "image/jpeg";
       const dataUri = `data:${mimeType};base64,${base64}`;
 
-      const systemPrompt = storage.getSetting("system_prompt") || "你是一位專業的客服助理。";
+      const systemPrompt = await getEnrichedSystemPrompt();
       const openai = new OpenAI({ apiKey });
       const completion = await openai.chat.completions.create({
         model: "gpt-5.2",
@@ -730,7 +748,7 @@ export async function registerRoutes(
     if (!apiKey || apiKey.trim() === "") {
       return res.status(400).json({ success: false, error: "no_api_key", message: "請先至系統設定填寫有效的 OpenAI API Key" });
     }
-    const systemPrompt = storage.getSetting("system_prompt") || "你是一位專業的客服助理。";
+    const systemPrompt = await getEnrichedSystemPrompt();
     try {
       const openai = new OpenAI({ apiKey });
       const completion = await openai.chat.completions.create({
