@@ -212,8 +212,8 @@ export async function ensurePagesCacheLoaded(config: SuperLandingConfig): Promis
 
 export function buildProductCatalogPrompt(pages: ProductPageMapping[]): string {
   if (pages.length === 0) return "";
-  const lines = pages.map((p) => `- page_id=${p.pageId}｜${p.productName}`);
-  return `\n\n## 🛍️ 目前商店產品對應表（自動同步，共 ${pages.length} 項）\n以下是目前所有可查詢的產品與其對應的 page_id，AI 必須依此表進行模糊匹配：\n${lines.join("\n")}\n\n## 🔍 產品模糊匹配規則\n1. 當客戶提到購買的產品時（可能包含錯字、簡稱、俗稱、用途描述，如「洗馬桶的」→潔廁泡泡、「蛋糕」→巴斯克），你必須從上方「產品對應表」中，使用語意理解推論出最符合的正確產品名稱與 page_id。\n2. **二次確認（防呆）**：如果客戶的描述太過模糊，可能對應到多個商品（例如只說「筋膜」，但對應表中有多款筋膜類產品），你必須主動列出所有可能的選項讓客戶確認，例如：「請問您購買的是『日本懶人舒壓筋膜圈』還是『雲感筋膜 SPA 軸』呢？」\n3. **自動觸發查詢**：當你成功推論出唯一的產品後，提取該產品的 page_id，連同客戶提供的手機號碼，呼叫「商品+電話」進階查詢功能來搜尋訂單。\n4. 若客戶描述的產品完全無法在對應表中找到任何匹配，請告知客戶「目前查無此商品，請確認商品名稱或提供訂單編號」。\n\n## ⚠️ 上下文實體提取規則（嚴格遵守）\n當你需要執行「產品＋電話」的訂單查詢前，請務必先檢視「整段歷史對話紀錄」。\n- 如果客戶在前面的對話中已經提過產品名稱（如巴斯克、筋膜圈），請直接結合最新的電話號碼來觸發查詢，**絕對不可以重複詢問客戶已經提供過的資訊**。\n- 同理，若客戶先提供了手機號碼，之後才提供產品名稱，也應直接合併觸發查詢。\n- 你必須從整段對話中提取所有已知的「產品名稱」和「電話號碼」實體，而非僅看最後一則訊息。`;
+  const lines = pages.map((p, i) => `- #${i + 1}｜${p.productName}`);
+  return `\n\n## [內部參考·商品清單]（自動同步，共 ${pages.length} 項）\n以下為本店目前所有商品，僅供你內部語意比對使用。禁止將編號、清單格式或任何內部資訊展示給客戶：\n${lines.join("\n")}\n\n## [內部規則] 產品辨識與查詢流程\n\n### 模糊匹配\n- 客戶可能用錯字、簡稱、俗稱或用途描述來指稱商品。\n- 你必須從上方商品清單中，用語意理解推論最佳匹配。\n\n### 二次確認（防呆）\n- 若客戶描述可能對應多個商品，用溫暖口語化的方式列出選項讓客戶確認。\n- 話術範例：「了解～因為跟○○相關的商品有幾款，想跟您確認一下，您購買的是『A商品名稱』還是『B商品名稱』呢？」\n- 只列出人類可讀的產品名稱，禁止顯示編號或任何代碼。\n\n### 自動觸發查詢\n- 確認唯一商品後，連同客戶手機號碼觸發訂單查詢。\n- 若完全找不到匹配商品，友善回覆：「不好意思，目前沒有找到跟您描述相符的商品，可以再確認一下商品名稱嗎？或者直接提供訂單編號我也能幫您查詢唷！」\n\n## [內部規則] 嚴格保密限制\n- **絕對禁止**在對話中顯示任何內部編號、API 欄位、系統代碼、技術參數。\n- **絕對禁止**提及「對應表」「商品清單」「備用查詢」「Function Calling」等系統用語。\n- 所有回覆必須像一位溫暖、專業的真人客服，使用口語化、親切的語氣。\n- 禁止使用條列式的系統說明（如「步驟一」「走備用查詢」），改用自然對話語氣。\n\n## [內部規則] 上下文實體提取\n- 執行查詢前，務必回顧整段歷史對話。\n- 若客戶先前已提過產品名稱或手機號碼，直接合併使用，**絕對不可重複詢問已提供過的資訊**。\n- 從整段對話中提取所有「產品名稱」和「電話號碼」實體，而非僅看最後一則訊息。\n\n## [內部規則] 回覆語氣指南\n- 語氣溫暖親切，像朋友般自然，適度使用「唷」「呢」「～」等語助詞。\n- 用「了解」「沒問題」「好的」開場，避免「根據系統」「依照規則」等機械用語。\n- 適度使用 emoji（😊、✨）但不過度。\n- 回覆簡潔有力，不冗長囉嗦。`;
 }
 
 export async function fetchPages(config: SuperLandingConfig): Promise<ProductPageMapping[]> {
@@ -224,6 +224,7 @@ export async function fetchPages(config: SuperLandingConfig): Promise<ProductPag
   const queryParams = new URLSearchParams({
     merchant_no: config.merchantNo,
     access_key: config.accessKey,
+    per_page: "100",
   });
 
   const url = `${SUPERLANDING_API_BASE}/pages.json?${queryParams.toString()}`;
@@ -244,12 +245,19 @@ export async function fetchPages(config: SuperLandingConfig): Promise<ProductPag
     const pages = Array.isArray(data) ? data : data?.pages || [];
     console.log(`[一頁商店] 取得 ${pages.length} 個銷售頁`);
 
-    return pages.map((p: any) => ({
+    const mapped = pages.map((p: any) => ({
       id: String(p.id),
       pageId: String(p.id),
       prefix: p.id_prefix || "",
       productName: p.title || p.name || `銷售頁 ${p.id}`,
     }));
+
+    if (mapped.length > 0) {
+      console.log("[一頁商店] 產品清單:");
+      mapped.forEach((m: ProductPageMapping) => console.log(`  - [${m.pageId}] ${m.productName}`));
+    }
+
+    return mapped;
   } catch (err: any) {
     if (err.message === "missing_credentials" || err.message === "invalid_credentials") throw err;
     if (err.message?.startsWith("api_error_")) throw err;
