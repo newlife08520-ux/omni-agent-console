@@ -57,6 +57,8 @@ function mapOrder(o: any): OrderInfo {
     buyer_phone: o.mobile || "",
     tracking_number: trackingNumber,
     created_at: o.created_date || o.order_created_at || "",
+    shipped_at: o.shipped_at || "",
+    order_created_at: o.order_created_at || "",
     shipping_method: o.shipping_method || "",
     payment_method: o.payment_method || "",
     address,

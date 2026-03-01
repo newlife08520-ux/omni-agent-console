@@ -18,13 +18,56 @@ import type { ContactWithPreview, Message, OrderInfo, ORDER_STATUS_LABELS } from
 
 const ORDER_STATUS_MAP: Record<string, { label: string; color: string }> = {
   new_order: { label: "新訂單", color: "bg-blue-50 text-blue-600 border-blue-200" },
+  confirming: { label: "確認中", color: "bg-sky-50 text-sky-600 border-sky-200" },
+  confirmed: { label: "已確認", color: "bg-indigo-50 text-indigo-600 border-indigo-200" },
+  awaiting_for_shipment: { label: "待出貨", color: "bg-amber-50 text-amber-600 border-amber-200" },
+  shipping: { label: "出貨中", color: "bg-cyan-50 text-cyan-600 border-cyan-200" },
   shipped: { label: "已出貨", color: "bg-emerald-50 text-emerald-600 border-emerald-200" },
-  pending: { label: "待處理", color: "bg-amber-50 text-amber-600 border-amber-200" },
-  completed: { label: "已完成", color: "bg-stone-50 text-stone-600 border-stone-200" },
-  cancelled: { label: "已取消", color: "bg-red-50 text-red-600 border-red-200" },
-  delay_handling: { label: "延遲處理", color: "bg-orange-50 text-orange-600 border-orange-200" },
-  returned: { label: "已退貨", color: "bg-rose-50 text-rose-600 border-rose-200" },
+  delay_handling: { label: "延遲出貨", color: "bg-orange-50 text-orange-600 border-orange-200" },
+  other: { label: "其他", color: "bg-stone-50 text-stone-600 border-stone-200" },
+  refunding: { label: "退款中", color: "bg-pink-50 text-pink-600 border-pink-200" },
+  refunded: { label: "已退款", color: "bg-rose-50 text-rose-600 border-rose-200" },
+  replacement: { label: "換貨中", color: "bg-purple-50 text-purple-600 border-purple-200" },
+  temp: { label: "臨時", color: "bg-stone-50 text-stone-500 border-stone-200" },
+  returned: { label: "已退貨", color: "bg-red-50 text-red-600 border-red-200" },
+  pending: { label: "待處理", color: "bg-yellow-50 text-yellow-700 border-yellow-200" },
+  canceled: { label: "已取消", color: "bg-red-50 text-red-500 border-red-200" },
 };
+
+const SHIPPING_METHOD_MAP: Record<string, string> = {
+  to_store: "超商取貨",
+  to_home: "宅配到家",
+};
+
+const PAYMENT_METHOD_MAP: Record<string, string> = {
+  none: "無",
+  pending: "取件時付款",
+  credit_card: "信用卡",
+  virtual_account: "ATM 繳費",
+  ibon: "ibon 繳費",
+  wechatpay: "微信支付",
+  installment: "分期付款",
+  linepay: "LINE Pay",
+};
+
+function parseProductList(raw: string): string {
+  try {
+    const items = JSON.parse(raw);
+    if (Array.isArray(items)) {
+      return items.map((item: any) => `${item.code || item.name || "商品"} x ${item.qty || 1}`).join("\n");
+    }
+  } catch {}
+  return raw;
+}
+
+function formatDateTime(raw?: string): string {
+  if (!raw) return "";
+  try {
+    const d = new Date(raw);
+    if (isNaN(d.getTime())) return raw;
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  } catch { return raw; }
+}
 
 const STATUS_MAP: Record<string, { label: string; color: string; dot: string }> = {
   pending: { label: "待處理", color: "bg-red-50 text-red-600 border-red-200", dot: "bg-red-500" },
@@ -197,10 +240,7 @@ export default function ChatPage() {
     if (!orderSearch.trim()) return;
     setOrderSearching(true);
     try {
-      const params = orderSearch.match(/^\d{4,}$/)
-        ? `phone=${encodeURIComponent(orderSearch.trim())}`
-        : `order_id=${encodeURIComponent(orderSearch.trim())}`;
-      const res = await fetch(`/api/orders/lookup?${params}`, { credentials: "include" });
+      const res = await fetch(`/api/orders/lookup?q=${encodeURIComponent(orderSearch.trim())}`, { credentials: "include" });
       if (!res.ok) throw new Error("Failed");
       const data = await res.json();
       setOrderSearchResults(data.orders || []);
@@ -630,29 +670,67 @@ export default function ChatPage() {
 
                       {orderSearchResults.length > 0 ? (
                         <div className="space-y-2">
+                          <p className="text-[10px] text-stone-400">共 {orderSearchResults.length} 筆訂單</p>
                           {orderSearchResults.map((order, i) => {
                             const statusInfo = ORDER_STATUS_MAP[order.status] || { label: order.status, color: "bg-stone-50 text-stone-600 border-stone-200" };
+                            const parsedProducts = parseProductList(order.product_list);
                             return (
                               <div key={i} className="rounded-xl border border-stone-200 p-3 space-y-2" data-testid={`order-card-${i}`}>
                                 <div className="flex items-center justify-between">
                                   <span className="text-xs font-mono font-semibold text-stone-800" data-testid={`order-id-${i}`}>{order.global_order_id}</span>
                                   <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${statusInfo.color}`}>{statusInfo.label}</span>
                                 </div>
-                                <div className="text-xs text-stone-600">
-                                  <div className="flex justify-between">
-                                    <span>金額</span>
-                                    <span className="font-semibold">${order.final_total_order_amount.toLocaleString()}</span>
-                                  </div>
-                                  {order.tracking_number && (
-                                    <div className="flex justify-between mt-0.5">
-                                      <span>物流單號</span>
-                                      <span className="font-mono text-[11px]">{order.tracking_number}</span>
+                                <div className="text-xs text-stone-600 space-y-1">
+                                  {order.buyer_name && (
+                                    <div className="flex justify-between">
+                                      <span className="text-stone-400">收件人</span>
+                                      <span>{order.buyer_name}</span>
                                     </div>
                                   )}
-                                  {order.product_list && (
+                                  <div className="flex justify-between">
+                                    <span className="text-stone-400">金額</span>
+                                    <span className="font-semibold text-stone-800">${order.final_total_order_amount.toLocaleString()}</span>
+                                  </div>
+                                  {order.shipping_method && (
+                                    <div className="flex justify-between">
+                                      <span className="text-stone-400">配送方式</span>
+                                      <span>{SHIPPING_METHOD_MAP[order.shipping_method] || order.shipping_method}</span>
+                                    </div>
+                                  )}
+                                  {order.payment_method && (
+                                    <div className="flex justify-between">
+                                      <span className="text-stone-400">付款方式</span>
+                                      <span>{PAYMENT_METHOD_MAP[order.payment_method] || order.payment_method}</span>
+                                    </div>
+                                  )}
+                                  {order.tracking_number && (
+                                    <div className="flex justify-between items-start">
+                                      <span className="text-stone-400 shrink-0">物流單號</span>
+                                      <span className="font-mono text-[11px] text-emerald-700 cursor-pointer select-all text-right" title="點擊選取複製">{order.tracking_number}</span>
+                                    </div>
+                                  )}
+                                  {order.order_created_at && (
+                                    <div className="flex justify-between">
+                                      <span className="text-stone-400">下單時間</span>
+                                      <span className="text-[11px]">{formatDateTime(order.order_created_at)}</span>
+                                    </div>
+                                  )}
+                                  {order.shipped_at && (
+                                    <div className="flex justify-between">
+                                      <span className="text-stone-400">出貨時間</span>
+                                      <span className="text-[11px] text-emerald-600">{formatDateTime(order.shipped_at)}</span>
+                                    </div>
+                                  )}
+                                  {parsedProducts && (
                                     <div className="mt-1.5 pt-1.5 border-t border-stone-100">
-                                      <span className="text-stone-500 text-[11px]">品項：</span>
-                                      <p className="text-[11px] text-stone-700 mt-0.5 line-clamp-3">{order.product_list}</p>
+                                      <span className="text-stone-400 text-[11px]">品項：</span>
+                                      <p className="text-[11px] text-stone-700 mt-0.5 whitespace-pre-line">{parsedProducts}</p>
+                                    </div>
+                                  )}
+                                  {order.address && (
+                                    <div className="mt-1 pt-1 border-t border-stone-100">
+                                      <span className="text-stone-400 text-[11px]">地址：</span>
+                                      <p className="text-[11px] text-stone-700 mt-0.5">{order.address}</p>
                                     </div>
                                   )}
                                 </div>

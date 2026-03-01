@@ -80,6 +80,8 @@ export interface OrderInfo {
   buyer_phone: string;
   tracking_number: string;
   created_at: string;
+  shipped_at?: string;
+  order_created_at?: string;
   shipping_method?: string;
   payment_method?: string;
   address?: string;

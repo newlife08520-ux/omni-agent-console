@@ -400,29 +400,30 @@ export async function registerRoutes(
   });
 
   app.get("/api/orders/lookup", authMiddleware, async (req, res) => {
-    const { phone, order_id } = req.query;
+    const { q } = req.query;
+    const query = (q as string || "").trim();
+    if (!query) return res.status(400).json({ message: "請提供搜尋關鍵字" });
     const config = getSuperLandingConfig();
     if (!config.merchantNo || !config.accessKey) {
       return res.json({ orders: [], error: "not_configured", message: "尚未設定一頁商店 API 金鑰" });
     }
+    const isPhone = /^0\d{8,9}$/.test(query.replace(/[-\s]/g, ""));
     try {
-      if (order_id) {
-        console.log("[一頁商店] 手動查詢訂單編號:", order_id);
-        const order = await lookupOrderById(config, order_id as string);
+      if (isPhone) {
+        console.log("[一頁商店] 以電話號碼查詢:", query);
+        const orders = await lookupOrdersByPhone(config, query);
+        if (orders.length === 0) {
+          return res.json({ orders: [], message: "於一頁商店查無此電話號碼的訂單紀錄" });
+        }
+        return res.json({ orders });
+      } else {
+        console.log("[一頁商店] 以訂單編號查詢:", query);
+        const order = await lookupOrderById(config, query);
         if (!order) {
           return res.json({ orders: [], message: "於一頁商店查無此訂單編號，請確認編號是否正確" });
         }
         return res.json({ orders: [order] });
       }
-      if (phone) {
-        console.log("[一頁商店] 手動查詢電話:", phone);
-        const orders = await lookupOrdersByPhone(config, phone as string);
-        if (orders.length === 0) {
-          return res.json({ orders: [], message: "於一頁商店查無此電話號碼的訂單紀錄" });
-        }
-        return res.json({ orders });
-      }
-      return res.status(400).json({ message: "請提供 phone 或 order_id 參數" });
     } catch (err: any) {
       const errorMap: Record<string, string> = {
         missing_credentials: "API 金鑰未設定",
