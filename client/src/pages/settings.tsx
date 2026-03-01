@@ -35,11 +35,8 @@ export default function SettingsPage() {
       await apiRequest("PUT", "/api/settings", { key, value: formValues[key] || "" });
       queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
       toast({ title: "儲存成功", description: "設定已更新" });
-    } catch {
-      toast({ title: "儲存失敗", variant: "destructive" });
-    } finally {
-      setSaving("");
-    }
+    } catch { toast({ title: "儲存失敗", variant: "destructive" }); }
+    finally { setSaving(""); }
   };
 
   const handleTestConnection = async (type: string) => {
@@ -47,11 +44,8 @@ export default function SettingsPage() {
     try {
       await apiRequest("POST", "/api/settings/test-connection", { type });
       toast({ title: "連線成功", description: `${type} 連線測試通過` });
-    } catch {
-      toast({ title: "連線失敗", variant: "destructive" });
-    } finally {
-      setTesting("");
-    }
+    } catch { toast({ title: "連線失敗", variant: "destructive" }); }
+    finally { setTesting(""); }
   };
 
   const handleTestModeToggle = async (checked: boolean) => {
@@ -60,9 +54,7 @@ export default function SettingsPage() {
       await apiRequest("PUT", "/api/settings", { key: "test_mode", value: checked ? "true" : "false" });
       queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
       toast({ title: checked ? "安全測試模式已開啟" : "安全測試模式已關閉" });
-    } catch {
-      toast({ title: "設定失敗", variant: "destructive" });
-    }
+    } catch { toast({ title: "設定失敗", variant: "destructive" }); }
   };
 
   const toggleKeyVisibility = (key: string) => {
@@ -76,7 +68,7 @@ export default function SettingsPage() {
   };
 
   if (isLoading) {
-    return <div className="flex items-center justify-center h-full"><p className="text-gray-400">載入設定中...</p></div>;
+    return <div className="flex items-center justify-center h-full"><p className="text-stone-400">載入設定中...</p></div>;
   }
 
   const settingsFields = [
@@ -88,39 +80,31 @@ export default function SettingsPage() {
   return (
     <div className="p-6 max-w-3xl mx-auto space-y-6" data-testid="settings-page">
       <div>
-        <h1 className="text-xl font-bold text-gray-900 dark:text-white" data-testid="text-settings-title">系統設定</h1>
-        <p className="text-sm text-gray-500 mt-1">管理 API 金鑰與系統環境設定</p>
+        <h1 className="text-xl font-bold text-stone-800" data-testid="text-settings-title">系統設定</h1>
+        <p className="text-sm text-stone-500 mt-1">管理 API 金鑰與系統環境設定</p>
       </div>
 
-      <div className="bg-white dark:bg-slate-900 rounded-xl border border-gray-200 dark:border-slate-800 p-5 shadow-sm">
+      <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
         <div className="flex items-center justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-lg bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center">
-                <Shield className="w-4 h-4 text-amber-600 dark:text-amber-400" />
-              </div>
-              <span className="font-semibold text-sm text-gray-900 dark:text-white">安全測試模式</span>
+              <div className="w-8 h-8 rounded-xl bg-amber-100 flex items-center justify-center"><Shield className="w-4 h-4 text-amber-600" /></div>
+              <span className="font-semibold text-sm text-stone-800">安全測試模式</span>
             </div>
-            <p className="text-xs text-gray-500 mt-1.5 ml-10">開啟後，系統將以模擬方式回覆訊息，不會呼叫真實 API</p>
+            <p className="text-xs text-stone-500 mt-1.5 ml-10">開啟後，系統將以模擬方式回覆訊息，不會呼叫真實 API</p>
           </div>
-          <Switch
-            data-testid="switch-test-mode"
-            checked={formValues.test_mode === "true"}
-            onCheckedChange={handleTestModeToggle}
-          />
+          <Switch data-testid="switch-test-mode" checked={formValues.test_mode === "true"} onCheckedChange={handleTestModeToggle} />
         </div>
       </div>
 
       <div className="space-y-4">
         {settingsFields.map((field) => (
-          <div key={field.key} className="bg-white dark:bg-slate-900 rounded-xl border border-gray-200 dark:border-slate-800 p-5 shadow-sm">
+          <div key={field.key} className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
             <div className="flex items-center gap-2 mb-1">
-              <div className="w-8 h-8 rounded-lg bg-gray-100 dark:bg-slate-800 flex items-center justify-center">
-                <field.icon className="w-4 h-4 text-gray-500" />
-              </div>
+              <div className="w-8 h-8 rounded-xl bg-stone-100 flex items-center justify-center"><field.icon className="w-4 h-4 text-stone-500" /></div>
               <div>
-                <span className="text-sm font-semibold text-gray-900 dark:text-white">{field.label}</span>
-                <p className="text-xs text-gray-500">{field.description}</p>
+                <span className="text-sm font-semibold text-stone-800">{field.label}</span>
+                <p className="text-xs text-stone-500">{field.description}</p>
               </div>
             </div>
             <div className="flex gap-2 mt-3">
@@ -132,38 +116,17 @@ export default function SettingsPage() {
                   value={showKeys[field.key] ? (formValues[field.key] || "") : (formValues[field.key] ? maskValue(formValues[field.key]) : "")}
                   onChange={(e) => { if (showKeys[field.key]) setFormValues((prev) => ({ ...prev, [field.key]: e.target.value })); }}
                   readOnly={!showKeys[field.key]}
-                  className="pr-10 bg-gray-50 dark:bg-slate-800 border-gray-200 dark:border-slate-700"
+                  className="pr-10 bg-stone-50 border-stone-200"
                 />
-                <button
-                  type="button"
-                  onClick={() => toggleKeyVisibility(field.key)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
-                  data-testid={`button-toggle-${field.key}`}
-                >
+                <button type="button" onClick={() => toggleKeyVisibility(field.key)} className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-600" data-testid={`button-toggle-${field.key}`}>
                   {showKeys[field.key] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
               </div>
-              <Button
-                variant="secondary"
-                onClick={() => handleTestConnection(field.testLabel)}
-                disabled={testing === field.testLabel}
-                data-testid={`button-test-${field.key}`}
-                className="text-xs shrink-0"
-              >
-                {testing === field.testLabel ? (
-                  <><Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />測試中</>
-                ) : (
-                  <><Plug className="w-3.5 h-3.5 mr-1" />測試連線</>
-                )}
+              <Button variant="secondary" onClick={() => handleTestConnection(field.testLabel)} disabled={testing === field.testLabel} data-testid={`button-test-${field.key}`} className="text-xs shrink-0 bg-stone-100 hover:bg-stone-200">
+                {testing === field.testLabel ? <><Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />測試中</> : <><Plug className="w-3.5 h-3.5 mr-1" />測試連線</>}
               </Button>
-              <Button
-                onClick={() => handleSave(field.key)}
-                disabled={saving === field.key}
-                data-testid={`button-save-${field.key}`}
-                className="text-xs shrink-0 bg-blue-600 hover:bg-blue-700 text-white"
-              >
-                <Save className="w-3.5 h-3.5 mr-1" />
-                {saving === field.key ? "儲存中" : "儲存"}
+              <Button onClick={() => handleSave(field.key)} disabled={saving === field.key} data-testid={`button-save-${field.key}`} className="text-xs shrink-0 bg-emerald-600 hover:bg-emerald-700 text-white">
+                <Save className="w-3.5 h-3.5 mr-1" />{saving === field.key ? "儲存中" : "儲存"}
               </Button>
             </div>
           </div>

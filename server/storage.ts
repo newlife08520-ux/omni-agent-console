@@ -1,10 +1,11 @@
-import db, { initDatabase } from "./db";
-import type { Contact, ContactWithPreview, Message, Setting, KnowledgeFile, TeamMember } from "@shared/schema";
+import db, { initDatabase, hashPassword } from "./db";
+import type { User, Contact, ContactWithPreview, Message, Setting, KnowledgeFile, TeamMember } from "@shared/schema";
 
 initDatabase();
 
 export interface IStorage {
-  login(password: string): boolean;
+  authenticateUser(username: string, password: string): User | null;
+  getUserById(id: number): User | undefined;
   getSetting(key: string): string | null;
   getAllSettings(): Setting[];
   setSetting(key: string, value: string): void;
@@ -24,9 +25,14 @@ export interface IStorage {
 }
 
 export class SQLiteStorage implements IStorage {
-  login(password: string): boolean {
-    const adminPassword = process.env.ADMIN_PASSWORD || "admin123";
-    return password === adminPassword;
+  authenticateUser(username: string, password: string): User | null {
+    const hash = hashPassword(password);
+    const user = db.prepare("SELECT * FROM users WHERE username = ? AND password_hash = ?").get(username, hash) as User | undefined;
+    return user || null;
+  }
+
+  getUserById(id: number): User | undefined {
+    return db.prepare("SELECT * FROM users WHERE id = ?").get(id) as User | undefined;
   }
 
   getSetting(key: string): string | null {
@@ -45,9 +51,7 @@ export class SQLiteStorage implements IStorage {
   getContacts(): ContactWithPreview[] {
     const contacts = db.prepare("SELECT * FROM contacts ORDER BY last_message_at DESC").all() as Contact[];
     return contacts.map((c) => {
-      const lastMsg = db.prepare(
-        "SELECT content FROM messages WHERE contact_id = ? ORDER BY created_at DESC LIMIT 1"
-      ).get(c.id) as { content: string } | undefined;
+      const lastMsg = db.prepare("SELECT content FROM messages WHERE contact_id = ? ORDER BY created_at DESC LIMIT 1").get(c.id) as { content: string } | undefined;
       return { ...c, last_message: lastMsg?.content || "" };
     });
   }
@@ -78,41 +82,17 @@ export class SQLiteStorage implements IStorage {
 
   createMessage(contactId: number, platform: string, senderType: string, content: string): Message {
     const now = new Date().toISOString().replace("T", " ").substring(0, 19);
-    const result = db.prepare(
-      "INSERT INTO messages (contact_id, platform, sender_type, content, created_at) VALUES (?, ?, ?, ?, ?)"
-    ).run(contactId, platform, senderType, content, now);
-
+    const result = db.prepare("INSERT INTO messages (contact_id, platform, sender_type, content, created_at) VALUES (?, ?, ?, ?, ?)").run(contactId, platform, senderType, content, now);
     db.prepare("UPDATE contacts SET last_message_at = ? WHERE id = ?").run(now, contactId);
-
-    return {
-      id: Number(result.lastInsertRowid),
-      contact_id: contactId,
-      platform,
-      sender_type: senderType as "user" | "ai" | "admin",
-      content,
-      created_at: now,
-    };
+    return { id: Number(result.lastInsertRowid), contact_id: contactId, platform, sender_type: senderType as "user" | "ai" | "admin", content, created_at: now };
   }
 
   getOrCreateContact(platform: string, platformUserId: string, displayName: string): Contact {
     let contact = db.prepare("SELECT * FROM contacts WHERE platform = ? AND platform_user_id = ?").get(platform, platformUserId) as Contact | undefined;
     if (!contact) {
       const now = new Date().toISOString().replace("T", " ").substring(0, 19);
-      const result = db.prepare(
-        "INSERT INTO contacts (platform, platform_user_id, display_name, needs_human, status, tags, created_at) VALUES (?, ?, ?, 0, 'pending', '[]', ?)"
-      ).run(platform, platformUserId, displayName, now);
-      contact = {
-        id: Number(result.lastInsertRowid),
-        platform,
-        platform_user_id: platformUserId,
-        display_name: displayName,
-        avatar_url: null,
-        needs_human: 0,
-        status: "pending",
-        tags: "[]",
-        last_message_at: null,
-        created_at: now,
-      };
+      const result = db.prepare("INSERT INTO contacts (platform, platform_user_id, display_name, needs_human, status, tags, created_at) VALUES (?, ?, ?, 0, 'pending', '[]', ?)").run(platform, platformUserId, displayName, now);
+      contact = { id: Number(result.lastInsertRowid), platform, platform_user_id: platformUserId, display_name: displayName, avatar_url: null, needs_human: 0, status: "pending", tags: "[]", last_message_at: null, created_at: now };
     }
     return contact;
   }
@@ -123,16 +103,8 @@ export class SQLiteStorage implements IStorage {
 
   createKnowledgeFile(filename: string, originalName: string, size: number): KnowledgeFile {
     const now = new Date().toISOString().replace("T", " ").substring(0, 19);
-    const result = db.prepare(
-      "INSERT INTO knowledge_files (filename, original_name, size, created_at) VALUES (?, ?, ?, ?)"
-    ).run(filename, originalName, size, now);
-    return {
-      id: Number(result.lastInsertRowid),
-      filename,
-      original_name: originalName,
-      size,
-      created_at: now,
-    };
+    const result = db.prepare("INSERT INTO knowledge_files (filename, original_name, size, created_at) VALUES (?, ?, ?, ?)").run(filename, originalName, size, now);
+    return { id: Number(result.lastInsertRowid), filename, original_name: originalName, size, created_at: now };
   }
 
   deleteKnowledgeFile(id: number): boolean {

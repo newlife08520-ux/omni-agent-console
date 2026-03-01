@@ -1,3 +1,11 @@
+export interface User {
+  id: number;
+  username: string;
+  password_hash: string;
+  role: "admin" | "agent";
+  created_at: string;
+}
+
 export interface Contact {
   id: number;
   platform: string;
@@ -48,10 +56,12 @@ export interface TeamMember {
 }
 
 export interface LoginRequest {
+  username: string;
   password: string;
 }
 
 export interface LoginResponse {
   success: boolean;
   message: string;
+  user?: { id: number; username: string; role: string };
 }

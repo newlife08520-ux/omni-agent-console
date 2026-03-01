@@ -5,6 +5,7 @@ import multer from "multer";
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
+import OpenAI from "openai";
 
 const uploadDir = path.resolve(process.cwd(), "uploads");
 if (!fs.existsSync(uploadDir)) {
@@ -40,24 +41,41 @@ export async function registerRoutes(
 ): Promise<Server> {
 
   app.post("/api/auth/login", (req, res) => {
-    const { password } = req.body;
-    if (!password) {
-      return res.status(400).json({ success: false, message: "請輸入密碼" });
+    const { username, password } = req.body;
+    if (!username || !password) {
+      return res.status(400).json({ success: false, message: "請輸入帳號與密碼" });
     }
-    if (storage.login(password)) {
+    const user = storage.authenticateUser(username, password);
+    if (user) {
       (req as any).session.authenticated = true;
-      return res.json({ success: true, message: "登入成功" });
+      (req as any).session.userId = user.id;
+      (req as any).session.userRole = user.role;
+      (req as any).session.username = user.username;
+      return res.json({
+        success: true,
+        message: "登入成功",
+        user: { id: user.id, username: user.username, role: user.role },
+      });
     }
-    return res.status(401).json({ success: false, message: "密碼錯誤" });
+    return res.status(401).json({ success: false, message: "帳號或密碼錯誤" });
   });
 
   app.get("/api/auth/check", (req, res) => {
-    const authenticated = (req as any).session?.authenticated === true;
-    return res.json({ authenticated });
+    const session = (req as any).session;
+    if (session?.authenticated === true) {
+      return res.json({
+        authenticated: true,
+        user: { id: session.userId, username: session.username, role: session.userRole },
+      });
+    }
+    return res.json({ authenticated: false });
   });
 
   app.post("/api/auth/logout", (req, res) => {
     (req as any).session.authenticated = false;
+    (req as any).session.userId = null;
+    (req as any).session.userRole = null;
+    (req as any).session.username = null;
     return res.json({ success: true });
   });
 
@@ -68,12 +86,19 @@ export async function registerRoutes(
     return res.status(401).json({ message: "未授權" });
   };
 
+  const adminOnly = (req: any, res: any, next: any) => {
+    if (req.session?.userRole === "admin") {
+      return next();
+    }
+    return res.status(403).json({ message: "權限不足" });
+  };
+
   app.get("/api/settings", authMiddleware, (_req, res) => {
     const settings = storage.getAllSettings();
     return res.json(settings);
   });
 
-  app.put("/api/settings", authMiddleware, (req, res) => {
+  app.put("/api/settings", authMiddleware, adminOnly, (req, res) => {
     const { key, value } = req.body;
     if (!key) {
       return res.status(400).json({ message: "key is required" });
@@ -82,7 +107,7 @@ export async function registerRoutes(
     return res.json({ success: true });
   });
 
-  app.post("/api/settings/test-connection", authMiddleware, (req, res) => {
+  app.post("/api/settings/test-connection", authMiddleware, adminOnly, (req, res) => {
     const { type } = req.body;
     setTimeout(() => {
       return res.json({ success: true, message: `${type} 連線測試成功` });
@@ -161,10 +186,7 @@ export async function registerRoutes(
 
     if (channelSecret && signature && req.rawBody) {
       const rawBody = Buffer.isBuffer(req.rawBody) ? req.rawBody : Buffer.from(req.rawBody as string);
-      const hash = crypto
-        .createHmac("SHA256", channelSecret)
-        .update(rawBody)
-        .digest("base64");
+      const hash = crypto.createHmac("SHA256", channelSecret).update(rawBody).digest("base64");
       if (hash !== signature) {
         return res.status(403).json({ message: "簽名驗證失敗" });
       }
@@ -176,10 +198,8 @@ export async function registerRoutes(
         const userId = event.source?.userId || "unknown";
         const displayName = event.source?.displayName || "LINE用戶";
         const text = event.message.text;
-
         const contact = storage.getOrCreateContact("line", userId, displayName);
         storage.createMessage(contact.id, "line", "user", text);
-
         const needsHuman = HUMAN_KEYWORDS.some((kw) => text.includes(kw));
         if (needsHuman) {
           storage.updateContactHumanFlag(contact.id, 1);
@@ -192,8 +212,55 @@ export async function registerRoutes(
         }
       }
     }
-
     return res.status(200).json({ success: true });
+  });
+
+  app.post("/api/sandbox/chat", authMiddleware, async (req, res) => {
+    const { message } = req.body;
+    if (!message) {
+      return res.status(400).json({ message: "message is required" });
+    }
+
+    const apiKey = storage.getSetting("openai_api_key");
+    if (!apiKey || apiKey.trim() === "") {
+      return res.status(400).json({
+        success: false,
+        error: "no_api_key",
+        message: "請先至系統設定填寫有效的 OpenAI API Key",
+      });
+    }
+
+    const systemPrompt = storage.getSetting("system_prompt") || "你是一位專業的客服助理。";
+
+    try {
+      const openai = new OpenAI({ apiKey });
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: message },
+        ],
+        max_tokens: 1000,
+        temperature: 0.7,
+      });
+
+      const reply = completion.choices[0]?.message?.content || "抱歉，AI 無法生成回覆。";
+      return res.json({ success: true, reply });
+    } catch (err: any) {
+      const errorMessage = err?.message || "未知錯誤";
+      if (errorMessage.includes("401") || errorMessage.includes("Incorrect API key") || errorMessage.includes("invalid_api_key")) {
+        return res.status(400).json({
+          success: false,
+          error: "invalid_api_key",
+          message: "OpenAI API Key 無效，請至系統設定更新您的金鑰",
+        });
+      }
+      return res.status(500).json({
+        success: false,
+        error: "api_error",
+        message: `AI 回覆失敗：${errorMessage}`,
+      });
+    }
   });
 
   app.post("/api/ai/sandbox", authMiddleware, (req, res) => {
@@ -201,15 +268,14 @@ export async function registerRoutes(
     if (!message) {
       return res.status(400).json({ message: "message is required" });
     }
-    const systemPrompt = storage.getSetting("system_prompt") || "";
     const mockResponses = [
       `收到您的訊息：「${message}」。我是您的 AI 助理，很高興為您服務！`,
-      `感謝您的提問！關於「${message}」，我會盡力為您解答。請問還需要更多資訊嗎？`,
-      `您好！已收到您的訊息。針對您提到的「${message}」，以下是我的回覆：\n\n根據目前的資料，建議您可以參考我們的常見問題頁面，或直接聯繫客服專員取得更詳細的協助。`,
+      `感謝您的提問！關於「${message}」，我會盡力為您解答。`,
+      `您好！已收到您的訊息。針對您提到的「${message}」，建議您可以參考我們的常見問題頁面。`,
     ];
     const reply = mockResponses[Math.floor(Math.random() * mockResponses.length)];
     setTimeout(() => {
-      return res.json({ reply, system_prompt_used: systemPrompt.substring(0, 50) + "..." });
+      return res.json({ reply });
     }, 800);
   });
 
@@ -228,11 +294,7 @@ export async function registerRoutes(
     if (!req.file) {
       return res.status(400).json({ message: "未上傳檔案" });
     }
-    const file = storage.createKnowledgeFile(
-      req.file.filename,
-      req.file.originalname,
-      req.file.size
-    );
+    const file = storage.createKnowledgeFile(req.file.filename, req.file.originalname, req.file.size);
     return res.json(file);
   });
 
@@ -242,18 +304,14 @@ export async function registerRoutes(
     const file = files.find((f) => f.id === id);
     if (file) {
       const filePath = path.join(uploadDir, file.filename);
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
-      }
+      if (fs.existsSync(filePath)) { fs.unlinkSync(filePath); }
     }
     const deleted = storage.deleteKnowledgeFile(id);
-    if (!deleted) {
-      return res.status(404).json({ message: "檔案不存在" });
-    }
+    if (!deleted) { return res.status(404).json({ message: "檔案不存在" }); }
     return res.json({ success: true });
   });
 
-  app.get("/api/team", authMiddleware, (_req, res) => {
+  app.get("/api/team", authMiddleware, adminOnly, (_req, res) => {
     const members = storage.getTeamMembers();
     return res.json(members);
   });
