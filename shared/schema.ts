@@ -1,18 +1,41 @@
-import { sql } from "drizzle-orm";
-import { pgTable, text, varchar } from "drizzle-orm/pg-core";
-import { createInsertSchema } from "drizzle-zod";
-import { z } from "zod";
+export interface Contact {
+  id: number;
+  platform: string;
+  platform_user_id: string;
+  display_name: string;
+  avatar_url: string | null;
+  needs_human: number;
+  last_message_at: string | null;
+  created_at: string;
+}
 
-export const users = pgTable("users", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  username: text("username").notNull().unique(),
-  password: text("password").notNull(),
-});
+export interface Message {
+  id: number;
+  contact_id: number;
+  platform: string;
+  sender_type: "user" | "ai" | "admin";
+  content: string;
+  created_at: string;
+}
 
-export const insertUserSchema = createInsertSchema(users).pick({
-  username: true,
-  password: true,
-});
+export interface Setting {
+  key: string;
+  value: string;
+}
 
-export type InsertUser = z.infer<typeof insertUserSchema>;
-export type User = typeof users.$inferSelect;
+export interface KnowledgeFile {
+  id: number;
+  filename: string;
+  original_name: string;
+  size: number;
+  created_at: string;
+}
+
+export interface LoginRequest {
+  password: string;
+}
+
+export interface LoginResponse {
+  success: boolean;
+  message: string;
+}
