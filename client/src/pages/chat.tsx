@@ -10,6 +10,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Send, User, Bot, Headphones, UserCheck, Search, X, Plus, Tag,
   Circle, Zap, Star, Info, Package, Crown, ShoppingBag, Loader2,
+  Paperclip, ImageIcon, Upload,
 } from "lucide-react";
 import { apiRequest, getQueryFn } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -71,8 +72,12 @@ export default function ChatPage() {
   const [orderSearch, setOrderSearch] = useState("");
   const [orderSearchResults, setOrderSearchResults] = useState<OrderInfo[]>([]);
   const [orderSearching, setOrderSearching] = useState(false);
+  const [pendingFiles, setPendingFiles] = useState<{ file: File; preview: string }[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [isDragOver, setIsDragOver] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const quickReplyRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const lastMessageIdRef = useRef<number>(0);
@@ -192,6 +197,84 @@ export default function ChatPage() {
   };
 
   const handleQuickReply = (text: string) => { setMessageInput(text); setShowQuickReplies(false); };
+
+  const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+  const MAX_FILE_SIZE = 10 * 1024 * 1024;
+
+  const addFiles = useCallback((files: FileList | File[]) => {
+    const validFiles: { file: File; preview: string }[] = [];
+    for (const file of Array.from(files)) {
+      if (!ALLOWED_IMAGE_TYPES.includes(file.type)) {
+        toast({ title: "不支援的檔案格式", description: `${file.name} — 僅支援 JPG, PNG, GIF, WebP`, variant: "destructive" });
+        continue;
+      }
+      if (file.size > MAX_FILE_SIZE) {
+        toast({ title: "檔案太大", description: `${file.name} 超過 10MB 限制`, variant: "destructive" });
+        continue;
+      }
+      validFiles.push({ file, preview: URL.createObjectURL(file) });
+    }
+    if (validFiles.length > 0) setPendingFiles((prev) => [...prev, ...validFiles]);
+  }, [toast]);
+
+  const removePendingFile = useCallback((index: number) => {
+    setPendingFiles((prev) => {
+      URL.revokeObjectURL(prev[index].preview);
+      return prev.filter((_, i) => i !== index);
+    });
+  }, []);
+
+  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      addFiles(e.target.files);
+      e.target.value = "";
+    }
+  }, [addFiles]);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setIsDragOver(true); }, []);
+  const handleDragLeave = useCallback((e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setIsDragOver(false); }, []);
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      addFiles(e.dataTransfer.files);
+    }
+  }, [addFiles]);
+
+  const uploadAndSendFiles = useCallback(async () => {
+    if (pendingFiles.length === 0 || !selectedId || uploading) return;
+    setUploading(true);
+    try {
+      for (const pf of pendingFiles) {
+        const formData = new FormData();
+        formData.append("file", pf.file);
+        const uploadRes = await fetch("/api/chat-upload", { method: "POST", body: formData, credentials: "include" });
+        if (!uploadRes.ok) {
+          const err = await uploadRes.json();
+          toast({ title: "上傳失敗", description: err.message || "無法上傳檔案", variant: "destructive" });
+          continue;
+        }
+        const uploadData = await uploadRes.json();
+        await apiRequest("POST", `/api/contacts/${selectedId}/messages`, {
+          content: `[圖片] ${pf.file.name}`,
+          message_type: "image",
+          image_url: uploadData.url,
+        });
+        URL.revokeObjectURL(pf.preview);
+      }
+      setPendingFiles([]);
+      queryClient.invalidateQueries({ queryKey: ["/api/contacts", selectedId, "messages"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
+    } catch { toast({ title: "傳送失敗", variant: "destructive" }); }
+    finally { setUploading(false); }
+  }, [pendingFiles, selectedId, uploading, queryClient, toast]);
+
+  const handleSendAll = useCallback(async () => {
+    if (sending || uploading) return;
+    if (pendingFiles.length > 0) await uploadAndSendFiles();
+    if (messageInput.trim()) await handleSendMessage();
+  }, [pendingFiles, messageInput, sending, uploading, uploadAndSendFiles, handleSendMessage]);
 
   const formatTime = (dateStr: string) => new Date(dateStr.replace(" ", "T")).toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit" });
   const formatDate = (dateStr: string) => new Date(dateStr.replace(" ", "T")).toLocaleDateString("zh-TW", { month: "short", day: "numeric" });
@@ -340,7 +423,17 @@ export default function ChatPage() {
               </div>
             </div>
 
-            <div className="flex flex-1 overflow-hidden">
+            <div className="flex flex-1 overflow-hidden relative"
+              onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
+              {isDragOver && (
+                <div className="absolute inset-0 z-50 bg-emerald-50/90 border-2 border-dashed border-emerald-400 rounded-lg flex items-center justify-center pointer-events-none" data-testid="drag-overlay">
+                  <div className="text-center">
+                    <Upload className="w-12 h-12 text-emerald-500 mx-auto mb-2" />
+                    <p className="text-sm font-semibold text-emerald-700">將圖片拖曳至此以上傳</p>
+                    <p className="text-xs text-emerald-500 mt-1">支援 JPG, PNG, GIF, WebP（最大 10MB）</p>
+                  </div>
+                </div>
+              )}
               <ScrollArea className="flex-1 bg-[#faf9f5]">
                 <div className="p-5">
                   {messagesLoading ? (
@@ -389,11 +482,21 @@ export default function ChatPage() {
                                   )}
                                 </div>
                                 <div>
-                                  <div className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow-sm ${
-                                    msg.sender_type === "user" ? "bg-white text-stone-700 rounded-bl-md border border-stone-100"
-                                      : msg.sender_type === "ai" ? "bg-emerald-50 text-emerald-900 rounded-br-md border border-emerald-100"
-                                      : "bg-amber-600 text-white rounded-br-md"
-                                  }`}>{msg.content}</div>
+                                  {msg.message_type === "image" && msg.image_url ? (
+                                    <div className={`rounded-2xl overflow-hidden shadow-sm ${
+                                      msg.sender_type === "user" ? "rounded-bl-md border border-stone-100"
+                                        : msg.sender_type === "ai" ? "rounded-br-md border border-emerald-100"
+                                        : "rounded-br-md"
+                                    }`}>
+                                      <img src={msg.image_url} alt="附件圖片" className="max-w-full max-h-[280px] object-contain cursor-pointer rounded-2xl" onClick={() => window.open(msg.image_url!, "_blank")} data-testid={`image-message-${msg.id}`} />
+                                    </div>
+                                  ) : (
+                                    <div className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow-sm ${
+                                      msg.sender_type === "user" ? "bg-white text-stone-700 rounded-bl-md border border-stone-100"
+                                        : msg.sender_type === "ai" ? "bg-emerald-50 text-emerald-900 rounded-br-md border border-emerald-100"
+                                        : "bg-amber-600 text-white rounded-br-md"
+                                    }`}>{msg.content}</div>
+                                  )}
                                   <div className={`text-[10px] text-stone-400 mt-1 ${msg.sender_type === "user" ? "text-left" : "text-right"}`}>
                                     {msg.sender_type === "ai" ? "AI 助理 " : msg.sender_type === "admin" ? "真人客服 " : ""}{formatTime(msg.created_at)}
                                   </div>
@@ -511,29 +614,50 @@ export default function ChatPage() {
               </div>
             </div>
 
-            <div className="p-4 border-t border-stone-200 bg-white">
-              <div className="flex gap-2 max-w-2xl mx-auto items-center">
-                <div className="relative" ref={quickReplyRef}>
-                  <Button size="icon" variant="ghost" className="h-10 w-10 text-amber-500 hover:text-amber-600 hover:bg-amber-50"
-                    onClick={() => setShowQuickReplies(!showQuickReplies)} data-testid="button-quick-reply">
-                    <Zap className="w-5 h-5" />
-                  </Button>
-                  {showQuickReplies && (
-                    <div className="absolute bottom-12 left-0 w-72 bg-white rounded-2xl shadow-lg border border-stone-200 py-2 z-50" data-testid="quick-reply-menu">
-                      <p className="text-[11px] text-stone-400 px-3 pb-1.5 font-medium">快捷回覆</p>
-                      {QUICK_REPLIES.map((text, i) => (
-                        <button key={i} onClick={() => handleQuickReply(text)} className="w-full text-left px-3 py-2 text-sm text-stone-700 hover:bg-stone-50 transition-colors" data-testid={`quick-reply-${i}`}>{text}</button>
-                      ))}
-                    </div>
-                  )}
+            <div className="border-t border-stone-200 bg-white">
+              {pendingFiles.length > 0 && (
+                <div className="px-4 pt-3 pb-1" data-testid="file-preview-area">
+                  <div className="flex gap-2 flex-wrap max-w-2xl mx-auto">
+                    {pendingFiles.map((pf, i) => (
+                      <div key={i} className="relative group" data-testid={`file-preview-${i}`}>
+                        <img src={pf.preview} alt={pf.file.name} className="w-16 h-16 object-cover rounded-xl border border-stone-200 shadow-sm" />
+                        <button onClick={() => removePendingFile(i)} className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-sm" data-testid={`button-remove-file-${i}`}>
+                          <X className="w-3 h-3" />
+                        </button>
+                        <p className="text-[9px] text-stone-400 text-center mt-0.5 truncate w-16">{pf.file.name}</p>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-                <Input data-testid="input-message" placeholder="輸入訊息以真人客服身分回覆..." value={messageInput} onChange={(e) => setMessageInput(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSendMessage(); } }} disabled={sending} className="bg-stone-50 border-stone-200" />
-                <Button onClick={handleSendMessage} disabled={!messageInput.trim() || sending} data-testid="button-send-message" className="bg-emerald-600 hover:bg-emerald-700 text-white px-4">
-                  <Send className="w-4 h-4 mr-1.5" />傳送
-                </Button>
+              )}
+              <div className="p-4 pt-2">
+                <div className="flex gap-2 max-w-2xl mx-auto items-center">
+                  <div className="relative" ref={quickReplyRef}>
+                    <Button size="icon" variant="ghost" className="h-10 w-10 text-amber-500 hover:text-amber-600 hover:bg-amber-50"
+                      onClick={() => setShowQuickReplies(!showQuickReplies)} data-testid="button-quick-reply">
+                      <Zap className="w-5 h-5" />
+                    </Button>
+                    {showQuickReplies && (
+                      <div className="absolute bottom-12 left-0 w-72 bg-white rounded-2xl shadow-lg border border-stone-200 py-2 z-50" data-testid="quick-reply-menu">
+                        <p className="text-[11px] text-stone-400 px-3 pb-1.5 font-medium">快捷回覆</p>
+                        {QUICK_REPLIES.map((text, i) => (
+                          <button key={i} onClick={() => handleQuickReply(text)} className="w-full text-left px-3 py-2 text-sm text-stone-700 hover:bg-stone-50 transition-colors" data-testid={`quick-reply-${i}`}>{text}</button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <input type="file" ref={fileInputRef} accept="image/jpeg,image/png,image/gif,image/webp" multiple onChange={handleFileSelect} className="hidden" data-testid="input-file-upload" />
+                  <Button size="icon" variant="ghost" className="h-10 w-10 text-stone-400 hover:text-emerald-600 hover:bg-emerald-50" onClick={() => fileInputRef.current?.click()} data-testid="button-attach-file">
+                    <Paperclip className="w-5 h-5" />
+                  </Button>
+                  <Input data-testid="input-message" placeholder="輸入訊息以真人客服身分回覆..." value={messageInput} onChange={(e) => setMessageInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSendAll(); } }} disabled={sending || uploading} className="bg-stone-50 border-stone-200" />
+                  <Button onClick={handleSendAll} disabled={(!messageInput.trim() && pendingFiles.length === 0) || sending || uploading} data-testid="button-send-message" className="bg-emerald-600 hover:bg-emerald-700 text-white px-4">
+                    {uploading ? <><Loader2 className="w-4 h-4 mr-1.5 animate-spin" />上傳中</> : <><Send className="w-4 h-4 mr-1.5" />傳送</>}
+                  </Button>
+                </div>
+                <p className="text-[10px] text-stone-400 text-center mt-2">以管理員身分發送訊息 · 支援圖片拖曳上傳或點擊 📎 附件按鈕</p>
               </div>
-              <p className="text-[10px] text-stone-400 text-center mt-2">以管理員身分發送訊息，將以真人客服樣式顯示</p>
             </div>
           </>
         )}

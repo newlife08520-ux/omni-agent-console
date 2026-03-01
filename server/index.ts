@@ -4,6 +4,7 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import session from "express-session";
 import MemoryStore from "memorystore";
+import path from "path";
 
 const app = express();
 const httpServer = createServer(app);
@@ -78,6 +79,7 @@ app.use((req, res, next) => {
 });
 
 (async () => {
+  app.use("/uploads", express.static(path.resolve(process.cwd(), "uploads")));
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {

@@ -15,6 +15,7 @@ if (!fs.existsSync(uploadDir)) {
 }
 
 const ALLOWED_EXTENSIONS = [".txt", ".pdf", ".csv", ".docx"];
+const ALLOWED_IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".gif", ".webp"];
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -29,6 +30,21 @@ const upload = multer({
     cb(null, ALLOWED_EXTENSIONS.includes(ext));
   },
   limits: { fileSize: 20 * 1024 * 1024 },
+});
+
+const chatUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, uploadDir),
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname);
+      cb(null, `chat-${Date.now()}-${crypto.randomUUID()}${ext}`);
+    },
+  }),
+  fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    cb(null, ALLOWED_IMAGE_EXTENSIONS.includes(ext));
+  },
+  limits: { fileSize: 10 * 1024 * 1024 },
 });
 
 function getSuperLandingConfig(): SuperLandingConfig {
@@ -238,13 +254,38 @@ export async function registerRoutes(
 
   app.post("/api/contacts/:id/messages", authMiddleware, (req, res) => {
     const contactId = parseInt(req.params.id);
-    const { content } = req.body;
-    if (!content) return res.status(400).json({ message: "content is required" });
+    const { content, message_type, image_url } = req.body;
+    if (!content && !image_url) return res.status(400).json({ message: "content or image_url is required" });
     const contact = storage.getContact(contactId);
     if (!contact) return res.status(404).json({ message: "聯絡人不存在" });
-    const message = storage.createMessage(contactId, contact.platform, "admin", content);
+    const msgType = message_type || "text";
+    const message = storage.createMessage(contactId, contact.platform, "admin", content || "", msgType, image_url || null);
     storage.updateContactHumanFlag(contactId, 1);
+
+    if (image_url && contact.platform === "line") {
+      const token = storage.getSetting("line_channel_access_token");
+      if (token) {
+        const protocol = req.headers["x-forwarded-proto"] || req.protocol;
+        const host = req.headers["x-forwarded-host"] || req.headers.host;
+        const fullImageUrl = image_url.startsWith("http") ? image_url : `${protocol}://${host}${image_url}`;
+        fetch("https://api.line.me/v2/bot/message/push", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+          body: JSON.stringify({
+            to: contact.platform_user_id,
+            messages: [{ type: "image", originalContentUrl: fullImageUrl, previewImageUrl: fullImageUrl }],
+          }),
+        }).catch((err) => console.error("LINE image push failed:", err));
+      }
+    }
+
     return res.json(message);
+  });
+
+  app.post("/api/chat-upload", authMiddleware, chatUpload.single("file"), (req, res) => {
+    if (!req.file) return res.status(400).json({ message: "僅支援 JPG, PNG, GIF, WebP 圖片格式，檔案大小不超過 10MB" });
+    const fileUrl = `/uploads/${req.file.filename}`;
+    return res.json({ url: fileUrl, filename: req.file.originalname, size: req.file.size });
   });
 
   app.get("/api/contacts/:id/orders", authMiddleware, async (req, res) => {

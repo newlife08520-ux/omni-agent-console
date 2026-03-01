@@ -272,9 +272,9 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
                 <div className="flex gap-2 mt-3">
                   <div className="relative flex-1">
                     <Input data-testid={`input-${field.key}`} type={showKeys[field.key] ? "text" : "password"} placeholder={field.placeholder}
-                      value={showKeys[field.key] ? (formValues[field.key] || "") : (formValues[field.key] ? maskValue(formValues[field.key]) : "")}
-                      onChange={(e) => { if (showKeys[field.key]) setFormValues((prev) => ({ ...prev, [field.key]: e.target.value })); }}
-                      readOnly={!showKeys[field.key]} className="pr-10 bg-stone-50 border-stone-200" />
+                      value={formValues[field.key] || ""}
+                      onChange={(e) => setFormValues((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                      className="pr-10 bg-stone-50 border-stone-200" />
                     <button type="button" onClick={() => toggleKeyVisibility(field.key)} className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-600" data-testid={`button-toggle-${field.key}`}>
                       {showKeys[field.key] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                     </button>
@@ -310,9 +310,9 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
                   <div className="flex gap-2">
                     <div className="relative flex-1">
                       <Input data-testid={`input-${field.key}`} type={showKeys[field.key] ? "text" : "password"} placeholder={field.placeholder}
-                        value={showKeys[field.key] ? (formValues[field.key] || "") : (formValues[field.key] ? maskValue(formValues[field.key]) : "")}
-                        onChange={(e) => { if (showKeys[field.key]) setFormValues((prev) => ({ ...prev, [field.key]: e.target.value })); }}
-                        readOnly={!showKeys[field.key]} className="pr-10 bg-stone-50 border-stone-200" />
+                        value={formValues[field.key] || ""}
+                        onChange={(e) => setFormValues((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                        className="pr-10 bg-stone-50 border-stone-200" />
                       <button type="button" onClick={() => toggleKeyVisibility(field.key)} className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-600">
                         {showKeys[field.key] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                       </button>

@@ -36,6 +36,8 @@ export interface Message {
   platform: string;
   sender_type: "user" | "ai" | "admin" | "system";
   content: string;
+  message_type: "text" | "image" | "file";
+  image_url: string | null;
   created_at: string;
 }
 

@@ -53,6 +53,8 @@ export function initDatabase() {
       platform TEXT NOT NULL DEFAULT 'line',
       sender_type TEXT NOT NULL CHECK(sender_type IN ('user','ai','admin','system')),
       content TEXT NOT NULL,
+      message_type TEXT NOT NULL DEFAULT 'text' CHECK(message_type IN ('text','image','file')),
+      image_url TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (contact_id) REFERENCES contacts(id)
     );
@@ -73,6 +75,15 @@ export function initDatabase() {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+
+  const cols = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
+  const colNames = cols.map((c) => c.name);
+  if (!colNames.includes("message_type")) {
+    db.exec("ALTER TABLE messages ADD COLUMN message_type TEXT NOT NULL DEFAULT 'text'");
+  }
+  if (!colNames.includes("image_url")) {
+    db.exec("ALTER TABLE messages ADD COLUMN image_url TEXT");
+  }
 
   seedMockData();
 }

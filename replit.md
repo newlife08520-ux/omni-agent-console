@@ -110,6 +110,8 @@ shared/
 13. **Real OpenAI Integration**: gpt-5.2 sandbox + production AI reply
 14. **Real API Test Connection**: POST /api/settings/test-connection for OpenAI (chat completion), LINE (bot info API), 一頁商店 (order API) — super_admin only, with detailed success/failure messages
 15. **CSAT Trigger**: Status→resolved auto-inserts satisfaction survey system message
+16. **Chat Image Upload**: Attachment button (Paperclip icon) + drag & drop with visual overlay + file preview thumbnails with remove; uploads via POST /api/chat-upload, images rendered in chat bubbles; LINE Messaging API image push support
+17. **Messages Schema**: message_type (text/image/file) + image_url columns with auto-migration
 
 ## Sensitive Settings (super_admin only)
 openai_api_key, line_channel_secret, line_channel_access_token, superlanding_merchant_no, superlanding_access_key

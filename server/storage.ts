@@ -22,7 +22,7 @@ export interface IStorage {
   updateContactVipData(id: number, vipLevel: number, orderCount: number, totalSpent: number): void;
   getMessages(contactId: number): Message[];
   getMessagesSince(contactId: number, sinceId: number): Message[];
-  createMessage(contactId: number, platform: string, senderType: string, content: string): Message;
+  createMessage(contactId: number, platform: string, senderType: string, content: string, messageType?: string, imageUrl?: string | null): Message;
   getOrCreateContact(platform: string, platformUserId: string, displayName: string): Contact;
   getKnowledgeFiles(): KnowledgeFile[];
   createKnowledgeFile(filename: string, originalName: string, size: number): KnowledgeFile;
@@ -122,11 +122,11 @@ export class SQLiteStorage implements IStorage {
     return db.prepare("SELECT * FROM messages WHERE contact_id = ? AND id > ? ORDER BY created_at ASC").all(contactId, sinceId) as Message[];
   }
 
-  createMessage(contactId: number, platform: string, senderType: string, content: string): Message {
+  createMessage(contactId: number, platform: string, senderType: string, content: string, messageType: string = "text", imageUrl: string | null = null): Message {
     const now = new Date().toISOString().replace("T", " ").substring(0, 19);
-    const result = db.prepare("INSERT INTO messages (contact_id, platform, sender_type, content, created_at) VALUES (?, ?, ?, ?, ?)").run(contactId, platform, senderType, content, now);
+    const result = db.prepare("INSERT INTO messages (contact_id, platform, sender_type, content, message_type, image_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(contactId, platform, senderType, content, messageType, imageUrl, now);
     db.prepare("UPDATE contacts SET last_message_at = ? WHERE id = ?").run(now, contactId);
-    return { id: Number(result.lastInsertRowid), contact_id: contactId, platform, sender_type: senderType as any, content, created_at: now };
+    return { id: Number(result.lastInsertRowid), contact_id: contactId, platform, sender_type: senderType as any, content, message_type: messageType as any, image_url: imageUrl, created_at: now };
   }
 
   getOrCreateContact(platform: string, platformUserId: string, displayName: string): Contact {
