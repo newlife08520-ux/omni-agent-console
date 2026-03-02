@@ -2433,7 +2433,7 @@ export async function registerRoutes(
     textMessage: string,
     context?: { contactId?: number; brandId?: number; channelToken?: string; platform?: string; platformUserId?: string }
   ): Promise<string> {
-    const host = process.env.REPL_SLUG ? `https://${process.env.REPL_SLUG}.${process.env.REPL_OWNER}.repl.co` : `https://${process.env.REPLIT_DEV_DOMAIN || "localhost:5000"}`;
+    const host = process.env.APP_DOMAIN ? `https://${process.env.APP_DOMAIN}` : `http://localhost:5000`;
     const imageUrl = `${host}/api/image-assets/file/${asset.filename}`;
 
     if (context?.platform === "line" && context?.platformUserId && context?.channelToken) {

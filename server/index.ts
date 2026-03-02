@@ -128,8 +128,8 @@ app.use((req, res, next) => {
     () => {
       log(`serving on port ${port}`);
 
-      const domain = process.env.REPLIT_DEV_DOMAIN || process.env.REPL_SLUG
-        ? `https://${process.env.REPLIT_DEV_DOMAIN || `${process.env.REPL_SLUG}.${process.env.REPL_OWNER}.repl.co`}`
+      const domain = process.env.APP_DOMAIN
+        ? `https://${process.env.APP_DOMAIN}`
         : `http://localhost:${port}`;
 
       console.log("\n" + "=".repeat(70));
