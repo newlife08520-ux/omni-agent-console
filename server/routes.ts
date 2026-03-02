@@ -671,10 +671,15 @@ export async function registerRoutes(
     };
   }
 
-  function getLineTokenForContact(contact: { channel_id?: number | null }): string | null {
+  function getLineTokenForContact(contact: { channel_id?: number | null; brand_id?: number | null }): string | null {
     if (contact.channel_id) {
       const channel = storage.getChannel(contact.channel_id);
       if (channel?.access_token) return channel.access_token;
+    }
+    if (contact.brand_id) {
+      const channels = storage.getChannelsByBrand(contact.brand_id);
+      const lineChannel = channels.find(c => c.platform === "line" && c.access_token);
+      if (lineChannel?.access_token) return lineChannel.access_token;
     }
     return storage.getSetting("line_channel_access_token");
   }

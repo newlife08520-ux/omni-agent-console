@@ -148,7 +148,7 @@ export default function ChatPage() {
     let reconnectTimer: ReturnType<typeof setTimeout>;
 
     function connect() {
-      es = new EventSource("/api/events");
+      es = new EventSource("/api/events", { withCredentials: true });
       es.addEventListener("connected", () => {
         sseConnectedRef.current = true;
         console.log("[SSE] Connected");
