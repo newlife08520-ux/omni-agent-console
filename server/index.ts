@@ -26,6 +26,15 @@ app.use(
 
 app.use(express.urlencoded({ extended: false }));
 
+app.use("/api", (_req, res, next) => {
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.set("Pragma", "no-cache");
+  res.set("Expires", "0");
+  res.set("ETag", "false");
+  next();
+});
+app.set("etag", false);
+
 app.use(
   session({
     secret: process.env.SESSION_SECRET || "omnichannel-secret-key",

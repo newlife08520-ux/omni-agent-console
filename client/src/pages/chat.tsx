@@ -146,28 +146,42 @@ export default function ChatPage() {
   useEffect(() => {
     let es: EventSource | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout>;
+    let retryCount = 0;
 
     function connect() {
-      es = new EventSource("/api/events", { withCredentials: true });
-      es.addEventListener("connected", () => {
-        sseConnectedRef.current = true;
-        console.log("[SSE] Connected");
-      });
-      es.addEventListener("new_message", (e) => {
-        try {
-          const data = JSON.parse(e.data);
-          queryClient.invalidateQueries({ queryKey: ["/api/contacts", data.contact_id, "messages"] });
+      try {
+        es = new EventSource("/api/events", { withCredentials: true });
+        es.addEventListener("connected", () => {
+          sseConnectedRef.current = true;
+          retryCount = 0;
+          console.log("[SSE] Connected successfully");
+        });
+        es.addEventListener("new_message", (e) => {
+          try {
+            const data = JSON.parse(e.data);
+            console.log("[SSE] new_message received, contact:", data.contact_id);
+            queryClient.invalidateQueries({ queryKey: ["/api/contacts", data.contact_id, "messages"] });
+            queryClient.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
+          } catch (err) {
+            console.error("[SSE] Error parsing new_message:", err);
+          }
+        });
+        es.addEventListener("contacts_updated", () => {
+          console.log("[SSE] contacts_updated received");
           queryClient.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
-        } catch {}
-      });
-      es.addEventListener("contacts_updated", () => {
-        queryClient.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
-      });
-      es.onerror = () => {
-        sseConnectedRef.current = false;
-        es?.close();
-        reconnectTimer = setTimeout(connect, 3000);
-      };
+        });
+        es.onerror = (err) => {
+          console.error("[SSE] Connection error, retry #" + retryCount, err);
+          sseConnectedRef.current = false;
+          es?.close();
+          retryCount++;
+          const delay = Math.min(3000 * retryCount, 15000);
+          reconnectTimer = setTimeout(connect, delay);
+        };
+      } catch (err) {
+        console.error("[SSE] Failed to create EventSource:", err);
+        reconnectTimer = setTimeout(connect, 5000);
+      }
     }
 
     connect();
@@ -182,18 +196,26 @@ export default function ChatPage() {
     queryKey: ["/api/contacts", selectedBrandId],
     queryFn: async () => {
       const url = selectedBrandId ? `/api/contacts?brand_id=${selectedBrandId}` : "/api/contacts";
-      const res = await fetch(url, { credentials: "include" });
+      const res = await fetch(url, {
+        credentials: "include",
+        headers: { "Cache-Control": "no-cache", "Pragma": "no-cache" },
+      });
       if (!res.ok) throw new Error("Failed");
       return res.json();
     },
-    refetchInterval: 5000,
+    refetchInterval: 3000,
+    refetchIntervalInBackground: true,
+    staleTime: 0,
   });
 
   const { data: messages = [], isLoading: messagesLoading } = useQuery<Message[]>({
     queryKey: ["/api/contacts", selectedId, "messages"],
     queryFn: async () => {
       if (!selectedId) return [];
-      const res = await fetch(`/api/contacts/${selectedId}/messages`, { credentials: "include" });
+      const res = await fetch(`/api/contacts/${selectedId}/messages`, {
+        credentials: "include",
+        headers: { "Cache-Control": "no-cache", "Pragma": "no-cache" },
+      });
       if (!res.ok) throw new Error("Failed");
       return res.json();
     },

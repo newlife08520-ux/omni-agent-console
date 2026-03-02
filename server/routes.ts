@@ -297,6 +297,7 @@ export async function registerRoutes(
     if (!(req as any).session?.authenticated) {
       return res.status(401).json({ message: "Unauthorized" });
     }
+    console.log("[SSE] Client connected, total clients:", sseClients.size + 1);
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -309,6 +310,7 @@ export async function registerRoutes(
       try { res.write(":ping\n\n"); } catch { clearInterval(keepAlive); sseClients.delete(res); }
     }, 25000);
     req.on("close", () => {
+      console.log("[SSE] Client disconnected, remaining:", sseClients.size - 1);
       clearInterval(keepAlive);
       sseClients.delete(res);
     });
