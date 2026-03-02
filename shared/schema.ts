@@ -181,22 +181,22 @@ export interface LoginResponse {
 
 export interface AnalyticsData {
   kpi: {
-    totalInboundMessages: number;
-    totalContacts: number;
+    customerMessages: number;
     activeContacts: number;
     resolvedCount: number;
-    completionRate: number;
-    aiInterceptRate: number;
-    needsHumanCount: number;
-    humanHandoffRate: number;
-    avgMessagesPerContact: number;
-    aiResolutionRate: number;
-    transferRate: number;
-    orderQuerySuccessRate: number;
+    completionRate: number | null;
+    transferCount: number;
+    transferRate: number | null;
+    aiResolutionRate: number | null;
+    aiHasData: boolean;
+    orderQuerySuccessRate: number | null;
+    orderQueryHasData: boolean;
+    avgMessagesPerContact: number | null;
   };
-  messageSplit: { name: string; value: number }[];
+  messageSplit: { name: string; value: number; pct: number }[];
   statusDistribution: { name: string; value: number }[];
-  intentDistribution: { name: string; value: number }[];
+  intentDistribution: { name: string; value: number; isEstimate: boolean }[];
+  intentUnclassifiedPct: number;
   aiInsights: {
     painPoints: string[];
     suggestions: string[];
@@ -204,7 +204,6 @@ export interface AnalyticsData {
     customerConcerns: { concern: string; count: number }[];
   };
   issueTypeDistribution: { name: string; value: number }[];
-  orderSourceDistribution: { name: string; value: number }[];
   transferReasons: { reason: string; count: number }[];
   platformDistribution: { name: string; value: number }[];
   topKeywords: { keyword: string; count: number }[];
