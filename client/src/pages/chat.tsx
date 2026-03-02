@@ -196,6 +196,24 @@ export default function ChatPage() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
+  const prevHumanCountRef = useRef<number>(0);
+  useEffect(() => {
+    const humanCount = contacts.filter(c => c.needs_human).length;
+    if (humanCount > prevHumanCountRef.current && prevHumanCountRef.current >= 0) {
+      try {
+        const audio = new Audio("data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgiq2up3hOMjdkjK+smXBILTRlj7CsmG9HLDVmkLCsmG9HLDVmkLCsmG5HLTVmkLCsmG5HLTVmkbGtmXBILDVmkLCsmG5HLTVnkbGtmXBILDVmkLCsmG5HLTRlkLCsmXBILjVljq+smXBJLTRlkLCsmXBJLTRlj7CsmG9ILTRlj7CsmG9ILDVmkLCsmG9ILDVmkLCsmXBILDVmkLCsmXBILDVmkLCsmXBILDVmkLCsmXBILDVmkbGtmXBILTVmkbGtmXBILTVmkbGtmXBILTVnkbGtmXBJLTVnkbGtmXBJLjZnkbKumXBJLjZokrKumnFKLjZokrKumnFKLzZokrKumnFKLzZpk7OvmnJKLzZpk7OvmnJKLzZplLOwm3NLLzZqlLOwm3NLMDdqlLOwm3NMMDdqlLOwnHRMMDdrlbSxnHRNMTdrlbSxnHRNMThslrWynXVOMjhslrWynXVOMjhtl7WynXZPMjhtl7aznndPMzhtl7aznndPMzlumLaznndQMzlumLe0n3hQNDlvmbe0n3hRNDlvmbi1oHlRNTpvmbi1oHlRNTpwmrm2oXpSNjpwmrm2oXpSNjpwm7m2oXtTNztxm7q3ontTNztxm7q3o3xUODtxnLu4o3xUODtxnLu4pHxVOTxynby5pX1WOTxynby5pX1WOj1zn726pn5XOj1zn726pn5XOz10oL67p39YPD50oL+8qIBZPD50oL+8qIBZPT91ocC9qYFaPj91ocC9qYFaPj91oc==");
+        audio.volume = 0.3;
+        audio.play().catch(() => {});
+      } catch {}
+      if (Notification.permission === "granted") {
+        new Notification("客服中心", { body: "有新的對話需要人工處理", icon: "/favicon.ico" });
+      } else if (Notification.permission === "default") {
+        Notification.requestPermission();
+      }
+    }
+    prevHumanCountRef.current = humanCount;
+  }, [contacts]);
+
   const selectedContact = contacts.find((c) => c.id === selectedId);
   const filteredContacts = contacts
     .filter((c) => c.display_name.toLowerCase().includes(searchQuery.toLowerCase()))
@@ -570,8 +588,8 @@ export default function ChatPage() {
                         <AvatarFallback className={`${getAvatarColor(contact.id)} text-white text-sm font-semibold`}>{getInitials(contact.display_name)}</AvatarFallback>
                       </Avatar>
                       {contact.needs_human ? (
-                        <div className="absolute -bottom-0.5 -right-0.5 w-4 h-4 bg-red-500 rounded-full border-2 border-white flex items-center justify-center">
-                          <Headphones className="w-2.5 h-2.5 text-white" />
+                        <div className="absolute -bottom-0.5 -right-0.5 w-5 h-5 bg-red-500 rounded-full border-2 border-white flex items-center justify-center animate-pulse">
+                          <Headphones className="w-3 h-3 text-white" />
                         </div>
                       ) : null}
                     </div>
@@ -592,6 +610,11 @@ export default function ChatPage() {
                       </div>
                       {contact.last_message && <p className="text-xs text-stone-500 truncate mt-0.5">{contact.last_message}</p>}
                       <div className="flex items-center gap-1 mt-1.5 flex-wrap">
+                        {contact.needs_human ? (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 border border-red-200" data-testid={`badge-needs-human-${contact.id}`}>
+                            <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />需人工處理
+                          </span>
+                        ) : null}
                         <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${statusInfo.color}`}>
                           <span className={`w-1.5 h-1.5 rounded-full ${statusInfo.dot}`} />{statusInfo.label}
                         </span>

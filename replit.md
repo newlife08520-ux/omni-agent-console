@@ -8,7 +8,7 @@ A commercial-grade **Multi-Brand Omnichannel Helpdesk** (多品牌全通路客�
 - **Backend**: Express.js API server (port 5000)
 - **Database**: SQLite via better-sqlite3 (file: omnichannel.db)
 - **Auth**: Session-based with 3-tier RBAC (super_admin / marketing_manager / cs_agent), SHA-256 password hashing
-- **AI**: OpenAI API integration (gpt-5.2) for sandbox testing and auto-reply
+- **AI**: OpenAI API integration (gpt-5.2) for sandbox testing and auto-reply, with Silent Handoff (無痕轉接真人) mechanism
 - **External API**: 一頁商店 (Super Landing) via https://api.super-landing.com — field mapping: recipient→buyer_name, mobile→buyer_phone, email→buyer_email, tracking_codes→tracking_number, created_date→created_at; API limitation: `mobile` param completely ignored (returns all 2.1M orders), sort params also ignored; **Enforced page_id policy**: all queries MUST include page_id (from product matching) — phone-only global scans are BLOCKED to protect against system overload; triple-mode lookup: (1) global_order_id direct (auto-uppercase), (2) product+phone via page_id (product name or index REQUIRED), (3) date-range + contact + optional page_id; full pages catalog (~3,970 pages) fetched with pagination, hourly cache refresh; AI prompt shows top 100 products; **Multi-order display**: when multiple orders found, ALL orders are returned (no cap) with instruction to list summaries and ask which one; **Auto-uppercase order IDs**: kbt58263 → KBT58263 at all layers
 
 ## Test Accounts
@@ -64,6 +64,15 @@ shared/
 - **Per-brand AI persona**: Each brand can have its own system_prompt that gets appended to the global system prompt
 - **Frontend**: BrandProvider context provides selected brand across all pages; sidebar brand workspace selector; chat platform filter tabs (全部/LINE/FB)
 - Auto-migration on startup: creates default "預設品牌" brand with existing LINE settings migrated as a channel
+
+## Silent Handoff (無痕轉接真人) Mechanism
+- **transfer_to_human** tool: AI calls this when it can't resolve the issue (multi-failed lookups, unknown products, SHOPLINE orders, complex issues)
+- **System prompt injection**: Handoff rules injected into every AI prompt — AI must use natural soothing language, never say "轉接真人" or "我無法處理"
+- **AI auto-reply**: Webhook text messages trigger full OpenAI completion with tool call loop (up to 3 rounds) when test_mode is off and needs_human is false
+- **State control**: When transfer_to_human fires, `needs_human = 1` is set on the contact, and all subsequent messages skip AI processing
+- **Reply suppression**: After transfer_to_human, any pending AI reply is discarded (not sent to customer)
+- **Frontend alerts**: needs_human contacts sorted to top (ORDER BY needs_human DESC); red pulsing "需人工處理" badge + headphone icon; browser notification + sound alert when new handoff detected
+- **Restore AI**: Admin clicks "恢復 AI" button to clear needs_human flag and re-enable AI auto-reply
 
 ## Database Schema (SQLite)
 - **users**: id, username, password_hash, display_name, role (super_admin/marketing_manager/cs_agent), created_at

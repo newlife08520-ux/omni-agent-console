@@ -3,7 +3,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, fetchPages, lookupOrdersByPageAndPhone, ensurePagesCacheLoaded, refreshPagesCache, getCachedPages, getCachedPagesAge, buildProductCatalogPrompt } from "./superlanding";
 import type { SuperLandingConfig } from "./superlanding";
-import type { OrderInfo } from "@shared/schema";
+import type { OrderInfo, Contact } from "@shared/schema";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
@@ -156,7 +156,26 @@ async function getEnrichedSystemPrompt(brandId?: number): Promise<string> {
   const catalogBlock = buildProductCatalogPrompt(pages);
   const knowledgeBlock = buildKnowledgeBlock(brandId);
   const imageBlock = buildImageAssetCatalog(brandId);
-  return basePrompt + brandBlock + catalogBlock + knowledgeBlock + imageBlock;
+
+  const handoffBlock = `
+
+--- 無痕轉接真人機制 (Silent Handoff) ---
+當你遇到以下情況時，必須呼叫 transfer_to_human 工具，將對話靜默轉交真人客服：
+1. 多次查詢仍查不到訂單（已嘗試不同查詢方式後仍無結果）
+2. 知識庫中找不到客戶描述的商品或服務
+3. 客戶問題過於複雜，超出你的能力範圍
+4. 判斷為非本系統管轄的訂單（如 SHOPLINE 官網訂單、其他平台訂單）
+5. 客戶反覆表達不滿或情緒激動
+
+重要規則：
+- 嚴禁說出「我聽不懂」「我無法處理」「幫您轉接真人」「轉接客服」等字眼
+- 在呼叫 transfer_to_human 之前或同時，你的回覆必須是自然的安撫話術，例如：
+  「為了給您最準確的資訊，我需要稍微進入內部系統幫您調閱詳細資料，請您稍等我一下喔」
+  「讓我幫您確認一下更詳細的紀錄，請稍候片刻」
+  「我正在為您查詢更深入的資料，請您稍等一下」
+- 客戶不應感知到自己被轉接，整個過程必須無痕銜接`;
+
+  return basePrompt + brandBlock + handoffBlock + catalogBlock + knowledgeBlock + imageBlock;
 }
 
 export async function registerRoutes(
@@ -959,6 +978,105 @@ export async function registerRoutes(
     }
   }
 
+  async function autoReplyWithAI(
+    contact: Contact,
+    userMessage: string,
+    channelToken?: string | null,
+    brandId?: number
+  ) {
+    const apiKey = storage.getSetting("openai_api_key");
+    if (!apiKey || apiKey.trim() === "") return;
+
+    try {
+      const systemPrompt = await getEnrichedSystemPrompt(contact.brand_id || brandId || undefined);
+      const openai = new OpenAI({ apiKey });
+
+      const recentMessages = storage.getMessages(contact.id).slice(-20);
+      const chatMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+        { role: "system", content: systemPrompt },
+      ];
+      for (const msg of recentMessages) {
+        if (msg.sender_type === "user") {
+          chatMessages.push({ role: "user", content: msg.content });
+        } else if (msg.sender_type === "ai") {
+          chatMessages.push({ role: "assistant", content: msg.content });
+        }
+      }
+
+      const effectiveBrandId = contact.brand_id || brandId;
+      const hasImageAssets = storage.getImageAssets(effectiveBrandId || undefined).length > 0;
+      const allTools = [...orderLookupTools, ...humanHandoffTools, ...(hasImageAssets ? imageTools : [])];
+
+      let completion = await openai.chat.completions.create({
+        model: "gpt-5.2",
+        messages: chatMessages,
+        tools: allTools,
+        max_completion_tokens: 1000,
+        temperature: 0.7,
+      });
+
+      let responseMessage = completion.choices[0]?.message;
+      let loopCount = 0;
+      const maxToolLoops = 3;
+
+      while (responseMessage?.tool_calls && responseMessage.tool_calls.length > 0 && loopCount < maxToolLoops) {
+        loopCount++;
+        console.log(`[Webhook AI] 觸發 ${responseMessage.tool_calls.length} 個 Tool Call（第 ${loopCount} 輪）`);
+        chatMessages.push(responseMessage as OpenAI.Chat.Completions.ChatCompletionMessageParam);
+
+        for (const toolCall of responseMessage.tool_calls) {
+          const fnName = toolCall.function.name;
+          let fnArgs: Record<string, string> = {};
+          try { fnArgs = JSON.parse(toolCall.function.arguments); } catch {}
+
+          console.log(`[Webhook AI] 執行 Tool: ${fnName}，參數:`, fnArgs);
+          const toolResult = await executeToolCall(fnName, fnArgs, {
+            contactId: contact.id,
+            brandId: effectiveBrandId || undefined,
+            channelToken: channelToken || undefined,
+            platform: contact.platform,
+            platformUserId: contact.platform_user_id,
+          });
+
+          chatMessages.push({ role: "tool", tool_call_id: toolCall.id, content: toolResult });
+
+          if (fnName === "transfer_to_human") {
+            const freshContact = storage.getContact(contact.id);
+            if (freshContact?.needs_human) {
+              console.log(`[Webhook AI] transfer_to_human 已觸發，停止 AI 回覆迴圈`);
+            }
+          }
+        }
+
+        const freshContact = storage.getContact(contact.id);
+        if (freshContact?.needs_human) break;
+
+        completion = await openai.chat.completions.create({
+          model: "gpt-5.2",
+          messages: chatMessages,
+          tools: allTools,
+          max_completion_tokens: 1000,
+          temperature: 0.7,
+        });
+        responseMessage = completion.choices[0]?.message;
+      }
+
+      const finalContact = storage.getContact(contact.id);
+      if (finalContact?.needs_human) {
+        console.log(`[Webhook AI] 已轉接真人，跳過 AI 回覆`);
+        return;
+      }
+
+      const reply = responseMessage?.content;
+      if (reply && reply.trim()) {
+        storage.createMessage(contact.id, "line", "ai", reply);
+        await pushLineMessage(contact.platform_user_id, [{ type: "text", text: reply }], channelToken);
+      }
+    } catch (err) {
+      console.error("[Webhook AI] 自動回覆失敗:", err);
+    }
+  }
+
   app.post("/api/webhook/line", async (req, res) => {
     const signature = req.headers["x-line-signature"] as string | undefined;
     const destination = req.body?.destination as string | undefined;
@@ -1018,6 +1136,10 @@ export async function registerRoutes(
             const testMode = storage.getSetting("test_mode");
             if (testMode === "true") {
               storage.createMessage(contact.id, "line", "ai", `[測試模式] 收到您的訊息：「${text}」。`);
+            } else {
+              autoReplyWithAI(contact, text, channelToken, matchedBrandId).catch(err =>
+                console.error("[Webhook] AI 自動回覆失敗:", err)
+              );
             }
           }
         } else if (event.type === "postback") {
@@ -1158,6 +1280,26 @@ export async function registerRoutes(
     },
   ];
 
+  const humanHandoffTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
+    {
+      type: "function",
+      function: {
+        name: "transfer_to_human",
+        description: "當你無法確定答案、多次查詢仍查不到訂單、知識庫中找不到客戶描述的商品、客戶問題過於複雜、或判斷為非本系統管轄的訂單（如 SHOPLINE 官網訂單）時，呼叫此工具將對話靜默轉交給真人客服。注意：呼叫此工具前，你必須先回覆一段自然的安撫話術，例如「為了給您最準確的資訊，我需要稍微進入內部系統幫您調閱詳細資料，請您稍等我一下喔」。嚴禁說出「我聽不懂」「我無法處理」「幫您轉接真人」等字眼。",
+        parameters: {
+          type: "object",
+          properties: {
+            reason: {
+              type: "string",
+              description: "轉接原因（內部記錄用，不會顯示給客戶）",
+            },
+          },
+          required: [],
+        },
+      },
+    },
+  ];
+
   const imageTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     {
       type: "function",
@@ -1221,6 +1363,17 @@ export async function registerRoutes(
     args: Record<string, string>,
     context?: { contactId?: number; brandId?: number; channelToken?: string; platform?: string; platformUserId?: string }
   ): Promise<string> {
+    if (toolName === "transfer_to_human") {
+      const reason = (args.reason || "AI 判斷需要人工處理").trim();
+      console.log(`[AI Tool Call] transfer_to_human，原因: ${reason}，contactId: ${context?.contactId}`);
+      if (context?.contactId) {
+        storage.updateContactHumanFlag(context.contactId, 1);
+        storage.createMessage(context.contactId, context?.platform || "line", "system",
+          `(系統提示) AI 已靜默轉接真人客服。轉接原因：${reason}`);
+      }
+      return JSON.stringify({ success: true, message: "已將對話轉交真人客服處理，客戶不會收到轉接通知。" });
+    }
+
     if (toolName === "send_image_to_customer") {
       const imageName = (args.image_name || "").trim();
       const textMessage = (args.text_message || "").trim();
@@ -1526,7 +1679,7 @@ export async function registerRoutes(
       }
 
       const hasImageAssets = storage.getImageAssets(brand_id ? parseInt(brand_id) : undefined).length > 0;
-      const allTools = hasImageAssets ? [...orderLookupTools, ...imageTools] : orderLookupTools;
+      const allTools = [...orderLookupTools, ...humanHandoffTools, ...(hasImageAssets ? imageTools : [])];
 
       let completion = await openai.chat.completions.create({
         model: "gpt-5.2",
