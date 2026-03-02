@@ -1,5 +1,5 @@
 import db, { initDatabase, hashPassword } from "./db";
-import type { User, Contact, ContactWithPreview, Message, Setting, KnowledgeFile, TeamMember, MarketingRule, Brand, Channel, ChannelWithBrand } from "@shared/schema";
+import type { User, Contact, ContactWithPreview, Message, Setting, KnowledgeFile, TeamMember, MarketingRule, Brand, Channel, ChannelWithBrand, ImageAsset } from "@shared/schema";
 
 initDatabase();
 
@@ -42,8 +42,15 @@ export interface IStorage {
   createMessage(contactId: number, platform: string, senderType: string, content: string, messageType?: string, imageUrl?: string | null): Message;
   getOrCreateContact(platform: string, platformUserId: string, displayName: string, brandId?: number, channelId?: number): Contact;
   getKnowledgeFiles(brandId?: number): KnowledgeFile[];
-  createKnowledgeFile(filename: string, originalName: string, size: number, brandId?: number): KnowledgeFile;
+  createKnowledgeFile(filename: string, originalName: string, size: number, brandId?: number, content?: string): KnowledgeFile;
+  updateKnowledgeFileContent(id: number, content: string): boolean;
   deleteKnowledgeFile(id: number): boolean;
+  getImageAssets(brandId?: number): ImageAsset[];
+  getImageAsset(id: number): ImageAsset | undefined;
+  getImageAssetByName(displayName: string, brandId?: number): ImageAsset | undefined;
+  createImageAsset(filename: string, originalName: string, displayName: string, description: string, keywords: string, size: number, mimeType: string, brandId?: number): ImageAsset;
+  updateImageAsset(id: number, data: Partial<Omit<ImageAsset, "id" | "created_at">>): boolean;
+  deleteImageAsset(id: number): boolean;
   getMarketingRules(brandId?: number): MarketingRule[];
   createMarketingRule(keyword: string, pitch: string, url: string, brandId?: number): MarketingRule;
   updateMarketingRule(id: number, keyword: string, pitch: string, url: string): boolean;
@@ -291,14 +298,61 @@ export class SQLiteStorage implements IStorage {
     return db.prepare("SELECT * FROM knowledge_files ORDER BY created_at DESC").all() as KnowledgeFile[];
   }
 
-  createKnowledgeFile(filename: string, originalName: string, size: number, brandId?: number): KnowledgeFile {
+  createKnowledgeFile(filename: string, originalName: string, size: number, brandId?: number, content?: string): KnowledgeFile {
     const now = new Date().toISOString().replace("T", " ").substring(0, 19);
-    const result = db.prepare("INSERT INTO knowledge_files (filename, original_name, size, brand_id, created_at) VALUES (?, ?, ?, ?, ?)").run(filename, originalName, size, brandId || null, now);
-    return { id: Number(result.lastInsertRowid), filename, original_name: originalName, size, created_at: now, brand_id: brandId || null };
+    const result = db.prepare("INSERT INTO knowledge_files (filename, original_name, size, brand_id, content, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(filename, originalName, size, brandId || null, content || null, now);
+    return { id: Number(result.lastInsertRowid), filename, original_name: originalName, size, content: content || null, created_at: now, brand_id: brandId || null };
+  }
+
+  updateKnowledgeFileContent(id: number, content: string): boolean {
+    const result = db.prepare("UPDATE knowledge_files SET content = ? WHERE id = ?").run(content, id);
+    return result.changes > 0;
   }
 
   deleteKnowledgeFile(id: number): boolean {
     const result = db.prepare("DELETE FROM knowledge_files WHERE id = ?").run(id);
+    return result.changes > 0;
+  }
+
+  getImageAssets(brandId?: number): ImageAsset[] {
+    if (brandId) {
+      return db.prepare("SELECT * FROM image_assets WHERE brand_id = ? ORDER BY created_at DESC").all(brandId) as ImageAsset[];
+    }
+    return db.prepare("SELECT * FROM image_assets ORDER BY created_at DESC").all() as ImageAsset[];
+  }
+
+  getImageAsset(id: number): ImageAsset | undefined {
+    return db.prepare("SELECT * FROM image_assets WHERE id = ?").get(id) as ImageAsset | undefined;
+  }
+
+  getImageAssetByName(displayName: string, brandId?: number): ImageAsset | undefined {
+    if (brandId) {
+      return db.prepare("SELECT * FROM image_assets WHERE (display_name = ? OR original_name = ?) AND brand_id = ?").get(displayName, displayName, brandId) as ImageAsset | undefined;
+    }
+    return db.prepare("SELECT * FROM image_assets WHERE display_name = ? OR original_name = ?").get(displayName, displayName) as ImageAsset | undefined;
+  }
+
+  createImageAsset(filename: string, originalName: string, displayName: string, description: string, keywords: string, size: number, mimeType: string, brandId?: number): ImageAsset {
+    const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+    const result = db.prepare("INSERT INTO image_assets (filename, original_name, display_name, description, keywords, size, mime_type, brand_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(filename, originalName, displayName, description, keywords, size, mimeType, brandId || null, now);
+    return { id: Number(result.lastInsertRowid), filename, original_name: originalName, display_name: displayName, description, keywords, size, mime_type: mimeType, brand_id: brandId || null, created_at: now };
+  }
+
+  updateImageAsset(id: number, data: Partial<Omit<ImageAsset, "id" | "created_at">>): boolean {
+    const fields: string[] = [];
+    const values: any[] = [];
+    for (const [key, value] of Object.entries(data)) {
+      fields.push(`${key} = ?`);
+      values.push(value);
+    }
+    if (fields.length === 0) return false;
+    values.push(id);
+    const result = db.prepare(`UPDATE image_assets SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+    return result.changes > 0;
+  }
+
+  deleteImageAsset(id: number): boolean {
+    const result = db.prepare("DELETE FROM image_assets WHERE id = ?").run(id);
     return result.changes > 0;
   }
 

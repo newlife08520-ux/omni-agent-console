@@ -36,6 +36,7 @@ server/
   storage.ts       - IStorage interface and SQLiteStorage implementation
   db.ts            - SQLite database setup, schema creation, mock data seeding
   superlanding.ts  - 一頁商店 API client (fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, lookupOrdersByPhone, fetchPages, lookupOrdersByPageAndPhone with smart date-window fallback)
+  file-parser.ts   - File content extraction (xlsx via xlsx lib, docx via jszip, pdf text extraction, txt/csv/md passthrough); isImageFile() guard
   vite.ts          - Vite dev server integration (DO NOT MODIFY)
   static.ts        - Static file serving for production
 
@@ -45,7 +46,7 @@ client/src/
     login.tsx          - Login page with 3 test accounts displayed
     chat.tsx           - Real-time chat with CRM panel, order lookup tab, VIP badges, quick replies
     settings.tsx       - API keys, 一頁商店 API, white-label, LINE welcome, human-transfer keywords
-    knowledge.tsx      - System prompt, knowledge files, marketing rules, AI sandbox
+    knowledge.tsx      - System prompt, knowledge files (xlsx/docx/pdf/csv/txt/md), image assets library, marketing rules, AI sandbox
     team.tsx           - Team CRUD with 3-tier role selector and RBAC info cards
     analytics.tsx      - BI dashboard with custom date range picker (Calendar + Popover)
     not-found.tsx      - 404 page

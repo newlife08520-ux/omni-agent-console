@@ -9,13 +9,20 @@ import path from "path";
 import fs from "fs";
 import crypto from "crypto";
 import OpenAI from "openai";
+import { parseFileContent, isImageFile } from "./file-parser";
 
 const uploadDir = path.resolve(process.cwd(), "uploads");
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-const ALLOWED_EXTENSIONS = [".txt", ".pdf", ".csv", ".docx"];
+const imageAssetsDir = path.resolve(process.cwd(), "uploads", "image-assets");
+if (!fs.existsSync(imageAssetsDir)) {
+  fs.mkdirSync(imageAssetsDir, { recursive: true });
+}
+
+const ALLOWED_EXTENSIONS = [".txt", ".pdf", ".csv", ".docx", ".xlsx", ".md"];
+const BLOCKED_IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".svg", ".ico"];
 const ALLOWED_IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".gif", ".webp"];
 const ALLOWED_VIDEO_EXTENSIONS = [".mp4", ".mov", ".avi", ".webm"];
 
@@ -29,9 +36,27 @@ const upload = multer({
   }),
   fileFilter: (_req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
+    if (BLOCKED_IMAGE_EXTENSIONS.includes(ext)) {
+      return cb(null, false);
+    }
     cb(null, ALLOWED_EXTENSIONS.includes(ext));
   },
   limits: { fileSize: 20 * 1024 * 1024 },
+});
+
+const imageAssetUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, imageAssetsDir),
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname);
+      cb(null, `${Date.now()}-${crypto.randomUUID()}${ext}`);
+    },
+  }),
+  fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    cb(null, ALLOWED_IMAGE_EXTENSIONS.includes(ext));
+  },
+  limits: { fileSize: 10 * 1024 * 1024 },
 });
 
 const chatUpload = multer({
@@ -74,6 +99,40 @@ function getSuperLandingConfig(): SuperLandingConfig {
   };
 }
 
+function buildKnowledgeBlock(brandId?: number): string {
+  const files = storage.getKnowledgeFiles(brandId);
+  const filesWithContent = files.filter(f => f.content && f.content.trim().length > 0);
+  if (filesWithContent.length === 0) return "";
+  const maxTotalChars = 80000;
+  let totalChars = 0;
+  const blocks: string[] = [];
+  for (const f of filesWithContent) {
+    const content = f.content!;
+    if (totalChars + content.length > maxTotalChars) {
+      const remaining = maxTotalChars - totalChars;
+      if (remaining > 500) {
+        blocks.push(`[知識檔案: ${f.original_name}]\n${content.substring(0, remaining)}\n[內容已截斷]`);
+      }
+      break;
+    }
+    blocks.push(`[知識檔案: ${f.original_name}]\n${content}`);
+    totalChars += content.length;
+  }
+  return "\n\n--- 知識庫內容 ---\n" + blocks.join("\n\n");
+}
+
+function buildImageAssetCatalog(brandId?: number): string {
+  const assets = storage.getImageAssets(brandId);
+  if (assets.length === 0) return "";
+  const lines = assets.map((a, i) => {
+    const parts = [`#${i + 1} ${a.display_name}`];
+    if (a.description) parts.push(`(${a.description})`);
+    if (a.keywords) parts.push(`關鍵字: ${a.keywords}`);
+    return parts.join(" ");
+  });
+  return "\n\n--- 圖片素材庫 ---\n你具備發送圖片的能力。如果客戶的問題用圖片回覆會更清晰，且素材庫中有對應圖片，請優先使用 send_image_to_customer 工具來回覆。\n可用圖片：\n" + lines.join("\n");
+}
+
 async function getEnrichedSystemPrompt(brandId?: number): Promise<string> {
   const basePrompt = storage.getSetting("system_prompt") || "你是一位專業的客服助理。";
   let brandBlock = "";
@@ -86,7 +145,9 @@ async function getEnrichedSystemPrompt(brandId?: number): Promise<string> {
   const config = getSuperLandingConfig();
   const pages = await ensurePagesCacheLoaded(config);
   const catalogBlock = buildProductCatalogPrompt(pages);
-  return basePrompt + brandBlock + catalogBlock;
+  const knowledgeBlock = buildKnowledgeBlock(brandId);
+  const imageBlock = buildImageAssetCatalog(brandId);
+  return basePrompt + brandBlock + catalogBlock + knowledgeBlock + imageBlock;
 }
 
 export async function registerRoutes(
@@ -1087,10 +1148,87 @@ export async function registerRoutes(
     },
   ];
 
+  const imageTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
+    {
+      type: "function",
+      function: {
+        name: "send_image_to_customer",
+        description: "發送圖片素材給客戶。當你認為客戶的問題用圖片回覆會更清晰（例如：產品特色圖、使用教學圖、活動海報），且圖片素材庫中有對應圖片時使用。",
+        parameters: {
+          type: "object",
+          properties: {
+            image_name: {
+              type: "string",
+              description: "圖片素材庫中的圖片名稱（display_name 或 original_name）",
+            },
+            text_message: {
+              type: "string",
+              description: "搭配圖片發送的文字訊息（選填）",
+            },
+          },
+          required: ["image_name"],
+        },
+      },
+    },
+  ];
+
+  async function sendImageAsset(
+    asset: { id: number; filename: string; display_name: string },
+    textMessage: string,
+    context?: { contactId?: number; brandId?: number; channelToken?: string; platform?: string; platformUserId?: string }
+  ): Promise<string> {
+    const host = process.env.REPL_SLUG ? `https://${process.env.REPL_SLUG}.${process.env.REPL_OWNER}.repl.co` : `https://${process.env.REPLIT_DEV_DOMAIN || "localhost:5000"}`;
+    const imageUrl = `${host}/api/image-assets/file/${asset.filename}`;
+
+    if (context?.platform === "line" && context?.platformUserId && context?.channelToken) {
+      const messages: object[] = [];
+      if (textMessage) {
+        messages.push({ type: "text", text: textMessage });
+      }
+      messages.push({
+        type: "image",
+        originalContentUrl: imageUrl,
+        previewImageUrl: imageUrl,
+      });
+      await pushLineMessage(context.platformUserId, messages, context.channelToken);
+      if (context.contactId) {
+        if (textMessage) storage.createMessage(context.contactId, "line", "ai", textMessage);
+        storage.createMessage(context.contactId, "line", "ai", `[圖片: ${asset.display_name}]`, "image", imageUrl);
+      }
+      return JSON.stringify({ success: true, message: `已發送圖片「${asset.display_name}」給客戶` });
+    }
+
+    return JSON.stringify({
+      success: true,
+      message: `圖片「${asset.display_name}」已準備`,
+      image_url: imageUrl,
+      text_message: textMessage,
+    });
+  }
+
   async function executeToolCall(
     toolName: string,
-    args: Record<string, string>
+    args: Record<string, string>,
+    context?: { contactId?: number; brandId?: number; channelToken?: string; platform?: string; platformUserId?: string }
   ): Promise<string> {
+    if (toolName === "send_image_to_customer") {
+      const imageName = (args.image_name || "").trim();
+      const textMessage = (args.text_message || "").trim();
+      if (!imageName) return JSON.stringify({ success: false, error: "未提供圖片名稱" });
+
+      const asset = storage.getImageAssetByName(imageName, context?.brandId);
+      if (!asset) {
+        const allAssets = storage.getImageAssets(context?.brandId);
+        const fuzzyMatch = allAssets.find(a =>
+          a.display_name.includes(imageName) || imageName.includes(a.display_name) ||
+          a.original_name.includes(imageName) || (a.keywords && a.keywords.includes(imageName))
+        );
+        if (!fuzzyMatch) return JSON.stringify({ success: false, error: `找不到圖片: ${imageName}` });
+        return await sendImageAsset(fuzzyMatch, textMessage, context);
+      }
+      return await sendImageAsset(asset, textMessage, context);
+    }
+
     const config = getSuperLandingConfig();
     if (!config.merchantNo || !config.accessKey) {
       return JSON.stringify({ success: false, error: "系統尚未設定一頁商店 API 金鑰，無法查詢訂單。" });
@@ -1377,10 +1515,13 @@ export async function registerRoutes(
         console.log("[Sandbox] 無對話歷史，僅傳送單筆訊息（含 Function Calling Tools）");
       }
 
+      const hasImageAssets = storage.getImageAssets(brand_id ? parseInt(brand_id) : undefined).length > 0;
+      const allTools = hasImageAssets ? [...orderLookupTools, ...imageTools] : orderLookupTools;
+
       let completion = await openai.chat.completions.create({
         model: "gpt-5.2",
         messages: chatMessages,
-        tools: orderLookupTools,
+        tools: allTools,
         max_completion_tokens: 1000,
         temperature: 0.7,
       });
@@ -1388,6 +1529,7 @@ export async function registerRoutes(
       let responseMessage = completion.choices[0]?.message;
       let loopCount = 0;
       const maxToolLoops = 3;
+      let sandboxImageResult: { image_url?: string; text_message?: string } | null = null;
 
       while (responseMessage?.tool_calls && responseMessage.tool_calls.length > 0 && loopCount < maxToolLoops) {
         loopCount++;
@@ -1411,8 +1553,15 @@ export async function registerRoutes(
           }
 
           console.log(`[Sandbox] 執行 Tool: ${fnName}，參數:`, fnArgs);
-          const toolResult = await executeToolCall(fnName, fnArgs);
+          const toolResult = await executeToolCall(fnName, fnArgs, { brandId: brand_id ? parseInt(brand_id) : undefined });
           console.log(`[Sandbox] Tool 回傳結果長度: ${toolResult.length} 字元`);
+
+          if (fnName === "send_image_to_customer") {
+            try {
+              const parsed = JSON.parse(toolResult);
+              if (parsed.image_url) sandboxImageResult = parsed;
+            } catch {}
+          }
 
           chatMessages.push({
             role: "tool",
@@ -1424,7 +1573,7 @@ export async function registerRoutes(
         completion = await openai.chat.completions.create({
           model: "gpt-5.2",
           messages: chatMessages,
-          tools: orderLookupTools,
+          tools: allTools,
           max_completion_tokens: 1000,
           temperature: 0.7,
         });
@@ -1432,7 +1581,11 @@ export async function registerRoutes(
       }
 
       const reply = responseMessage?.content || "抱歉，AI 無法生成回覆。";
-      return res.json({ success: true, reply });
+      const result: Record<string, any> = { success: true, reply };
+      if (sandboxImageResult) {
+        result.image_url = sandboxImageResult.image_url;
+      }
+      return res.json(result);
     } catch (err: any) {
       const errorMessage = err?.message || "未知錯誤";
       if (errorMessage.includes("401") || errorMessage.includes("Incorrect API key") || errorMessage.includes("invalid_api_key")) {
@@ -1517,10 +1670,27 @@ export async function registerRoutes(
     return res.json(storage.getKnowledgeFiles());
   });
 
-  app.post("/api/knowledge-files", authMiddleware, managerOrAbove, upload.single("file"), (req, res) => {
-    if (!req.file) return res.status(400).json({ message: "未上傳檔案" });
+  app.post("/api/knowledge-files", authMiddleware, managerOrAbove, upload.single("file"), async (req, res) => {
+    if (!req.file) return res.status(400).json({ message: "未上傳檔案，或檔案格式不支援。支援格式：.txt, .csv, .pdf, .docx, .xlsx, .md。圖片檔案請上傳至圖片素材庫。" });
+    const ext = path.extname(req.file.originalname).toLowerCase();
+    if (isImageFile(req.file.originalname)) {
+      const filePath = path.join(uploadDir, req.file.filename);
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      return res.status(400).json({ message: "圖片檔案不可上傳至知識庫。如需上傳圖片素材，請至「圖片素材庫」。" });
+    }
     const brandId = req.body.brand_id ? parseInt(req.body.brand_id) : undefined;
-    const file = storage.createKnowledgeFile(req.file.filename, req.file.originalname, req.file.size, brandId);
+    let content: string | undefined;
+    try {
+      const filePath = path.join(uploadDir, req.file.filename);
+      content = await parseFileContent(filePath, req.file.originalname);
+      if (content && content.length > 500000) {
+        content = content.substring(0, 500000) + "\n\n[內容已截斷，原始檔案過大]";
+      }
+    } catch (err) {
+      console.error(`[知識庫] 檔案解析失敗 ${req.file.originalname}:`, err);
+      content = `[檔案解析失敗: ${req.file.originalname}]`;
+    }
+    const file = storage.createKnowledgeFile(req.file.filename, req.file.originalname, req.file.size, brandId, content || undefined);
     return res.json(file);
   });
 
@@ -1534,6 +1704,50 @@ export async function registerRoutes(
     }
     if (!storage.deleteKnowledgeFile(id)) return res.status(404).json({ message: "檔案不存在" });
     return res.json({ success: true });
+  });
+
+  app.get("/api/image-assets", authMiddleware, (req, res) => {
+    const brandId = req.query.brand_id ? parseInt(req.query.brand_id as string) : undefined;
+    return res.json(storage.getImageAssets(brandId));
+  });
+
+  app.post("/api/image-assets", authMiddleware, managerOrAbove, imageAssetUpload.single("file"), (req, res) => {
+    if (!req.file) return res.status(400).json({ message: "未上傳檔案或格式不支援。僅支援 .jpg, .jpeg, .png, .gif, .webp" });
+    const brandId = req.body.brand_id ? parseInt(req.body.brand_id) : undefined;
+    const displayName = req.body.display_name || req.file.originalname;
+    const description = req.body.description || "";
+    const keywords = req.body.keywords || "";
+    const asset = storage.createImageAsset(req.file.filename, req.file.originalname, displayName, description, keywords, req.file.size, req.file.mimetype, brandId);
+    return res.json(asset);
+  });
+
+  app.put("/api/image-assets/:id", authMiddleware, managerOrAbove, (req, res) => {
+    const id = parseInt(req.params.id);
+    const { display_name, description, keywords } = req.body;
+    const data: Record<string, string> = {};
+    if (display_name !== undefined) data.display_name = display_name;
+    if (description !== undefined) data.description = description;
+    if (keywords !== undefined) data.keywords = keywords;
+    if (!storage.updateImageAsset(id, data)) return res.status(404).json({ message: "素材不存在" });
+    return res.json({ success: true });
+  });
+
+  app.delete("/api/image-assets/:id", authMiddleware, managerOrAbove, (req, res) => {
+    const id = parseInt(req.params.id);
+    const asset = storage.getImageAsset(id);
+    if (asset) {
+      const filePath = path.join(imageAssetsDir, asset.filename);
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    }
+    if (!storage.deleteImageAsset(id)) return res.status(404).json({ message: "素材不存在" });
+    return res.json({ success: true });
+  });
+
+  app.get("/api/image-assets/file/:filename", (req, res) => {
+    const filename = req.params.filename;
+    const filePath = path.join(imageAssetsDir, filename);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ message: "檔案不存在" });
+    res.sendFile(filePath);
   });
 
   app.get("/api/team", authMiddleware, superAdminOnly, (_req, res) => {

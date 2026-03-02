@@ -142,9 +142,28 @@ function migrateBrandsAndChannels() {
   }
 
   const kfCols = db.prepare("PRAGMA table_info(knowledge_files)").all() as { name: string }[];
-  if (!kfCols.map(c => c.name).includes("brand_id")) {
+  const kfColNames = kfCols.map(c => c.name);
+  if (!kfColNames.includes("brand_id")) {
     db.exec("ALTER TABLE knowledge_files ADD COLUMN brand_id INTEGER");
   }
+  if (!kfColNames.includes("content")) {
+    db.exec("ALTER TABLE knowledge_files ADD COLUMN content TEXT");
+  }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS image_assets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      filename TEXT NOT NULL,
+      original_name TEXT NOT NULL,
+      display_name TEXT NOT NULL DEFAULT '',
+      description TEXT NOT NULL DEFAULT '',
+      keywords TEXT NOT NULL DEFAULT '',
+      size INTEGER NOT NULL DEFAULT 0,
+      mime_type TEXT NOT NULL DEFAULT '',
+      brand_id INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
 
   const mrCols = db.prepare("PRAGMA table_info(marketing_rules)").all() as { name: string }[];
   if (!mrCols.map(c => c.name).includes("brand_id")) {

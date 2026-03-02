@@ -86,8 +86,22 @@ export interface KnowledgeFile {
   filename: string;
   original_name: string;
   size: number;
+  content: string | null;
   created_at: string;
   brand_id: number | null;
+}
+
+export interface ImageAsset {
+  id: number;
+  filename: string;
+  original_name: string;
+  display_name: string;
+  description: string;
+  keywords: string;
+  size: number;
+  mime_type: string;
+  brand_id: number | null;
+  created_at: string;
 }
 
 export interface TeamMember {

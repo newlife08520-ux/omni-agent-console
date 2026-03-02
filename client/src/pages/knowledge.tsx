@@ -15,7 +15,7 @@ import {
 import { apiRequest, getQueryFn } from "@/lib/queryClient";
 import { useBrand } from "@/lib/brand-context";
 import { useToast } from "@/hooks/use-toast";
-import type { Setting, KnowledgeFile, MarketingRule } from "@shared/schema";
+import type { Setting, KnowledgeFile, MarketingRule, ImageAsset } from "@shared/schema";
 
 interface SandboxMessage {
   role: "user" | "ai";
@@ -43,7 +43,13 @@ export default function KnowledgePage() {
   const [ruleSaving, setRuleSaving] = useState(false);
   const [sandboxUploading, setSandboxUploading] = useState(false);
   const [sandboxPendingFile, setSandboxPendingFile] = useState<{ file: File; preview: string; type: "image" | "video" } | null>(null);
+  const [imageAssetUploading, setImageAssetUploading] = useState(false);
+  const [editingAsset, setEditingAsset] = useState<ImageAsset | null>(null);
+  const [assetForm, setAssetForm] = useState({ display_name: "", description: "", keywords: "" });
+  const [showAssetDialog, setShowAssetDialog] = useState(false);
+  const [assetSaving, setAssetSaving] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const imageAssetInputRef = useRef<HTMLInputElement>(null);
   const sandboxFileRef = useRef<HTMLInputElement>(null);
   const sandboxEndRef = useRef<HTMLDivElement>(null);
   const queryClient = useQueryClient();
@@ -78,8 +84,14 @@ export default function KnowledgePage() {
     queryFn: getQueryFn({ on401: "throw" }),
   });
 
+  const { data: imageAssets = [] } = useQuery<ImageAsset[]>({
+    queryKey: ["/api/image-assets"],
+    queryFn: getQueryFn({ on401: "throw" }),
+  });
+
   const brandFiles = files.filter(f => !selectedBrandId || f.brand_id === selectedBrandId || f.brand_id === null);
   const brandRules = marketingRules.filter(r => !selectedBrandId || (r as any).brand_id === selectedBrandId || (r as any).brand_id === null);
+  const brandAssets = imageAssets.filter(a => !selectedBrandId || a.brand_id === selectedBrandId || a.brand_id === null);
 
   const handleSavePrompt = async () => {
     setSaving(true);
@@ -105,10 +117,15 @@ export default function KnowledgePage() {
   };
 
   const handleUploadFile = useCallback(async (file: File) => {
-    const allowed = [".txt", ".pdf", ".csv", ".docx"];
+    const allowed = [".txt", ".pdf", ".csv", ".docx", ".xlsx", ".md"];
+    const imageExts = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".svg", ".ico"];
     const ext = file.name.substring(file.name.lastIndexOf(".")).toLowerCase();
+    if (imageExts.includes(ext)) {
+      toast({ title: "圖片檔案不可上傳至知識庫", description: "如需上傳圖片素材，請至「圖片素材庫」分頁", variant: "destructive" });
+      return;
+    }
     if (!allowed.includes(ext)) {
-      toast({ title: "檔案格式錯誤", description: "僅支援 .txt, .pdf, .csv, .docx", variant: "destructive" });
+      toast({ title: "檔案格式錯誤", description: "僅支援 .txt, .pdf, .csv, .docx, .xlsx, .md", variant: "destructive" });
       return;
     }
     setUploading(true);
@@ -268,6 +285,53 @@ export default function KnowledgePage() {
     } catch { toast({ title: "刪除失敗", variant: "destructive" }); }
   };
 
+  const handleUploadImageAsset = useCallback(async (file: File) => {
+    const allowed = [".jpg", ".jpeg", ".png", ".gif", ".webp"];
+    const ext = file.name.substring(file.name.lastIndexOf(".")).toLowerCase();
+    if (!allowed.includes(ext)) {
+      toast({ title: "格式錯誤", description: "僅支援 .jpg, .jpeg, .png, .gif, .webp", variant: "destructive" });
+      return;
+    }
+    setImageAssetUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("display_name", file.name);
+      if (selectedBrandId) formData.append("brand_id", String(selectedBrandId));
+      const res = await fetch("/api/image-assets", { method: "POST", body: formData, credentials: "include" });
+      if (!res.ok) throw new Error("Upload failed");
+      queryClient.invalidateQueries({ queryKey: ["/api/image-assets"] });
+      toast({ title: "上傳成功", description: `${file.name} 已加入素材庫` });
+    } catch { toast({ title: "上傳失敗", variant: "destructive" }); }
+    finally { setImageAssetUploading(false); }
+  }, [queryClient, toast, selectedBrandId]);
+
+  const handleEditAsset = (asset: ImageAsset) => {
+    setEditingAsset(asset);
+    setAssetForm({ display_name: asset.display_name, description: asset.description, keywords: asset.keywords });
+    setShowAssetDialog(true);
+  };
+
+  const handleSaveAsset = async () => {
+    if (!editingAsset) return;
+    setAssetSaving(true);
+    try {
+      await apiRequest("PUT", `/api/image-assets/${editingAsset.id}`, assetForm);
+      queryClient.invalidateQueries({ queryKey: ["/api/image-assets"] });
+      toast({ title: "更新成功" });
+      setShowAssetDialog(false);
+    } catch { toast({ title: "更新失敗", variant: "destructive" }); }
+    finally { setAssetSaving(false); }
+  };
+
+  const handleDeleteAsset = async (id: number) => {
+    try {
+      await apiRequest("DELETE", `/api/image-assets/${id}`);
+      queryClient.invalidateQueries({ queryKey: ["/api/image-assets"] });
+      toast({ title: "刪除成功" });
+    } catch { toast({ title: "刪除失敗", variant: "destructive" }); }
+  };
+
   const formatFileSize = (bytes: number) => {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -276,7 +340,7 @@ export default function KnowledgePage() {
 
   const getFileIcon = (name: string) => {
     const ext = name.substring(name.lastIndexOf(".")).toLowerCase();
-    const colors: Record<string, string> = { ".txt": "bg-stone-100 text-stone-600", ".pdf": "bg-red-100 text-red-600", ".csv": "bg-emerald-100 text-emerald-600", ".docx": "bg-sky-100 text-sky-600" };
+    const colors: Record<string, string> = { ".txt": "bg-stone-100 text-stone-600", ".pdf": "bg-red-100 text-red-600", ".csv": "bg-emerald-100 text-emerald-600", ".docx": "bg-sky-100 text-sky-600", ".xlsx": "bg-green-100 text-green-600", ".md": "bg-violet-100 text-violet-600" };
     return colors[ext] || "bg-stone-100 text-stone-600";
   };
 
@@ -299,6 +363,9 @@ export default function KnowledgePage() {
         <TabsList className="bg-white border border-stone-200 p-1 rounded-xl">
           <TabsTrigger value="prompt" className="text-xs rounded-lg" data-testid="tab-prompt">
             <Brain className="w-3.5 h-3.5 mr-1.5" />系統指令與知識庫
+          </TabsTrigger>
+          <TabsTrigger value="images" className="text-xs rounded-lg" data-testid="tab-images">
+            <ImageIcon className="w-3.5 h-3.5 mr-1.5" />圖片素材庫
           </TabsTrigger>
           <TabsTrigger value="marketing" className="text-xs rounded-lg" data-testid="tab-marketing">
             <ShoppingCart className="w-3.5 h-3.5 mr-1.5" />產品導購庫
@@ -384,8 +451,8 @@ export default function KnowledgePage() {
             >
               <div className="w-12 h-12 mx-auto mb-3 rounded-2xl bg-stone-100 flex items-center justify-center"><Upload className="w-6 h-6 text-stone-400" /></div>
               <p className="text-sm font-medium text-stone-600">{uploading ? "上傳中..." : "拖曳檔案至此或點擊上傳"}</p>
-              <p className="text-xs text-stone-400 mt-1">支援拖曳 .pdf, .docx, .txt, .csv 格式 (最大 20MB)</p>
-              <input ref={fileInputRef} type="file" accept=".txt,.pdf,.csv,.docx" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleUploadFile(f); e.target.value = ""; }} data-testid="input-file-upload" />
+              <p className="text-xs text-stone-400 mt-1">支援 .xlsx, .docx, .pdf, .csv, .txt, .md 格式 (最大 20MB，不接受圖片)</p>
+              <input ref={fileInputRef} type="file" accept=".txt,.pdf,.csv,.docx,.xlsx,.md" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleUploadFile(f); e.target.value = ""; }} data-testid="input-file-upload" />
             </div>
 
             {filesLoading ? (
@@ -415,6 +482,99 @@ export default function KnowledgePage() {
             )}
           </div>
         </TabsContent>
+
+        <TabsContent value="images" className="mt-4">
+          <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="section-image-assets">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-pink-100 flex items-center justify-center"><ImageIcon className="w-4 h-4 text-pink-600" /></div>
+                <div>
+                  <span className="text-sm font-semibold text-stone-800">圖片素材庫</span>
+                  <p className="text-xs text-stone-500">
+                    上傳圖片讓 AI 可以在對話中自動發送給客戶
+                    {selectedBrand && <span className="text-emerald-600"> ({selectedBrand.name})</span>}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-sky-50 border border-sky-200 rounded-xl p-3 mb-4 flex items-start gap-2">
+              <Lightbulb className="w-4 h-4 text-sky-600 shrink-0 mt-0.5" />
+              <p className="text-xs text-sky-800 leading-relaxed">
+                AI 會根據客戶問題自動判斷是否需要發送圖片。為每張圖片設定「顯示名稱」「說明」「關鍵字」可以幫助 AI 更精準地選圖。
+              </p>
+            </div>
+
+            <div
+              className="border-2 border-dashed rounded-2xl p-6 text-center transition-all cursor-pointer border-stone-200 hover:border-pink-300 mb-4"
+              onClick={() => imageAssetInputRef.current?.click()}
+              data-testid="dropzone-image-upload"
+            >
+              <div className="w-10 h-10 mx-auto mb-2 rounded-xl bg-pink-50 flex items-center justify-center"><Upload className="w-5 h-5 text-pink-400" /></div>
+              <p className="text-sm font-medium text-stone-600">{imageAssetUploading ? "上傳中..." : "點擊上傳圖片素材"}</p>
+              <p className="text-xs text-stone-400 mt-1">支援 .jpg, .png, .gif, .webp (最大 10MB)</p>
+              <input ref={imageAssetInputRef} type="file" accept=".jpg,.jpeg,.png,.gif,.webp" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleUploadImageAsset(f); e.target.value = ""; }} data-testid="input-image-asset-upload" />
+            </div>
+
+            {brandAssets.length === 0 ? (
+              <p className="text-sm text-stone-400 text-center py-4">尚未上傳任何圖片素材</p>
+            ) : (
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                {brandAssets.map((asset) => (
+                  <div key={asset.id} className="rounded-xl border border-stone-200 overflow-hidden bg-stone-50 group" data-testid={`image-asset-${asset.id}`}>
+                    <div className="aspect-square bg-stone-100 relative">
+                      <img src={`/api/image-assets/file/${asset.filename}`} alt={asset.display_name} className="w-full h-full object-cover" loading="lazy" />
+                      <div className="absolute top-1.5 right-1.5 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button onClick={() => handleEditAsset(asset)} className="w-6 h-6 rounded-lg bg-white/90 border border-stone-200 flex items-center justify-center hover:bg-white" data-testid={`button-edit-asset-${asset.id}`}><Pencil className="w-3 h-3 text-stone-600" /></button>
+                        <button onClick={() => handleDeleteAsset(asset.id)} className="w-6 h-6 rounded-lg bg-white/90 border border-red-200 flex items-center justify-center hover:bg-red-50" data-testid={`button-delete-asset-${asset.id}`}><Trash2 className="w-3 h-3 text-red-500" /></button>
+                      </div>
+                    </div>
+                    <div className="p-2">
+                      <p className="text-xs font-medium text-stone-700 truncate" data-testid={`text-asset-name-${asset.id}`}>{asset.display_name}</p>
+                      {asset.description && <p className="text-xs text-stone-400 truncate mt-0.5">{asset.description}</p>}
+                      {asset.keywords && (
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {asset.keywords.split(",").map((kw, i) => (
+                            <span key={i} className="text-xs bg-pink-50 text-pink-600 rounded px-1.5 py-0.5">{kw.trim()}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </TabsContent>
+
+        <Dialog open={showAssetDialog} onOpenChange={setShowAssetDialog}>
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle className="text-base font-bold text-stone-800">編輯圖片素材資訊</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-3 py-2">
+              <div>
+                <label className="text-xs font-medium text-stone-600 mb-1 block">顯示名稱</label>
+                <Input data-testid="input-asset-display-name" value={assetForm.display_name} onChange={(e) => setAssetForm(f => ({ ...f, display_name: e.target.value }))} placeholder="例如：巴斯克蛋糕特色圖" className="bg-stone-50 border-stone-200" />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-stone-600 mb-1 block">說明</label>
+                <Input data-testid="input-asset-description" value={assetForm.description} onChange={(e) => setAssetForm(f => ({ ...f, description: e.target.value }))} placeholder="例如：展示巴斯克蛋糕的製作過程與口感" className="bg-stone-50 border-stone-200" />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-stone-600 mb-1 block">關鍵字 (逗號分隔)</label>
+                <Input data-testid="input-asset-keywords" value={assetForm.keywords} onChange={(e) => setAssetForm(f => ({ ...f, keywords: e.target.value }))} placeholder="例如：巴斯克,蛋糕,甜點,推薦" className="bg-stone-50 border-stone-200" />
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="ghost" onClick={() => setShowAssetDialog(false)} className="text-xs">取消</Button>
+              <Button onClick={handleSaveAsset} disabled={assetSaving} className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs" data-testid="button-save-asset">
+                {assetSaving ? <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" /> : <Save className="w-3.5 h-3.5 mr-1" />}
+                更新
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         <TabsContent value="marketing" className="mt-4">
           <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="section-marketing-rules">
