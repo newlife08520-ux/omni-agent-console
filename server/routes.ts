@@ -332,6 +332,95 @@ export async function registerRoutes(
     return res.json({ success: true });
   });
 
+  app.post("/api/brands/:id/test-superlanding", authMiddleware, superAdminOnly, async (req, res) => {
+    const id = parseInt(req.params.id);
+    const brand = storage.getBrand(id);
+    if (!brand) return res.status(404).json({ message: "品牌不存在" });
+    const merchantNo = brand.superlanding_merchant_no || storage.getSetting("superlanding_merchant_no") || "";
+    const accessKey = brand.superlanding_access_key || storage.getSetting("superlanding_access_key") || "";
+    if (!merchantNo || !accessKey) {
+      return res.json({ success: false, message: "此品牌尚未設定一頁商店 Merchant No 或 Access Key（品牌專屬或全域預設皆無）" });
+    }
+    try {
+      const slUrl = `https://api.super-landing.com/orders.json?merchant_no=${encodeURIComponent(merchantNo)}&access_key=${encodeURIComponent(accessKey)}&per_page=1`;
+      const slRes = await fetch(slUrl, { headers: { Accept: "application/json" } });
+      if (slRes.ok) {
+        const data = await slRes.json();
+        const total = data.total_entries || "N/A";
+        return res.json({ success: true, message: `一頁商店連線成功！共 ${total} 筆訂單` });
+      }
+      const errText = await slRes.text().catch(() => "");
+      return res.json({ success: false, message: `一頁商店連線失敗 (HTTP ${slRes.status})：${errText || "請確認 merchant_no 與 access_key 是否正確"}` });
+    } catch (fetchErr: any) {
+      const detail = fetchErr?.cause?.code || fetchErr?.code || fetchErr?.message || "未知網路錯誤";
+      return res.json({ success: false, message: `一頁商店連線失敗（網路錯誤）：${detail}` });
+    }
+  });
+
+  app.get("/api/health/status", authMiddleware, async (_req, res) => {
+    const results: Record<string, { status: "ok" | "error" | "unconfigured"; message: string }> = {};
+
+    const apiKey = storage.getSetting("openai_api_key");
+    if (!apiKey || apiKey.trim() === "") {
+      results.openai = { status: "unconfigured", message: "尚未設定 API 金鑰" };
+    } else {
+      try {
+        const openai = new OpenAI({ apiKey });
+        await openai.chat.completions.create({ model: "gpt-5.2", messages: [{ role: "user", content: "hi" }], max_completion_tokens: 5 });
+        results.openai = { status: "ok", message: "連線正常" };
+      } catch (err: any) {
+        results.openai = { status: "error", message: `連線失敗: ${err.message}` };
+      }
+    }
+
+    const brands = storage.getBrands();
+    for (const brand of brands) {
+      const merchantNo = brand.superlanding_merchant_no || storage.getSetting("superlanding_merchant_no") || "";
+      const accessKey = brand.superlanding_access_key || storage.getSetting("superlanding_access_key") || "";
+      const key = `superlanding_brand_${brand.id}`;
+      if (!merchantNo || !accessKey) {
+        results[key] = { status: "unconfigured", message: "尚未設定" };
+      } else {
+        try {
+          const slUrl = `https://api.super-landing.com/orders.json?merchant_no=${encodeURIComponent(merchantNo)}&access_key=${encodeURIComponent(accessKey)}&per_page=1`;
+          const slRes = await fetch(slUrl, { headers: { Accept: "application/json" } });
+          if (slRes.ok) {
+            results[key] = { status: "ok", message: "連線正常" };
+          } else {
+            results[key] = { status: "error", message: `HTTP ${slRes.status}` };
+          }
+        } catch (err: any) {
+          results[key] = { status: "error", message: err.message };
+        }
+      }
+
+      const channels = storage.getChannelsByBrand(brand.id);
+      for (const ch of channels) {
+        const chKey = `channel_${ch.id}`;
+        if (ch.platform === "line") {
+          if (!ch.access_token) {
+            results[chKey] = { status: "unconfigured", message: "尚未設定 Token" };
+          } else {
+            try {
+              const verifyRes = await fetch("https://api.line.me/v2/bot/info", { headers: { Authorization: `Bearer ${ch.access_token}` } });
+              if (verifyRes.ok) {
+                results[chKey] = { status: "ok", message: "連線正常" };
+              } else {
+                results[chKey] = { status: "error", message: `驗證失敗 (${verifyRes.status})` };
+              }
+            } catch (err: any) {
+              results[chKey] = { status: "error", message: err.message };
+            }
+          }
+        } else {
+          results[chKey] = ch.access_token ? { status: "ok", message: "已設定 Token" } : { status: "unconfigured", message: "尚未設定 Token" };
+        }
+      }
+    }
+
+    return res.json(results);
+  });
+
   app.post("/api/channels/:id/test", authMiddleware, superAdminOnly, async (req, res) => {
     const id = parseInt(req.params.id);
     const channel = storage.getChannel(id);

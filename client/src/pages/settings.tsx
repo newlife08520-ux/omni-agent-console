@@ -11,7 +11,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Eye, EyeOff, Save, Key, Shield, MessageSquare, Plug, Loader2, Palette, Type, Image,
   MessageCircle, Zap, AlertTriangle, ShoppingBag, Building2, Plus, Pencil, Trash2,
-  Hash, CheckCircle, XCircle, ExternalLink,
+  Hash, CheckCircle, XCircle, ExternalLink, RefreshCw, Wifi, WifiOff, CircleDot,
 } from "lucide-react";
 import { apiRequest, getQueryFn } from "@/lib/queryClient";
 import { useBrand } from "@/lib/brand-context";
@@ -20,6 +20,39 @@ import type { Setting, Brand, Channel, ChannelPlatform } from "@shared/schema";
 
 interface SettingsPageProps {
   userRole?: string;
+}
+
+type HealthStatus = "ok" | "error" | "unconfigured" | "loading" | "unknown";
+
+interface HealthEntry { status: HealthStatus; message: string }
+
+function StatusDot({ status, size = "sm" }: { status: HealthStatus; size?: "sm" | "md" }) {
+  const sizeClass = size === "md" ? "w-2.5 h-2.5" : "w-2 h-2";
+  const colors: Record<HealthStatus, string> = {
+    ok: "bg-emerald-500",
+    error: "bg-red-500 animate-pulse",
+    unconfigured: "bg-stone-300",
+    loading: "bg-amber-400 animate-pulse",
+    unknown: "bg-stone-300",
+  };
+  return <div className={`${sizeClass} rounded-full ${colors[status]} shrink-0`} />;
+}
+
+function StatusBadge({ status, message }: { status: HealthStatus; message?: string }) {
+  const config: Record<HealthStatus, { bg: string; text: string; label: string }> = {
+    ok: { bg: "bg-emerald-50 border-emerald-200", text: "text-emerald-700", label: "連線正常" },
+    error: { bg: "bg-red-50 border-red-200", text: "text-red-700", label: "連線異常" },
+    unconfigured: { bg: "bg-stone-50 border-stone-200", text: "text-stone-500", label: "尚未設定" },
+    loading: { bg: "bg-amber-50 border-amber-200", text: "text-amber-700", label: "檢測中..." },
+    unknown: { bg: "bg-stone-50 border-stone-200", text: "text-stone-400", label: "未檢測" },
+  };
+  const c = config[status];
+  return (
+    <span className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full border ${c.bg} ${c.text}`} title={message}>
+      <StatusDot status={status} />
+      {c.label}
+    </span>
+  );
 }
 
 function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
@@ -38,6 +71,41 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
   const [channelSaving, setChannelSaving] = useState(false);
   const [testingChannel, setTestingChannel] = useState<number | null>(null);
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
+  const [healthStatus, setHealthStatus] = useState<Record<string, HealthEntry>>({});
+  const [healthLoading, setHealthLoading] = useState(false);
+  const [testingBrandSL, setTestingBrandSL] = useState<number | null>(null);
+
+  const fetchHealthStatus = async () => {
+    setHealthLoading(true);
+    try {
+      const res = await fetch("/api/health/status", { credentials: "include" });
+      if (res.ok) {
+        const data = await res.json();
+        setHealthStatus(data);
+      }
+    } catch {}
+    finally { setHealthLoading(false); }
+  };
+
+  useEffect(() => {
+    if (isSuperAdmin) fetchHealthStatus();
+  }, [isSuperAdmin]);
+
+  const handleTestBrandSL = async (brandId: number) => {
+    setTestingBrandSL(brandId);
+    try {
+      const res = await fetch(`/api/brands/${brandId}/test-superlanding`, { method: "POST", credentials: "include" });
+      const data = await res.json();
+      if (data.success) {
+        toast({ title: "連線成功", description: data.message });
+        setHealthStatus(prev => ({ ...prev, [`superlanding_brand_${brandId}`]: { status: "ok", message: data.message } }));
+      } else {
+        toast({ title: "連線失敗", description: data.message, variant: "destructive" });
+        setHealthStatus(prev => ({ ...prev, [`superlanding_brand_${brandId}`]: { status: "error", message: data.message } }));
+      }
+    } catch { toast({ title: "測試失敗", variant: "destructive" }); }
+    finally { setTestingBrandSL(null); }
+  };
 
   const { data: allChannels = [] } = useQuery<Channel[]>({
     queryKey: ["/api/brands", selectedBrandId, "channels"],
@@ -137,8 +205,11 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
       const data = await res.json();
       if (data.success) {
         toast({ title: "連線成功", description: data.message });
+        setHealthStatus(prev => ({ ...prev, [`channel_${id}`]: { status: "ok", message: data.message } }));
+        queryClient.invalidateQueries({ queryKey: ["/api/brands", selectedBrandId, "channels"] });
       } else {
         toast({ title: "連線失敗", description: data.message, variant: "destructive" });
+        setHealthStatus(prev => ({ ...prev, [`channel_${id}`]: { status: "error", message: data.message } }));
       }
     } catch { toast({ title: "測試失敗", variant: "destructive" }); }
     finally { setTestingChannel(null); }
@@ -165,13 +236,21 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
               <p className="text-xs text-stone-500">管理品牌與渠道（LINE / Facebook）的連線設定</p>
             </div>
           </div>
-          <Button onClick={openAddBrand} className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs" data-testid="button-add-brand">
-            <Plus className="w-3.5 h-3.5 mr-1.5" />新增品牌
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="ghost" onClick={fetchHealthStatus} disabled={healthLoading} className="text-xs text-stone-500 hover:text-emerald-600" data-testid="button-refresh-health">
+              <RefreshCw className={`w-3.5 h-3.5 mr-1 ${healthLoading ? "animate-spin" : ""}`} />
+              {healthLoading ? "檢測中" : "全部檢測"}
+            </Button>
+            <Button onClick={openAddBrand} className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs" data-testid="button-add-brand">
+              <Plus className="w-3.5 h-3.5 mr-1.5" />新增品牌
+            </Button>
+          </div>
         </div>
 
         <div className="space-y-3">
-          {brands.map((brand) => (
+          {brands.map((brand) => {
+            const slStatus = healthStatus[`superlanding_brand_${brand.id}`];
+            return (
             <div key={brand.id} className={`rounded-xl border p-4 transition-all ${selectedBrandId === brand.id ? "border-emerald-300 bg-emerald-50/30" : "border-stone-200 bg-stone-50/50"}`} data-testid={`brand-card-${brand.id}`}>
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
@@ -181,11 +260,17 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
                     <div className="w-10 h-10 rounded-xl bg-stone-200 flex items-center justify-center"><Building2 className="w-5 h-5 text-stone-400" /></div>
                   )}
                   <div>
-                    <p className="text-sm font-semibold text-stone-800">{brand.name}</p>
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-semibold text-stone-800">{brand.name}</p>
+                      {slStatus && <StatusBadge status={slStatus.status as HealthStatus} message={slStatus.message} />}
+                    </div>
                     <p className="text-[10px] text-stone-400">{brand.slug} · {brand.description || "尚無描述"}</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-1">
+                  <Button size="sm" variant="ghost" onClick={() => handleTestBrandSL(brand.id)} disabled={testingBrandSL === brand.id} className="text-xs text-stone-500 hover:text-emerald-600" data-testid={`button-test-brand-sl-${brand.id}`}>
+                    {testingBrandSL === brand.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <><Plug className="w-3 h-3 mr-1" />商店</>}
+                  </Button>
                   <Button size="sm" variant="ghost" onClick={() => { setSelectedBrandId(brand.id); }} className="text-xs text-stone-500 hover:text-emerald-600" data-testid={`button-select-brand-${brand.id}`}>
                     {selectedBrandId === brand.id ? <CheckCircle className="w-4 h-4 text-emerald-600" /> : "選取"}
                   </Button>
@@ -198,7 +283,8 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
                 </div>
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 
@@ -225,10 +311,17 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
             </div>
           ) : (
             <div className="space-y-2">
-              {allChannels.map((ch) => (
+              {allChannels.map((ch) => {
+                const chStatus = healthStatus[`channel_${ch.id}`];
+                return (
                 <div key={ch.id} className="flex items-center gap-3 p-3 rounded-xl bg-stone-50 border border-stone-100" data-testid={`channel-card-${ch.id}`}>
-                  <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${ch.platform === "line" ? "bg-green-100" : "bg-blue-100"}`}>
+                  <div className={`relative w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${ch.platform === "line" ? "bg-green-100" : "bg-blue-100"}`}>
                     <div className={`w-3 h-3 rounded-full ${ch.platform === "line" ? "bg-green-500" : "bg-blue-500"}`} />
+                    {chStatus && (
+                      <div className="absolute -top-0.5 -right-0.5">
+                        <StatusDot status={chStatus.status as HealthStatus} size="sm" />
+                      </div>
+                    )}
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
@@ -236,9 +329,7 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
                       <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${ch.platform === "line" ? "bg-green-100 text-green-700" : "bg-blue-100 text-blue-700"}`}>
                         {ch.platform === "line" ? "LINE" : "Messenger"}
                       </span>
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${ch.is_active ? "bg-emerald-100 text-emerald-700" : "bg-stone-200 text-stone-500"}`}>
-                        {ch.is_active ? "啟用中" : "已停用"}
-                      </span>
+                      {chStatus && <StatusBadge status={chStatus.status as HealthStatus} message={chStatus.message} />}
                     </div>
                     <p className="text-[10px] text-stone-400 truncate">Bot ID: {ch.bot_id || "未設定"} · Token: {ch.access_token ? maskValue(ch.access_token) : "未設定"}</p>
                   </div>
@@ -256,7 +347,8 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
                     </Button>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
@@ -298,6 +390,19 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
                 <Input data-testid="input-brand-access-key" value={brandForm.superlanding_access_key} onChange={(e) => setBrandForm(f => ({ ...f, superlanding_access_key: e.target.value }))} placeholder="存取金鑰" className="bg-stone-50 border-stone-200" />
               </div>
             </div>
+            {editingBrand && (
+              <div className="flex items-center justify-between pt-1">
+                {healthStatus[`superlanding_brand_${editingBrand.id}`] && (
+                  <StatusBadge
+                    status={healthStatus[`superlanding_brand_${editingBrand.id}`].status as HealthStatus}
+                    message={healthStatus[`superlanding_brand_${editingBrand.id}`].message}
+                  />
+                )}
+                <Button size="sm" variant="secondary" onClick={() => handleTestBrandSL(editingBrand.id)} disabled={testingBrandSL === editingBrand.id} className="text-xs bg-stone-100 hover:bg-stone-200 ml-auto" data-testid="button-test-brand-sl-dialog">
+                  {testingBrandSL === editingBrand.id ? <><Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />測試中</> : <><Plug className="w-3.5 h-3.5 mr-1" />測試一頁商店連線</>}
+                </Button>
+              </div>
+            )}
           </div>
           <DialogFooter>
             <Button variant="ghost" onClick={() => setShowBrandDialog(false)} className="text-xs">取消</Button>
@@ -381,6 +486,7 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
   const [formValues, setFormValues] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState("");
   const [testing, setTesting] = useState("");
+  const [apiHealth, setApiHealth] = useState<Record<string, HealthEntry>>({});
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -428,25 +534,6 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
     finally { setSaving(""); }
   };
 
-  const handleTestConnection = async (type: string) => {
-    setTesting(type);
-    try {
-      const res = await fetch("/api/settings/test-connection", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type }),
-        credentials: "include",
-      });
-      const data = await res.json();
-      if (data.success) {
-        toast({ title: "連線成功", description: data.message });
-      } else {
-        toast({ title: "連線失敗", description: data.message, variant: "destructive" });
-      }
-    } catch { toast({ title: "連線失敗", description: "無法連線至伺服器", variant: "destructive" }); }
-    finally { setTesting(""); }
-  };
-
   const handleTestModeToggle = async (checked: boolean) => {
     setFormValues((prev) => ({ ...prev, test_mode: checked ? "true" : "false" }));
     try {
@@ -465,6 +552,35 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
   };
 
   const quickButtons = (formValues.quick_buttons || "").split(",").map((s) => s.trim()).filter(Boolean);
+
+  const updateApiHealth = (key: string, entry: HealthEntry) => {
+    setApiHealth(prev => ({ ...prev, [key]: entry }));
+  };
+
+  const handleTestConnectionWithStatus = async (type: string) => {
+    setTesting(type);
+    updateApiHealth(type, { status: "loading", message: "檢測中..." });
+    try {
+      const res = await fetch("/api/settings/test-connection", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type }),
+        credentials: "include",
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast({ title: "連線成功", description: data.message });
+        updateApiHealth(type, { status: "ok", message: data.message });
+      } else {
+        toast({ title: "連線失敗", description: data.message, variant: "destructive" });
+        updateApiHealth(type, { status: "error", message: data.message });
+      }
+    } catch {
+      toast({ title: "連線失敗", description: "無法連線至伺服器", variant: "destructive" });
+      updateApiHealth(type, { status: "error", message: "無法連線至伺服器" });
+    }
+    finally { setTesting(""); }
+  };
 
   if (isLoading) {
     return <div className="flex items-center justify-center h-full"><p className="text-stone-400">載入設定中...</p></div>;
@@ -622,8 +738,13 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
               <div key={field.key} className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
                 <div className="flex items-center gap-2 mb-1">
                   <div className="w-8 h-8 rounded-xl bg-stone-100 flex items-center justify-center"><field.icon className="w-4 h-4 text-stone-500" /></div>
-                  <div>
-                    <span className="text-sm font-semibold text-stone-800">{field.label}</span>
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-semibold text-stone-800">{field.label}</span>
+                      {field.testType && apiHealth[field.testType] && (
+                        <StatusBadge status={apiHealth[field.testType].status as HealthStatus} message={apiHealth[field.testType].message} />
+                      )}
+                    </div>
                     <p className="text-xs text-stone-500">{field.description}</p>
                   </div>
                 </div>
@@ -638,7 +759,7 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
                     </button>
                   </div>
                   {field.testType && (
-                    <Button variant="secondary" onClick={() => handleTestConnection(field.testType!)} disabled={testing === field.testType} data-testid={`button-test-${field.key}`} className="text-xs shrink-0 bg-stone-100 hover:bg-stone-200">
+                    <Button variant="secondary" onClick={() => handleTestConnectionWithStatus(field.testType!)} disabled={testing === field.testType} data-testid={`button-test-${field.key}`} className="text-xs shrink-0 bg-stone-100 hover:bg-stone-200">
                       {testing === field.testType ? <><Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />測試中</> : <><Plug className="w-3.5 h-3.5 mr-1" />測試連線</>}
                     </Button>
                   )}
@@ -653,8 +774,11 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
           <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="section-superlanding">
             <div className="flex items-center gap-2 mb-4">
               <div className="w-8 h-8 rounded-xl bg-orange-100 flex items-center justify-center"><ShoppingBag className="w-4 h-4 text-orange-600" /></div>
-              <div>
-                <span className="text-sm font-semibold text-stone-800">一頁商店 (Super Landing) API 串接</span>
+              <div className="flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-semibold text-stone-800">一頁商店 (Super Landing) API 串接</span>
+                  {apiHealth.superlanding && <StatusBadge status={apiHealth.superlanding.status as HealthStatus} message={apiHealth.superlanding.message} />}
+                </div>
                 <p className="text-xs text-stone-500">串接一頁商店訂單系統，讓 AI 與客服人員可查詢客戶訂單狀態</p>
               </div>
             </div>
@@ -691,7 +815,7 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
                 </div>
               ))}
               <div className="pt-2 flex justify-end">
-                <Button variant="secondary" onClick={() => handleTestConnection("superlanding")} disabled={testing === "superlanding"} data-testid="button-test-superlanding" className="text-xs bg-stone-100 hover:bg-stone-200">
+                <Button variant="secondary" onClick={() => handleTestConnectionWithStatus("superlanding")} disabled={testing === "superlanding"} data-testid="button-test-superlanding" className="text-xs bg-stone-100 hover:bg-stone-200">
                   {testing === "superlanding" ? <><Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />測試中...</> : <><Plug className="w-3.5 h-3.5 mr-1" />測試一頁商店連線</>}
                 </Button>
               </div>
