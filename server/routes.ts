@@ -1260,16 +1260,13 @@ export async function registerRoutes(
   }
 
   app.post("/api/webhook/line", (req, res) => {
-    console.log("=====================================");
-    console.log("🚨 [超級除錯] 收到 LINE Webhook 請求！");
-    console.log("🚨 [Headers]:", JSON.stringify(req.headers, null, 2));
-    console.log("🚨 [Body]:", JSON.stringify(req.body, null, 2));
-    console.log("=====================================");
+    try {
+    console.log("===== [LINE WEBHOOK START] =====");
+    console.log("[WEBHOOK] destination:", req.body?.destination);
+    console.log("[WEBHOOK] events count:", req.body?.events?.length || 0);
 
     const signature = req.headers["x-line-signature"] as string | undefined;
     const destination = req.body?.destination as string | undefined;
-
-    console.log("🔍 [系統正在尋找的 Bot ID]:", destination || "(無 destination 欄位)");
 
     let channelToken: string | null = null;
     let channelSecretVal: string | null = null;
@@ -1277,40 +1274,57 @@ export async function registerRoutes(
     let matchedBrandId: number | undefined;
 
     if (destination) {
+      console.log("[WEBHOOK] Looking up bot_id:", destination);
       matchedChannel = storage.getChannelByBotId(destination);
       if (matchedChannel) {
         channelToken = matchedChannel.access_token || null;
         channelSecretVal = matchedChannel.channel_secret || null;
         matchedBrandId = matchedChannel.brand_id;
-        console.log(`✅ [比對成功] 品牌: ${matchedChannel.brand_name}, 頻道: ${matchedChannel.channel_name}, 平台: ${matchedChannel.platform}`);
+        console.log("[WEBHOOK] MATCH FOUND - brand:", matchedChannel.brand_name, "channel:", matchedChannel.channel_name);
       } else {
         const allChannels = storage.getChannels();
-        const botIds = allChannels.map(c => `${c.channel_name}(${c.bot_id || "空"}/${c.platform})`).join(", ");
-        console.log(`❌ [錯誤]: 找不到對應的 Bot ID「${destination}」，訊息被丟棄！`);
-        console.log(`📋 [資料庫現有頻道]: ${botIds || "無任何頻道"}`);
+        const botIds = allChannels.map(c => `${c.channel_name}(bot_id=${c.bot_id || "EMPTY"})`).join(", ");
+        console.log("[WEBHOOK] NO MATCH for bot_id:", destination);
+        console.log("[WEBHOOK] DB channels:", botIds || "NONE");
+        const firstChannel = allChannels.find(c => c.platform === "line" && c.access_token);
+        if (firstChannel) {
+          console.log("[WEBHOOK] FALLBACK to first LINE channel:", firstChannel.channel_name);
+          channelToken = firstChannel.access_token || null;
+          channelSecretVal = firstChannel.channel_secret || null;
+          matchedBrandId = firstChannel.brand_id;
+          storage.updateChannel(firstChannel.id, { bot_id: destination });
+          console.log("[WEBHOOK] AUTO-FIXED: Updated channel bot_id to", destination);
+        }
       }
     } else {
-      console.log("⚠️ [警告]: LINE Webhook 請求中沒有 destination 欄位，將使用全域設定");
+      console.log("[WEBHOOK] No destination field in webhook body");
     }
 
     if (!channelSecretVal) {
       channelSecretVal = storage.getSetting("line_channel_secret");
+      console.log("[WEBHOOK] Using global channel_secret, exists:", !!channelSecretVal);
     }
     if (!channelToken) {
       channelToken = storage.getSetting("line_channel_access_token");
+      console.log("[WEBHOOK] Using global channel_token, exists:", !!channelToken);
     }
+
+    console.log("[WEBHOOK] Token available:", !!channelToken, "Secret available:", !!channelSecretVal);
 
     if (channelSecretVal && signature && req.rawBody) {
       const rawBody = Buffer.isBuffer(req.rawBody) ? req.rawBody : Buffer.from(req.rawBody as string);
       const hash = crypto.createHmac("SHA256", channelSecretVal).update(rawBody).digest("base64");
       if (hash !== signature) {
-        console.log("🚨 [超級除錯] 簽名驗證失敗！收到:", signature, "計算:", crypto.createHmac("SHA256", channelSecretVal).update(rawBody).digest("base64"));
+        console.log("[WEBHOOK] SIGNATURE MISMATCH! Expected:", hash, "Got:", signature);
         return res.status(403).json({ message: "簽名驗證失敗" });
       }
+      console.log("[WEBHOOK] Signature verified OK");
+    } else {
+      console.log("[WEBHOOK] Skipping signature check - secret:", !!channelSecretVal, "sig:", !!signature, "rawBody:", !!req.rawBody);
     }
 
     res.status(200).json({ success: true });
-    console.log("🚨 [超級除錯] 已回傳 HTTP 200 給 LINE，開始非同步處理事件...");
+    console.log("[WEBHOOK] Sent 200 OK to LINE, processing events async...");
 
     const humanKeywordsSetting = storage.getSetting("human_transfer_keywords");
     const HUMAN_KEYWORDS = humanKeywordsSetting
@@ -1421,8 +1435,12 @@ export async function registerRoutes(
         storage.markEventProcessed(webhookEventId);
       }
     }
-    console.log("🚨 [超級除錯] 所有事件處理完畢");
-    })().catch(err => console.error("🚨 [超級除錯] 非同步處理事件時發生錯誤:", err));
+    console.log("[WEBHOOK] All events processed");
+    })().catch(err => console.error("[WEBHOOK] Async event processing error:", err));
+    } catch (outerErr) {
+      console.error("[WEBHOOK] FATAL ERROR in webhook handler:", outerErr);
+      if (!res.headersSent) res.status(200).json({ success: true });
+    }
   });
 
   app.get("/api/webhook/facebook", (req, res) => {
