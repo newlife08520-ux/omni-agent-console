@@ -123,6 +123,7 @@ export default function ChatPage() {
   const [productPages, setProductPages] = useState<{ pageId: string; prefix: string; productName: string }[]>([]);
   const [selectedPageId, setSelectedPageId] = useState("");
   const [productPhone, setProductPhone] = useState("");
+  const [pageSearchFilter, setPageSearchFilter] = useState("");
   const [pendingFiles, setPendingFiles] = useState<{ file: File; preview: string }[]>([]);
   const [uploading, setUploading] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -384,10 +385,14 @@ export default function ChatPage() {
 
   const handleQuickReply = (text: string) => { setMessageInput(text); setShowQuickReplies(false); };
 
-  const handleSendRating = useCallback(async () => {
+  const handleSendRating = useCallback(async (ratingType: "human" | "ai" = "human") => {
     if (!selectedId || sendingRating) return;
-    if (selectedContact?.cs_rating != null) {
-      toast({ title: "客戶已評分過", description: "此客戶已完成滿意度評分，無法重複發送", variant: "destructive" });
+    if (ratingType === "ai" && selectedContact?.ai_rating != null) {
+      toast({ title: "AI 評分已完成", description: "此客戶已完成 AI 客服滿意度評分", variant: "destructive" });
+      return;
+    }
+    if (ratingType === "human" && selectedContact?.cs_rating != null) {
+      toast({ title: "真人評分已完成", description: "此客戶已完成真人客服滿意度評分", variant: "destructive" });
       return;
     }
     setSendingRating(true);
@@ -396,10 +401,12 @@ export default function ChatPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
+        body: JSON.stringify({ type: ratingType }),
       });
       const data = await res.json();
       if (res.ok) {
-        toast({ title: "已發送評價卡片", description: "滿意度調查已傳送給客戶" });
+        const typeLabel = ratingType === "ai" ? "AI 客服" : "真人客服";
+        toast({ title: "已發送評價卡片", description: `${typeLabel}滿意度調查已傳送給客戶` });
         queryClient.invalidateQueries({ queryKey: ["/api/contacts", selectedId, "messages"] });
         queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
       } else {
@@ -860,10 +867,16 @@ export default function ChatPage() {
                           <span className="text-stone-500">建立日期</span>
                           <span className="text-stone-800">{selectedContact?.created_at ? formatDate(selectedContact.created_at) : "-"}</span>
                         </div>
+                        {selectedContact?.ai_rating != null && (
+                          <div className="flex justify-between text-xs" data-testid="text-ai-rating">
+                            <span className="text-indigo-500 flex items-center gap-1"><Bot className="w-3 h-3" />AI 客服評分</span>
+                            <span className="text-indigo-500 font-semibold">{"⭐".repeat(selectedContact.ai_rating)}（{selectedContact.ai_rating} 分）</span>
+                          </div>
+                        )}
                         {selectedContact?.cs_rating != null && (
                           <div className="flex justify-between text-xs" data-testid="text-cs-rating">
-                            <span className="text-stone-500">滿意度評分</span>
-                            <span className="text-amber-500 font-semibold">{"⭐".repeat(selectedContact.cs_rating)}</span>
+                            <span className="text-emerald-600 flex items-center gap-1"><UserCheck className="w-3 h-3" />真人客服評分</span>
+                            <span className="text-amber-500 font-semibold">{"⭐".repeat(selectedContact.cs_rating)}（{selectedContact.cs_rating} 分）</span>
                           </div>
                         )}
                       </div>
@@ -909,22 +922,51 @@ export default function ChatPage() {
                         <div className="space-y-2 p-2.5 rounded-lg bg-stone-50 border border-stone-200">
                           <div>
                             <label className="text-[10px] font-medium text-stone-500 mb-1 flex items-center gap-1"><Package className="w-3 h-3" />選擇商品（銷售頁）</label>
-                            <Select value={selectedPageId} onValueChange={setSelectedPageId}>
-                              <SelectTrigger className="text-xs bg-white border-stone-200 h-8" data-testid="select-product-page">
-                                <SelectValue placeholder="請選擇商品..." />
-                              </SelectTrigger>
-                              <SelectContent>
-                                {productPages.length === 0 ? (
-                                  <SelectItem value="_empty" disabled>載入中或無銷售頁...</SelectItem>
-                                ) : (
-                                  productPages.map((p) => (
-                                    <SelectItem key={p.pageId} value={p.pageId} data-testid={`product-page-${p.pageId}`}>
+                            {selectedPageId && (() => {
+                              const sel = productPages.find(p => p.pageId === selectedPageId);
+                              return sel ? (
+                                <div className="flex items-center justify-between text-[10px] bg-emerald-50 text-emerald-700 px-2 py-1 rounded border border-emerald-200 mb-1" data-testid="text-selected-page">
+                                  <span className="font-medium truncate">{sel.prefix ? `[${sel.prefix}] ` : ""}{sel.productName}</span>
+                                  <button type="button" onClick={() => setSelectedPageId("")} className="ml-1 text-emerald-400 hover:text-red-500"><X className="w-3 h-3" /></button>
+                                </div>
+                              ) : null;
+                            })()}
+                            <Input
+                              data-testid="input-page-search"
+                              placeholder="輸入頁面名稱搜尋..."
+                              value={pageSearchFilter}
+                              onChange={(e) => setPageSearchFilter(e.target.value)}
+                              className="text-xs bg-white border-stone-200 h-7 mb-1"
+                            />
+                            <div className="max-h-[180px] overflow-y-auto border border-stone-200 rounded-md bg-white">
+                              {productPages.length === 0 ? (
+                                <div className="text-[10px] text-stone-400 p-2 text-center">載入中或無銷售頁...</div>
+                              ) : (
+                                productPages
+                                  .filter(p => {
+                                    if (!pageSearchFilter.trim()) return true;
+                                    const q = pageSearchFilter.toLowerCase();
+                                    return (p.productName?.toLowerCase().includes(q)) || (p.prefix?.toLowerCase().includes(q));
+                                  })
+                                  .map((p) => (
+                                    <button
+                                      key={p.pageId}
+                                      type="button"
+                                      onClick={() => { setSelectedPageId(p.pageId); setPageSearchFilter(""); }}
+                                      className={`w-full text-left text-[11px] px-2 py-1.5 hover:bg-emerald-50 transition-colors border-b border-stone-100 last:border-0 ${selectedPageId === p.pageId ? "bg-emerald-50 text-emerald-700 font-medium" : "text-stone-700"}`}
+                                      data-testid={`product-page-${p.pageId}`}
+                                    >
                                       {p.prefix ? `[${p.prefix}] ` : ""}{p.productName}
-                                    </SelectItem>
+                                    </button>
                                   ))
-                                )}
-                              </SelectContent>
-                            </Select>
+                              )}
+                              {productPages.length > 0 && pageSearchFilter.trim() && productPages.filter(p => {
+                                const q = pageSearchFilter.toLowerCase();
+                                return (p.productName?.toLowerCase().includes(q)) || (p.prefix?.toLowerCase().includes(q));
+                              }).length === 0 && (
+                                <div className="text-[10px] text-stone-400 p-2 text-center">找不到符合「{pageSearchFilter}」的頁面</div>
+                              )}
+                            </div>
                           </div>
                           <div>
                             <label className="text-[10px] font-medium text-stone-500 mb-1 flex items-center gap-1"><Phone className="w-3 h-3" />客戶手機號碼</label>
@@ -1122,13 +1164,24 @@ export default function ChatPage() {
                   <Button
                     size="icon"
                     variant="ghost"
+                    className="h-10 w-10 text-indigo-400 hover:text-indigo-500 hover:bg-indigo-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                    onClick={() => handleSendRating("ai")}
+                    disabled={sendingRating || !selectedContact || selectedContact.platform !== "line" || selectedContact.ai_rating != null}
+                    title={selectedContact?.ai_rating != null ? "AI 評分已完成" : "發送 AI 客服評價卡片"}
+                    data-testid="button-send-ai-rating"
+                  >
+                    {sendingRating ? <Loader2 className="w-4 h-4 animate-spin" /> : <span className="relative"><Star className="w-4 h-4 fill-current" /><Bot className="w-2.5 h-2.5 absolute -top-1 -right-1.5" /></span>}
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="ghost"
                     className="h-10 w-10 text-amber-400 hover:text-amber-500 hover:bg-amber-50 disabled:opacity-40 disabled:cursor-not-allowed"
-                    onClick={handleSendRating}
+                    onClick={() => handleSendRating("human")}
                     disabled={sendingRating || !selectedContact || selectedContact.platform !== "line" || selectedContact.cs_rating != null}
-                    title={selectedContact?.cs_rating != null ? "客戶已評分過" : "發送滿意度評價卡片"}
+                    title={selectedContact?.cs_rating != null ? "真人評分已完成" : "發送真人客服評價卡片"}
                     data-testid="button-send-rating"
                   >
-                    {sendingRating ? <Loader2 className="w-5 h-5 animate-spin" /> : <Star className="w-5 h-5 fill-current" />}
+                    {sendingRating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Star className="w-5 h-5 fill-current" />}
                   </Button>
                   <Input data-testid="input-message" placeholder="輸入訊息以真人客服身分回覆..." value={messageInput} onChange={(e) => setMessageInput(e.target.value)}
                     onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSendAll(); } }} disabled={sending || uploading} className="bg-stone-50 border-stone-200" />

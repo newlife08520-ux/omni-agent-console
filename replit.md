@@ -27,6 +27,8 @@ The system is built on a modern full-stack architecture:
     - **Knowledge Base Management**: Support for various file types (xlsx, docx, pdf, csv, txt, md) for AI knowledge base and marketing rules.
     - **White-labeling**: Custom branding options for system name and logo.
     - **Messaging Features**: LINE Welcome Messages, quick buttons, human-transfer keywords, and CSAT rating collection via Flex Messages.
+    - **Dual Rating System**: Separate AI rating (`ai_rating`) and human agent rating (`cs_rating`) per contact. Each has its own LINE Flex Message template (purple for AI, green for human) and distinct postback actions (`rate_ai` / `rate`). Two separate rating buttons in the chat toolbar.
+    - **Searchable Product Page Selector**: Order lookup "商品+電話" mode uses a text filter input with scrollable list instead of a dropdown, allowing quick search by page name or prefix code.
     - **Robust File Handling**: Includes filename encoding fixes, BOM stripping, and content extraction for diverse document types.
 
 ## External Dependencies

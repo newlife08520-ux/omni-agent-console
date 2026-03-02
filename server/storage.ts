@@ -33,6 +33,7 @@ export interface IStorage {
   updateContactPinned(id: number, isPinned: number): void;
   updateContactVipData(id: number, vipLevel: number, orderCount: number, totalSpent: number): void;
   updateContactRating(id: number, rating: number): void;
+  updateContactAiRating(id: number, rating: number): void;
   getContactByPlatformUser(platform: string, platformUserId: string): Contact | undefined;
   isEventProcessed(eventId: string): boolean;
   markEventProcessed(eventId: string): void;
@@ -236,6 +237,10 @@ export class SQLiteStorage implements IStorage {
     db.prepare("UPDATE contacts SET cs_rating = ? WHERE id = ?").run(rating, id);
   }
 
+  updateContactAiRating(id: number, rating: number): void {
+    db.prepare("UPDATE contacts SET ai_rating = ? WHERE id = ?").run(rating, id);
+  }
+
   getContactByPlatformUser(platform: string, platformUserId: string): Contact | undefined {
     return db.prepare("SELECT * FROM contacts WHERE platform = ? AND platform_user_id = ?").get(platform, platformUserId) as Contact | undefined;
   }
@@ -282,7 +287,7 @@ export class SQLiteStorage implements IStorage {
     if (!contact) {
       const now = new Date().toISOString().replace("T", " ").substring(0, 19);
       const result = db.prepare("INSERT INTO contacts (platform, platform_user_id, display_name, needs_human, is_pinned, status, tags, vip_level, order_count, total_spent, brand_id, channel_id, created_at) VALUES (?, ?, ?, 0, 0, 'pending', '[]', 0, 0, 0, ?, ?, ?)").run(platform, platformUserId, displayName, brandId || null, channelId || null, now);
-      contact = { id: Number(result.lastInsertRowid), platform, platform_user_id: platformUserId, display_name: displayName, avatar_url: null, needs_human: 0, is_pinned: 0, status: "pending", tags: "[]", vip_level: 0, order_count: 0, total_spent: 0, cs_rating: null, last_message_at: null, created_at: now, brand_id: brandId || null, channel_id: channelId || null };
+      contact = { id: Number(result.lastInsertRowid), platform, platform_user_id: platformUserId, display_name: displayName, avatar_url: null, needs_human: 0, is_pinned: 0, status: "pending", tags: "[]", vip_level: 0, order_count: 0, total_spent: 0, cs_rating: null, ai_rating: null, last_message_at: null, created_at: now, brand_id: brandId || null, channel_id: channelId || null };
     } else if (brandId && !contact.brand_id) {
       db.prepare("UPDATE contacts SET brand_id = ?, channel_id = ? WHERE id = ?").run(brandId, channelId || null, contact.id);
       contact.brand_id = brandId;

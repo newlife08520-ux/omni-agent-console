@@ -581,13 +581,14 @@ export async function registerRoutes(
     return res.json({ success: true });
   });
 
-  function buildRatingFlexMessage(contactId: number): object {
+  function buildRatingFlexMessage(contactId: number, ratingType: "human" | "ai" = "human"): object {
+    const actionPrefix = ratingType === "ai" ? "rate_ai" : "rate";
     const stars = [1, 2, 3, 4, 5].map((score) => ({
       type: "button",
       action: {
         type: "postback",
         label: "⭐",
-        data: `action=rate&ticket_id=${contactId}&score=${score}`,
+        data: `action=${actionPrefix}&ticket_id=${contactId}&score=${score}`,
         displayText: `${"⭐".repeat(score)}`,
       },
       style: "link",
@@ -595,9 +596,16 @@ export async function registerRoutes(
       flex: 1,
     }));
 
+    const headerText = ratingType === "ai" ? "感謝使用 AI 客服！" : "感謝您的詢問！";
+    const bodyText = ratingType === "ai" 
+      ? "請為本次 AI 客服體驗評分：" 
+      : "為了提供更優質的服務，請為本次真人客服體驗評分：";
+    const headerColor = ratingType === "ai" ? "#6366F1" : "#1DB446";
+    const bgColor = ratingType === "ai" ? "#F5F3FF" : "#F7FFF7";
+
     return {
       type: "flex",
-      altText: "滿意度調查",
+      altText: ratingType === "ai" ? "AI 客服滿意度調查" : "真人客服滿意度調查",
       contents: {
         type: "bubble",
         size: "kilo",
@@ -605,16 +613,16 @@ export async function registerRoutes(
           type: "box",
           layout: "vertical",
           contents: [
-            { type: "text", text: "感謝您的詢問！", weight: "bold", size: "lg", color: "#1DB446", align: "center" },
+            { type: "text", text: headerText, weight: "bold", size: "lg", color: headerColor, align: "center" },
           ],
           paddingAll: "16px",
-          backgroundColor: "#F7FFF7",
+          backgroundColor: bgColor,
         },
         body: {
           type: "box",
           layout: "vertical",
           contents: [
-            { type: "text", text: "為了提供更優質的服務，請為本次客服體驗評分：", size: "sm", color: "#555555", wrap: true, align: "center" },
+            { type: "text", text: bodyText, size: "sm", color: "#555555", wrap: true, align: "center" },
             { type: "separator", margin: "lg" },
             { type: "text", text: "點擊星星評分（1~5 顆星）", size: "xs", color: "#AAAAAA", align: "center", margin: "md" },
           ],
@@ -639,11 +647,11 @@ export async function registerRoutes(
     return storage.getSetting("line_channel_access_token");
   }
 
-  async function sendRatingFlexMessage(contact: { id: number; platform_user_id: string; channel_id?: number | null }) {
+  async function sendRatingFlexMessage(contact: { id: number; platform_user_id: string; channel_id?: number | null }, ratingType: "human" | "ai" = "human") {
     const token = getLineTokenForContact(contact);
     if (!token) return;
     try {
-      const flexMsg = buildRatingFlexMessage(contact.id);
+      const flexMsg = buildRatingFlexMessage(contact.id, ratingType);
       await fetch("https://api.line.me/v2/bot/message/push", {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
@@ -666,10 +674,14 @@ export async function registerRoutes(
 
   app.post("/api/contacts/:id/send-rating", authMiddleware, async (req, res) => {
     const id = parseInt(req.params.id);
+    const ratingType = (req.body?.type === "ai" ? "ai" : "human") as "human" | "ai";
     const contact = storage.getContact(id);
     if (!contact) return res.status(404).json({ message: "聯絡人不存在" });
-    if (contact.cs_rating != null) {
-      return res.status(400).json({ message: "此客戶已評分過，無法重複發送" });
+    if (ratingType === "ai" && contact.ai_rating != null) {
+      return res.status(400).json({ message: "此客戶 AI 評分已完成，無法重複發送" });
+    }
+    if (ratingType === "human" && contact.cs_rating != null) {
+      return res.status(400).json({ message: "此客戶真人評分已完成，無法重複發送" });
     }
     if (contact.platform !== "line") {
       return res.status(400).json({ message: "僅支援 LINE 平台" });
@@ -679,8 +691,9 @@ export async function registerRoutes(
       return res.status(400).json({ message: "尚未設定 LINE Channel Access Token" });
     }
     try {
-      await sendRatingFlexMessage(contact);
-      storage.createMessage(id, contact.platform, "system", "(系統提示) 已手動發送滿意度調查卡片給客戶");
+      await sendRatingFlexMessage(contact, ratingType);
+      const typeLabel = ratingType === "ai" ? "AI 客服" : "真人客服";
+      storage.createMessage(id, contact.platform, "system", `(系統提示) 已手動發送${typeLabel}滿意度調查卡片給客戶`);
       return res.json({ success: true });
     } catch (err) {
       return res.status(500).json({ message: "發送失敗" });
@@ -1171,14 +1184,22 @@ export async function registerRoutes(
         } else if (event.type === "postback") {
           const data = event.postback?.data || "";
           const params = new URLSearchParams(data);
-          if (params.get("action") === "rate") {
+          const postbackAction = params.get("action");
+          if (postbackAction === "rate" || postbackAction === "rate_ai") {
             const ticketId = parseInt(params.get("ticket_id") || "0");
             const score = parseInt(params.get("score") || "0");
             if (ticketId > 0 && score >= 1 && score <= 5) {
-              storage.updateContactRating(ticketId, score);
-              storage.createMessage(ticketId, "line", "system", `(系統提示) 客戶評分：${"⭐".repeat(score)}（${score} 分）`);
+              const isAi = postbackAction === "rate_ai";
+              if (isAi) {
+                storage.updateContactAiRating(ticketId, score);
+                storage.createMessage(ticketId, "line", "system", `(系統提示) 客戶 AI 客服評分：${"⭐".repeat(score)}（${score} 分）`);
+              } else {
+                storage.updateContactRating(ticketId, score);
+                storage.createMessage(ticketId, "line", "system", `(系統提示) 客戶真人客服評分：${"⭐".repeat(score)}（${score} 分）`);
+              }
+              const typeLabel = isAi ? "AI 客服" : "真人客服";
               replyToLine(event.replyToken, [
-                { type: "text", text: `已收到您的 ${"⭐".repeat(score)} 評分，感謝您的寶貴意見！祝您有美好的一天。` },
+                { type: "text", text: `已收到您對${typeLabel}的 ${"⭐".repeat(score)} 評分，感謝您的寶貴意見！祝您有美好的一天。` },
               ], channelToken);
             }
           }

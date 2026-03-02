@@ -54,6 +54,7 @@ export interface Contact {
   order_count: number;
   total_spent: number;
   cs_rating: number | null;
+  ai_rating: number | null;
   last_message_at: string | null;
   created_at: string;
   brand_id: number | null;

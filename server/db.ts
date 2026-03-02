@@ -91,6 +91,9 @@ export function initDatabase() {
   if (!contactColNames.includes("cs_rating")) {
     db.exec("ALTER TABLE contacts ADD COLUMN cs_rating INTEGER");
   }
+  if (!contactColNames.includes("ai_rating")) {
+    db.exec("ALTER TABLE contacts ADD COLUMN ai_rating INTEGER");
+  }
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS processed_events (
