@@ -6,11 +6,12 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import {
   Brain, Upload, Trash2, FileText, Save, FlaskConical, Send, Bot, User,
   AlertTriangle, ShoppingCart, Plus, Pencil, ExternalLink, Lightbulb, Tag,
-  Paperclip, ImageIcon, Film, X, Loader2, Building2,
+  Paperclip, ImageIcon, Film, X, Loader2, Building2, RotateCcw, Eye,
+  Database, Wrench, Zap, BookOpen, Palette, MessageSquare,
 } from "lucide-react";
 import { apiRequest, getQueryFn } from "@/lib/queryClient";
 import { useBrand } from "@/lib/brand-context";
@@ -18,10 +19,26 @@ import { useToast } from "@/hooks/use-toast";
 import type { Setting, KnowledgeFile, MarketingRule, ImageAsset } from "@shared/schema";
 
 interface SandboxMessage {
-  role: "user" | "ai";
+  role: "user" | "ai" | "system";
   content: string;
   fileUrl?: string;
   fileType?: "image" | "video";
+  toolLog?: string[];
+  imageUrl?: string;
+}
+
+interface PromptPreview {
+  brand_name: string;
+  brand_prompt: string;
+  global_prompt: string;
+  full_prompt_length: number;
+  full_prompt_preview: string;
+  context_stats: {
+    knowledge_files: number;
+    marketing_rules: number;
+    image_assets: number;
+    channels: number;
+  };
 }
 
 export default function KnowledgePage() {
@@ -43,6 +60,9 @@ export default function KnowledgePage() {
   const [ruleSaving, setRuleSaving] = useState(false);
   const [sandboxUploading, setSandboxUploading] = useState(false);
   const [sandboxPendingFile, setSandboxPendingFile] = useState<{ file: File; preview: string; type: "image" | "video" } | null>(null);
+  const [showPromptPreview, setShowPromptPreview] = useState(false);
+  const [promptPreview, setPromptPreview] = useState<PromptPreview | null>(null);
+  const [promptPreviewLoading, setPromptPreviewLoading] = useState(false);
   const [imageAssetUploading, setImageAssetUploading] = useState(false);
   const [editingAsset, setEditingAsset] = useState<ImageAsset | null>(null);
   const [assetForm, setAssetForm] = useState({ display_name: "", description: "", keywords: "" });
@@ -164,7 +184,7 @@ export default function KnowledgePage() {
     setSandboxInput("");
     setSandboxLoading(true);
     try {
-      const history = updatedMessages.slice(-20).map((m) => ({
+      const history = updatedMessages.filter(m => m.role !== "system").slice(-20).map((m) => ({
         role: m.role === "ai" ? "assistant" : "user",
         content: m.content,
       }));
@@ -178,9 +198,12 @@ export default function KnowledgePage() {
       if (!res.ok) {
         setSandboxMessages((prev) => [...prev, { role: "ai", content: `⚠️ ${data.message}` }]);
       } else {
-        setSandboxMessages((prev) => [...prev, { role: "ai", content: data.reply }]);
+        if (data.tool_log && data.tool_log.length > 0) {
+          setSandboxMessages((prev) => [...prev, { role: "system", content: "🔧 AI 工具呼叫紀錄", toolLog: data.tool_log }]);
+        }
+        setSandboxMessages((prev) => [...prev, { role: "ai", content: data.reply, imageUrl: data.image_url }]);
         if (data.transferred) {
-          setSandboxMessages((prev) => [...prev, { role: "ai", content: `⚠️ [沙盒提示] AI 已觸發「轉接真人客服」工具。在正式環境中，此聯絡人會被標記為「需人工處理」並暫停 AI 回覆。\n轉接原因：${data.transfer_reason || "未提供"}` }]);
+          setSandboxMessages((prev) => [...prev, { role: "system", content: `⚡ AI 觸發「轉接真人客服」\n正式環境中，此聯絡人會被標記為「需人工處理」並暫停 AI 回覆。\n轉接原因：${data.transfer_reason || "未提供"}` }]);
         }
       }
     } catch (_e) {
@@ -188,6 +211,29 @@ export default function KnowledgePage() {
     } finally {
       setSandboxLoading(false);
       setTimeout(() => sandboxEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
+    }
+  };
+
+  const handleLoadPromptPreview = async () => {
+    setPromptPreviewLoading(true);
+    try {
+      const url = selectedBrandId ? `/api/sandbox/prompt-preview?brand_id=${selectedBrandId}` : "/api/sandbox/prompt-preview";
+      const res = await fetch(url, { credentials: "include" });
+      if (!res.ok) {
+        toast({ title: "載入提示詞失敗", description: `HTTP ${res.status}`, variant: "destructive" });
+        return;
+      }
+      const data = await res.json();
+      if (data.success) {
+        setPromptPreview(data);
+        setShowPromptPreview(true);
+      } else {
+        toast({ title: "載入提示詞失敗", description: data.message || "未知錯誤", variant: "destructive" });
+      }
+    } catch (_e) {
+      toast({ title: "載入失敗", description: "無法連線至伺服器", variant: "destructive" });
+    } finally {
+      setPromptPreviewLoading(false);
     }
   };
 
@@ -222,7 +268,8 @@ export default function KnowledgePage() {
     try {
       const formData = new FormData();
       formData.append("file", file);
-      const history = sandboxMessages.slice(-20).map(m => ({
+      if (selectedBrandId) formData.append("brand_id", String(selectedBrandId));
+      const history = sandboxMessages.filter(m => m.role !== "system").slice(-20).map(m => ({
         role: m.role === "ai" ? "assistant" : "user",
         content: m.content,
       }));
@@ -237,9 +284,12 @@ export default function KnowledgePage() {
       if (!res.ok) {
         setSandboxMessages(prev => [...prev, { role: "ai", content: `⚠️ ${data.message}` }]);
       } else {
+        if (data.tool_log && data.tool_log.length > 0) {
+          setSandboxMessages(prev => [...prev, { role: "system", content: "🔧 AI 工具呼叫紀錄", toolLog: data.tool_log }]);
+        }
         setSandboxMessages(prev => [...prev, { role: "ai", content: data.reply }]);
         if (data.transferred) {
-          setSandboxMessages(prev => [...prev, { role: "ai", content: `⚠️ [沙盒提示] AI 已觸發「轉接真人客服」工具。在正式環境中，此聯絡人會被標記為「需人工處理」並暫停 AI 回覆。\n轉接原因：${data.transfer_reason || "未提供"}` }]);
+          setSandboxMessages(prev => [...prev, { role: "system", content: `⚡ AI 觸發「轉接真人客服」\n正式環境中，此聯絡人會被標記為「需人工處理」並暫停 AI 回覆。\n轉接原因：${data.transfer_reason || "未提供"}` }]);
         }
       }
     } catch (_e) {
@@ -644,83 +694,185 @@ export default function KnowledgePage() {
           </div>
         </TabsContent>
 
-        <TabsContent value="sandbox" className="mt-4">
+        <TabsContent value="sandbox" className="mt-4 space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+            <div className="bg-white rounded-xl border border-stone-200 p-3 flex items-center gap-2.5" data-testid="sandbox-stat-persona">
+              <div className="w-9 h-9 rounded-lg bg-violet-100 flex items-center justify-center shrink-0"><Brain className="w-4 h-4 text-violet-600" /></div>
+              <div className="min-w-0">
+                <p className="text-[10px] text-stone-400 uppercase tracking-wide">人設/人格</p>
+                <p className="text-xs font-semibold text-stone-800 truncate">{selectedBrand?.name || "全域"}</p>
+              </div>
+            </div>
+            <div className="bg-white rounded-xl border border-stone-200 p-3 flex items-center gap-2.5" data-testid="sandbox-stat-knowledge">
+              <div className="w-9 h-9 rounded-lg bg-emerald-100 flex items-center justify-center shrink-0"><BookOpen className="w-4 h-4 text-emerald-600" /></div>
+              <div className="min-w-0">
+                <p className="text-[10px] text-stone-400 uppercase tracking-wide">知識庫文件</p>
+                <p className="text-xs font-semibold text-stone-800">{brandFiles.length} 份</p>
+              </div>
+            </div>
+            <div className="bg-white rounded-xl border border-stone-200 p-3 flex items-center gap-2.5" data-testid="sandbox-stat-rules">
+              <div className="w-9 h-9 rounded-lg bg-orange-100 flex items-center justify-center shrink-0"><ShoppingCart className="w-4 h-4 text-orange-600" /></div>
+              <div className="min-w-0">
+                <p className="text-[10px] text-stone-400 uppercase tracking-wide">導購規則</p>
+                <p className="text-xs font-semibold text-stone-800">{brandRules.length} 筆</p>
+              </div>
+            </div>
+            <div className="bg-white rounded-xl border border-stone-200 p-3 flex items-center gap-2.5" data-testid="sandbox-stat-images">
+              <div className="w-9 h-9 rounded-lg bg-pink-100 flex items-center justify-center shrink-0"><Palette className="w-4 h-4 text-pink-600" /></div>
+              <div className="min-w-0">
+                <p className="text-[10px] text-stone-400 uppercase tracking-wide">圖片素材</p>
+                <p className="text-xs font-semibold text-stone-800">{brandAssets.length} 張</p>
+              </div>
+            </div>
+          </div>
+
           <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
             <div className="px-5 py-3 border-b border-stone-200 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <div className="w-8 h-8 rounded-xl bg-amber-100 flex items-center justify-center"><FlaskConical className="w-4 h-4 text-amber-600" /></div>
                 <div>
-                  <span className="text-sm font-semibold text-stone-800">AI 測試沙盒</span>
+                  <span className="text-sm font-semibold text-stone-800">AI 擬真測試沙盒</span>
                   <p className="text-xs text-stone-500">
-                    使用真實 OpenAI API 測試{selectedBrand ? ` ${selectedBrand.name} 的` : ""}系統指令效果
+                    使用真實 OpenAI API + {selectedBrand ? `${selectedBrand.name} 品牌人格` : "全域指令"} + 完整工具鏈測試
                   </p>
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                {selectedBrand && (
-                  <span className="text-[10px] px-2 py-1 rounded-full bg-emerald-50 text-emerald-600 border border-emerald-200">
-                    {selectedBrand.name} 人設
-                  </span>
-                )}
-                <div className="flex items-center gap-1.5 text-xs text-amber-600 bg-amber-50 px-2.5 py-1 rounded-full border border-amber-200">
-                  <AlertTriangle className="w-3 h-3" />
-                  此區僅供內部測試
-                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleLoadPromptPreview}
+                  disabled={promptPreviewLoading}
+                  className="text-xs h-7 px-2.5 border-violet-200 text-violet-600 hover:bg-violet-50"
+                  data-testid="button-preview-prompt"
+                >
+                  {promptPreviewLoading ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <Eye className="w-3 h-3 mr-1" />}
+                  查看完整提示詞
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setSandboxMessages([])}
+                  className="text-xs h-7 px-2.5 border-stone-200 text-stone-500 hover:bg-stone-50"
+                  data-testid="button-sandbox-reset"
+                >
+                  <RotateCcw className="w-3 h-3 mr-1" />重置對話
+                </Button>
               </div>
             </div>
 
-            <ScrollArea className="h-[400px] bg-[#faf9f5]">
+            {selectedBrand?.system_prompt && (
+              <div className="px-5 py-2 bg-violet-50/50 border-b border-violet-100 flex items-start gap-2">
+                <Brain className="w-3.5 h-3.5 text-violet-500 shrink-0 mt-0.5" />
+                <p className="text-[11px] text-violet-700 leading-relaxed line-clamp-2">
+                  <span className="font-semibold">品牌人設：</span>{selectedBrand.system_prompt.substring(0, 150)}{selectedBrand.system_prompt.length > 150 ? "..." : ""}
+                </p>
+              </div>
+            )}
+
+            <ScrollArea className="h-[420px] bg-[#faf9f5]">
               <div className="p-5 space-y-4">
                 {sandboxMessages.length === 0 && (
-                  <div className="text-center py-12">
+                  <div className="text-center py-10">
                     <div className="w-16 h-16 mx-auto mb-3 rounded-2xl bg-stone-100 flex items-center justify-center"><Bot className="w-8 h-8 text-stone-300" /></div>
-                    <p className="text-sm text-stone-500">輸入訊息開始測試 AI 回覆效果</p>
-                    <p className="text-xs text-stone-400 mt-1">
-                      系統將使用 {selectedBrand ? `${selectedBrand.name} 的專屬指令 + ` : ""}全域指令來回覆
+                    <p className="text-sm font-medium text-stone-600">擬真 AI 客服測試</p>
+                    <p className="text-xs text-stone-400 mt-1 max-w-sm mx-auto">
+                      模擬真實客戶對話，AI 將以 {selectedBrand ? `「${selectedBrand.name}」品牌人格` : "全域指令"} 回覆，支援訂單查詢、圖片分析、轉接真人等完整功能
                     </p>
+                    <div className="flex flex-wrap justify-center gap-2 mt-4">
+                      {["你們有什麼推薦的甜點？", "我想查訂單進度", "這個蛋糕可以退嗎？", "幫我找真人客服"].map((q, i) => (
+                        <button
+                          key={i}
+                          onClick={() => { setSandboxInput(q); }}
+                          className="text-xs px-3 py-1.5 rounded-full bg-white border border-stone-200 text-stone-600 hover:bg-emerald-50 hover:border-emerald-200 hover:text-emerald-700 transition-colors"
+                          data-testid={`button-sandbox-quickstart-${i}`}
+                        >
+                          <MessageSquare className="w-3 h-3 inline mr-1" />{q}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 )}
                 {sandboxMessages.map((msg, i) => (
-                  <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-                    <div className={`flex items-end gap-2 max-w-[70%] ${msg.role === "user" ? "flex-row-reverse" : "flex-row"}`}>
-                      <Avatar className="w-7 h-7 shrink-0">
-                        <AvatarFallback className={msg.role === "user" ? "bg-emerald-600 text-white" : "bg-emerald-100 text-emerald-600"}>
-                          {msg.role === "user" ? <User className="w-3.5 h-3.5" /> : <Bot className="w-3.5 h-3.5" />}
-                        </AvatarFallback>
-                      </Avatar>
-                      <div className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow-sm ${
-                        msg.role === "user"
-                          ? "bg-emerald-600 text-white rounded-br-md"
-                          : msg.content.startsWith("⚠️")
-                          ? "bg-red-50 text-red-700 rounded-bl-md border border-red-200"
-                          : "bg-white text-stone-700 rounded-bl-md border border-stone-100"
-                      }`}>
-                        {msg.fileType === "image" && msg.fileUrl && (
-                          <img src={msg.fileUrl} alt="uploaded" className="max-w-[200px] rounded-lg mb-2" />
-                        )}
-                        {msg.fileType === "video" && (
-                          <div className="flex items-center gap-2 mb-1">
-                            <Film className="w-4 h-4" />
-                            <span className="text-xs opacity-80">影片檔案</span>
-                          </div>
-                        )}
-                        {msg.content}
+                  <div key={i}>
+                    {msg.role === "system" ? (
+                      <div className="flex justify-center">
+                        <div className="max-w-[85%] rounded-xl px-3 py-2 bg-amber-50 border border-amber-200 text-xs">
+                          {msg.toolLog ? (
+                            <div>
+                              <div className="flex items-center gap-1.5 text-amber-700 font-semibold mb-1">
+                                <Wrench className="w-3 h-3" />{msg.content}
+                              </div>
+                              <div className="space-y-0.5 font-mono text-[10px] text-amber-600 bg-amber-100/50 rounded-lg p-2">
+                                {msg.toolLog.map((log, j) => (
+                                  <div key={j} className={log.startsWith(">>>") ? "text-red-600 font-semibold" : ""}>{log}</div>
+                                ))}
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="flex items-start gap-1.5 text-amber-700 whitespace-pre-wrap">
+                              <Zap className="w-3 h-3 shrink-0 mt-0.5" />
+                              <span>{msg.content}</span>
+                            </div>
+                          )}
+                        </div>
                       </div>
-                    </div>
+                    ) : (
+                      <div className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+                        <div className={`flex items-end gap-2 max-w-[75%] ${msg.role === "user" ? "flex-row-reverse" : "flex-row"}`}>
+                          <Avatar className="w-7 h-7 shrink-0">
+                            <AvatarFallback className={msg.role === "user" ? "bg-emerald-600 text-white" : "bg-emerald-100 text-emerald-600"}>
+                              {msg.role === "user" ? <User className="w-3.5 h-3.5" /> : <Bot className="w-3.5 h-3.5" />}
+                            </AvatarFallback>
+                          </Avatar>
+                          <div>
+                            <div className={`text-[10px] mb-0.5 ${msg.role === "user" ? "text-right text-stone-400" : "text-left text-stone-400"}`}>
+                              {msg.role === "user" ? "模擬客戶" : `AI 客服 (${selectedBrand?.name || "全域"})`}
+                            </div>
+                            <div className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow-sm ${
+                              msg.role === "user"
+                                ? "bg-emerald-600 text-white rounded-br-md"
+                                : msg.content.startsWith("⚠️")
+                                ? "bg-red-50 text-red-700 rounded-bl-md border border-red-200"
+                                : "bg-white text-stone-700 rounded-bl-md border border-stone-100"
+                            }`}>
+                              {msg.fileType === "image" && msg.fileUrl && (
+                                <img src={msg.fileUrl} alt="uploaded" className="max-w-[200px] rounded-lg mb-2" />
+                              )}
+                              {msg.fileType === "video" && (
+                                <div className="flex items-center gap-2 mb-1 bg-black/5 rounded-lg p-2">
+                                  <Film className="w-4 h-4" />
+                                  <span className="text-xs opacity-80">影片檔案</span>
+                                </div>
+                              )}
+                              {msg.content}
+                            </div>
+                            {msg.imageUrl && (
+                              <div className="mt-2">
+                                <img src={msg.imageUrl} alt="AI sent" className="max-w-[200px] rounded-lg border border-stone-200" />
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 ))}
                 {sandboxLoading && (
                   <div className="flex justify-start">
                     <div className="flex items-end gap-2">
                       <Avatar className="w-7 h-7"><AvatarFallback className="bg-emerald-100 text-emerald-600"><Bot className="w-3.5 h-3.5" /></AvatarFallback></Avatar>
-                      <div className="bg-white rounded-2xl rounded-bl-md px-4 py-3 shadow-sm border border-stone-100">
-                        <div className="flex items-center gap-2">
-                          <div className="flex gap-1">
-                            <span className="w-2 h-2 rounded-full bg-stone-300 animate-bounce" style={{ animationDelay: "0ms" }} />
-                            <span className="w-2 h-2 rounded-full bg-stone-300 animate-bounce" style={{ animationDelay: "150ms" }} />
-                            <span className="w-2 h-2 rounded-full bg-stone-300 animate-bounce" style={{ animationDelay: "300ms" }} />
+                      <div>
+                        <div className="text-[10px] mb-0.5 text-stone-400">AI 客服 ({selectedBrand?.name || "全域"})</div>
+                        <div className="bg-white rounded-2xl rounded-bl-md px-4 py-3 shadow-sm border border-stone-100">
+                          <div className="flex items-center gap-2">
+                            <div className="flex gap-1">
+                              <span className="w-2 h-2 rounded-full bg-stone-300 animate-bounce" style={{ animationDelay: "0ms" }} />
+                              <span className="w-2 h-2 rounded-full bg-stone-300 animate-bounce" style={{ animationDelay: "150ms" }} />
+                              <span className="w-2 h-2 rounded-full bg-stone-300 animate-bounce" style={{ animationDelay: "300ms" }} />
+                            </div>
+                            <span className="text-xs text-stone-400">AI 思考中...</span>
                           </div>
-                          <span className="text-xs text-stone-400">AI 思考中...</span>
                         </div>
                       </div>
                     </div>
@@ -774,7 +926,7 @@ export default function KnowledgePage() {
                   value={sandboxInput}
                   onChange={(e) => setSandboxInput(e.target.value)}
                   onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSandboxSend(); } }}
-                  placeholder="輸入測試訊息..."
+                  placeholder="模擬客戶訊息... (例如：我想查訂單、推薦甜點、我要退貨)"
                   className="bg-stone-50 border-stone-200"
                 />
                 <Button onClick={handleSandboxSend} disabled={!sandboxInput.trim() || sandboxLoading} data-testid="button-sandbox-send" className="bg-emerald-600 hover:bg-emerald-700 text-white shrink-0">
@@ -811,6 +963,53 @@ export default function KnowledgePage() {
               {ruleSaving ? <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" /> : <Save className="w-3.5 h-3.5 mr-1" />}
               {editingRule ? "更新" : "建立"}
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showPromptPreview} onOpenChange={setShowPromptPreview}>
+        <DialogContent className="max-w-2xl max-h-[80vh]">
+          <DialogHeader>
+            <DialogTitle className="text-base font-bold text-stone-800 flex items-center gap-2">
+              <Eye className="w-4 h-4 text-violet-600" />
+              AI 完整提示詞預覽 — {promptPreview?.brand_name || "全域"}
+            </DialogTitle>
+            <DialogDescription className="text-xs text-stone-500">檢視送入 OpenAI 的完整提示詞，包含品牌人設、知識庫、導購規則等所有上下文</DialogDescription>
+          </DialogHeader>
+          {promptPreview && (
+            <div className="space-y-4 overflow-y-auto max-h-[60vh] pr-1">
+              <div className="grid grid-cols-4 gap-2">
+                <div className="bg-emerald-50 rounded-lg p-2 text-center border border-emerald-200">
+                  <p className="text-lg font-bold text-emerald-700">{promptPreview.context_stats.knowledge_files}</p>
+                  <p className="text-[10px] text-emerald-600">知識庫</p>
+                </div>
+                <div className="bg-orange-50 rounded-lg p-2 text-center border border-orange-200">
+                  <p className="text-lg font-bold text-orange-700">{promptPreview.context_stats.marketing_rules}</p>
+                  <p className="text-[10px] text-orange-600">導購規則</p>
+                </div>
+                <div className="bg-pink-50 rounded-lg p-2 text-center border border-pink-200">
+                  <p className="text-lg font-bold text-pink-700">{promptPreview.context_stats.image_assets}</p>
+                  <p className="text-[10px] text-pink-600">圖片素材</p>
+                </div>
+                <div className="bg-violet-50 rounded-lg p-2 text-center border border-violet-200">
+                  <p className="text-lg font-bold text-violet-700">{Math.round(promptPreview.full_prompt_length / 1000)}K</p>
+                  <p className="text-[10px] text-violet-600">字元總長</p>
+                </div>
+              </div>
+              {promptPreview.brand_prompt && (
+                <div className="bg-violet-50 rounded-xl p-3 border border-violet-200">
+                  <p className="text-xs font-semibold text-violet-700 mb-1 flex items-center gap-1"><Brain className="w-3 h-3" />品牌專屬人設</p>
+                  <p className="text-xs text-violet-800 whitespace-pre-wrap leading-relaxed">{promptPreview.brand_prompt}</p>
+                </div>
+              )}
+              <div className="bg-stone-50 rounded-xl p-3 border border-stone-200">
+                <p className="text-xs font-semibold text-stone-600 mb-1 flex items-center gap-1"><Database className="w-3 h-3" />完整提示詞（送入 OpenAI 的全文）</p>
+                <pre className="text-[11px] text-stone-700 whitespace-pre-wrap leading-relaxed font-sans max-h-[300px] overflow-y-auto">{promptPreview.full_prompt_preview}</pre>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setShowPromptPreview(false)} className="text-xs">關閉</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

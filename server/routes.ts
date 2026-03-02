@@ -2359,6 +2359,34 @@ export async function registerRoutes(
     }
   }
 
+  app.get("/api/sandbox/prompt-preview", authMiddleware, async (req, res) => {
+    try {
+      const brandId = req.query.brand_id ? parseInt(req.query.brand_id as string) : undefined;
+      const fullPrompt = await getEnrichedSystemPrompt(brandId);
+      const brand = brandId ? storage.getBrand(brandId) : undefined;
+      const knowledgeFiles = storage.getKnowledgeFiles(brandId);
+      const marketingRules = storage.getMarketingRules(brandId);
+      const imageAssets = storage.getImageAssets(brandId);
+      const channels = brandId ? storage.getChannelsByBrand(brandId) : [];
+      return res.json({
+        success: true,
+        brand_name: brand?.name || "全域",
+        brand_prompt: brand?.system_prompt || "",
+        global_prompt: storage.getSetting("system_prompt") || "",
+        full_prompt_length: fullPrompt.length,
+        full_prompt_preview: fullPrompt.substring(0, 2000) + (fullPrompt.length > 2000 ? "\n...(truncated)" : ""),
+        context_stats: {
+          knowledge_files: knowledgeFiles.length,
+          marketing_rules: marketingRules.length,
+          image_assets: imageAssets.length,
+          channels: channels.length,
+        },
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
   app.post("/api/sandbox/chat", authMiddleware, async (req, res) => {
     const { message, history, brand_id } = req.body;
     if (!message) return res.status(400).json({ message: "message is required" });
@@ -2461,10 +2489,14 @@ export async function registerRoutes(
       }
 
       let reply = responseMessage?.content || "抱歉，AI 無法生成回覆。";
-      const result: Record<string, any> = { success: true, reply, transferred: sandboxTransferTriggered };
+      const result: Record<string, any> = {
+        success: true,
+        reply,
+        transferred: sandboxTransferTriggered,
+        tool_log: sandboxToolLog,
+      };
       if (sandboxTransferTriggered) {
         result.transfer_reason = sandboxTransferReason;
-        result.tool_log = sandboxToolLog;
       }
       if (sandboxImageResult) {
         result.image_url = sandboxImageResult.image_url;
@@ -2497,12 +2529,17 @@ export async function registerRoutes(
     let history: { role: string; content: string }[] = [];
     try { history = JSON.parse(historyRaw || "[]"); } catch (_e) {}
 
+    const brandIdParam = req.body.brand_id ? parseInt(req.body.brand_id) : undefined;
+
     if (isVideo) {
       return res.json({
         success: true,
         reply: `已收到您上傳的影片（${decodedFilename}）。\n\n在實際 LINE 對話中，系統會自動將影片訊息標記為「需要真人客服」，並通知專人檢視。\n\n📋 模擬結果：\n- 檔案類型：影片\n- 動作：自動轉接真人客服\n- 回覆：「已收到您的影片，將為您轉交專人檢視。」`,
         fileUrl,
         fileType: "video",
+        transferred: true,
+        transfer_reason: "影片訊息自動轉接真人",
+        tool_log: ["Tool: auto_transfer_video()", ">>> 影片訊息自動觸發轉接真人客服"],
       });
     }
 
@@ -2514,7 +2551,7 @@ export async function registerRoutes(
         const mimeType = ext === ".png" ? "image/png" : ext === ".gif" ? "image/gif" : ext === ".webp" ? "image/webp" : "image/jpeg";
         const dataUri = `data:${mimeType};base64,${base64}`;
 
-        const systemPrompt = await getEnrichedSystemPrompt();
+        const systemPrompt = await getEnrichedSystemPrompt(brandIdParam);
         const openai = new OpenAI({ apiKey });
         const chatMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
           { role: "system", content: systemPrompt },
