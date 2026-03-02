@@ -19,6 +19,7 @@ export interface Brand {
   system_prompt: string;
   superlanding_merchant_no: string;
   superlanding_access_key: string;
+  return_form_url: string;
   created_at: string;
 }
 

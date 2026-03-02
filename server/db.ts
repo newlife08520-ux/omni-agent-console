@@ -115,6 +115,7 @@ function migrateBrandsAndChannels() {
       system_prompt TEXT NOT NULL DEFAULT '',
       superlanding_merchant_no TEXT NOT NULL DEFAULT '',
       superlanding_access_key TEXT NOT NULL DEFAULT '',
+      return_form_url TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -131,6 +132,11 @@ function migrateBrandsAndChannels() {
       FOREIGN KEY (brand_id) REFERENCES brands(id)
     );
   `);
+
+  const brandColNames = db.prepare("PRAGMA table_info(brands)").all() as { name: string }[];
+  if (!brandColNames.map(c => c.name).includes("return_form_url")) {
+    db.exec("ALTER TABLE brands ADD COLUMN return_form_url TEXT NOT NULL DEFAULT ''");
+  }
 
   const contactCols2 = db.prepare("PRAGMA table_info(contacts)").all() as { name: string }[];
   const contactColNames2 = contactCols2.map((c) => c.name);

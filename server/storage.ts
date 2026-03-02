@@ -114,10 +114,10 @@ export class SQLiteStorage implements IStorage {
     return db.prepare("SELECT * FROM brands WHERE id = ?").get(id) as Brand | undefined;
   }
 
-  createBrand(name: string, slug: string, logoUrl?: string, description?: string, systemPrompt?: string, superlandingMerchantNo?: string, superlandingAccessKey?: string): Brand {
+  createBrand(name: string, slug: string, logoUrl?: string, description?: string, systemPrompt?: string, superlandingMerchantNo?: string, superlandingAccessKey?: string, returnFormUrl?: string): Brand {
     const now = new Date().toISOString().replace("T", " ").substring(0, 19);
-    const result = db.prepare("INSERT INTO brands (name, slug, logo_url, description, system_prompt, superlanding_merchant_no, superlanding_access_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
-      name, slug, logoUrl || "", description || "", systemPrompt || "", superlandingMerchantNo || "", superlandingAccessKey || "", now
+    const result = db.prepare("INSERT INTO brands (name, slug, logo_url, description, system_prompt, superlanding_merchant_no, superlanding_access_key, return_form_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+      name, slug, logoUrl || "", description || "", systemPrompt || "", superlandingMerchantNo || "", superlandingAccessKey || "", returnFormUrl || "", now
     );
     return db.prepare("SELECT * FROM brands WHERE id = ?").get(Number(result.lastInsertRowid)) as Brand;
   }

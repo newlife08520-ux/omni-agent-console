@@ -62,7 +62,11 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
 
   const [showBrandDialog, setShowBrandDialog] = useState(false);
   const [editingBrand, setEditingBrand] = useState<Brand | null>(null);
-  const [brandForm, setBrandForm] = useState({ name: "", slug: "", logo_url: "", description: "", system_prompt: "", superlanding_merchant_no: "", superlanding_access_key: "" });
+  const [brandForm, setBrandForm] = useState({ 
+    name: "", slug: "", logo_url: "", description: "", system_prompt: "", 
+    superlanding_merchant_no: "", superlanding_access_key: "",
+    return_form_url: "" 
+  });
   const [brandSaving, setBrandSaving] = useState(false);
 
   const [showChannelDialog, setShowChannelDialog] = useState(false);
@@ -120,7 +124,11 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
 
   const openAddBrand = () => {
     setEditingBrand(null);
-    setBrandForm({ name: "", slug: "", logo_url: "", description: "", system_prompt: "", superlanding_merchant_no: "", superlanding_access_key: "" });
+    setBrandForm({ 
+      name: "", slug: "", logo_url: "", description: "", system_prompt: "", 
+      superlanding_merchant_no: "", superlanding_access_key: "",
+      return_form_url: "" 
+    });
     setShowBrandDialog(true);
   };
 
@@ -131,6 +139,7 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
       description: brand.description || "", system_prompt: brand.system_prompt || "",
       superlanding_merchant_no: brand.superlanding_merchant_no || "",
       superlanding_access_key: brand.superlanding_access_key || "",
+      return_form_url: brand.return_form_url || "",
     });
     setShowBrandDialog(true);
   };
@@ -379,6 +388,10 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
             <div>
               <label className="text-xs font-medium text-stone-600 mb-1 block">品牌專屬 AI 系統指令</label>
               <Textarea data-testid="textarea-brand-prompt" value={brandForm.system_prompt} onChange={(e) => setBrandForm(f => ({ ...f, system_prompt: e.target.value }))} placeholder="此品牌的 AI 客服人設與回覆風格..." className="min-h-[80px] resize-y text-sm bg-stone-50 border-stone-200" />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-stone-600 mb-1 block">退換貨表單連結 (Google Form 等)</label>
+              <Input data-testid="input-brand-return-url" value={brandForm.return_form_url} onChange={(e) => setBrandForm(f => ({ ...f, return_form_url: e.target.value }))} placeholder="https://forms.gle/..." className="bg-stone-50 border-stone-200" />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
