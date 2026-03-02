@@ -79,6 +79,7 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
   const [healthStatus, setHealthStatus] = useState<Record<string, HealthEntry>>({});
   const [healthLoading, setHealthLoading] = useState(false);
   const [testingBrandSL, setTestingBrandSL] = useState<number | null>(null);
+  const [testingBrandShopline, setTestingBrandShopline] = useState<number | null>(null);
   const [refreshingProfiles, setRefreshingProfiles] = useState(false);
 
   const handleRefreshProfiles = async () => {
@@ -125,6 +126,22 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
       }
     } catch (_e) { toast({ title: "測試失敗", variant: "destructive" }); }
     finally { setTestingBrandSL(null); }
+  };
+
+  const handleTestBrandShopline = async (brandId: number) => {
+    setTestingBrandShopline(brandId);
+    try {
+      const res = await fetch(`/api/brands/${brandId}/test-shopline`, { method: "POST", credentials: "include" });
+      const data = await res.json();
+      if (data.success) {
+        toast({ title: "連線成功", description: data.message });
+        setHealthStatus(prev => ({ ...prev, [`shopline_brand_${brandId}`]: { status: "ok", message: data.message } }));
+      } else {
+        toast({ title: "連線失敗", description: data.message, variant: "destructive" });
+        setHealthStatus(prev => ({ ...prev, [`shopline_brand_${brandId}`]: { status: "error", message: data.message } }));
+      }
+    } catch (_e) { toast({ title: "測試失敗", variant: "destructive" }); }
+    finally { setTestingBrandShopline(null); }
   };
 
   const { data: allChannels = [] } = useQuery<Channel[]>({
@@ -282,6 +299,7 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
         <div className="space-y-3">
           {brands.map((brand) => {
             const slStatus = healthStatus[`superlanding_brand_${brand.id}`];
+            const shoplineStatus = healthStatus[`shopline_brand_${brand.id}`];
             return (
             <div key={brand.id} className={`rounded-xl border p-4 transition-all ${selectedBrandId === brand.id ? "border-emerald-300 bg-emerald-50/30" : "border-stone-200 bg-stone-50/50"}`} data-testid={`brand-card-${brand.id}`}>
               <div className="flex items-center justify-between">
@@ -295,6 +313,7 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
                     <div className="flex items-center gap-2">
                       <p className="text-sm font-semibold text-stone-800">{brand.name}</p>
                       {slStatus && <StatusBadge status={slStatus.status as HealthStatus} message={slStatus.message} />}
+                      {shoplineStatus && <StatusBadge status={shoplineStatus.status as HealthStatus} message={shoplineStatus.message} />}
                     </div>
                     <p className="text-[10px] text-stone-400">{brand.slug} · {brand.description || "尚無描述"}</p>
                   </div>
@@ -302,6 +321,9 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
                 <div className="flex items-center gap-1">
                   <Button size="sm" variant="ghost" onClick={() => handleTestBrandSL(brand.id)} disabled={testingBrandSL === brand.id} className="text-xs text-stone-500 hover:text-emerald-600" data-testid={`button-test-brand-sl-${brand.id}`}>
                     {testingBrandSL === brand.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <><Plug className="w-3 h-3 mr-1" />商店</>}
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => handleTestBrandShopline(brand.id)} disabled={testingBrandShopline === brand.id} className="text-xs text-stone-500 hover:text-blue-600" data-testid={`button-test-brand-shopline-${brand.id}`}>
+                    {testingBrandShopline === brand.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <><Plug className="w-3 h-3 mr-1" />SHOPLINE</>}
                   </Button>
                   <Button size="sm" variant="ghost" onClick={() => { setSelectedBrandId(brand.id); }} className="text-xs text-stone-500 hover:text-emerald-600" data-testid={`button-select-brand-${brand.id}`}>
                     {selectedBrandId === brand.id ? <CheckCircle className="w-4 h-4 text-emerald-600" /> : "選取"}
@@ -445,16 +467,29 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
               </div>
             </div>
             {editingBrand && (
-              <div className="flex items-center justify-between pt-1">
-                {healthStatus[`superlanding_brand_${editingBrand.id}`] && (
-                  <StatusBadge
-                    status={healthStatus[`superlanding_brand_${editingBrand.id}`].status as HealthStatus}
-                    message={healthStatus[`superlanding_brand_${editingBrand.id}`].message}
-                  />
-                )}
-                <Button size="sm" variant="secondary" onClick={() => handleTestBrandSL(editingBrand.id)} disabled={testingBrandSL === editingBrand.id} className="text-xs bg-stone-100 hover:bg-stone-200 ml-auto" data-testid="button-test-brand-sl-dialog">
-                  {testingBrandSL === editingBrand.id ? <><Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />測試中</> : <><Plug className="w-3.5 h-3.5 mr-1" />測試一頁商店連線</>}
-                </Button>
+              <div className="flex flex-col gap-2 pt-1">
+                <div className="flex items-center justify-between">
+                  {healthStatus[`superlanding_brand_${editingBrand.id}`] && (
+                    <StatusBadge
+                      status={healthStatus[`superlanding_brand_${editingBrand.id}`].status as HealthStatus}
+                      message={healthStatus[`superlanding_brand_${editingBrand.id}`].message}
+                    />
+                  )}
+                  <Button size="sm" variant="secondary" onClick={() => handleTestBrandSL(editingBrand.id)} disabled={testingBrandSL === editingBrand.id} className="text-xs bg-stone-100 hover:bg-stone-200 ml-auto" data-testid="button-test-brand-sl-dialog">
+                    {testingBrandSL === editingBrand.id ? <><Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />測試中</> : <><Plug className="w-3.5 h-3.5 mr-1" />測試一頁商店連線</>}
+                  </Button>
+                </div>
+                <div className="flex items-center justify-between">
+                  {healthStatus[`shopline_brand_${editingBrand.id}`] && (
+                    <StatusBadge
+                      status={healthStatus[`shopline_brand_${editingBrand.id}`].status as HealthStatus}
+                      message={healthStatus[`shopline_brand_${editingBrand.id}`].message}
+                    />
+                  )}
+                  <Button size="sm" variant="secondary" onClick={() => handleTestBrandShopline(editingBrand.id)} disabled={testingBrandShopline === editingBrand.id} className="text-xs bg-blue-50 hover:bg-blue-100 text-blue-700 ml-auto" data-testid="button-test-brand-shopline-dialog">
+                    {testingBrandShopline === editingBrand.id ? <><Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />測試中</> : <><Plug className="w-3.5 h-3.5 mr-1" />測試 SHOPLINE 連線</>}
+                  </Button>
+                </div>
               </div>
             )}
           </div>

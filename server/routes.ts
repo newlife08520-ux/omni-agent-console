@@ -653,6 +653,34 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/brands/:id/test-shopline", authMiddleware, superAdminOnly, async (req, res) => {
+    const id = parseInt(req.params.id);
+    const brand = storage.getBrand(id);
+    if (!brand) return res.status(404).json({ message: "品牌不存在" });
+    const storeDomain = brand.shopline_store_domain || "";
+    const apiToken = brand.shopline_api_token || "";
+    if (!storeDomain || !apiToken) {
+      return res.json({ success: false, message: "此品牌尚未設定 SHOPLINE 商店域名或 API Token" });
+    }
+    try {
+      const domain = storeDomain.replace(/^https?:\/\//, "").replace(/\/$/, "");
+      const baseUrl = `https://${domain}/api/v1`;
+      const slRes = await fetch(`${baseUrl}/orders.json?per_page=1`, {
+        headers: { Accept: "application/json", Authorization: `Bearer ${apiToken}` },
+      });
+      if (slRes.ok) {
+        const data = await slRes.json();
+        const total = data.total || data.orders?.length || "N/A";
+        return res.json({ success: true, message: `SHOPLINE 連線成功！取得訂單資料 (${total})` });
+      }
+      const errText = await slRes.text().catch(() => "");
+      return res.json({ success: false, message: `SHOPLINE 連線失敗 (HTTP ${slRes.status})：${errText || "請確認商店域名與 API Token 是否正確"}` });
+    } catch (fetchErr: any) {
+      const detail = fetchErr?.cause?.code || fetchErr?.code || fetchErr?.message || "未知網路錯誤";
+      return res.json({ success: false, message: `SHOPLINE 連線失敗（網路錯誤）：${detail}` });
+    }
+  });
+
   app.get("/api/health/status", authMiddleware, async (_req, res) => {
     const results: Record<string, { status: "ok" | "error" | "unconfigured"; message: string }> = {};
 
