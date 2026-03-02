@@ -1,9 +1,11 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
+import db from "./db";
 import { fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, fetchPages, lookupOrdersByPageAndPhone, ensurePagesCacheLoaded, refreshPagesCache, getCachedPages, getCachedPagesAge, buildProductCatalogPrompt } from "./superlanding";
 import type { SuperLandingConfig } from "./superlanding";
-import type { OrderInfo, Contact } from "@shared/schema";
+import type { OrderInfo, Contact, ContactStatus, IssueType } from "@shared/schema";
+import { unifiedLookupById, unifiedLookupByProductAndPhone, unifiedLookupByDateAndContact, getUnifiedStatusLabel } from "./order-service";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
@@ -108,6 +110,56 @@ const sandboxUpload = multer({
   },
   limits: { fileSize: 20 * 1024 * 1024 },
 });
+
+const HIGH_RISK_KEYWORDS = [
+  "投訴", "客訴", "消保", "消費者保護", "消基會", "法律", "律師", "告你", "告你們",
+  "提告", "訴訟", "報警", "警察", "公平會", "媒體", "爆料", "上新聞", "找記者",
+  "詐騙", "騙子", "垃圾", "廢物", "爛", "靠北", "幹", "他媽", "媽的", "狗屎",
+  "去死", "白痴", "智障", "噁心", "極度不滿", "非常生氣", "太扯", "離譜",
+];
+
+const RETURN_REFUND_KEYWORDS = ["退貨", "退款", "換貨", "退錢", "退費", "取消訂單", "不要了"];
+
+const ISSUE_TYPE_KEYWORDS: Record<IssueType, string[]> = {
+  order_inquiry: ["訂單", "查詢", "出貨", "物流", "寄送", "追蹤", "到貨", "配送"],
+  product_consult: ["商品", "產品", "尺寸", "顏色", "材質", "規格", "有貨", "庫存", "價格", "多少錢"],
+  return_refund: ["退貨", "退款", "換貨", "退錢", "退費", "瑕疵", "損壞", "破損"],
+  complaint: ["投訴", "客訴", "不滿", "太爛", "太差", "生氣", "憤怒"],
+  order_modify: ["修改", "改地址", "改電話", "改數量", "取消"],
+  general: ["營業時間", "門市", "活動", "優惠", "會員"],
+  other: [],
+};
+
+function detectHighRisk(text: string): { isHighRisk: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  for (const kw of HIGH_RISK_KEYWORDS) {
+    if (text.includes(kw)) {
+      reasons.push(`高風險關鍵字: ${kw}`);
+    }
+  }
+  return { isHighRisk: reasons.length > 0, reasons };
+}
+
+function detectIssueType(messages: string[]): IssueType | null {
+  const combined = messages.join(" ");
+  let bestType: IssueType | null = null;
+  let bestScore = 0;
+  for (const [type, keywords] of Object.entries(ISSUE_TYPE_KEYWORDS)) {
+    let score = 0;
+    for (const kw of keywords) {
+      if (combined.includes(kw)) score++;
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      bestType = type as IssueType;
+    }
+  }
+  return bestType;
+}
+
+function detectReturnRefund(text: string): boolean {
+  return RETURN_REFUND_KEYWORDS.some(kw => text.includes(kw));
+}
 
 function getSuperLandingConfig(brandId?: number): SuperLandingConfig {
   if (brandId) {
@@ -817,7 +869,7 @@ export async function registerRoutes(
   app.put("/api/contacts/:id/status", authMiddleware, async (req, res) => {
     const id = parseInt(req.params.id);
     const { status } = req.body;
-    if (!["pending", "processing", "resolved"].includes(status)) {
+    if (!["pending", "processing", "resolved", "ai_handling", "awaiting_human", "high_risk", "closed"].includes(status)) {
       return res.status(400).json({ message: "Invalid status" });
     }
     storage.updateContactStatus(id, status);
@@ -858,6 +910,24 @@ export async function registerRoutes(
     }
 
     return res.json({ success: true });
+  });
+
+  app.put("/api/contacts/:id/issue-type", authMiddleware, async (req, res) => {
+    const id = parseInt(req.params.id);
+    const { issue_type } = req.body;
+    const validTypes = ["order_inquiry", "product_consult", "return_refund", "complaint", "order_modify", "general", "other"];
+    if (issue_type && !validTypes.includes(issue_type)) {
+      return res.status(400).json({ message: "Invalid issue type" });
+    }
+    storage.updateContactIssueType(id, issue_type || null);
+    broadcastSSE("contacts_updated", { contact_id: id });
+    return res.json({ success: true });
+  });
+
+  app.get("/api/contacts/:id/ai-logs", authMiddleware, (req, res) => {
+    const id = parseInt(req.params.id);
+    const logs = storage.getAiLogs(id);
+    return res.json(logs);
   });
 
   app.post("/api/contacts/:id/send-rating", authMiddleware, async (req, res) => {
@@ -1362,7 +1432,58 @@ export async function registerRoutes(
     const apiKey = storage.getSetting("openai_api_key");
     if (!apiKey || apiKey.trim() === "") return;
 
+    const startTime = Date.now();
+    const toolsCalled: string[] = [];
+    let transferTriggered = false;
+    let transferReason: string | undefined;
+    let totalTokens = 0;
+    let orderLookupFailed = 0;
+
     try {
+      const effectiveBrandId = contact.brand_id || brandId;
+
+      storage.updateContactStatus(contact.id, "ai_handling");
+      broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+
+      const riskCheck = detectHighRisk(userMessage);
+      if (riskCheck.isHighRisk) {
+        console.log(`[AI Risk] 高風險訊息偵測: ${riskCheck.reasons.join(", ")}`);
+        storage.updateContactStatus(contact.id, "high_risk");
+        storage.updateContactHumanFlag(contact.id, 1);
+        storage.createMessage(contact.id, contact.platform, "system",
+          `(系統提示) 偵測到高風險訊息，已自動標記並轉接真人客服。原因：${riskCheck.reasons.join("、")}`);
+        broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+
+        storage.createAiLog({
+          contact_id: contact.id,
+          brand_id: effectiveBrandId || undefined,
+          prompt_summary: `高風險偵測: ${userMessage.slice(0, 100)}`,
+          knowledge_hits: [],
+          tools_called: [],
+          transfer_triggered: true,
+          transfer_reason: `高風險關鍵字: ${riskCheck.reasons.join(", ")}`,
+          result_summary: "高風險自動轉人工",
+          token_usage: 0,
+          model: "risk-detection",
+          response_time_ms: Date.now() - startTime,
+        });
+        return;
+      }
+
+      if (detectReturnRefund(userMessage)) {
+        if (!contact.issue_type || contact.issue_type !== "return_refund") {
+          storage.updateContactIssueType(contact.id, "return_refund");
+        }
+      }
+
+      const recentUserMsgs = storage.getMessages(contact.id)
+        .filter(m => m.sender_type === "user")
+        .map(m => m.content);
+      const detectedIssue = detectIssueType(recentUserMsgs);
+      if (detectedIssue && !contact.issue_type) {
+        storage.updateContactIssueType(contact.id, detectedIssue);
+      }
+
       const systemPrompt = await getEnrichedSystemPrompt(contact.brand_id || brandId || undefined);
       const openai = new OpenAI({ apiKey });
 
@@ -1370,6 +1491,8 @@ export async function registerRoutes(
       const chatMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
         { role: "system", content: systemPrompt },
       ];
+      const knowledgeHits: string[] = [];
+
       for (const msg of recentMessages) {
         if (msg.sender_type === "user") {
           if (msg.message_type === "image" && msg.image_url) {
@@ -1390,7 +1513,6 @@ export async function registerRoutes(
         }
       }
 
-      const effectiveBrandId = contact.brand_id || brandId;
       const hasImageAssets = storage.getImageAssets(effectiveBrandId || undefined).length > 0;
       const allTools = [...orderLookupTools, ...humanHandoffTools, ...(hasImageAssets ? imageTools : [])];
 
@@ -1401,6 +1523,8 @@ export async function registerRoutes(
         max_completion_tokens: 1000,
         temperature: 0.7,
       });
+
+      totalTokens += completion.usage?.total_tokens || 0;
 
       let responseMessage = completion.choices[0]?.message;
       let loopCount = 0;
@@ -1416,6 +1540,7 @@ export async function registerRoutes(
           let fnArgs: Record<string, string> = {};
           try { fnArgs = JSON.parse(toolCall.function.arguments); } catch (_e) {}
 
+          toolsCalled.push(fnName);
           console.log(`[Webhook AI] 執行 Tool: ${fnName}，參數:`, fnArgs);
           const toolResult = await executeToolCall(fnName, fnArgs, {
             contactId: contact.id,
@@ -1428,11 +1553,41 @@ export async function registerRoutes(
           chatMessages.push({ role: "tool", tool_call_id: toolCall.id, content: toolResult });
 
           if (fnName === "transfer_to_human") {
+            transferTriggered = true;
+            transferReason = fnArgs.reason || "AI 判斷需要人工處理";
+            storage.updateContactStatus(contact.id, "awaiting_human");
             const freshContact = storage.getContact(contact.id);
             if (freshContact?.needs_human) {
               console.log(`[Webhook AI] transfer_to_human 已觸發，停止 AI 回覆迴圈`);
             }
           }
+
+          if (fnName.includes("lookup_order")) {
+            try {
+              const parsed = JSON.parse(toolResult);
+              if (parsed.found === false) {
+                orderLookupFailed++;
+              }
+              if (parsed.found === true && !contact.issue_type) {
+                storage.updateContactIssueType(contact.id, "order_inquiry");
+              }
+            } catch (_e) {}
+          }
+        }
+
+        if (orderLookupFailed >= 2 && !transferTriggered) {
+          console.log(`[AI Risk] 多次查單失敗(${orderLookupFailed}次)，自動升級為待人工`);
+          storage.updateContactStatus(contact.id, "awaiting_human");
+          storage.updateContactHumanFlag(contact.id, 1);
+          transferTriggered = true;
+          transferReason = `多次查單失敗(${orderLookupFailed}次)`;
+        }
+
+        if (loopCount >= maxToolLoops && !transferTriggered) {
+          console.log(`[AI Risk] 達到最大工具呼叫次數(${maxToolLoops})，標記待人工`);
+          storage.updateContactStatus(contact.id, "awaiting_human");
+          transferTriggered = true;
+          transferReason = `AI 多輪工具呼叫未能解決(${loopCount}輪)`;
         }
 
         const freshContact = storage.getContact(contact.id);
@@ -1445,12 +1600,26 @@ export async function registerRoutes(
           max_completion_tokens: 1000,
           temperature: 0.7,
         });
+        totalTokens += completion.usage?.total_tokens || 0;
         responseMessage = completion.choices[0]?.message;
       }
 
       const finalContact = storage.getContact(contact.id);
       if (finalContact?.needs_human) {
         console.log(`[Webhook AI] 已轉接真人，跳過 AI 回覆`);
+        storage.createAiLog({
+          contact_id: contact.id,
+          brand_id: effectiveBrandId || undefined,
+          prompt_summary: userMessage.slice(0, 200),
+          knowledge_hits: knowledgeHits,
+          tools_called: toolsCalled,
+          transfer_triggered: true,
+          transfer_reason: transferReason,
+          result_summary: "轉接真人客服",
+          token_usage: totalTokens,
+          model: "gpt-5.2",
+          response_time_ms: Date.now() - startTime,
+        });
         return;
       }
 
@@ -1465,9 +1634,36 @@ export async function registerRoutes(
         } else {
           await pushLineMessage(contact.platform_user_id, [{ type: "text", text: reply }], channelToken);
         }
+
+        storage.createAiLog({
+          contact_id: contact.id,
+          message_id: aiMsg.id,
+          brand_id: effectiveBrandId || undefined,
+          prompt_summary: userMessage.slice(0, 200),
+          knowledge_hits: knowledgeHits,
+          tools_called: toolsCalled,
+          transfer_triggered: transferTriggered,
+          transfer_reason: transferReason,
+          result_summary: reply.slice(0, 300),
+          token_usage: totalTokens,
+          model: "gpt-5.2",
+          response_time_ms: Date.now() - startTime,
+        });
       }
     } catch (err) {
       console.error("[Webhook AI] 自動回覆失敗:", err);
+      storage.createAiLog({
+        contact_id: contact.id,
+        brand_id: contact.brand_id || brandId || undefined,
+        prompt_summary: userMessage.slice(0, 200),
+        knowledge_hits: [],
+        tools_called: toolsCalled,
+        transfer_triggered: false,
+        result_summary: `錯誤: ${(err as Error).message}`,
+        token_usage: totalTokens,
+        model: "gpt-5.2",
+        response_time_ms: Date.now() - startTime,
+      });
     }
   }
 
@@ -2015,57 +2211,42 @@ export async function registerRoutes(
     }
 
     const config = getSuperLandingConfig(context?.brandId);
-    if (!config.merchantNo || !config.accessKey) {
-      return JSON.stringify({ success: false, error: "系統尚未設定一頁商店 API 金鑰，無法查詢訂單。請至系統設定 → 品牌管理中設定該品牌的一頁商店 API 金鑰。" });
+    const hasAnyCreds = (config.merchantNo && config.accessKey) || (() => {
+      const shopBrand = context?.brandId ? storage.getBrand(context.brandId) : null;
+      return shopBrand?.shopline_store_domain && shopBrand?.shopline_api_token;
+    })();
+    if (!hasAnyCreds) {
+      return JSON.stringify({ success: false, error: "系統尚未設定訂單查詢 API 金鑰（一頁商店或 SHOPLINE），無法查詢訂單。請至系統設定 → 品牌管理中設定 API 金鑰。" });
     }
 
     try {
       if (toolName === "lookup_order_by_id") {
         const orderId = (args.order_id || "").trim().toUpperCase();
         console.log(`[AI Tool Call] lookup_order_by_id，單號: ${orderId} (已自動大寫)，品牌ID: ${context?.brandId || "無"}`);
-        console.log(`[API 請求] 準備查詢單號: ${orderId}，使用 merchant_no: ${config.merchantNo}`);
 
         if (!orderId) {
           return JSON.stringify({ success: false, error: "訂單編號為空" });
         }
 
-        let order = await lookupOrderById(config, orderId);
+        const result = await unifiedLookupById(config, orderId, context?.brandId);
 
-        if (!order) {
-          console.log(`[AI Tool Call] 品牌 ${context?.brandId || "預設"} 查無訂單: ${orderId}，嘗試跨品牌查詢...`);
-          const allBrands = storage.getBrands();
-          for (const brand of allBrands) {
-            if (brand.id === context?.brandId) continue;
-            if (!brand.superlanding_merchant_no || !brand.superlanding_access_key) continue;
-            const altConfig: SuperLandingConfig = {
-              merchantNo: brand.superlanding_merchant_no,
-              accessKey: brand.superlanding_access_key,
-            };
-            console.log(`[API 請求] 跨品牌查詢: 品牌「${brand.name}」(ID:${brand.id})，merchant_no: ${altConfig.merchantNo}`);
-            try {
-              const altOrder = await lookupOrderById(altConfig, orderId);
-              if (altOrder) {
-                console.log(`[API 回應] 在品牌「${brand.name}」找到訂單 ${orderId}`);
-                order = altOrder;
-                break;
-              }
-            } catch (altErr) {
-              console.log(`[API 回應] 品牌「${brand.name}」查詢失敗:`, altErr);
-            }
-          }
+        if (!result.found || result.orders.length === 0) {
+          console.log(`[AI Tool Call] 所有平台皆查無訂單: ${orderId}`);
+          return JSON.stringify({ success: true, found: false, message: `所有平台（一頁商店 + SHOPLINE）皆查無訂單編號 ${orderId} 的紀錄。請告知客戶目前查不到這筆資料，並詢問是否需要轉接專人客服。` });
         }
 
-        if (!order) {
-          console.log(`[AI Tool Call] 所有品牌皆查無訂單: ${orderId}`);
-          return JSON.stringify({ success: true, found: false, message: `所有品牌帳戶皆查無訂單編號 ${orderId} 的紀錄。(絕對規則) 你現在必須立刻誠實表明你是 AI 客服小助手，告知客戶目前查不到這筆資料，並詢問是否需要轉接專人客服。` });
+        const order = result.orders[0];
+        const statusLabel = getUnifiedStatusLabel(order.status, result.source);
+        console.log(`[AI Tool Call] 查到訂單: ${orderId}，來源: ${result.source}，狀態: ${statusLabel}`);
+
+        if (context?.contactId) {
+          storage.updateContactOrderSource(context.contactId, result.source);
         }
 
-        const statusLabel = (await import("./superlanding")).getStatusLabel(order.status);
-        console.log(`[AI Tool Call] 查到訂單: ${orderId}，狀態: ${statusLabel}`);
-        console.log(`[API 回應] 查詢結果:`, JSON.stringify({ order_id: order.global_order_id, status: statusLabel, amount: order.final_total_order_amount, buyer: order.buyer_name }));
         return JSON.stringify({
           success: true,
           found: true,
+          source: result.source,
           order: {
             order_id: order.global_order_id,
             status: statusLabel,
@@ -2216,46 +2397,35 @@ export async function registerRoutes(
         }
         const result = { orders: allResults, totalFetched: allResults.length, truncated: false };
 
+        let orderSource: string = "superlanding";
+
         if (result.orders.length === 0) {
-          console.log(`[AI Tool Call] 品牌 ${context?.brandId || "預設"} 查無結果，嘗試跨品牌查詢...`);
-          const allBrands = storage.getBrands();
-          for (const brand of allBrands) {
-            if (brand.id === context?.brandId) continue;
-            if (!brand.superlanding_merchant_no || !brand.superlanding_access_key) continue;
-            const altConfig: SuperLandingConfig = {
-              merchantNo: brand.superlanding_merchant_no,
-              accessKey: brand.superlanding_access_key,
-            };
-            try {
-              for (const mp of matchedPages) {
-                const altResult = await lookupOrdersByPageAndPhone(altConfig, mp.pageId, phone);
-                if (altResult.orders.length > 0) {
-                  console.log(`[API 回應] 在品牌「${brand.name}」找到 ${altResult.orders.length} 筆訂單`);
-                  allResults = altResult.orders;
-                  break;
-                }
-              }
-              if (allResults.length > 0) break;
-            } catch (altErr) {
-              console.log(`[API 回應] 品牌「${brand.name}」查詢失敗:`, altErr);
-            }
+          console.log(`[AI Tool Call] 品牌 ${context?.brandId || "預設"} SuperLanding 查無結果，嘗試統一查詢...`);
+          const unifiedResult = await unifiedLookupByProductAndPhone(config, matchedPages, phone, context?.brandId);
+          if (unifiedResult.found) {
+            allResults = unifiedResult.orders;
+            orderSource = unifiedResult.source;
           }
         }
 
         if (allResults.length === 0) {
-          return JSON.stringify({ success: true, found: false, message: `所有品牌帳戶皆查無此手機號碼的訂單（已搜尋 ${matchedPages.length} 個相關銷售頁）。(絕對規則) 你現在必須立刻誠實表明你是 AI 客服小助手，告知客戶目前查不到這筆資料，並詢問是否需要轉接專人客服。` });
+          return JSON.stringify({ success: true, found: false, message: `所有平台（一頁商店 + SHOPLINE）皆查無此手機號碼的訂單（已搜尋 ${matchedPages.length} 個相關銷售頁）。請告知客戶目前查不到這筆資料，並詢問是否需要轉接專人客服。` });
         }
 
-        const { getStatusLabel: getSL } = await import("./superlanding");
+        if (context?.contactId) {
+          storage.updateContactOrderSource(context.contactId, orderSource);
+        }
+
         const orderSummaries = allResults.map(o => ({
           order_id: o.global_order_id,
-          status: getSL(o.status),
+          status: getUnifiedStatusLabel(o.status, o.source || orderSource),
           amount: o.final_total_order_amount,
           product_list: o.product_list,
           buyer_name: o.buyer_name,
           tracking_number: o.tracking_number,
           created_at: o.created_at,
           shipped_at: o.shipped_at,
+          source: o.source || orderSource,
         }));
 
         console.log("[AI Tool Call] 查到", allResults.length, "筆訂單（全部列出）");
@@ -2324,20 +2494,35 @@ export async function registerRoutes(
           );
         });
 
+        let dateOrderSource: string = "superlanding";
+
         if (matched.length === 0) {
-          return JSON.stringify({ success: true, found: false, message: "在指定日期範圍內查無相符紀錄" });
+          console.log("[AI Tool Call] SuperLanding 日期查詢查無結果，嘗試 SHOPLINE...");
+          const unifiedResult = await unifiedLookupByDateAndContact(config, contact, beginDate, endDate, pageId, context?.brandId);
+          if (unifiedResult.found) {
+            matched.push(...unifiedResult.orders);
+            dateOrderSource = unifiedResult.source;
+          }
         }
 
-        const { getStatusLabel: getSL2 } = await import("./superlanding");
+        if (matched.length === 0) {
+          return JSON.stringify({ success: true, found: false, message: "所有平台（一頁商店 + SHOPLINE）在指定日期範圍內均查無相符紀錄" });
+        }
+
+        if (context?.contactId) {
+          storage.updateContactOrderSource(context.contactId, dateOrderSource);
+        }
+
         const orderSummaries = matched.map(o => ({
           order_id: o.global_order_id,
-          status: getSL2(o.status),
+          status: getUnifiedStatusLabel(o.status, o.source || dateOrderSource),
           amount: o.final_total_order_amount,
           product_list: o.product_list,
           buyer_name: o.buyer_name,
           tracking_number: o.tracking_number,
           created_at: o.created_at,
           shipped_at: o.shipped_at,
+          source: o.source || dateOrderSource,
         }));
 
         console.log("[AI Tool Call] 查到", matched.length, "筆訂單（全部列出）");
@@ -2738,6 +2923,7 @@ export async function registerRoutes(
 
     const stats = storage.getAnalytics(startDate, endDate, brandId);
     const topKeywords = storage.getTopKeywordsFromMessages(startDate, endDate, brandId);
+    const aiLogStats = storage.getAiLogStats(startDate, endDate, brandId);
 
     const totalInbound = stats.userMessages;
     const completedCount = stats.resolvedContacts;
@@ -2825,6 +3011,46 @@ export async function registerRoutes(
     if (painPoints.length === 0) painPoints.push("目前尚無明顯痛點，持續監控中。");
     if (suggestions.length === 0) suggestions.push("持續優化知識庫內容，提升客戶服務品質。");
 
+    const aiResolutionRate = aiLogStats.totalAiResponses > 0
+      ? Math.round(((aiLogStats.totalAiResponses - aiLogStats.transferTriggered) / aiLogStats.totalAiResponses) * 1000) / 10
+      : 0;
+    const transferRate = aiLogStats.totalAiResponses > 0
+      ? Math.round((aiLogStats.transferTriggered / aiLogStats.totalAiResponses) * 1000) / 10
+      : 0;
+    const orderQuerySuccessRate = aiLogStats.orderQueryCount > 0
+      ? Math.round((aiLogStats.orderQuerySuccess / aiLogStats.orderQueryCount) * 1000) / 10
+      : 0;
+
+    const issueTypeDistribution: { name: string; value: number }[] = [];
+    const issueTypeCounts = db.prepare(`
+      SELECT issue_type, COUNT(*) as count FROM contacts
+      WHERE issue_type IS NOT NULL AND created_at >= ? AND created_at <= ?${brandId ? " AND brand_id = ?" : ""}
+      GROUP BY issue_type ORDER BY count DESC
+    `).all(startDate, endDate, ...(brandId ? [brandId] : [])) as { issue_type: string; count: number }[];
+    const issueTypeLabels: Record<string, string> = {
+      order_inquiry: "訂單查詢", product_consult: "商品諮詢", return_refund: "退貨退款",
+      complaint: "客訴", order_modify: "訂單修改", general: "一般諮詢", other: "其他",
+    };
+    for (const it of issueTypeCounts) {
+      issueTypeDistribution.push({ name: issueTypeLabels[it.issue_type] || it.issue_type, value: it.count });
+    }
+
+    const orderSourceDistribution: { name: string; value: number }[] = [];
+    const orderSourceCounts = db.prepare(`
+      SELECT order_source, COUNT(*) as count FROM contacts
+      WHERE order_source IS NOT NULL AND created_at >= ? AND created_at <= ?${brandId ? " AND brand_id = ?" : ""}
+      GROUP BY order_source ORDER BY count DESC
+    `).all(startDate, endDate, ...(brandId ? [brandId] : [])) as { order_source: string; count: number }[];
+    const sourceLabels: Record<string, string> = { superlanding: "一頁商店", shopline: "SHOPLINE", unknown: "未知" };
+    for (const os of orderSourceCounts) {
+      orderSourceDistribution.push({ name: sourceLabels[os.order_source] || os.order_source, value: os.count });
+    }
+
+    const platformDistribution = stats.contactsByPlatform.map(p => ({
+      name: p.platform === "line" ? "LINE" : p.platform === "messenger" ? "Messenger" : p.platform,
+      value: p.count,
+    }));
+
     return res.json({
       kpi: {
         todayInbound: totalInbound,
@@ -2833,10 +3059,17 @@ export async function registerRoutes(
         aiInterceptRate,
         avgFrtAi: stats.aiMessages > 0 ? "即時" : "N/A",
         avgFrtHuman: stats.adminMessages > 0 ? "依專員回覆" : "N/A",
+        aiResolutionRate,
+        transferRate,
+        orderQuerySuccessRate,
       },
       agentPerformance,
       intentDistribution,
       aiInsights: { painPoints, suggestions },
+      issueTypeDistribution,
+      orderSourceDistribution,
+      transferReasons: aiLogStats.transferReasons,
+      platformDistribution,
     });
   });
 

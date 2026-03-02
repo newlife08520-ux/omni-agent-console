@@ -15,7 +15,8 @@ import {
 import { apiRequest, getQueryFn } from "@/lib/queryClient";
 import { useBrand } from "@/lib/brand-context";
 import { useToast } from "@/hooks/use-toast";
-import type { ContactWithPreview, Message, OrderInfo, ORDER_STATUS_LABELS } from "@shared/schema";
+import type { ContactWithPreview, Message, OrderInfo, ContactStatus, IssueType, OrderSource } from "@shared/schema";
+import { CONTACT_STATUS_LABELS, CONTACT_STATUS_COLORS, ISSUE_TYPE_LABELS, ISSUE_TYPE_COLORS, ORDER_SOURCE_LABELS } from "@shared/schema";
 
 const ORDER_STATUS_MAP: Record<string, { label: string; color: string }> = {
   new_order: { label: "新訂單", color: "bg-blue-50 text-blue-600 border-blue-200" },
@@ -70,11 +71,6 @@ function formatDateTime(raw?: string): string {
   } catch (_e) { return raw; }
 }
 
-const STATUS_MAP: Record<string, { label: string; color: string; dot: string }> = {
-  pending: { label: "待處理", color: "bg-red-50 text-red-600 border-red-200", dot: "bg-red-500" },
-  processing: { label: "處理中", color: "bg-amber-50 text-amber-600 border-amber-200", dot: "bg-amber-500" },
-  resolved: { label: "已解決", color: "bg-emerald-50 text-emerald-600 border-emerald-200", dot: "bg-emerald-500" },
-};
 
 const TAG_COLORS: Record<string, string> = {
   "VIP": "bg-violet-50 text-violet-600 border-violet-200",
@@ -337,6 +333,14 @@ export default function ChatPage() {
       await apiRequest("PUT", `/api/contacts/${contactId}/pinned`, { is_pinned: currentPinned ? 0 : 1 });
       queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
     } catch (_e) { toast({ title: "操作失敗", variant: "destructive" }); }
+  };
+
+  const handleIssueTypeChange = async (issueType: string) => {
+    if (!selectedId) return;
+    try {
+      await apiRequest("PUT", `/api/contacts/${selectedId}/issue-type`, { issue_type: issueType || null });
+      queryClient.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
+    } catch (_e) { toast({ title: "更新問題類型失敗", variant: "destructive" }); }
   };
 
   const handleAddTag = async () => {
@@ -648,7 +652,8 @@ export default function ChatPage() {
             <div className="p-2 space-y-0.5">
               {filteredContacts.map((contact) => {
                 const tags: string[] = JSON.parse(contact.tags || "[]");
-                const statusInfo = STATUS_MAP[contact.status] || STATUS_MAP.pending;
+                const statusColors = CONTACT_STATUS_COLORS[contact.status as ContactStatus] || CONTACT_STATUS_COLORS.pending;
+                const statusLabel = CONTACT_STATUS_LABELS[contact.status as ContactStatus] || CONTACT_STATUS_LABELS.pending;
                 return (
                   <div key={contact.id} onClick={() => { setSelectedId(contact.id); lastMessageIdRef.current = 0; }}
                     className={`w-full flex items-start gap-3 p-3 rounded-2xl text-left transition-all cursor-pointer ${selectedId === contact.id ? "bg-emerald-50/70 ring-1 ring-emerald-200" : "hover:bg-stone-50"}`}
@@ -688,9 +693,14 @@ export default function ChatPage() {
                             <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />需人工處理
                           </span>
                         ) : null}
-                        <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${statusInfo.color}`}>
-                          <span className={`w-1.5 h-1.5 rounded-full ${statusInfo.dot}`} />{statusInfo.label}
+                        <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${statusColors.bg}`} data-testid={`badge-status-${contact.id}`}>
+                          <span className={`w-1.5 h-1.5 rounded-full ${statusColors.dot}`} />{statusLabel}
                         </span>
+                        {contact.issue_type && (
+                          <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${ISSUE_TYPE_COLORS[contact.issue_type as IssueType]}`} data-testid={`badge-issue-type-${contact.id}`}>
+                            {ISSUE_TYPE_LABELS[contact.issue_type as IssueType]}
+                          </span>
+                        )}
                         {tags.slice(0, 2).map((tag) => (
                           <span key={tag} className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${getTagColor(tag)}`}>{tag}</span>
                         ))}
@@ -744,9 +754,14 @@ export default function ChatPage() {
                 <Select value={selectedContact?.status || "pending"} onValueChange={handleStatusChange}>
                   <SelectTrigger className="w-[130px] h-8 text-xs border-stone-200" data-testid="select-contact-status"><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="pending"><span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-red-500" />待處理</span></SelectItem>
-                    <SelectItem value="processing"><span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-amber-500" />處理中</span></SelectItem>
-                    <SelectItem value="resolved"><span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-emerald-500" />已解決</span></SelectItem>
+                    {(Object.keys(CONTACT_STATUS_LABELS) as ContactStatus[]).map((s) => (
+                      <SelectItem key={s} value={s} data-testid={`select-status-${s}`}>
+                        <span className="flex items-center gap-1.5">
+                          <span className={`w-2 h-2 rounded-full ${CONTACT_STATUS_COLORS[s].dot}`} />
+                          {CONTACT_STATUS_LABELS[s]}
+                        </span>
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
                 {selectedContact?.needs_human ? (
@@ -934,6 +949,20 @@ export default function ChatPage() {
                           <span className="text-stone-500">建立日期</span>
                           <span className="text-stone-800">{selectedContact?.created_at ? formatDate(selectedContact.created_at) : "-"}</span>
                         </div>
+                        <div className="flex justify-between items-center text-xs">
+                          <span className="text-stone-500">問題類型</span>
+                          <Select value={selectedContact?.issue_type || "none"} onValueChange={(v) => handleIssueTypeChange(v === "none" ? "" : v)}>
+                            <SelectTrigger className="w-[120px] h-7 text-[11px] border-stone-200" data-testid="select-issue-type"><SelectValue placeholder="未分類" /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="none" data-testid="select-issue-type-none">未分類</SelectItem>
+                              {(Object.keys(ISSUE_TYPE_LABELS) as IssueType[]).map((it) => (
+                                <SelectItem key={it} value={it} data-testid={`select-issue-type-${it}`}>
+                                  {ISSUE_TYPE_LABELS[it]}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
                         {selectedContact?.ai_rating != null && (
                           <div className="flex justify-between text-xs" data-testid="text-ai-rating">
                             <span className="text-indigo-500 flex items-center gap-1"><Bot className="w-3 h-3" />AI 客服評分</span>
@@ -1105,9 +1134,16 @@ export default function ChatPage() {
                             const parsedProducts = parseProductList(order.product_list);
                             return (
                               <div key={i} className="rounded-xl border border-stone-200 p-3 space-y-2" data-testid={`order-card-${i}`}>
-                                <div className="flex items-center justify-between">
+                                <div className="flex items-center justify-between gap-1 flex-wrap">
                                   <span className="text-xs font-mono font-semibold text-stone-800" data-testid={`order-id-${i}`}>{order.global_order_id}</span>
-                                  <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${statusInfo.color}`}>{statusInfo.label}</span>
+                                  <div className="flex items-center gap-1">
+                                    {order.source && order.source !== "unknown" && (
+                                      <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${order.source === "shopline" ? "bg-indigo-100 text-indigo-700" : "bg-teal-100 text-teal-700"}`} data-testid={`order-source-${i}`}>
+                                        {ORDER_SOURCE_LABELS[order.source as OrderSource] || order.source}
+                                      </span>
+                                    )}
+                                    <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${statusInfo.color}`}>{statusInfo.label}</span>
+                                  </div>
                                 </div>
                                 <div className="text-xs text-stone-600 space-y-1">
                                   {order.buyer_name && (

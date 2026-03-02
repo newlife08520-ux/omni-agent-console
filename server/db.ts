@@ -124,9 +124,101 @@ export function initDatabase() {
     );
   `);
 
+  migrateContactStatusExpansion();
+  migrateAiLogsTable();
   migrateBrandsAndChannels();
+  migrateShoplineFields();
   migrateSystemPrompt();
   seedMockData();
+}
+
+function migrateContactStatusExpansion() {
+  const tableSql = (db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='contacts'").get() as any)?.sql || "";
+  if (tableSql.includes("'pending','processing','resolved'") && !tableSql.includes("'ai_handling'")) {
+    console.log("[DB Migration] 擴充 contacts.status CHECK 約束...");
+    const cols = db.prepare("PRAGMA table_info(contacts)").all() as { name: string }[];
+    const colNames = cols.map(c => c.name);
+    const hasIssueType = colNames.includes("issue_type");
+    const hasOrderSource = colNames.includes("order_source");
+
+    db.pragma("foreign_keys = OFF");
+
+    db.exec(`DROP TABLE IF EXISTS contacts_new;`);
+    db.exec(`
+      CREATE TABLE contacts_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        platform TEXT NOT NULL DEFAULT 'line',
+        platform_user_id TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        avatar_url TEXT,
+        needs_human INTEGER NOT NULL DEFAULT 0,
+        is_pinned INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','processing','resolved','ai_handling','awaiting_human','high_risk','closed')),
+        tags TEXT NOT NULL DEFAULT '[]',
+        vip_level INTEGER NOT NULL DEFAULT 0,
+        order_count INTEGER NOT NULL DEFAULT 0,
+        total_spent REAL NOT NULL DEFAULT 0,
+        cs_rating INTEGER,
+        ai_rating INTEGER,
+        last_message_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        brand_id INTEGER,
+        channel_id INTEGER,
+        issue_type TEXT,
+        order_source TEXT
+      );
+    `);
+
+    const selectCols = ["id","platform","platform_user_id","display_name","avatar_url","needs_human","is_pinned","status","tags","vip_level","order_count","total_spent","cs_rating","ai_rating","last_message_at","created_at","brand_id","channel_id"];
+    if (hasIssueType) selectCols.push("issue_type");
+    if (hasOrderSource) selectCols.push("order_source");
+
+    const insertCols = [...selectCols];
+    if (!hasIssueType) insertCols.push("issue_type");
+    if (!hasOrderSource) insertCols.push("order_source");
+
+    let selectStr = selectCols.join(",");
+    if (!hasIssueType) selectStr += ",NULL";
+    if (!hasOrderSource) selectStr += ",NULL";
+
+    db.exec(`INSERT INTO contacts_new (${insertCols.join(",")}) SELECT ${selectStr} FROM contacts;`);
+    db.exec(`DROP TABLE contacts;`);
+    db.exec(`ALTER TABLE contacts_new RENAME TO contacts;`);
+
+    db.pragma("foreign_keys = ON");
+    console.log("[DB Migration] contacts.status CHECK 已擴充完成（含 ai_handling, awaiting_human, high_risk, closed）");
+  } else {
+    const contactCols = db.prepare("PRAGMA table_info(contacts)").all() as { name: string }[];
+    const contactColNames = contactCols.map(c => c.name);
+    if (!contactColNames.includes("issue_type")) {
+      db.exec("ALTER TABLE contacts ADD COLUMN issue_type TEXT");
+    }
+    if (!contactColNames.includes("order_source")) {
+      db.exec("ALTER TABLE contacts ADD COLUMN order_source TEXT");
+    }
+  }
+}
+
+function migrateAiLogsTable() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ai_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      contact_id INTEGER,
+      message_id INTEGER,
+      brand_id INTEGER,
+      prompt_summary TEXT NOT NULL DEFAULT '',
+      knowledge_hits TEXT NOT NULL DEFAULT '[]',
+      tools_called TEXT NOT NULL DEFAULT '[]',
+      transfer_triggered INTEGER NOT NULL DEFAULT 0,
+      transfer_reason TEXT,
+      result_summary TEXT NOT NULL DEFAULT '',
+      token_usage INTEGER NOT NULL DEFAULT 0,
+      model TEXT NOT NULL DEFAULT '',
+      response_time_ms INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (contact_id) REFERENCES contacts(id)
+    );
+  `);
 }
 
 function migrateBrandsAndChannels() {
@@ -233,6 +325,17 @@ function migrateBrandsAndChannels() {
       db.prepare("UPDATE contacts SET brand_id = ? WHERE brand_id IS NULL").run(firstBrand.id);
       console.log(`[DB] 已將 ${orphanedContacts.count} 位未分配聯絡人歸入品牌 #${firstBrand.id}`);
     }
+  }
+}
+
+function migrateShoplineFields() {
+  const brandCols = db.prepare("PRAGMA table_info(brands)").all() as { name: string }[];
+  const brandColNames = brandCols.map(c => c.name);
+  if (!brandColNames.includes("shopline_store_domain")) {
+    db.exec("ALTER TABLE brands ADD COLUMN shopline_store_domain TEXT NOT NULL DEFAULT ''");
+  }
+  if (!brandColNames.includes("shopline_api_token")) {
+    db.exec("ALTER TABLE brands ADD COLUMN shopline_api_token TEXT NOT NULL DEFAULT ''");
   }
 }
 

@@ -60,6 +60,29 @@ The system is built on a modern full-stack architecture:
   - Full tool-call loop (order lookup, human handoff, image assets) up to 3 rounds
   - Multi-platform reply (LINE push / FB message)
   - Per-brand system prompt + image handling guidelines
-- **autoReplyWithAI**: Now includes image messages in conversation context as Vision content for contextual awareness.
+- **autoReplyWithAI**: Now includes image messages in conversation context as Vision content for contextual awareness. Instrumented with AI logging, high-risk detection, issue type detection, and contact status management.
 - **Frontend Lightbox**: Clicking chat images opens a full-screen overlay preview instead of new tab. Close via X button or clicking backdrop.
 - **FB Webhook Images**: Downloads FB image attachments locally, triggers AI vision analysis for non-human-flagged contacts.
+
+## Unified Order Query Service
+- **server/order-service.ts**: Chains SuperLanding → SHOPLINE → not found. Each result includes `source: 'superlanding' | 'shopline' | 'unknown'`.
+- **server/shopline.ts**: SHOPLINE Open API integration. Supports lookup by order number, phone, email, name. Config: `shopline_store_domain` + `shopline_api_token` stored per brand.
+- **OrderInfo.source**: Optional field tracking which platform the order came from.
+- **executeToolCall**: Updated to use unified order service for all 3 lookup tools. Automatically updates `contacts.order_source`.
+
+## AI Logging & Risk Detection
+- **ai_logs table**: Stores every AI response with prompt_summary, knowledge_hits, tools_called, transfer_triggered, transfer_reason, result_summary, token_usage, model, response_time_ms.
+- **High-Risk Auto-Transfer**: Keywords (legal threats, profanity, extreme anger) trigger automatic `high_risk` status and human transfer.
+- **Multi-Round Failure Detection**: If 3+ tool calls fail or order lookups fail 2+ times, auto-escalate to `awaiting_human`.
+- **Issue Type Detection**: Automatically detects issue type from conversation keywords (order_inquiry, product_consult, return_refund, complaint, order_modify, general).
+
+## Expanded Contact Status System
+- **Statuses**: pending, processing, resolved, ai_handling, awaiting_human, high_risk, closed (was: pending, processing, resolved)
+- **Issue Types**: order_inquiry, product_consult, return_refund, complaint, order_modify, general, other
+- **Order Sources**: superlanding, shopline, unknown
+- **Schema maps**: CONTACT_STATUS_LABELS, CONTACT_STATUS_COLORS, ISSUE_TYPE_LABELS, ISSUE_TYPE_COLORS, ORDER_SOURCE_LABELS in shared/schema.ts
+
+## Analytics Upgrade
+- **New KPI**: AI resolution rate, transfer rate, order query success rate (from ai_logs)
+- **New Charts**: Issue type distribution, order source distribution, transfer reason ranking, platform distribution
+- **API**: `/api/analytics` now returns issueTypeDistribution, orderSourceDistribution, transferReasons, platformDistribution

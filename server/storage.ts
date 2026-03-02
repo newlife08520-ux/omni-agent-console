@@ -1,5 +1,5 @@
 import db, { initDatabase, hashPassword } from "./db";
-import type { User, Contact, ContactWithPreview, Message, Setting, KnowledgeFile, TeamMember, MarketingRule, Brand, Channel, ChannelWithBrand, ImageAsset } from "@shared/schema";
+import type { User, Contact, ContactWithPreview, Message, Setting, KnowledgeFile, TeamMember, MarketingRule, Brand, Channel, ChannelWithBrand, ImageAsset, AiLog } from "@shared/schema";
 
 initDatabase();
 
@@ -57,6 +57,32 @@ export interface IStorage {
   createMarketingRule(keyword: string, pitch: string, url: string, brandId?: number): MarketingRule;
   updateMarketingRule(id: number, keyword: string, pitch: string, url: string): boolean;
   deleteMarketingRule(id: number): boolean;
+  createAiLog(data: {
+    contact_id?: number;
+    message_id?: number;
+    brand_id?: number;
+    prompt_summary: string;
+    knowledge_hits: string[];
+    tools_called: string[];
+    transfer_triggered: boolean;
+    transfer_reason?: string;
+    result_summary: string;
+    token_usage: number;
+    model: string;
+    response_time_ms: number;
+  }): AiLog;
+  getAiLogs(contactId: number): AiLog[];
+  getAiLogStats(startDate: string, endDate: string, brandId?: number): {
+    totalAiResponses: number;
+    transferTriggered: number;
+    avgResponseTime: number;
+    toolCallCount: number;
+    orderQueryCount: number;
+    orderQuerySuccess: number;
+    transferReasons: { reason: string; count: number }[];
+  };
+  updateContactIssueType(id: number, issueType: string | null): void;
+  updateContactOrderSource(id: number, orderSource: string): void;
 }
 
 export class SQLiteStorage implements IStorage {
@@ -494,6 +520,102 @@ export class SQLiteStorage implements IStorage {
       contactsByPlatform: platformStats,
       messagesByType: msgByType,
     };
+  }
+
+  createAiLog(data: {
+    contact_id?: number;
+    message_id?: number;
+    brand_id?: number;
+    prompt_summary: string;
+    knowledge_hits: string[];
+    tools_called: string[];
+    transfer_triggered: boolean;
+    transfer_reason?: string;
+    result_summary: string;
+    token_usage: number;
+    model: string;
+    response_time_ms: number;
+  }): AiLog {
+    const result = db.prepare(`
+      INSERT INTO ai_logs (contact_id, message_id, brand_id, prompt_summary, knowledge_hits, tools_called, transfer_triggered, transfer_reason, result_summary, token_usage, model, response_time_ms)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      data.contact_id || null,
+      data.message_id || null,
+      data.brand_id || null,
+      data.prompt_summary,
+      JSON.stringify(data.knowledge_hits),
+      JSON.stringify(data.tools_called),
+      data.transfer_triggered ? 1 : 0,
+      data.transfer_reason || null,
+      data.result_summary,
+      data.token_usage,
+      data.model,
+      data.response_time_ms
+    );
+    return db.prepare("SELECT * FROM ai_logs WHERE id = ?").get(Number(result.lastInsertRowid)) as AiLog;
+  }
+
+  getAiLogs(contactId: number): AiLog[] {
+    return db.prepare("SELECT * FROM ai_logs WHERE contact_id = ? ORDER BY created_at DESC LIMIT 50").all(contactId) as AiLog[];
+  }
+
+  getAiLogStats(startDate: string, endDate: string, brandId?: number): {
+    totalAiResponses: number;
+    transferTriggered: number;
+    avgResponseTime: number;
+    toolCallCount: number;
+    orderQueryCount: number;
+    orderQuerySuccess: number;
+    transferReasons: { reason: string; count: number }[];
+  } {
+    const brandFilter = brandId ? " AND brand_id = ?" : "";
+    const brandParam = brandId ? [brandId] : [];
+
+    const stats = db.prepare(`
+      SELECT
+        COUNT(*) as total,
+        SUM(CASE WHEN transfer_triggered = 1 THEN 1 ELSE 0 END) as transfers,
+        AVG(response_time_ms) as avg_time,
+        SUM(CASE WHEN tools_called != '[]' THEN 1 ELSE 0 END) as tool_calls
+      FROM ai_logs
+      WHERE created_at >= ? AND created_at <= ?${brandFilter}
+    `).get(startDate, endDate, ...brandParam) as any;
+
+    const orderStats = db.prepare(`
+      SELECT
+        COUNT(*) as total,
+        SUM(CASE WHEN result_summary LIKE '%found%' OR result_summary LIKE '%查到%' OR result_summary LIKE '%success%' THEN 1 ELSE 0 END) as success
+      FROM ai_logs
+      WHERE tools_called LIKE '%lookup_order%' AND created_at >= ? AND created_at <= ?${brandFilter}
+    `).get(startDate, endDate, ...brandParam) as any;
+
+    const reasons = db.prepare(`
+      SELECT transfer_reason as reason, COUNT(*) as count
+      FROM ai_logs
+      WHERE transfer_triggered = 1 AND transfer_reason IS NOT NULL AND created_at >= ? AND created_at <= ?${brandFilter}
+      GROUP BY transfer_reason
+      ORDER BY count DESC
+      LIMIT 10
+    `).all(startDate, endDate, ...brandParam) as { reason: string; count: number }[];
+
+    return {
+      totalAiResponses: stats?.total || 0,
+      transferTriggered: stats?.transfers || 0,
+      avgResponseTime: Math.round(stats?.avg_time || 0),
+      toolCallCount: stats?.tool_calls || 0,
+      orderQueryCount: orderStats?.total || 0,
+      orderQuerySuccess: orderStats?.success || 0,
+      transferReasons: reasons,
+    };
+  }
+
+  updateContactIssueType(id: number, issueType: string | null): void {
+    db.prepare("UPDATE contacts SET issue_type = ? WHERE id = ?").run(issueType, id);
+  }
+
+  updateContactOrderSource(id: number, orderSource: string): void {
+    db.prepare("UPDATE contacts SET order_source = ? WHERE id = ?").run(orderSource, id);
   }
 
   getTopKeywordsFromMessages(startDate: string, endDate: string, brandId?: number): { keyword: string; count: number }[] {

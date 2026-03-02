@@ -5,12 +5,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Calendar } from "@/components/ui/calendar";
 import { Button } from "@/components/ui/button";
-import { TrendingUp, CheckCircle2, Users, Clock, Brain, Flame, Lightbulb, BarChart3, CalendarDays } from "lucide-react";
+import { TrendingUp, CheckCircle2, Users, Clock, Brain, Flame, Lightbulb, BarChart3, CalendarDays, ShieldCheck, ArrowRightLeft, Search, Tag, ShoppingBag, Monitor } from "lucide-react";
 import { format } from "date-fns";
 import { zhTW } from "date-fns/locale/zh-TW";
 import type { AnalyticsData } from "@shared/schema";
 
-const PIE_COLORS = ["#059669", "#d97706", "#7c3aed", "#0284c7"];
+const PIE_COLORS = ["#059669", "#d97706", "#7c3aed", "#0284c7", "#e11d48", "#ea580c", "#0d9488"];
+const PLATFORM_COLORS = ["#06b6d4", "#8b5cf6"];
+const ISSUE_TYPE_COLORS_CHART = ["#059669", "#d97706", "#7c3aed", "#0284c7", "#e11d48", "#ea580c", "#78716c"];
 
 const RANGE_LABELS: Record<string, string> = {
   today: "今日",
@@ -133,6 +135,39 @@ export default function AnalyticsPage() {
         </div>
       </div>
 
+      <div className="grid grid-cols-3 gap-4">
+        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="kpi-ai-resolution">
+          <div className="flex items-center gap-2 mb-3">
+            <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${(data.kpi.aiResolutionRate ?? 0) > 70 ? "bg-emerald-100" : "bg-stone-100"}`}>
+              <ShieldCheck className={`w-5 h-5 ${(data.kpi.aiResolutionRate ?? 0) > 70 ? "text-emerald-600" : "text-stone-500"}`} />
+            </div>
+            <span className="text-xs font-medium text-stone-500">AI 解決率</span>
+          </div>
+          <p className={`text-3xl font-bold ${(data.kpi.aiResolutionRate ?? 0) > 70 ? "text-emerald-600" : "text-stone-800"}`} data-testid="text-ai-resolution-rate">{data.kpi.aiResolutionRate ?? 0}%</p>
+          <p className="text-xs text-stone-400 mt-1">AI 自主解決問題的比例</p>
+        </div>
+        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="kpi-transfer-rate">
+          <div className="flex items-center gap-2 mb-3">
+            <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${(data.kpi.transferRate ?? 0) > 30 ? "bg-amber-100" : "bg-stone-100"}`}>
+              <ArrowRightLeft className={`w-5 h-5 ${(data.kpi.transferRate ?? 0) > 30 ? "text-amber-600" : "text-stone-500"}`} />
+            </div>
+            <span className="text-xs font-medium text-stone-500">轉人工率</span>
+          </div>
+          <p className={`text-3xl font-bold ${(data.kpi.transferRate ?? 0) > 30 ? "text-amber-600" : "text-stone-800"}`} data-testid="text-transfer-rate">{data.kpi.transferRate ?? 0}%</p>
+          <p className="text-xs text-stone-400 mt-1">需轉交人工處理的比例</p>
+        </div>
+        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="kpi-order-query-success">
+          <div className="flex items-center gap-2 mb-3">
+            <div className="w-10 h-10 rounded-xl bg-sky-100 flex items-center justify-center">
+              <Search className="w-5 h-5 text-sky-600" />
+            </div>
+            <span className="text-xs font-medium text-stone-500">查單成功率</span>
+          </div>
+          <p className="text-3xl font-bold text-stone-800" data-testid="text-order-query-success-rate">{data.kpi.orderQuerySuccessRate ?? 0}%</p>
+          <p className="text-xs text-stone-400 mt-1">訂單查詢成功的比例</p>
+        </div>
+      </div>
+
       <div className="grid grid-cols-2 gap-4">
         <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
           <div className="flex items-center gap-2 mb-4">
@@ -175,6 +210,116 @@ export default function AnalyticsPage() {
                 <Legend verticalAlign="bottom" height={36} iconType="circle" iconSize={10} wrapperStyle={{ fontSize: "12px", paddingTop: "8px" }} formatter={(value: string) => <span className="text-stone-600">{value}</span>} />
               </PieChart>
             </ResponsiveContainer>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4">
+        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
+          <div className="flex items-center gap-2 mb-4">
+            <div className="w-8 h-8 rounded-xl bg-rose-100 flex items-center justify-center"><Tag className="w-4 h-4 text-rose-600" /></div>
+            <div>
+              <span className="text-sm font-semibold text-stone-800">問題類型分布</span>
+              <p className="text-xs text-stone-500">{rangeLabel}各問題類型佔比</p>
+            </div>
+          </div>
+          <div className="h-[280px]" data-testid="chart-issue-type-distribution">
+            {data.issueTypeDistribution && data.issueTypeDistribution.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie data={data.issueTypeDistribution} cx="50%" cy="45%" innerRadius={55} outerRadius={90} paddingAngle={4} dataKey="value" nameKey="name" animationDuration={800}>
+                    {data.issueTypeDistribution.map((_entry, index) => (
+                      <Cell key={`issue-${index}`} fill={ISSUE_TYPE_COLORS_CHART[index % ISSUE_TYPE_COLORS_CHART.length]} />
+                    ))}
+                  </Pie>
+                  <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #e7e5e4", fontSize: "13px" }} formatter={(value: number) => [`${value}%`, "佔比"]} />
+                  <Legend verticalAlign="bottom" height={36} iconType="circle" iconSize={10} wrapperStyle={{ fontSize: "12px", paddingTop: "8px" }} formatter={(value: string) => <span className="text-stone-600">{value}</span>} />
+                </PieChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex items-center justify-center h-full"><p className="text-sm text-stone-400">暫無數據</p></div>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
+          <div className="flex items-center gap-2 mb-4">
+            <div className="w-8 h-8 rounded-xl bg-amber-100 flex items-center justify-center"><ShoppingBag className="w-4 h-4 text-amber-600" /></div>
+            <div>
+              <span className="text-sm font-semibold text-stone-800">訂單來源分布</span>
+              <p className="text-xs text-stone-500">{rangeLabel}各訂單來源佔比</p>
+            </div>
+          </div>
+          <div className="h-[280px]" data-testid="chart-order-source-distribution">
+            {data.orderSourceDistribution && data.orderSourceDistribution.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie data={data.orderSourceDistribution} cx="50%" cy="45%" innerRadius={55} outerRadius={90} paddingAngle={4} dataKey="value" nameKey="name" animationDuration={800}>
+                    {data.orderSourceDistribution.map((_entry, index) => (
+                      <Cell key={`source-${index}`} fill={PIE_COLORS[index % PIE_COLORS.length]} />
+                    ))}
+                  </Pie>
+                  <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #e7e5e4", fontSize: "13px" }} formatter={(value: number) => [`${value}%`, "佔比"]} />
+                  <Legend verticalAlign="bottom" height={36} iconType="circle" iconSize={10} wrapperStyle={{ fontSize: "12px", paddingTop: "8px" }} formatter={(value: string) => <span className="text-stone-600">{value}</span>} />
+                </PieChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex items-center justify-center h-full"><p className="text-sm text-stone-400">暫無數據</p></div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4">
+        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
+          <div className="flex items-center gap-2 mb-4">
+            <div className="w-8 h-8 rounded-xl bg-orange-100 flex items-center justify-center"><ArrowRightLeft className="w-4 h-4 text-orange-600" /></div>
+            <div>
+              <span className="text-sm font-semibold text-stone-800">轉人工原因排行</span>
+              <p className="text-xs text-stone-500">{rangeLabel}主要轉人工處理原因</p>
+            </div>
+          </div>
+          <div className="h-[280px]" data-testid="chart-transfer-reasons">
+            {data.transferReasons && data.transferReasons.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={data.transferReasons} layout="vertical" margin={{ top: 5, right: 30, left: 80, bottom: 5 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e7e5e4" />
+                  <XAxis type="number" tick={{ fontSize: 12, fill: "#78716c" }} />
+                  <YAxis type="category" dataKey="reason" tick={{ fontSize: 12, fill: "#78716c" }} width={75} />
+                  <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #e7e5e4", fontSize: "13px" }} />
+                  <Bar dataKey="count" fill="#ea580c" radius={[0, 8, 8, 0]} name="次數" animationDuration={800} />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex items-center justify-center h-full"><p className="text-sm text-stone-400">暫無數據</p></div>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
+          <div className="flex items-center gap-2 mb-4">
+            <div className="w-8 h-8 rounded-xl bg-cyan-100 flex items-center justify-center"><Monitor className="w-4 h-4 text-cyan-600" /></div>
+            <div>
+              <span className="text-sm font-semibold text-stone-800">平台來源分布</span>
+              <p className="text-xs text-stone-500">{rangeLabel} LINE vs Messenger 佔比</p>
+            </div>
+          </div>
+          <div className="h-[280px]" data-testid="chart-platform-distribution">
+            {data.platformDistribution && data.platformDistribution.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie data={data.platformDistribution} cx="50%" cy="45%" innerRadius={55} outerRadius={90} paddingAngle={4} dataKey="value" nameKey="name" animationDuration={800}>
+                    {data.platformDistribution.map((_entry, index) => (
+                      <Cell key={`platform-${index}`} fill={PLATFORM_COLORS[index % PLATFORM_COLORS.length]} />
+                    ))}
+                  </Pie>
+                  <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #e7e5e4", fontSize: "13px" }} formatter={(value: number) => [`${value}%`, "佔比"]} />
+                  <Legend verticalAlign="bottom" height={36} iconType="circle" iconSize={10} wrapperStyle={{ fontSize: "12px", paddingTop: "8px" }} formatter={(value: string) => <span className="text-stone-600">{value}</span>} />
+                </PieChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex items-center justify-center h-full"><p className="text-sm text-stone-400">暫無數據</p></div>
+            )}
           </div>
         </div>
       </div>

@@ -65,7 +65,8 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
   const [brandForm, setBrandForm] = useState({ 
     name: "", slug: "", logo_url: "", description: "", system_prompt: "", 
     superlanding_merchant_no: "", superlanding_access_key: "",
-    return_form_url: "" 
+    return_form_url: "",
+    shopline_store_domain: "", shopline_api_token: "",
   });
   const [brandSaving, setBrandSaving] = useState(false);
 
@@ -142,7 +143,8 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
     setBrandForm({ 
       name: "", slug: "", logo_url: "", description: "", system_prompt: "", 
       superlanding_merchant_no: "", superlanding_access_key: "",
-      return_form_url: "" 
+      return_form_url: "",
+      shopline_store_domain: "", shopline_api_token: "",
     });
     setShowBrandDialog(true);
   };
@@ -155,6 +157,8 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
       superlanding_merchant_no: brand.superlanding_merchant_no || "",
       superlanding_access_key: brand.superlanding_access_key || "",
       return_form_url: brand.return_form_url || "",
+      shopline_store_domain: brand.shopline_store_domain || "",
+      shopline_api_token: brand.shopline_api_token || "",
     });
     setShowBrandDialog(true);
   };
@@ -425,6 +429,19 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
               <div>
                 <label className="text-xs font-medium text-stone-600 mb-1 block">一頁商店 Access Key</label>
                 <Input data-testid="input-brand-access-key" value={brandForm.superlanding_access_key} onChange={(e) => setBrandForm(f => ({ ...f, superlanding_access_key: e.target.value }))} placeholder="存取金鑰" className="bg-stone-50 border-stone-200" />
+              </div>
+            </div>
+            <div className="pt-2 border-t border-stone-100">
+              <label className="text-xs font-semibold text-stone-700 mb-2 block">SHOPLINE 訂單查詢</label>
+              <div className="grid grid-cols-1 gap-3">
+                <div>
+                  <label className="text-xs font-medium text-stone-600 mb-1 block">SHOPLINE 商店域名</label>
+                  <Input data-testid="input-brand-shopline-domain" value={brandForm.shopline_store_domain} onChange={(e) => setBrandForm(f => ({ ...f, shopline_store_domain: e.target.value }))} placeholder="your-store.myshopline.com" className="bg-stone-50 border-stone-200" />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-stone-600 mb-1 block">SHOPLINE API Token</label>
+                  <Input data-testid="input-brand-shopline-token" type="password" value={brandForm.shopline_api_token} onChange={(e) => setBrandForm(f => ({ ...f, shopline_api_token: e.target.value }))} placeholder="輸入 SHOPLINE API Token" className="bg-stone-50 border-stone-200" />
+                </div>
               </div>
             </div>
             {editingBrand && (
