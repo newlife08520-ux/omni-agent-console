@@ -249,12 +249,26 @@ export async function registerRoutes(
     try {
       const allChannels = storage.getChannels();
       const allBrands = storage.getBrands();
-      const contactCount = storage.getContacts().length;
+      const allContacts = storage.getContacts();
+      const contactCount = allContacts.length;
+      const recentContacts = allContacts
+        .sort((a: any, b: any) => new Date(b.last_message_at || 0).getTime() - new Date(a.last_message_at || 0).getTime())
+        .slice(0, 8)
+        .map((c: any) => ({
+          id: c.id,
+          display_name: c.display_name,
+          platform: c.platform,
+          brand_id: c.brand_id,
+          last_message: c.last_message?.substring(0, 40),
+          last_message_at: c.last_message_at,
+        }));
       const globalToken = storage.getSetting("line_channel_access_token");
       const globalSecret = storage.getSetting("line_channel_secret");
+      const testMode = storage.getSetting("test_mode");
       return res.json({
         timestamp: new Date().toISOString(),
-        code_version: "v3-ascii-autofix",
+        code_version: "v4-bulletproof",
+        test_mode: testMode,
         brands: allBrands.map(b => ({ id: b.id, name: b.name, slug: b.slug })),
         channels: allChannels.map(c => ({
           id: c.id,
@@ -272,6 +286,7 @@ export async function registerRoutes(
           has_secret: !!globalSecret,
         },
         total_contacts: contactCount,
+        recent_contacts: recentContacts,
       });
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
