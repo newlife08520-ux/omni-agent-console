@@ -34,6 +34,7 @@ export interface IStorage {
   updateContactVipData(id: number, vipLevel: number, orderCount: number, totalSpent: number): void;
   updateContactRating(id: number, rating: number): void;
   updateContactAiRating(id: number, rating: number): void;
+  updateContactProfile(id: number, displayName: string, avatarUrl: string | null): void;
   getContactByPlatformUser(platform: string, platformUserId: string): Contact | undefined;
   isEventProcessed(eventId: string): boolean;
   markEventProcessed(eventId: string): void;
@@ -239,6 +240,10 @@ export class SQLiteStorage implements IStorage {
 
   updateContactAiRating(id: number, rating: number): void {
     db.prepare("UPDATE contacts SET ai_rating = ? WHERE id = ?").run(rating, id);
+  }
+
+  updateContactProfile(id: number, displayName: string, avatarUrl: string | null): void {
+    db.prepare("UPDATE contacts SET display_name = ?, avatar_url = ? WHERE id = ?").run(displayName, avatarUrl, id);
   }
 
   getContactByPlatformUser(platform: string, platformUserId: string): Contact | undefined {

@@ -1385,9 +1385,37 @@ export async function registerRoutes(
       ? humanKeywordsSetting.split(",").map((k) => k.trim()).filter(Boolean)
       : ["找客服", "真人", "轉人工", "人工客服", "真人客服"];
 
+    async function fetchAndUpdateLineProfile(userId: string, contactId: number, token: string | null) {
+      if (!token || userId === "unknown") return;
+      try {
+        const profileRes = await fetch(`https://api.line.me/v2/bot/profile/${userId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (profileRes.ok) {
+          const profile = await profileRes.json() as { displayName?: string; pictureUrl?: string };
+          if (profile.displayName) {
+            storage.updateContactProfile(contactId, profile.displayName, profile.pictureUrl || null);
+            console.log("[WEBHOOK] Profile updated:", profile.displayName, profile.pictureUrl ? "(has avatar)" : "(no avatar)");
+          }
+        } else {
+          console.log("[WEBHOOK] Profile fetch failed:", profileRes.status);
+        }
+      } catch (err: any) {
+        console.log("[WEBHOOK] Profile fetch error:", err.message);
+      }
+    }
+
+    const GHOST_REPLY_TOKEN = "00000000000000000000000000000000";
+    const GHOST_USER_ID = "Udeadbeefdeadbeefdeadbeefdeadbeef";
+
     const events = req.body?.events || [];
     (async () => {
     for (const event of events) {
+      if (event.replyToken === GHOST_REPLY_TOKEN || event.source?.userId === GHOST_USER_ID) {
+        console.log("[WEBHOOK] Skipping ghost/verification event");
+        continue;
+      }
+
       const webhookEventId = event.webhookEventId || event.timestamp?.toString();
       if (webhookEventId && storage.isEventProcessed(webhookEventId)) {
         continue;
@@ -1397,10 +1425,12 @@ export async function registerRoutes(
         console.log("[WEBHOOK] Processing event:", event.type, event.message?.type || "", "from:", event.source?.userId || "unknown");
         if (event.type === "message" && event.message?.type === "text") {
           const userId = event.source?.userId || "unknown";
-          const displayName = event.source?.displayName || "LINE用戶";
           const text = event.message.text;
           console.log("[WEBHOOK] Text message from", userId, ":", text.substring(0, 50));
-          const contact = storage.getOrCreateContact("line", userId, displayName, matchedBrandId, matchedChannel?.id);
+          const contact = storage.getOrCreateContact("line", userId, "LINE用戶", matchedBrandId, matchedChannel?.id);
+          if (contact.display_name === "LINE用戶" || !contact.avatar_url) {
+            fetchAndUpdateLineProfile(userId, contact.id, channelToken).catch(() => {});
+          }
           console.log("[WEBHOOK] Contact id:", contact.id, "brand_id:", contact.brand_id, "needs_human:", contact.needs_human);
           const userMsg = storage.createMessage(contact.id, "line", "user", text);
           console.log("[WEBHOOK] Message saved id:", userMsg.id);
@@ -1448,8 +1478,10 @@ export async function registerRoutes(
           // silently ignore lifecycle events
         } else if (event.type === "message" && event.message?.type === "image") {
           const userId = event.source?.userId || "unknown";
-          const displayName = event.source?.displayName || "LINE用戶";
-          const contact = storage.getOrCreateContact("line", userId, displayName, matchedBrandId, matchedChannel?.id);
+          const contact = storage.getOrCreateContact("line", userId, "LINE用戶", matchedBrandId, matchedChannel?.id);
+          if (contact.display_name === "LINE用戶" || !contact.avatar_url) {
+            fetchAndUpdateLineProfile(userId, contact.id, channelToken).catch(() => {});
+          }
           const messageId = event.message.id;
           const imageUrl = await downloadLineContent(messageId, ".jpg");
           if (imageUrl) {
@@ -1466,8 +1498,10 @@ export async function registerRoutes(
           }
         } else if (event.type === "message" && event.message?.type === "video") {
           const userId = event.source?.userId || "unknown";
-          const displayName = event.source?.displayName || "LINE用戶";
-          const contact = storage.getOrCreateContact("line", userId, displayName, matchedBrandId, matchedChannel?.id);
+          const contact = storage.getOrCreateContact("line", userId, "LINE用戶", matchedBrandId, matchedChannel?.id);
+          if (contact.display_name === "LINE用戶" || !contact.avatar_url) {
+            fetchAndUpdateLineProfile(userId, contact.id, channelToken).catch(() => {});
+          }
           const messageId = event.message.id;
           const videoUrl = await downloadLineContent(messageId, ".mp4");
           if (videoUrl) {
@@ -1480,8 +1514,10 @@ export async function registerRoutes(
           await pushLineMessage(contact.platform_user_id, [{ type: "text", text: "已收到您的影片，將為您轉交專人檢視。" }], channelToken);
         } else if (event.type === "message" && event.message?.type !== "text") {
           const userId = event.source?.userId || "unknown";
-          const displayName = event.source?.displayName || "LINE用戶";
-          const contact = storage.getOrCreateContact("line", userId, displayName, matchedBrandId, matchedChannel?.id);
+          const contact = storage.getOrCreateContact("line", userId, "LINE用戶", matchedBrandId, matchedChannel?.id);
+          if (contact.display_name === "LINE用戶" || !contact.avatar_url) {
+            fetchAndUpdateLineProfile(userId, contact.id, channelToken).catch(() => {});
+          }
           const msgType = event.message?.type || "unknown";
           storage.createMessage(contact.id, "line", "user", `[${msgType === "sticker" ? "貼圖" : msgType === "audio" ? "音訊" : msgType === "location" ? "位置" : msgType === "file" ? "檔案" : msgType}訊息]`);
         }

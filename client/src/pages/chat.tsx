@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
@@ -66,7 +66,7 @@ function formatDateTime(raw?: string): string {
   try {
     const d = new Date(raw);
     if (isNaN(d.getTime())) return raw;
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    return d.toLocaleString("zh-TW", { timeZone: "Asia/Taipei", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
   } catch { return raw; }
 }
 
@@ -556,8 +556,8 @@ export default function ChatPage() {
     if (messageInput.trim()) await handleSendMessage();
   }, [pendingFiles, messageInput, sending, uploading, uploadAndSendFiles, handleSendMessage]);
 
-  const formatTime = (dateStr: string) => new Date(dateStr.replace(" ", "T")).toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit" });
-  const formatDate = (dateStr: string) => new Date(dateStr.replace(" ", "T")).toLocaleDateString("zh-TW", { month: "short", day: "numeric" });
+  const formatTime = (dateStr: string) => new Date(dateStr.replace(" ", "T") + (dateStr.includes("+") || dateStr.includes("Z") ? "" : "Z")).toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Taipei" });
+  const formatDate = (dateStr: string) => new Date(dateStr.replace(" ", "T") + (dateStr.includes("+") || dateStr.includes("Z") ? "" : "Z")).toLocaleDateString("zh-TW", { month: "short", day: "numeric", timeZone: "Asia/Taipei" });
   const getInitials = (name: string) => name.charAt(0);
   const avatarColors = ["bg-emerald-500", "bg-amber-500", "bg-violet-500", "bg-sky-500", "bg-rose-400", "bg-teal-500", "bg-orange-400"];
   const getAvatarColor = (id: number) => avatarColors[id % avatarColors.length];
@@ -607,6 +607,7 @@ export default function ChatPage() {
                       data-testid={`search-contact-${contact.id}`}
                     >
                       <Avatar className="w-8 h-8 shrink-0">
+                        {contact.avatar_url && <AvatarImage src={contact.avatar_url} alt={contact.display_name} />}
                         <AvatarFallback className={`${getAvatarColor(contact.id)} text-white text-xs font-semibold`}>{getInitials(contact.display_name)}</AvatarFallback>
                       </Avatar>
                       <span className="text-sm font-medium text-stone-700 truncate">{contact.display_name}</span>
@@ -648,12 +649,13 @@ export default function ChatPage() {
                 const tags: string[] = JSON.parse(contact.tags || "[]");
                 const statusInfo = STATUS_MAP[contact.status] || STATUS_MAP.pending;
                 return (
-                  <button key={contact.id} onClick={() => { setSelectedId(contact.id); lastMessageIdRef.current = 0; }}
-                    className={`w-full flex items-start gap-3 p-3 rounded-2xl text-left transition-all ${selectedId === contact.id ? "bg-emerald-50/70 ring-1 ring-emerald-200" : "hover:bg-stone-50"}`}
+                  <div key={contact.id} onClick={() => { setSelectedId(contact.id); lastMessageIdRef.current = 0; }}
+                    className={`w-full flex items-start gap-3 p-3 rounded-2xl text-left transition-all cursor-pointer ${selectedId === contact.id ? "bg-emerald-50/70 ring-1 ring-emerald-200" : "hover:bg-stone-50"}`}
                     data-testid={`contact-item-${contact.id}`}
                   >
                     <div className="relative shrink-0">
                       <Avatar className="w-11 h-11">
+                        {contact.avatar_url && <AvatarImage src={contact.avatar_url} alt={contact.display_name} />}
                         <AvatarFallback className={`${getAvatarColor(contact.id)} text-white text-sm font-semibold`}>{getInitials(contact.display_name)}</AvatarFallback>
                       </Avatar>
                       {contact.needs_human ? (
@@ -694,7 +696,7 @@ export default function ChatPage() {
                         {tags.length > 2 && <span className="text-[10px] text-stone-400">+{tags.length - 2}</span>}
                       </div>
                     </div>
-                  </button>
+                  </div>
                 );
               })}
             </div>
@@ -718,6 +720,7 @@ export default function ChatPage() {
             <div className="flex items-center justify-between gap-3 px-5 py-3 border-b border-stone-200 bg-white">
               <div className="flex items-center gap-3 min-w-0">
                 <Avatar className="w-9 h-9 shrink-0">
+                  {selectedContact?.avatar_url && <AvatarImage src={selectedContact.avatar_url} alt={selectedContact.display_name} />}
                   <AvatarFallback className={`${getAvatarColor(selectedContact?.id || 0)} text-white text-sm`}>{selectedContact ? getInitials(selectedContact.display_name) : "?"}</AvatarFallback>
                 </Avatar>
                 <div className="min-w-0">
@@ -886,6 +889,7 @@ export default function ChatPage() {
                     <div className="p-4 space-y-4">
                       <div className="text-center pb-3 border-b border-stone-100">
                         <Avatar className="w-16 h-16 mx-auto mb-2">
+                          {selectedContact?.avatar_url && <AvatarImage src={selectedContact.avatar_url} alt={selectedContact.display_name} />}
                           <AvatarFallback className={`${getAvatarColor(selectedContact?.id || 0)} text-white text-xl font-bold`}>{selectedContact ? getInitials(selectedContact.display_name) : "?"}</AvatarFallback>
                         </Avatar>
                         <p className="font-semibold text-stone-800">{selectedContact?.display_name}</p>
