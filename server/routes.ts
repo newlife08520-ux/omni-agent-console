@@ -610,6 +610,24 @@ export async function registerRoutes(
         return res.json({ success: false, message: `連線失敗: ${err.message}` });
       }
     }
+    if (channel.platform === "messenger") {
+      if (!channel.access_token) return res.json({ success: false, message: "尚未設定 Page Access Token" });
+      try {
+        const fbRes = await fetch(`https://graph.facebook.com/v19.0/me?access_token=${encodeURIComponent(channel.access_token)}`);
+        if (fbRes.ok) {
+          const pageInfo = await fbRes.json();
+          const pageId = pageInfo.id || "";
+          if (pageId && !channel.bot_id) {
+            storage.updateChannel(id, { bot_id: pageId });
+          }
+          return res.json({ success: true, message: `Facebook 連線成功！粉專: ${pageInfo.name || "OK"} (ID: ${pageId})`, botId: pageId });
+        }
+        const errBody = await fbRes.text();
+        return res.json({ success: false, message: `Facebook 驗證失敗 (${fbRes.status}): ${errBody}` });
+      } catch (err: any) {
+        return res.json({ success: false, message: `連線失敗: ${err.message}` });
+      }
+    }
     return res.json({ success: false, message: `暫不支援 ${channel.platform} 頻道測試` });
   });
 
@@ -692,7 +710,7 @@ export async function registerRoutes(
   function getLineTokenForContact(contact: { channel_id?: number | null; brand_id?: number | null }): string | null {
     if (contact.channel_id) {
       const channel = storage.getChannel(contact.channel_id);
-      if (channel?.access_token) return channel.access_token;
+      if (channel?.platform === "line" && channel?.access_token) return channel.access_token;
     }
     if (contact.brand_id) {
       const channels = storage.getChannelsByBrand(contact.brand_id);
@@ -717,13 +735,49 @@ export async function registerRoutes(
     }
   }
 
-  app.put("/api/contacts/:id/status", authMiddleware, (req, res) => {
+  app.put("/api/contacts/:id/status", authMiddleware, async (req, res) => {
     const id = parseInt(req.params.id);
     const { status } = req.body;
     if (!["pending", "processing", "resolved"].includes(status)) {
       return res.status(400).json({ message: "Invalid status" });
     }
     storage.updateContactStatus(id, status);
+    broadcastSSE("contacts_updated", { contact_id: id });
+
+    if (status === "resolved") {
+      const contact = storage.getContact(id);
+      if (contact) {
+        let ratingSent = false;
+        if (contact.needs_human === 1 && contact.cs_rating == null) {
+          if (contact.platform === "line") {
+            const token = getLineTokenForContact(contact);
+            if (token) {
+              try {
+                await sendRatingFlexMessage(contact, "human");
+                storage.createMessage(id, contact.platform, "system", "(系統提示) 已自動發送真人客服滿意度調查卡片給客戶");
+                ratingSent = true;
+              } catch (err) {
+                console.error("Auto rating (human) send failed:", err);
+              }
+            }
+          }
+        }
+        if (!ratingSent && contact.ai_rating == null) {
+          if (contact.platform === "line") {
+            const token = getLineTokenForContact(contact);
+            if (token) {
+              try {
+                await sendRatingFlexMessage(contact, "ai");
+                storage.createMessage(id, contact.platform, "system", "(系統提示) 已自動發送 AI 客服滿意度調查卡片給客戶");
+              } catch (err) {
+                console.error("Auto rating (ai) send failed:", err);
+              }
+            }
+          }
+        }
+      }
+    }
+
     return res.json({ success: true });
   });
 

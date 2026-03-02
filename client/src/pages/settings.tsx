@@ -343,7 +343,7 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
                     <p className="text-[10px] text-stone-400 truncate">Bot ID: {ch.bot_id || "未設定"} · Token: {ch.access_token ? maskValue(ch.access_token) : "未設定"}</p>
                   </div>
                   <div className="flex items-center gap-1">
-                    {ch.platform === "line" && ch.access_token && (
+                    {ch.access_token && (
                       <Button size="sm" variant="secondary" onClick={() => handleTestChannel(ch.id)} disabled={testingChannel === ch.id} className="text-xs h-7 bg-stone-100 hover:bg-stone-200" data-testid={`button-test-channel-${ch.id}`}>
                         {testingChannel === ch.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <><Plug className="w-3 h-3 mr-1" />測試</>}
                       </Button>

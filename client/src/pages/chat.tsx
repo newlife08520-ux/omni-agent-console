@@ -301,8 +301,11 @@ export default function ChatPage() {
     if (!selectedId) return;
     try {
       await apiRequest("PUT", `/api/contacts/${selectedId}/status`, { status });
-      queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
       queryClient.invalidateQueries({ queryKey: ["/api/contacts", selectedId, "messages"] });
+      if (status === "resolved" && selectedContact?.platform === "line") {
+        toast({ title: "已標記為已解決", description: "系統將自動發送滿意度調查卡片給客戶" });
+      }
     } catch { toast({ title: "操作失敗", variant: "destructive" }); }
   };
 
