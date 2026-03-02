@@ -401,8 +401,9 @@ export async function lookupOrderById(
   orderId: string
 ): Promise<OrderInfo | null> {
   const normalizedId = orderId.trim().toUpperCase();
+  console.log(`[API 請求] 準備查詢單號: ${normalizedId}，merchant_no: ${config.merchantNo}`);
   const orders = await fetchOrders(config, { global_order_id: normalizedId });
-  console.log("[一頁商店] 依訂單編號查詢:", normalizedId, "(已自動大寫) 結果:", orders.length, "筆");
+  console.log(`[API 回應] 查詢結果: ${orders.length} 筆`, orders.length > 0 ? `→ 找到訂單 ${orders[0].global_order_id} 狀態=${orders[0].status}` : "→ 查無資料");
   return orders.length > 0 ? orders[0] : null;
 }
 

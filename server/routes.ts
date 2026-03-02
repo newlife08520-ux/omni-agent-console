@@ -194,7 +194,11 @@ async function getEnrichedSystemPrompt(brandId?: number): Promise<string> {
   「很抱歉，這個問題超出了我目前的處理範圍。我是 AI 客服小助手，建議為您轉接專人客服來協助處理，請問可以嗎？」
   「抱歉，我在系統中找不到您提到的商品資訊。我是 AI 助手，想幫您轉接給專人客服，讓他們為您查詢，您覺得可以嗎？」
 - 嚴禁隱瞞 AI 身分或假裝仍在查詢
-- 當客戶回覆「需要轉接」「轉人工」「找真人」等意圖時，直接呼叫 transfer_to_human 並回覆「好的，已為您轉接專人客服，請稍候片刻。」`;
+- 當客戶回覆「需要轉接」「轉人工」「找真人」等意圖時，直接呼叫 transfer_to_human 並回覆「好的，已為您轉接專人客服，請稍候片刻。」
+
+(絕對規則) 當你呼叫訂單查詢工具，但後端回傳 found=false 或空陣列時，你必須立刻回覆：
+「非常抱歉，我這邊目前查不到這筆資料 🥺 我是 AI 客服小助手，為了避免耽誤您的時間，請問需要幫您轉接給【專人客服】為您進一步查詢嗎？（請回覆：需要轉接）」
+此規則優先級最高，不可被任何其他規則覆蓋。`;
 
   return basePrompt + brandBlock + handoffBlock + catalogBlock + knowledgeBlock + imageBlock;
 }
@@ -1421,20 +1425,47 @@ export async function registerRoutes(
     try {
       if (toolName === "lookup_order_by_id") {
         const orderId = (args.order_id || "").trim().toUpperCase();
-        console.log("[AI Tool Call] lookup_order_by_id，單號:", orderId, "(已自動大寫)");
+        console.log(`[AI Tool Call] lookup_order_by_id，單號: ${orderId} (已自動大寫)，品牌ID: ${context?.brandId || "無"}`);
+        console.log(`[API 請求] 準備查詢單號: ${orderId}，使用 merchant_no: ${config.merchantNo}`);
 
         if (!orderId) {
           return JSON.stringify({ success: false, error: "訂單編號為空" });
         }
 
-        const order = await lookupOrderById(config, orderId);
+        let order = await lookupOrderById(config, orderId);
+
         if (!order) {
-          console.log("[AI Tool Call] 查無訂單:", orderId);
-          return JSON.stringify({ success: true, found: false, message: `查無訂單編號 ${orderId} 的紀錄` });
+          console.log(`[AI Tool Call] 品牌 ${context?.brandId || "預設"} 查無訂單: ${orderId}，嘗試跨品牌查詢...`);
+          const allBrands = storage.getBrands();
+          for (const brand of allBrands) {
+            if (brand.id === context?.brandId) continue;
+            if (!brand.superlanding_merchant_no || !brand.superlanding_access_key) continue;
+            const altConfig: SuperLandingConfig = {
+              merchantNo: brand.superlanding_merchant_no,
+              accessKey: brand.superlanding_access_key,
+            };
+            console.log(`[API 請求] 跨品牌查詢: 品牌「${brand.name}」(ID:${brand.id})，merchant_no: ${altConfig.merchantNo}`);
+            try {
+              const altOrder = await lookupOrderById(altConfig, orderId);
+              if (altOrder) {
+                console.log(`[API 回應] 在品牌「${brand.name}」找到訂單 ${orderId}`);
+                order = altOrder;
+                break;
+              }
+            } catch (altErr) {
+              console.log(`[API 回應] 品牌「${brand.name}」查詢失敗:`, altErr);
+            }
+          }
+        }
+
+        if (!order) {
+          console.log(`[AI Tool Call] 所有品牌皆查無訂單: ${orderId}`);
+          return JSON.stringify({ success: true, found: false, message: `所有品牌帳戶皆查無訂單編號 ${orderId} 的紀錄。(絕對規則) 你現在必須立刻誠實表明你是 AI 客服小助手，告知客戶目前查不到這筆資料，並詢問是否需要轉接專人客服。` });
         }
 
         const statusLabel = (await import("./superlanding")).getStatusLabel(order.status);
-        console.log("[AI Tool Call] 查到訂單:", orderId, "狀態:", statusLabel);
+        console.log(`[AI Tool Call] 查到訂單: ${orderId}，狀態: ${statusLabel}`);
+        console.log(`[API 回應] 查詢結果:`, JSON.stringify({ order_id: order.global_order_id, status: statusLabel, amount: order.final_total_order_amount, buyer: order.buyer_name }));
         return JSON.stringify({
           success: true,
           found: true,
