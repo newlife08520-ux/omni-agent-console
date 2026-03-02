@@ -359,7 +359,12 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
                       </span>
                       {chStatus && <StatusBadge status={chStatus.status as HealthStatus} message={chStatus.message} />}
                     </div>
-                    <p className="text-[10px] text-stone-400 truncate">Bot ID: {ch.bot_id || "未設定"} · Token: {ch.access_token ? maskValue(ch.access_token) : "未設定"} · AI: {ch.is_ai_enabled ? <span className="text-emerald-500">開啟</span> : <span className="text-stone-400">關閉</span>}</p>
+                    <div className="flex items-center gap-2">
+                      <p className="text-[10px] text-stone-400 truncate">Bot ID: {ch.bot_id || "未設定"} · Token: {ch.access_token ? maskValue(ch.access_token) : "未設定"}</p>
+                      <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full whitespace-nowrap ${ch.is_ai_enabled ? "bg-emerald-50 text-emerald-600" : "bg-stone-100 text-stone-400"}`} data-testid={`badge-ai-status-${ch.id}`}>
+                        AI {ch.is_ai_enabled ? "開啟" : "關閉"}
+                      </span>
+                    </div>
                   </div>
                   <div className="flex items-center gap-1">
                     {ch.access_token && (
