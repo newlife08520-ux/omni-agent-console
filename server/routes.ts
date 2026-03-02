@@ -1678,8 +1678,12 @@ export async function registerRoutes(
           const messageId = event.message.id;
           const videoUrl = await downloadLineContent(messageId, ".mp4", channelToken);
           if (videoUrl) {
-            storage.createMessage(contact.id, "line", "user", "[影片訊息]", "video", videoUrl);
+            console.log("[影片處理成功]:", videoUrl);
+            const vidMsg = storage.createMessage(contact.id, "line", "user", "[影片訊息]", "video", videoUrl);
+            broadcastSSE("new_message", { contact_id: contact.id, message: vidMsg, brand_id: matchedBrandId || contact.brand_id });
+            broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
           } else {
+            console.log("[影片處理失敗]: messageId:", messageId);
             storage.createMessage(contact.id, "line", "user", "[影片訊息] (下載失敗)");
           }
           const aiEnabledVid = matchedChannel ? matchedChannel.is_ai_enabled : 1;

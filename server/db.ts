@@ -54,7 +54,7 @@ export function initDatabase() {
       platform TEXT NOT NULL DEFAULT 'line',
       sender_type TEXT NOT NULL CHECK(sender_type IN ('user','ai','admin','system')),
       content TEXT NOT NULL,
-      message_type TEXT NOT NULL DEFAULT 'text' CHECK(message_type IN ('text','image','file')),
+      message_type TEXT NOT NULL DEFAULT 'text' CHECK(message_type IN ('text','image','file','video','audio')),
       image_url TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (contact_id) REFERENCES contacts(id)
@@ -84,6 +84,28 @@ export function initDatabase() {
   }
   if (!msgColNames.includes("image_url")) {
     db.exec("ALTER TABLE messages ADD COLUMN image_url TEXT");
+  }
+
+  const msgTableSql = (db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='messages'").get() as any)?.sql || "";
+  if (msgTableSql.includes("'text','image','file'") && !msgTableSql.includes("'video'")) {
+    console.log("[DB Migration] 擴充 messages.message_type CHECK 約束，加入 'video' 和 'audio'...");
+    db.exec(`
+      CREATE TABLE messages_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        contact_id INTEGER NOT NULL,
+        platform TEXT NOT NULL DEFAULT 'line',
+        sender_type TEXT NOT NULL CHECK(sender_type IN ('user','ai','admin','system')),
+        content TEXT NOT NULL,
+        message_type TEXT NOT NULL DEFAULT 'text' CHECK(message_type IN ('text','image','file','video','audio')),
+        image_url TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (contact_id) REFERENCES contacts(id)
+      );
+      INSERT INTO messages_new SELECT * FROM messages;
+      DROP TABLE messages;
+      ALTER TABLE messages_new RENAME TO messages;
+    `);
+    console.log("[DB Migration] messages 資料表 CHECK 約束已更新完成");
   }
 
   const contactCols = db.prepare("PRAGMA table_info(contacts)").all() as { name: string }[];

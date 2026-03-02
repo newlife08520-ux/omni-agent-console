@@ -852,7 +852,7 @@ export default function ChatPage() {
                                         : msg.sender_type === "ai" ? "rounded-br-md border border-emerald-100"
                                         : "rounded-br-md"
                                     }`}>
-                                      <video controls className="max-w-full max-h-[280px] rounded-2xl" data-testid={`video-message-${msg.id}`}>
+                                      <video controls preload="metadata" className="max-w-full max-h-[280px] rounded-2xl bg-black" data-testid={`video-message-${msg.id}`}>
                                         <source src={msg.image_url} type="video/mp4" />
                                         您的瀏覽器不支援影片播放
                                       </video>
