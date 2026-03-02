@@ -1259,8 +1259,12 @@ export async function registerRoutes(
     }
   }
 
-  app.post("/api/webhook/line", async (req, res) => {
-    console.log("🟢 [收到 LINE Webhook]:", JSON.stringify(req.body, null, 2));
+  app.post("/api/webhook/line", (req, res) => {
+    console.log("=====================================");
+    console.log("🚨 [超級除錯] 收到 LINE Webhook 請求！");
+    console.log("🚨 [Headers]:", JSON.stringify(req.headers, null, 2));
+    console.log("🚨 [Body]:", JSON.stringify(req.body, null, 2));
+    console.log("=====================================");
 
     const signature = req.headers["x-line-signature"] as string | undefined;
     const destination = req.body?.destination as string | undefined;
@@ -1299,8 +1303,14 @@ export async function registerRoutes(
     if (channelSecretVal && signature && req.rawBody) {
       const rawBody = Buffer.isBuffer(req.rawBody) ? req.rawBody : Buffer.from(req.rawBody as string);
       const hash = crypto.createHmac("SHA256", channelSecretVal).update(rawBody).digest("base64");
-      if (hash !== signature) return res.status(403).json({ message: "簽名驗證失敗" });
+      if (hash !== signature) {
+        console.log("🚨 [超級除錯] 簽名驗證失敗！收到:", signature, "計算:", crypto.createHmac("SHA256", channelSecretVal).update(rawBody).digest("base64"));
+        return res.status(403).json({ message: "簽名驗證失敗" });
+      }
     }
+
+    res.status(200).json({ success: true });
+    console.log("🚨 [超級除錯] 已回傳 HTTP 200 給 LINE，開始非同步處理事件...");
 
     const humanKeywordsSetting = storage.getSetting("human_transfer_keywords");
     const HUMAN_KEYWORDS = humanKeywordsSetting
@@ -1308,6 +1318,7 @@ export async function registerRoutes(
       : ["找客服", "真人", "轉人工", "人工客服", "真人客服"];
 
     const events = req.body?.events || [];
+    (async () => {
     for (const event of events) {
       const webhookEventId = event.webhookEventId || event.timestamp?.toString();
       if (webhookEventId && storage.isEventProcessed(webhookEventId)) {
@@ -1410,7 +1421,8 @@ export async function registerRoutes(
         storage.markEventProcessed(webhookEventId);
       }
     }
-    return res.status(200).json({ success: true });
+    console.log("🚨 [超級除錯] 所有事件處理完畢");
+    })().catch(err => console.error("🚨 [超級除錯] 非同步處理事件時發生錯誤:", err));
   });
 
   app.get("/api/webhook/facebook", (req, res) => {
