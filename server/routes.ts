@@ -176,21 +176,25 @@ async function getEnrichedSystemPrompt(brandId?: number): Promise<string> {
 
   const handoffBlock = `
 
---- 無痕轉接真人機制 (Silent Handoff) ---
-當你遇到以下情況時，必須呼叫 transfer_to_human 工具，將對話靜默轉交真人客服：
+--- 轉接真人客服機制 ---
+你是 AI 客服小助手，請在回覆中誠實表明自己的 AI 身分。
+
+當你遇到以下情況時，必須「先回覆一段明確的轉接詢問話術」，然後呼叫 transfer_to_human 工具：
 1. 多次查詢仍查不到訂單（已嘗試不同查詢方式後仍無結果）
 2. 知識庫中找不到客戶描述的商品或服務
 3. 客戶問題過於複雜，超出你的能力範圍
 4. 判斷為非本系統管轄的訂單（如 SHOPLINE 官網訂單、其他平台訂單）
 5. 客戶反覆表達不滿或情緒激動
+6. 客戶明確要求轉接真人（例如回覆「需要轉接」）
 
 重要規則：
-- 嚴禁說出「我聽不懂」「我無法處理」「幫您轉接真人」「轉接客服」等字眼
-- 在呼叫 transfer_to_human 之前或同時，你的回覆必須是自然的安撫話術，例如：
-  「為了給您最準確的資訊，我需要稍微進入內部系統幫您調閱詳細資料，請您稍等我一下喔」
-  「讓我幫您確認一下更詳細的紀錄，請稍候片刻」
-  「我正在為您查詢更深入的資料，請您稍等一下」
-- 客戶不應感知到自己被轉接，整個過程必須無痕銜接`;
+- 你必須誠實告知客戶你是 AI 客服小助手，不要假裝是真人
+- 在呼叫 transfer_to_human 之前或同時，你的回覆必須明確說明查詢結果和轉接意圖，範例話術：
+  「非常抱歉，我這邊目前查不到這筆資料。我是 AI 客服小助手，為了避免耽誤您的時間，請問需要幫您轉接給專人客服為您進一步查詢嗎？」
+  「很抱歉，這個問題超出了我目前的處理範圍。我是 AI 客服小助手，建議為您轉接專人客服來協助處理，請問可以嗎？」
+  「抱歉，我在系統中找不到您提到的商品資訊。我是 AI 助手，想幫您轉接給專人客服，讓他們為您查詢，您覺得可以嗎？」
+- 嚴禁隱瞞 AI 身分或假裝仍在查詢
+- 當客戶回覆「需要轉接」「轉人工」「找真人」等意圖時，直接呼叫 transfer_to_human 並回覆「好的，已為您轉接專人客服，請稍候片刻。」`;
 
   return basePrompt + brandBlock + handoffBlock + catalogBlock + knowledgeBlock + imageBlock;
 }
@@ -1302,13 +1306,13 @@ export async function registerRoutes(
       type: "function",
       function: {
         name: "transfer_to_human",
-        description: "當你無法確定答案、多次查詢仍查不到訂單、知識庫中找不到客戶描述的商品、客戶問題過於複雜、或判斷為非本系統管轄的訂單（如 SHOPLINE 官網訂單）時，呼叫此工具將對話靜默轉交給真人客服。注意：呼叫此工具前，你必須先回覆一段自然的安撫話術，例如「為了給您最準確的資訊，我需要稍微進入內部系統幫您調閱詳細資料，請您稍等我一下喔」。嚴禁說出「我聽不懂」「我無法處理」「幫您轉接真人」等字眼。",
+        description: "當你無法確定答案、多次查詢仍查不到訂單、知識庫中找不到客戶描述的商品、客戶問題過於複雜、或判斷為非本系統管轄的訂單（如 SHOPLINE 官網訂單）、或客戶明確要求轉接真人時，呼叫此工具將對話轉交給真人客服。注意：呼叫此工具前，你必須先誠實表明自己是 AI 客服小助手，並明確告知客戶查詢結果（如查不到訂單、找不到商品等），然後詢問客戶是否需要轉接專人客服。",
         parameters: {
           type: "object",
           properties: {
             reason: {
               type: "string",
-              description: "轉接原因（內部記錄用，不會顯示給客戶）",
+              description: "轉接原因（內部記錄用，會顯示在中控台系統訊息中）",
             },
           },
           required: [],
@@ -1386,9 +1390,9 @@ export async function registerRoutes(
       if (context?.contactId) {
         storage.updateContactHumanFlag(context.contactId, 1);
         storage.createMessage(context.contactId, context?.platform || "line", "system",
-          `(系統提示) AI 已靜默轉接真人客服。轉接原因：${reason}`);
+          `(系統提示) AI 已放棄查詢並轉接真人客服。轉接原因：${reason}`);
       }
-      return JSON.stringify({ success: true, message: "已將對話轉交真人客服處理，客戶不會收到轉接通知。" });
+      return JSON.stringify({ success: true, message: "已將對話轉交真人客服處理。請在回覆中誠實告知客戶你是 AI 助手，並說明轉接原因。" });
     }
 
     if (toolName === "send_image_to_customer") {
@@ -1710,6 +1714,9 @@ export async function registerRoutes(
       let loopCount = 0;
       const maxToolLoops = 3;
       let sandboxImageResult: { image_url?: string; text_message?: string } | null = null;
+      let sandboxTransferTriggered = false;
+      let sandboxTransferReason = "";
+      const sandboxToolLog: string[] = [];
 
       while (responseMessage?.tool_calls && responseMessage.tool_calls.length > 0 && loopCount < maxToolLoops) {
         loopCount++;
@@ -1733,8 +1740,15 @@ export async function registerRoutes(
           }
 
           console.log(`[Sandbox] 執行 Tool: ${fnName}，參數:`, fnArgs);
+          sandboxToolLog.push(`Tool: ${fnName}(${JSON.stringify(fnArgs)})`);
           const toolResult = await executeToolCall(fnName, fnArgs, { brandId: brand_id ? parseInt(brand_id) : undefined });
           console.log(`[Sandbox] Tool 回傳結果長度: ${toolResult.length} 字元`);
+
+          if (fnName === "transfer_to_human") {
+            sandboxTransferTriggered = true;
+            sandboxTransferReason = (fnArgs.reason || "AI 判斷需要人工處理").trim();
+            sandboxToolLog.push(`>>> AI 放棄查詢，觸發轉接真人。原因：${sandboxTransferReason}`);
+          }
 
           if (fnName === "send_image_to_customer") {
             try {
@@ -1760,8 +1774,15 @@ export async function registerRoutes(
         responseMessage = completion.choices[0]?.message;
       }
 
-      const reply = responseMessage?.content || "抱歉，AI 無法生成回覆。";
-      const result: Record<string, any> = { success: true, reply };
+      let reply = responseMessage?.content || "抱歉，AI 無法生成回覆。";
+      if (sandboxTransferTriggered) {
+        reply += `\n\n---\n[沙盒除錯資訊] AI 已觸發「轉接真人客服」\n轉接原因：${sandboxTransferReason}\n呼叫紀錄：${sandboxToolLog.join(" → ")}`;
+      }
+      const result: Record<string, any> = { success: true, reply, transferred: sandboxTransferTriggered };
+      if (sandboxTransferTriggered) {
+        result.transfer_reason = sandboxTransferReason;
+        result.tool_log = sandboxToolLog;
+      }
       if (sandboxImageResult) {
         result.image_url = sandboxImageResult.image_url;
       }

@@ -14,13 +14,13 @@ The system is built on a modern full-stack architecture:
 - **Backend**: An Express.js API server handles all business logic and data operations.
 - **Database**: SQLite is used as the primary data store, managed via `better-sqlite3`.
 - **Authentication**: Session-based authentication with a 3-tier Role-Based Access Control (RBAC) system (super_admin, marketing_manager, cs_agent) secures the application. Passwords are hashed using SHA-256.
-- **AI Integration**: OpenAI API (gpt-5.2) is integrated for AI-driven auto-replies, sandbox testing, and content analysis, featuring a "Silent Handoff" mechanism to human agents when needed.
+- **AI Integration**: OpenAI API (gpt-5.2) is integrated for AI-driven auto-replies, sandbox testing, and content analysis, featuring an explicit handoff mechanism where AI honestly identifies itself and asks customers if they want to be transferred to a human agent.
 - **Multi-Brand Support**: The architecture includes `brands` and `channels` tables to support multiple brands, each with unique AI personas and configurations. Webhooks are dynamically routed based on brand and channel.
 - **UI/UX Decisions**: The design emphasizes a warm and cozy aesthetic with specific color schemes (cream, dark sidebar, emerald accents) and a fully localized Traditional Chinese interface.
 - **Key Features**:
     - **3-Tier RBAC**: Granular access control for different user roles.
     - **Multi-Brand Workspaces**: Support for distinct brands, each with its AI persona and settings.
-    - **Silent Handoff (無痕轉接真人)**: AI intelligently transfers conversations to human agents, preventing AI from sending "I cannot help" messages and alerting agents.
+    - **轉接真人客服 (Explicit Handoff)**: AI honestly identifies itself and asks if the customer wants to be transferred. Backend still sets needs_human=1 to pause AI and alert agents. Sandbox shows debug info (transfer reason + tool call log) in a red warning bubble.
     - **一頁商店 (Super Landing) API Integration**: Triple-mode order lookup with product matching, fuzzy search, and dynamic catalog injection for AI queries.
     - **Real-time Chat**: Features include CRM panel, order lookup, VIP badges, quick replies, and image upload with AI analysis.
     - **Analytics BI Dashboard**: Provides key performance indicators, charts, and AI insights.

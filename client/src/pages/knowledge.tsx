@@ -179,6 +179,9 @@ export default function KnowledgePage() {
         setSandboxMessages((prev) => [...prev, { role: "ai", content: `⚠️ ${data.message}` }]);
       } else {
         setSandboxMessages((prev) => [...prev, { role: "ai", content: data.reply }]);
+        if (data.transferred) {
+          setSandboxMessages((prev) => [...prev, { role: "ai", content: `⚠️ [沙盒提示] AI 已觸發「轉接真人客服」工具。在正式環境中，此聯絡人會被標記為「需人工處理」並暫停 AI 回覆。\n轉接原因：${data.transfer_reason || "未提供"}` }]);
+        }
       }
     } catch {
       setSandboxMessages((prev) => [...prev, { role: "ai", content: "⚠️ 連線失敗，請稍後再試。" }]);
@@ -235,6 +238,9 @@ export default function KnowledgePage() {
         setSandboxMessages(prev => [...prev, { role: "ai", content: `⚠️ ${data.message}` }]);
       } else {
         setSandboxMessages(prev => [...prev, { role: "ai", content: data.reply }]);
+        if (data.transferred) {
+          setSandboxMessages(prev => [...prev, { role: "ai", content: `⚠️ [沙盒提示] AI 已觸發「轉接真人客服」工具。在正式環境中，此聯絡人會被標記為「需人工處理」並暫停 AI 回覆。\n轉接原因：${data.transfer_reason || "未提供"}` }]);
+        }
       }
     } catch {
       setSandboxMessages(prev => [...prev, { role: "ai", content: "⚠️ 上傳失敗，請稍後再試。" }]);
