@@ -1260,8 +1260,12 @@ export async function registerRoutes(
   }
 
   app.post("/api/webhook/line", async (req, res) => {
+    console.log("🟢 [收到 LINE Webhook]:", JSON.stringify(req.body, null, 2));
+
     const signature = req.headers["x-line-signature"] as string | undefined;
     const destination = req.body?.destination as string | undefined;
+
+    console.log("🔍 [系統正在尋找的 Bot ID]:", destination || "(無 destination 欄位)");
 
     let channelToken: string | null = null;
     let channelSecretVal: string | null = null;
@@ -1274,8 +1278,15 @@ export async function registerRoutes(
         channelToken = matchedChannel.access_token || null;
         channelSecretVal = matchedChannel.channel_secret || null;
         matchedBrandId = matchedChannel.brand_id;
-        console.log(`[Webhook] 動態路由 → 品牌: ${matchedChannel.brand_name}, 頻道: ${matchedChannel.channel_name}`);
+        console.log(`✅ [比對成功] 品牌: ${matchedChannel.brand_name}, 頻道: ${matchedChannel.channel_name}, 平台: ${matchedChannel.platform}`);
+      } else {
+        const allChannels = storage.getChannels();
+        const botIds = allChannels.map(c => `${c.channel_name}(${c.bot_id || "空"}/${c.platform})`).join(", ");
+        console.log(`❌ [錯誤]: 找不到對應的 Bot ID「${destination}」，訊息被丟棄！`);
+        console.log(`📋 [資料庫現有頻道]: ${botIds || "無任何頻道"}`);
       }
+    } else {
+      console.log("⚠️ [警告]: LINE Webhook 請求中沒有 destination 欄位，將使用全域設定");
     }
 
     if (!channelSecretVal) {
