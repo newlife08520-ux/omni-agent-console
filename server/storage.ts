@@ -201,7 +201,7 @@ export class SQLiteStorage implements IStorage {
       query += " WHERE c.brand_id = ?";
       params.push(brandId);
     }
-    query += " ORDER BY c.needs_human DESC, c.is_pinned DESC, c.last_message_at DESC";
+    query += " ORDER BY c.is_pinned DESC, c.last_message_at DESC";
     const contacts = db.prepare(query).all(...params) as (Contact & { brand_name?: string; channel_name?: string })[];
     return contacts.map((c) => {
       const lastMsg = db.prepare("SELECT content FROM messages WHERE contact_id = ? ORDER BY created_at DESC LIMIT 1").get(c.id) as { content: string } | undefined;
