@@ -78,6 +78,21 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
   const [healthStatus, setHealthStatus] = useState<Record<string, HealthEntry>>({});
   const [healthLoading, setHealthLoading] = useState(false);
   const [testingBrandSL, setTestingBrandSL] = useState<number | null>(null);
+  const [refreshingProfiles, setRefreshingProfiles] = useState(false);
+
+  const handleRefreshProfiles = async () => {
+    setRefreshingProfiles(true);
+    try {
+      const res = await fetch("/api/admin/refresh-profiles", { method: "POST", credentials: "include" });
+      if (res.ok) {
+        const data = await res.json();
+        toast({ title: "LINE 頭貼更新完成", description: `共 ${data.total} 位聯絡人，成功更新 ${data.updated} 位${data.failed > 0 ? `，失敗 ${data.failed} 位` : ""}` });
+      } else {
+        toast({ title: "更新失敗", variant: "destructive" });
+      }
+    } catch { toast({ title: "更新失敗", variant: "destructive" }); }
+    finally { setRefreshingProfiles(false); }
+  };
 
   const fetchHealthStatus = async () => {
     setHealthLoading(true);
@@ -246,6 +261,10 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <Button size="sm" variant="ghost" onClick={handleRefreshProfiles} disabled={refreshingProfiles} className="text-xs text-stone-500 hover:text-emerald-600" data-testid="button-refresh-profiles">
+              <RefreshCw className={`w-3.5 h-3.5 mr-1 ${refreshingProfiles ? "animate-spin" : ""}`} />
+              {refreshingProfiles ? "更新中..." : "同步 LINE 頭貼"}
+            </Button>
             <Button size="sm" variant="ghost" onClick={fetchHealthStatus} disabled={healthLoading} className="text-xs text-stone-500 hover:text-emerald-600" data-testid="button-refresh-health">
               <RefreshCw className={`w-3.5 h-3.5 mr-1 ${healthLoading ? "animate-spin" : ""}`} />
               {healthLoading ? "檢測中" : "全部檢測"}

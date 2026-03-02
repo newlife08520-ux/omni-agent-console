@@ -293,6 +293,39 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/admin/refresh-profiles", authMiddleware, superAdminOnly, async (_req, res) => {
+    try {
+      const contacts = storage.getContacts();
+      const lineContacts = contacts.filter(c => c.platform === "line" && c.platform_user_id && c.platform_user_id !== "unknown");
+      let updated = 0;
+      let failed = 0;
+      for (const contact of lineContacts) {
+        const token = getLineTokenForContact(contact);
+        if (!token) { failed++; continue; }
+        try {
+          const profileRes = await fetch(`https://api.line.me/v2/bot/profile/${contact.platform_user_id}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (profileRes.ok) {
+            const profile = await profileRes.json() as { displayName?: string; pictureUrl?: string };
+            if (profile.displayName) {
+              storage.updateContactProfile(contact.id, profile.displayName, profile.pictureUrl || null);
+              updated++;
+            }
+          } else {
+            failed++;
+          }
+          await new Promise(r => setTimeout(r, 100));
+        } catch {
+          failed++;
+        }
+      }
+      return res.json({ success: true, total: lineContacts.length, updated, failed });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
   app.get("/api/events", (req, res) => {
     if (!(req as any).session?.authenticated) {
       return res.status(401).json({ message: "Unauthorized" });
