@@ -14,10 +14,18 @@ export async function parseFileContent(filePath: string, originalName: string): 
   switch (ext) {
     case ".txt":
     case ".csv":
-      return fs.readFileSync(filePath, "utf-8");
-
-    case ".md":
-      return fs.readFileSync(filePath, "utf-8");
+    case ".md": {
+      const raw = fs.readFileSync(filePath);
+      let text: string;
+      if (raw[0] === 0xEF && raw[1] === 0xBB && raw[2] === 0xBF) {
+        text = raw.slice(3).toString("utf-8");
+      } else if (raw[0] === 0xFF && raw[1] === 0xFE) {
+        text = raw.slice(2).toString("utf16le");
+      } else {
+        text = raw.toString("utf-8");
+      }
+      return text;
+    }
 
     case ".xlsx": {
       const XLSX = await import("xlsx");

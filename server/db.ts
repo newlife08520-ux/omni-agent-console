@@ -189,6 +189,15 @@ function migrateBrandsAndChannels() {
 
     console.log("[DB] 已建立多品牌架構：預設品牌 + 頻道已遷移");
   }
+
+  const orphanedContacts = db.prepare("SELECT COUNT(*) as count FROM contacts WHERE brand_id IS NULL").get() as { count: number };
+  if (orphanedContacts.count > 0) {
+    const firstBrand = db.prepare("SELECT id FROM brands ORDER BY id ASC LIMIT 1").get() as { id: number } | undefined;
+    if (firstBrand) {
+      db.prepare("UPDATE contacts SET brand_id = ? WHERE brand_id IS NULL").run(firstBrand.id);
+      console.log(`[DB] 已將 ${orphanedContacts.count} 位未分配聯絡人歸入品牌 #${firstBrand.id}`);
+    }
+  }
 }
 
 function migrateSystemPrompt() {

@@ -1,161 +1,46 @@
-# 全通路 AI 客服中控台 (Omnichannel AI Agent Dashboard) V7 Multi-Brand
+# Omnichannel AI Agent Dashboard - Multi-Brand
 
 ## Overview
-A commercial-grade **Multi-Brand Omnichannel Helpdesk** (多品牌全通路客服中心) built with Express + React (Vite) + Tailwind CSS + SQLite. Supports multiple LINE accounts + Facebook pages organized under Brand Workspaces, with per-brand AI persona and knowledge base. All UI is 100% Traditional Chinese with warm cozy SaaS design (bg-[#faf9f5] cream, bg-stone-800 sidebar, emerald-600 accents).
+This project is a commercial-grade Multi-Brand Omnichannel Helpdesk built with a modern web stack. It supports multiple LINE accounts and Facebook pages, organized under Brand Workspaces, each with its own AI persona and knowledge base. The system aims to provide a comprehensive customer service solution with advanced AI capabilities for auto-reply and seamless human agent handoff. The UI is designed to be warm and user-friendly, catering specifically to Traditional Chinese users.
 
-## Architecture
-- **Frontend**: React + Vite + Tailwind CSS + shadcn/ui components + recharts + react-day-picker + date-fns
-- **Backend**: Express.js API server (port 5000)
-- **Database**: SQLite via better-sqlite3 (file: omnichannel.db)
-- **Auth**: Session-based with 3-tier RBAC (super_admin / marketing_manager / cs_agent), SHA-256 password hashing
-- **AI**: OpenAI API integration (gpt-5.2) for sandbox testing and auto-reply, with Silent Handoff (無痕轉接真人) mechanism
-- **External API**: 一頁商店 (Super Landing) via https://api.super-landing.com — field mapping: recipient→buyer_name, mobile→buyer_phone, email→buyer_email, tracking_codes→tracking_number, created_date→created_at; API limitation: `mobile` param completely ignored (returns all 2.1M orders), sort params also ignored; **Enforced page_id policy**: all queries MUST include page_id (from product matching) — phone-only global scans are BLOCKED to protect against system overload; triple-mode lookup: (1) global_order_id direct (auto-uppercase), (2) product+phone via page_id (product name or index REQUIRED), (3) date-range + contact + optional page_id; full pages catalog (~3,970 pages) fetched with pagination, hourly cache refresh; AI prompt shows top 100 products; **Multi-order display**: when multiple orders found, ALL orders are returned (no cap) with instruction to list summaries and ask which one; **Auto-uppercase order IDs**: kbt58263 → KBT58263 at all layers
+The business vision is to empower businesses with efficient, scalable, and personalized customer support across various digital channels, reducing operational costs while improving customer satisfaction. The market potential lies in e-commerce, service industries, and any business managing customer interactions across multiple brands or platforms. The project's ambition is to be a leading AI-powered customer service platform in the Traditional Chinese market.
 
-## Test Accounts
-- **admin** / admin123 → role: super_admin, display_name: 系統管理員 (full access)
-- **marketing** / mkt123 → role: marketing_manager, display_name: 行銷經理 Amy (knowledge, analytics, settings minus API keys)
-- **agent** / agent123 → role: cs_agent, display_name: 客服小李 (chat only)
+## User Preferences
+I prefer all UI to be 100% Traditional Chinese with a warm cozy SaaS design (bg-[#faf9f5] cream, bg-stone-800 sidebar, emerald-600 accents).
 
-## 3-Tier RBAC Access Matrix
-| Feature | super_admin | marketing_manager | cs_agent |
-|---------|------------|-------------------|----------|
-| 即時客服 (Chat) | ✓ | ✓ | ✓ |
-| AI 與知識庫 | ✓ | ✓ | ✗ |
-| 數據戰情室 | ✓ | ✓ | ✗ |
-| 團隊管理 | ✓ | ✗ | ✗ |
-| 系統設定 | ✓ (full) | ✓ (no API keys) | ✗ |
-| API 金鑰設定 | ✓ | ✗ | ✗ |
-| 一頁商店 API 設定 | ✓ | ✗ | ✗ |
-| 訂單查詢 (chat panel) | ✓ | ✓ | ✓ |
+## System Architecture
+The system is built on a modern full-stack architecture:
+- **Frontend**: React, Vite, Tailwind CSS, shadcn/ui, recharts, react-day-picker, and date-fns provide a rich, interactive user experience.
+- **Backend**: An Express.js API server handles all business logic and data operations.
+- **Database**: SQLite is used as the primary data store, managed via `better-sqlite3`.
+- **Authentication**: Session-based authentication with a 3-tier Role-Based Access Control (RBAC) system (super_admin, marketing_manager, cs_agent) secures the application. Passwords are hashed using SHA-256.
+- **AI Integration**: OpenAI API (gpt-5.2) is integrated for AI-driven auto-replies, sandbox testing, and content analysis, featuring a "Silent Handoff" mechanism to human agents when needed.
+- **Multi-Brand Support**: The architecture includes `brands` and `channels` tables to support multiple brands, each with unique AI personas and configurations. Webhooks are dynamically routed based on brand and channel.
+- **UI/UX Decisions**: The design emphasizes a warm and cozy aesthetic with specific color schemes (cream, dark sidebar, emerald accents) and a fully localized Traditional Chinese interface.
+- **Key Features**:
+    - **3-Tier RBAC**: Granular access control for different user roles.
+    - **Multi-Brand Workspaces**: Support for distinct brands, each with its AI persona and settings.
+    - **Silent Handoff (無痕轉接真人)**: AI intelligently transfers conversations to human agents, preventing AI from sending "I cannot help" messages and alerting agents.
+    - **一頁商店 (Super Landing) API Integration**: Triple-mode order lookup with product matching, fuzzy search, and dynamic catalog injection for AI queries.
+    - **Real-time Chat**: Features include CRM panel, order lookup, VIP badges, quick replies, and image upload with AI analysis.
+    - **Analytics BI Dashboard**: Provides key performance indicators, charts, and AI insights.
+    - **Knowledge Base Management**: Support for various file types (xlsx, docx, pdf, csv, txt, md) for AI knowledge base and marketing rules.
+    - **White-labeling**: Custom branding options for system name and logo.
+    - **Messaging Features**: LINE Welcome Messages, quick buttons, human-transfer keywords, and CSAT rating collection via Flex Messages.
+    - **Robust File Handling**: Includes filename encoding fixes, BOM stripping, and content extraction for diverse document types.
 
-## Project Structure
-```
-server/
-  index.ts         - Express server setup with session middleware
-  routes.ts        - All API endpoints (/api/*) with RBAC middleware
-  storage.ts       - IStorage interface and SQLiteStorage implementation
-  db.ts            - SQLite database setup, schema creation, mock data seeding
-  superlanding.ts  - 一頁商店 API client (fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, lookupOrdersByPhone, fetchPages, lookupOrdersByPageAndPhone with smart date-window fallback)
-  file-parser.ts   - File content extraction (xlsx via xlsx lib, docx via jszip, pdf text extraction, txt/csv/md passthrough); isImageFile() guard
-  vite.ts          - Vite dev server integration (DO NOT MODIFY)
-  static.ts        - Static file serving for production
-
-client/src/
-  App.tsx              - Main app with auth guard, 3-tier RBAC routing, white-label settings
-  pages/
-    login.tsx          - Login page with 3 test accounts displayed
-    chat.tsx           - Real-time chat with CRM panel, order lookup tab, VIP badges, quick replies
-    settings.tsx       - API keys, 一頁商店 API, white-label, LINE welcome, human-transfer keywords
-    knowledge.tsx      - System prompt, knowledge files (xlsx/docx/pdf/csv/txt/md), image assets library, marketing rules, AI sandbox
-    team.tsx           - Team CRUD with 3-tier role selector and RBAC info cards
-    analytics.tsx      - BI dashboard with custom date range picker (Calendar + Popover)
-    not-found.tsx      - 404 page
-  components/
-    app-sidebar.tsx    - Dark sidebar (bg-stone-800) with 3-tier role-based menu filtering
-
-shared/
-  schema.ts            - TypeScript interfaces, ROLE_LABELS, ORDER_STATUS_LABELS
-```
-
-## Multi-Brand Architecture
-- **brands** table: id, name, slug, logo_url, description, system_prompt, superlanding_merchant_no, superlanding_access_key, created_at
-- **channels** table: id, brand_id (FK→brands), platform (line/messenger), channel_name, bot_id (LINE userId / FB page_id), access_token, channel_secret, is_active, created_at
-- **Dynamic webhook routing**: LINE webhook reads `destination` field → looks up channel by bot_id → uses per-channel credentials for signature verification and reply
-- **Per-brand AI persona**: Each brand can have its own system_prompt that gets appended to the global system prompt
-- **Frontend**: BrandProvider context provides selected brand across all pages; sidebar brand workspace selector; chat platform filter tabs (全部/LINE/FB)
-- Auto-migration on startup: creates default "預設品牌" brand with existing LINE settings migrated as a channel
-
-## Silent Handoff (無痕轉接真人) Mechanism
-- **transfer_to_human** tool: AI calls this when it can't resolve the issue (multi-failed lookups, unknown products, SHOPLINE orders, complex issues)
-- **System prompt injection**: Handoff rules injected into every AI prompt — AI must use natural soothing language, never say "轉接真人" or "我無法處理"
-- **AI auto-reply**: Webhook text messages trigger full OpenAI completion with tool call loop (up to 3 rounds) when test_mode is off and needs_human is false
-- **State control**: When transfer_to_human fires, `needs_human = 1` is set on the contact, and all subsequent messages skip AI processing
-- **Reply suppression**: After transfer_to_human, any pending AI reply is discarded (not sent to customer)
-- **Frontend alerts**: needs_human contacts sorted to top (ORDER BY needs_human DESC); red pulsing "需人工處理" badge + headphone icon; browser notification + sound alert when new handoff detected
-- **Restore AI**: Admin clicks "恢復 AI" button to clear needs_human flag and re-enable AI auto-reply
-
-## Database Schema (SQLite)
-- **users**: id, username, password_hash, display_name, role (super_admin/marketing_manager/cs_agent), created_at
-- **brands**: id, name, slug, logo_url, description, system_prompt, superlanding_merchant_no, superlanding_access_key, created_at
-- **channels**: id, brand_id (FK), platform, channel_name, bot_id, access_token, channel_secret, is_active, created_at
-- **settings**: key-value store (openai_api_key, system_prompt, test_mode, system_name, logo_url, welcome_message, quick_buttons, human_transfer_keywords, superlanding_merchant_no, superlanding_access_key)
-- **contacts**: id, platform, platform_user_id, display_name, avatar_url, needs_human, is_pinned, status, tags (JSON), vip_level, order_count, total_spent, last_message_at, created_at, brand_id (FK), channel_id (FK)
-- **messages**: id, contact_id, platform, sender_type (user/ai/admin/system), content, message_type, image_url, created_at
-- **knowledge_files**: id, filename, original_name, size, created_at, brand_id (FK, nullable)
-- **marketing_rules**: id, keyword, pitch, url, created_at, brand_id (FK, nullable)
-
-## API Endpoints
-### Auth
-- POST /api/auth/login, GET /api/auth/check, POST /api/auth/logout
-
-### Brands & Channels (super_admin for CUD, all authenticated for R)
-- GET /api/brands, POST /api/brands, GET /api/brands/:id, PUT /api/brands/:id, DELETE /api/brands/:id
-- GET /api/brands/:id/channels, POST /api/brands/:id/channels
-- GET /api/channels, PUT /api/channels/:id, DELETE /api/channels/:id
-- POST /api/channels/:id/test
-
-### Settings (RBAC: super_admin full, marketing_manager partial, sensitive keys super_admin only)
-- GET /api/settings, PUT /api/settings, POST /api/settings/test-connection
-
-### Contacts
-- GET /api/contacts, GET /api/contacts/:id
-- PUT /api/contacts/:id/human, PUT /api/contacts/:id/status, PUT /api/contacts/:id/tags, PUT /api/contacts/:id/pinned
-
-### Messages
-- GET /api/contacts/:id/messages, POST /api/contacts/:id/messages
-
-### Orders (一頁商店 API proxy)
-- GET /api/contacts/:id/orders — lookup orders for a contact
-- GET /api/orders/lookup?q= — order search by global_order_id
-- GET /api/orders/search?q=&begin_date=&end_date= — advanced search (email/phone/name + date range, 31-day max)
-- GET /api/orders/pages — list all product pages (銷售頁) from 一頁商店
-- GET /api/orders/by-product?page_id=&phone= — product-based order search (page_id + phone matching)
-
-### Team (super_admin only)
-- GET /api/team, POST /api/team, PUT /api/team/:id, DELETE /api/team/:id
-
-### Analytics (managerOrAbove)
-- GET /api/analytics?range=today|7d|30d|custom&start=YYYY-MM-DD&end=YYYY-MM-DD
-
-### Marketing Rules (managerOrAbove for CUD, all authenticated for R)
-- GET /api/marketing-rules, POST /api/marketing-rules, PUT /api/marketing-rules/:id, DELETE /api/marketing-rules/:id
-
-### Other
-- POST /api/webhook/line, POST /api/sandbox/chat, POST /api/sandbox/upload, GET /api/messages/search?q=, GET/POST/DELETE /api/knowledge-files
-
-## Key Features (V6)
-1. **3-Tier RBAC**: super_admin, marketing_manager, cs_agent with granular access control
-2. **Custom Date Range Picker**: Calendar popover for arbitrary date ranges in analytics
-3. **一頁商店 API Integration**: Triple-mode order lookup — (1) strict global_order_id direct query, (2) product + phone search via page_id, (3) date-range + email/phone/name filter with 31-day cap; AI prompt v4.1 enforces 3-stage escalation with fuzzy product matching: ask order ID → ask product+phone (AI auto-matches from cached catalog using semantic understanding, handles typos/slang/nicknames, disambiguation when ambiguous) → human transfer only as last resort; pages catalog auto-synced hourly and dynamically injected into system prompt before every OpenAI call
-4. **Order Lookup Panel**: Right-side tabs in chat with customer info + order search
-5. **VIP Badges**: Crown icon badges for VIP contacts (level 1-3)
-6. **Team CRUD with 3-Tier Roles**: Add/edit/delete with role descriptions
-7. **White-label Branding**: Custom system_name and logo_url
-8. **Pin/Star Contacts**: Pinned contacts sort to top
-9. **Analytics BI Dashboard**: 4 KPI cards, bar chart, pie chart, AI insights
-10. **LINE Welcome Settings**: Welcome message + 3 quick buttons
-11. **Smart Human-Transfer Keywords**: Comma-separated keywords with tag preview
-12. **Marketing Rules Hub**: Full CRUD for keyword→pitch→URL rules
-13. **Real OpenAI Integration**: gpt-5.2 sandbox with Function Calling (3 tools: lookup_order_by_id, lookup_order_by_product_and_phone, lookup_order_by_date_and_contact) + full conversation history (up to 20 turns) + tool-calling loop (max 3 rounds) + production AI reply + sandbox file upload (image→OpenAI Vision analysis, video→simulated human transfer)
-14. **Real API Test Connection**: POST /api/settings/test-connection for OpenAI (chat completion), LINE (bot info API), 一頁商店 (order API) — super_admin only, with detailed success/failure messages
-15. **LINE CSAT Flex Message**: Manual ⭐ button in chat toolbar sends LINE Flex Message with 5-star postback rating buttons; POST /api/contacts/:id/send-rating endpoint; webhook parses postback action=rate&ticket_id&score, stores cs_rating, replies acknowledgement via Reply API; rating displayed in contact info panel; button auto-disabled when cs_rating exists
-16. **Chat Image Upload**: Attachment button (Paperclip icon) + drag & drop with visual overlay + file preview thumbnails with remove; uploads via POST /api/chat-upload, images rendered in chat bubbles; LINE Messaging API image push support
-17. **Messages Schema**: message_type (text/image/file) + image_url columns with auto-migration
-18. **Chat Message Search**: Search contacts AND message content simultaneously; GET /api/messages/search?q=keyword (SQLite LIKE, max 50 results); debounced 400ms; shows contacts section + message results section; clicking result navigates to that contact
-19. **Sandbox File Upload**: POST /api/sandbox/upload (multipart, MIME+extension validation); images→OpenAI Vision analysis; videos→simulated human-transfer response; file preview with send/cancel
-
-## Sensitive Settings (super_admin only)
-openai_api_key, line_channel_secret, line_channel_access_token, superlanding_merchant_no, superlanding_access_key
-
-## Webhook (POST /api/webhook/line)
-- Signature verification via HMAC-SHA256 (x-line-signature header)
-- Idempotency: processed_events table deduplicates by webhookEventId
-- Handles: text messages, postback (rating), image (download via LINE Content API → save to uploads/ → OpenAI Vision analysis), video (download → save → auto-flag needs_human), sticker/audio/location/file (recorded as placeholder), follow/unfollow/join/leave (silently ignored)
-- Rating postback: action=rate&ticket_id={id}&score={1-5} → updates cs_rating + reply API
-- Image analysis: downloadLineContent() fetches binary from LINE → saves to uploads/ → analyzeImageWithAI() reads file as base64 → sends to gpt-5.2 with vision payload → stores AI reply + pushes to LINE
-- Video handling: downloads video → stores as message_type="video" → auto-replies "轉交專人檢視" → sets needs_human=1
-
-## Middleware Chain
-- authMiddleware: checks session.authenticated
-- superAdminOnly: checks session.userRole === "super_admin"
-- managerOrAbove: checks session.userRole in ["super_admin", "marketing_manager"]
+## External Dependencies
+- **OpenAI API**: Utilized for AI capabilities, including chat completion (gpt-5.2), function calling, and vision analysis.
+- **一頁商店 (Super Landing) API**: Integrated for order lookup and product page catalog retrieval (https://api.super-landing.com).
+- **LINE Messaging API**: Used for handling LINE webhooks, sending messages, and content retrieval (images, videos).
+- **React (Vite)**: Frontend framework and build tool.
+- **Express.js**: Backend web application framework.
+- **SQLite**: Database management system.
+- **Tailwind CSS**: Utility-first CSS framework for styling.
+- **shadcn/ui**: UI component library.
+- **recharts**: Charting library for data visualization.
+- **react-day-picker, date-fns**: For date selection and manipulation.
+- **better-sqlite3**: SQLite driver for Node.js.
+- **multer**: Middleware for handling `multipart/form-data`.
+- **xlsx**: Library for reading and writing Excel files.
+- **jszip**: Library for creating, reading, and editing .zip files.

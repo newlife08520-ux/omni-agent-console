@@ -604,6 +604,7 @@ export default function ChatPage() {
                             <Star className={`w-3.5 h-3.5 transition-colors ${contact.is_pinned ? "fill-amber-400 text-amber-400" : "text-stone-300 hover:text-amber-400"}`} />
                           </button>
                           <span className="text-sm font-semibold text-stone-800 truncate">{contact.display_name}</span>
+                          <span className={`shrink-0 text-[9px] font-bold px-1 py-0.5 rounded ${contact.platform === "messenger" ? "bg-blue-100 text-blue-600" : "bg-green-100 text-green-600"}`} data-testid={`badge-platform-${contact.id}`}>{contact.platform === "messenger" ? "FB" : "LINE"}</span>
                           {contact.vip_level > 0 && <VipBadge level={contact.vip_level} />}
                         </div>
                         {contact.last_message_at && <span className="text-[11px] text-stone-400 shrink-0">{formatTime(contact.last_message_at)}</span>}
@@ -657,8 +658,9 @@ export default function ChatPage() {
                     {selectedContact && selectedContact.vip_level > 0 && <VipBadge level={selectedContact.vip_level} />}
                   </div>
                   <div className="flex items-center gap-1.5">
-                    <Circle className="w-2 h-2 fill-emerald-500 text-emerald-500" />
-                    <span className="text-[11px] text-stone-400">LINE</span>
+                    <Circle className={`w-2 h-2 ${selectedContact?.platform === "messenger" ? "fill-blue-500 text-blue-500" : "fill-emerald-500 text-emerald-500"}`} />
+                    <span className="text-[11px] text-stone-400" data-testid="text-contact-platform">{selectedContact?.platform === "messenger" ? "Facebook Messenger" : "LINE"}</span>
+                    {selectedContact?.brand_name && <span className="text-[11px] text-stone-400">| {selectedContact.brand_name}</span>}
                     {selectedContact && selectedContact.order_count > 0 && (
                       <span className="text-[11px] text-stone-400 ml-1">| {selectedContact.order_count} 筆訂單 · ${selectedContact.total_spent.toLocaleString()}</span>
                     )}
@@ -824,8 +826,20 @@ export default function ChatPage() {
                       <div className="space-y-2">
                         <div className="flex justify-between text-xs">
                           <span className="text-stone-500">平台</span>
-                          <span className="text-stone-800">LINE</span>
+                          <span className={`font-medium ${selectedContact?.platform === "messenger" ? "text-blue-600" : "text-green-600"}`} data-testid="text-info-platform">{selectedContact?.platform === "messenger" ? "Facebook Messenger" : "LINE"}</span>
                         </div>
+                        {selectedContact?.brand_name && (
+                          <div className="flex justify-between text-xs">
+                            <span className="text-stone-500">品牌</span>
+                            <span className="text-stone-800" data-testid="text-info-brand">{selectedContact.brand_name}</span>
+                          </div>
+                        )}
+                        {selectedContact?.channel_name && (
+                          <div className="flex justify-between text-xs">
+                            <span className="text-stone-500">渠道</span>
+                            <span className="text-stone-800" data-testid="text-info-channel">{selectedContact.channel_name}</span>
+                          </div>
+                        )}
                         <div className="flex justify-between text-xs">
                           <span className="text-stone-500">平台 ID</span>
                           <span className="text-stone-800 font-mono text-[11px] truncate max-w-[140px]">{selectedContact?.platform_user_id}</span>

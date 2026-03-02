@@ -8,6 +8,23 @@ import multer from "multer";
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
+
+function fixMulterFilename(originalname: string): string {
+  try {
+    const decoded = Buffer.from(originalname, 'latin1').toString('utf8');
+    if (/[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]/.test(decoded) || decoded !== originalname) {
+      return decoded;
+    }
+  } catch {}
+  return originalname;
+}
+
+function stripBOM(content: string): string {
+  if (content.charCodeAt(0) === 0xFEFF) {
+    return content.slice(1);
+  }
+  return content;
+}
 import OpenAI from "openai";
 import { parseFileContent, isImageFile } from "./file-parser";
 
@@ -722,7 +739,7 @@ export async function registerRoutes(
   app.post("/api/chat-upload", authMiddleware, chatUpload.single("file"), (req, res) => {
     if (!req.file) return res.status(400).json({ message: "僅支援 JPG, PNG, GIF, WebP 圖片格式，檔案大小不超過 10MB" });
     const fileUrl = `/uploads/${req.file.filename}`;
-    return res.json({ url: fileUrl, filename: req.file.originalname, size: req.file.size });
+    return res.json({ url: fileUrl, filename: fixMulterFilename(req.file.originalname), size: req.file.size });
   });
 
   app.get("/api/contacts/:id/orders", authMiddleware, async (req, res) => {
@@ -1766,7 +1783,9 @@ export async function registerRoutes(
       return res.status(400).json({ success: false, message: "請先至系統設定填寫有效的 OpenAI API Key" });
     }
 
-    const ext = path.extname(req.file.originalname).toLowerCase();
+    const decodedFilename = fixMulterFilename(req.file.originalname);
+    console.log("[沙盒上傳] 上傳的原始檔名:", decodedFilename);
+    const ext = path.extname(decodedFilename).toLowerCase();
     const isVideo = [".mp4", ".mov", ".avi", ".webm"].includes(ext);
     const isImage = [".jpg", ".jpeg", ".png", ".gif", ".webp"].includes(ext);
     const fileUrl = `/uploads/${req.file.filename}`;
@@ -1777,7 +1796,7 @@ export async function registerRoutes(
     if (isVideo) {
       return res.json({
         success: true,
-        reply: `已收到您上傳的影片（${req.file.originalname}）。\n\n在實際 LINE 對話中，系統會自動將影片訊息標記為「需要真人客服」，並通知專人檢視。\n\n📋 模擬結果：\n- 檔案類型：影片\n- 動作：自動轉接真人客服\n- 回覆：「已收到您的影片，將為您轉交專人檢視。」`,
+        reply: `已收到您上傳的影片（${decodedFilename}）。\n\n在實際 LINE 對話中，系統會自動將影片訊息標記為「需要真人客服」，並通知專人檢視。\n\n📋 模擬結果：\n- 檔案類型：影片\n- 動作：自動轉接真人客服\n- 回覆：「已收到您的影片，將為您轉交專人檢視。」`,
         fileUrl,
         fileType: "video",
       });
@@ -1835,8 +1854,10 @@ export async function registerRoutes(
 
   app.post("/api/knowledge-files", authMiddleware, managerOrAbove, upload.single("file"), async (req, res) => {
     if (!req.file) return res.status(400).json({ message: "未上傳檔案，或檔案格式不支援。支援格式：.txt, .csv, .pdf, .docx, .xlsx, .md。圖片檔案請上傳至圖片素材庫。" });
-    const ext = path.extname(req.file.originalname).toLowerCase();
-    if (isImageFile(req.file.originalname)) {
+    const decodedFilename = fixMulterFilename(req.file.originalname);
+    console.log("[知識庫] 上傳的原始檔名:", decodedFilename);
+    const ext = path.extname(decodedFilename).toLowerCase();
+    if (isImageFile(decodedFilename)) {
       const filePath = path.join(uploadDir, req.file.filename);
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
       return res.status(400).json({ message: "圖片檔案不可上傳至知識庫。如需上傳圖片素材，請至「圖片素材庫」。" });
@@ -1845,15 +1866,16 @@ export async function registerRoutes(
     let content: string | undefined;
     try {
       const filePath = path.join(uploadDir, req.file.filename);
-      content = await parseFileContent(filePath, req.file.originalname);
+      content = await parseFileContent(filePath, decodedFilename);
+      if (content) content = stripBOM(content);
       if (content && content.length > 500000) {
         content = content.substring(0, 500000) + "\n\n[內容已截斷，原始檔案過大]";
       }
     } catch (err) {
-      console.error(`[知識庫] 檔案解析失敗 ${req.file.originalname}:`, err);
-      content = `[檔案解析失敗: ${req.file.originalname}]`;
+      console.error(`[知識庫] 檔案解析失敗 ${decodedFilename}:`, err);
+      content = `[檔案解析失敗: ${decodedFilename}]`;
     }
-    const file = storage.createKnowledgeFile(req.file.filename, req.file.originalname, req.file.size, brandId, content || undefined);
+    const file = storage.createKnowledgeFile(req.file.filename, decodedFilename, req.file.size, brandId, content || undefined);
     return res.json(file);
   });
 
@@ -1876,11 +1898,13 @@ export async function registerRoutes(
 
   app.post("/api/image-assets", authMiddleware, managerOrAbove, imageAssetUpload.single("file"), (req, res) => {
     if (!req.file) return res.status(400).json({ message: "未上傳檔案或格式不支援。僅支援 .jpg, .jpeg, .png, .gif, .webp" });
+    const decodedFilename = fixMulterFilename(req.file.originalname);
+    console.log("[圖片素材] 上傳的原始檔名:", decodedFilename);
     const brandId = req.body.brand_id ? parseInt(req.body.brand_id) : undefined;
-    const displayName = req.body.display_name || req.file.originalname;
+    const displayName = req.body.display_name ? fixMulterFilename(req.body.display_name) : decodedFilename;
     const description = req.body.description || "";
     const keywords = req.body.keywords || "";
-    const asset = storage.createImageAsset(req.file.filename, req.file.originalname, displayName, description, keywords, req.file.size, req.file.mimetype, brandId);
+    const asset = storage.createImageAsset(req.file.filename, decodedFilename, displayName, description, keywords, req.file.size, req.file.mimetype, brandId);
     return res.json(asset);
   });
 
