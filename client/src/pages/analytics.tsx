@@ -1,18 +1,22 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend, AreaChart, Area } from "recharts";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Calendar } from "@/components/ui/calendar";
 import { Button } from "@/components/ui/button";
-import { TrendingUp, CheckCircle2, Users, Clock, Brain, Flame, Lightbulb, BarChart3, CalendarDays, ShieldCheck, ArrowRightLeft, Search, Tag, ShoppingBag, Monitor, Activity, ShieldAlert, Copy, Lock, PackageX, Timer, ArrowRight } from "lucide-react";
+import {
+  TrendingUp, CheckCircle2, Users, Brain, Flame, Lightbulb, BarChart3, CalendarDays,
+  ShieldCheck, ArrowRightLeft, Search, Tag, ShoppingBag, Monitor, Activity, ShieldAlert,
+  Copy, Lock, PackageX, Timer, ArrowRight, MessageSquare, Bot, Headphones,
+  AlertTriangle, Hash, ThumbsDown, Package,
+} from "lucide-react";
 import { format } from "date-fns";
 import { zhTW } from "date-fns/locale/zh-TW";
 import type { AnalyticsData } from "@shared/schema";
 
-const PIE_COLORS = ["#059669", "#d97706", "#7c3aed", "#0284c7", "#e11d48", "#ea580c", "#0d9488"];
-const PLATFORM_COLORS = ["#06b6d4", "#8b5cf6"];
-const ISSUE_TYPE_COLORS_CHART = ["#059669", "#d97706", "#7c3aed", "#0284c7", "#e11d48", "#ea580c", "#78716c"];
+const PIE_COLORS = ["#059669", "#d97706", "#7c3aed", "#0284c7", "#e11d48", "#ea580c", "#0d9488", "#64748b"];
+const AREA_COLORS = { user: "#0284c7", ai: "#059669", admin: "#d97706" };
 
 const RANGE_LABELS: Record<string, string> = {
   today: "今日",
@@ -22,7 +26,7 @@ const RANGE_LABELS: Record<string, string> = {
 };
 
 export default function AnalyticsPage() {
-  const [range, setRange] = useState("today");
+  const [range, setRange] = useState("30d");
   const [customStart, setCustomStart] = useState<Date | undefined>(undefined);
   const [customEnd, setCustomEnd] = useState<Date | undefined>(undefined);
   const [showStartCal, setShowStartCal] = useState(false);
@@ -68,11 +72,11 @@ export default function AnalyticsPage() {
     : RANGE_LABELS[range] || "今日";
 
   return (
-    <div className="p-6 max-w-6xl mx-auto space-y-6" data-testid="analytics-page">
+    <div className="p-6 max-w-[1200px] mx-auto space-y-5" data-testid="analytics-page">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-xl font-bold text-stone-800" data-testid="text-analytics-title">數據戰情室</h1>
-          <p className="text-sm text-stone-500 mt-1">即時監控客服績效與 AI 洞察分析</p>
+          <p className="text-sm text-stone-500 mt-0.5">即時監控客服績效與 AI 洞察分析</p>
         </div>
         <div className="flex items-center gap-2">
           <CalendarDays className="w-4 h-4 text-stone-400" />
@@ -87,7 +91,6 @@ export default function AnalyticsPage() {
               <SelectItem value="custom">自訂區間</SelectItem>
             </SelectContent>
           </Select>
-
           {range === "custom" && (
             <div className="flex items-center gap-1.5">
               <Popover open={showStartCal} onOpenChange={setShowStartCal}>
@@ -116,261 +119,246 @@ export default function AnalyticsPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-4 gap-4">
-        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="kpi-inbound">
-          <div className="flex items-center gap-2 mb-3">
-            <div className="w-10 h-10 rounded-xl bg-emerald-100 flex items-center justify-center"><TrendingUp className="w-5 h-5 text-emerald-600" /></div>
-            <span className="text-xs font-medium text-stone-500">{rangeLabel}總進線量</span>
-          </div>
-          <p className="text-3xl font-bold text-stone-800">{data.kpi.todayInbound}</p>
-          <p className="text-xs text-stone-400 mt-1">則訊息</p>
-        </div>
-        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="kpi-completion">
-          <div className="flex items-center gap-2 mb-3">
-            <div className="w-10 h-10 rounded-xl bg-sky-100 flex items-center justify-center"><CheckCircle2 className="w-5 h-5 text-sky-600" /></div>
-            <span className="text-xs font-medium text-stone-500">處理完成率</span>
-          </div>
-          <p className="text-3xl font-bold text-stone-800">{data.kpi.completionRate}%</p>
-          <p className="text-xs text-stone-400 mt-1">已處理 {data.kpi.completedCount} 則</p>
-        </div>
-        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="kpi-ai-rate">
-          <div className="flex items-center gap-2 mb-3">
-            <div className="w-10 h-10 rounded-xl bg-violet-100 flex items-center justify-center"><Users className="w-5 h-5 text-violet-600" /></div>
-            <span className="text-xs font-medium text-stone-500">AI 攔截率</span>
-          </div>
-          <p className="text-3xl font-bold text-stone-800">{data.kpi.aiInterceptRate}%</p>
-          <p className="text-xs text-stone-400 mt-1">AI 成功處理的對話比例</p>
-        </div>
-        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="kpi-frt">
-          <div className="flex items-center gap-2 mb-3">
-            <div className="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center"><Clock className="w-5 h-5 text-amber-600" /></div>
-            <span className="text-xs font-medium text-stone-500">平均首次回覆時間</span>
-          </div>
-          <div className="flex items-baseline gap-2">
-            <p className="text-lg font-bold text-stone-800">AI {data.kpi.avgFrtAi}</p>
-          </div>
-          <p className="text-xs text-stone-400 mt-1">真人 {data.kpi.avgFrtHuman}</p>
-        </div>
+      <div className="grid grid-cols-4 gap-3">
+        <KpiCard icon={<MessageSquare className="w-5 h-5 text-emerald-600" />} bg="bg-emerald-100" label={`${rangeLabel}客戶進線`} value={data.kpi.totalInboundMessages} unit="則訊息" testId="kpi-inbound" />
+        <KpiCard icon={<Users className="w-5 h-5 text-sky-600" />} bg="bg-sky-100" label="活躍對話" value={data.kpi.activeContacts} sub={`總客戶 ${data.kpi.totalContacts} 位`} testId="kpi-active" />
+        <KpiCard icon={<CheckCircle2 className="w-5 h-5 text-violet-600" />} bg="bg-violet-100" label="處理完成率" value={`${data.kpi.completionRate}%`} sub={`已解決 ${data.kpi.resolvedCount} 位`} testId="kpi-completion" />
+        <KpiCard icon={<Bot className="w-5 h-5 text-teal-600" />} bg="bg-teal-100" label="AI 攔截率" value={`${data.kpi.aiInterceptRate}%`} sub="AI 獨立處理的對話比例" testId="kpi-ai-rate" />
       </div>
+
+      <div className="grid grid-cols-4 gap-3">
+        <KpiCard icon={<Headphones className="w-5 h-5 text-amber-600" />} bg="bg-amber-100" label="轉人工率" value={`${data.kpi.humanHandoffRate}%`} sub={`${data.kpi.needsHumanCount} 位需人工`} testId="kpi-human-rate"
+          highlight={data.kpi.humanHandoffRate > 30 ? "text-amber-600" : undefined} />
+        <KpiCard icon={<ShieldCheck className="w-5 h-5 text-emerald-600" />} bg="bg-emerald-100" label="AI 解決率" value={`${data.kpi.aiResolutionRate}%`} sub="AI 自主完成的比例" testId="kpi-ai-resolution"
+          highlight={data.kpi.aiResolutionRate > 70 ? "text-emerald-600" : undefined} />
+        <KpiCard icon={<Search className="w-5 h-5 text-sky-600" />} bg="bg-sky-100" label="查單成功率" value={`${data.kpi.orderQuerySuccessRate}%`} sub="訂單查詢成功比例" testId="kpi-order-query" />
+        <KpiCard icon={<Hash className="w-5 h-5 text-stone-500" />} bg="bg-stone-100" label="每人平均訊息" value={data.kpi.avgMessagesPerContact} sub="則/客戶" testId="kpi-avg-msg"
+          highlight={data.kpi.avgMessagesPerContact > 6 ? "text-amber-600" : undefined} />
+      </div>
+
+      {data.dailyVolume.length > 1 && (
+        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
+          <div className="flex items-center gap-2 mb-4">
+            <div className="w-8 h-8 rounded-xl bg-sky-100 flex items-center justify-center"><TrendingUp className="w-4 h-4 text-sky-600" /></div>
+            <div>
+              <span className="text-sm font-semibold text-stone-800">每日訊息量趨勢</span>
+              <p className="text-xs text-stone-500">依日期查看客戶、AI、真人訊息量變化</p>
+            </div>
+          </div>
+          <div className="h-[240px]" data-testid="chart-daily-volume">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={data.dailyVolume} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e7e5e4" />
+                <XAxis dataKey="date" tick={{ fontSize: 11, fill: "#78716c" }} tickFormatter={(v: string) => v.slice(5)} />
+                <YAxis tick={{ fontSize: 11, fill: "#78716c" }} />
+                <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #e7e5e4", fontSize: "13px" }}
+                  labelFormatter={(v: string) => `日期：${v}`} />
+                <Area type="monotone" dataKey="user" name="客戶" stroke={AREA_COLORS.user} fill={AREA_COLORS.user} fillOpacity={0.15} strokeWidth={2} />
+                <Area type="monotone" dataKey="ai" name="AI 回覆" stroke={AREA_COLORS.ai} fill={AREA_COLORS.ai} fillOpacity={0.15} strokeWidth={2} />
+                <Area type="monotone" dataKey="admin" name="真人回覆" stroke={AREA_COLORS.admin} fill={AREA_COLORS.admin} fillOpacity={0.15} strokeWidth={2} />
+                <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: "12px" }} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-3 gap-4">
-        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="kpi-ai-resolution">
-          <div className="flex items-center gap-2 mb-3">
-            <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${(data.kpi.aiResolutionRate ?? 0) > 70 ? "bg-emerald-100" : "bg-stone-100"}`}>
-              <ShieldCheck className={`w-5 h-5 ${(data.kpi.aiResolutionRate ?? 0) > 70 ? "text-emerald-600" : "text-stone-500"}`} />
-            </div>
-            <span className="text-xs font-medium text-stone-500">AI 解決率</span>
-          </div>
-          <p className={`text-3xl font-bold ${(data.kpi.aiResolutionRate ?? 0) > 70 ? "text-emerald-600" : "text-stone-800"}`} data-testid="text-ai-resolution-rate">{data.kpi.aiResolutionRate ?? 0}%</p>
-          <p className="text-xs text-stone-400 mt-1">AI 自主解決問題的比例</p>
-        </div>
-        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="kpi-transfer-rate">
-          <div className="flex items-center gap-2 mb-3">
-            <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${(data.kpi.transferRate ?? 0) > 30 ? "bg-amber-100" : "bg-stone-100"}`}>
-              <ArrowRightLeft className={`w-5 h-5 ${(data.kpi.transferRate ?? 0) > 30 ? "text-amber-600" : "text-stone-500"}`} />
-            </div>
-            <span className="text-xs font-medium text-stone-500">轉人工率</span>
-          </div>
-          <p className={`text-3xl font-bold ${(data.kpi.transferRate ?? 0) > 30 ? "text-amber-600" : "text-stone-800"}`} data-testid="text-transfer-rate">{data.kpi.transferRate ?? 0}%</p>
-          <p className="text-xs text-stone-400 mt-1">需轉交人工處理的比例</p>
-        </div>
-        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="kpi-order-query-success">
-          <div className="flex items-center gap-2 mb-3">
-            <div className="w-10 h-10 rounded-xl bg-sky-100 flex items-center justify-center">
-              <Search className="w-5 h-5 text-sky-600" />
-            </div>
-            <span className="text-xs font-medium text-stone-500">查單成功率</span>
-          </div>
-          <p className="text-3xl font-bold text-stone-800" data-testid="text-order-query-success-rate">{data.kpi.orderQuerySuccessRate ?? 0}%</p>
-          <p className="text-xs text-stone-400 mt-1">訂單查詢成功的比例</p>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 gap-4">
-        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
-          <div className="flex items-center gap-2 mb-4">
-            <div className="w-8 h-8 rounded-xl bg-emerald-100 flex items-center justify-center"><BarChart3 className="w-4 h-4 text-emerald-600" /></div>
-            <div>
-              <span className="text-sm font-semibold text-stone-800">{rangeLabel}績效比較</span>
-              <p className="text-xs text-stone-500">各客服專員解決案件數量</p>
-            </div>
-          </div>
-          <div className="h-[280px]" data-testid="chart-agent-performance">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={data.agentPerformance} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e7e5e4" />
-                <XAxis dataKey="name" tick={{ fontSize: 12, fill: "#78716c" }} />
-                <YAxis tick={{ fontSize: 12, fill: "#78716c" }} />
-                <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #e7e5e4", fontSize: "13px" }} />
-                <Bar dataKey="cases" fill="#059669" radius={[8, 8, 0, 0]} name="解決案件數" animationDuration={800} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-
-        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
-          <div className="flex items-center gap-2 mb-4">
-            <div className="w-8 h-8 rounded-xl bg-violet-100 flex items-center justify-center"><Brain className="w-4 h-4 text-violet-600" /></div>
-            <div>
-              <span className="text-sm font-semibold text-stone-800">客戶進線意圖分佈</span>
-              <p className="text-xs text-stone-500">{rangeLabel}各類型諮詢佔比</p>
-            </div>
-          </div>
-          <div className="h-[280px]" data-testid="chart-intent-distribution">
+        <ChartCard icon={<BarChart3 className="w-4 h-4 text-emerald-600" />} bg="bg-emerald-100" title="訊息類型分布" sub={`${rangeLabel}各角色訊息量`} testId="chart-message-split">
+          {data.messageSplit.length > 0 ? (
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
-                <Pie data={data.intentDistribution} cx="50%" cy="45%" innerRadius={55} outerRadius={90} paddingAngle={4} dataKey="value" nameKey="name" animationDuration={800}>
-                  {data.intentDistribution.map((_entry, index) => (
-                    <Cell key={`cell-${index}`} fill={PIE_COLORS[index % PIE_COLORS.length]} />
-                  ))}
+                <Pie data={data.messageSplit} cx="50%" cy="45%" innerRadius={45} outerRadius={80} paddingAngle={4} dataKey="value" nameKey="name" animationDuration={800}>
+                  {data.messageSplit.map((_e, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
                 </Pie>
-                <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #e7e5e4", fontSize: "13px" }} formatter={(value: number) => [`${value}%`, "佔比"]} />
-                <Legend verticalAlign="bottom" height={36} iconType="circle" iconSize={10} wrapperStyle={{ fontSize: "12px", paddingTop: "8px" }} formatter={(value: string) => <span className="text-stone-600">{value}</span>} />
+                <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #e7e5e4", fontSize: "13px" }} />
+                <Legend verticalAlign="bottom" height={36} iconType="circle" iconSize={8} wrapperStyle={{ fontSize: "11px", paddingTop: "8px" }} />
               </PieChart>
             </ResponsiveContainer>
-          </div>
-        </div>
+          ) : <EmptyChart />}
+        </ChartCard>
+
+        <ChartCard icon={<Brain className="w-4 h-4 text-violet-600" />} bg="bg-violet-100" title="客戶進線意圖" sub={`${rangeLabel}各類型佔比`} testId="chart-intent-distribution">
+          <ResponsiveContainer width="100%" height="100%">
+            <PieChart>
+              <Pie data={data.intentDistribution} cx="50%" cy="45%" innerRadius={45} outerRadius={80} paddingAngle={4} dataKey="value" nameKey="name" animationDuration={800}>
+                {data.intentDistribution.map((_e, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
+              </Pie>
+              <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #e7e5e4", fontSize: "13px" }} formatter={(v: number) => [`${v}%`, "佔比"]} />
+              <Legend verticalAlign="bottom" height={36} iconType="circle" iconSize={8} wrapperStyle={{ fontSize: "11px", paddingTop: "8px" }} />
+            </PieChart>
+          </ResponsiveContainer>
+        </ChartCard>
+
+        <ChartCard icon={<Monitor className="w-4 h-4 text-cyan-600" />} bg="bg-cyan-100" title="對話狀態分布" sub={`${rangeLabel}活躍對話當前狀態`} testId="chart-status-distribution">
+          {data.statusDistribution.length > 0 ? (
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={data.statusDistribution} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e7e5e4" />
+                <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#78716c" }} />
+                <YAxis tick={{ fontSize: 10, fill: "#78716c" }} />
+                <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #e7e5e4", fontSize: "13px" }} />
+                <Bar dataKey="value" fill="#7c3aed" radius={[6, 6, 0, 0]} name="對話數" animationDuration={800} />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : <EmptyChart />}
+        </ChartCard>
       </div>
 
       <div className="grid grid-cols-2 gap-4">
-        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
-          <div className="flex items-center gap-2 mb-4">
-            <div className="w-8 h-8 rounded-xl bg-rose-100 flex items-center justify-center"><Tag className="w-4 h-4 text-rose-600" /></div>
-            <div>
-              <span className="text-sm font-semibold text-stone-800">問題類型分布</span>
-              <p className="text-xs text-stone-500">{rangeLabel}各問題類型佔比</p>
-            </div>
-          </div>
-          <div className="h-[280px]" data-testid="chart-issue-type-distribution">
-            {data.issueTypeDistribution && data.issueTypeDistribution.length > 0 ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie data={data.issueTypeDistribution} cx="50%" cy="45%" innerRadius={55} outerRadius={90} paddingAngle={4} dataKey="value" nameKey="name" animationDuration={800}>
-                    {data.issueTypeDistribution.map((_entry, index) => (
-                      <Cell key={`issue-${index}`} fill={ISSUE_TYPE_COLORS_CHART[index % ISSUE_TYPE_COLORS_CHART.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #e7e5e4", fontSize: "13px" }} formatter={(value: number) => [`${value}%`, "佔比"]} />
-                  <Legend verticalAlign="bottom" height={36} iconType="circle" iconSize={10} wrapperStyle={{ fontSize: "12px", paddingTop: "8px" }} formatter={(value: string) => <span className="text-stone-600">{value}</span>} />
-                </PieChart>
-              </ResponsiveContainer>
-            ) : (
-              <div className="flex items-center justify-center h-full"><p className="text-sm text-stone-400">暫無數據</p></div>
-            )}
-          </div>
-        </div>
+        <ChartCard icon={<Tag className="w-4 h-4 text-rose-600" />} bg="bg-rose-100" title="問題類型分布" sub={`${rangeLabel}各問題類型`} testId="chart-issue-type">
+          {data.issueTypeDistribution.length > 0 ? (
+            <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                <Pie data={data.issueTypeDistribution} cx="50%" cy="45%" innerRadius={45} outerRadius={80} paddingAngle={4} dataKey="value" nameKey="name" animationDuration={800}>
+                  {data.issueTypeDistribution.map((_e, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
+                </Pie>
+                <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #e7e5e4", fontSize: "13px" }} />
+                <Legend verticalAlign="bottom" height={36} iconType="circle" iconSize={8} wrapperStyle={{ fontSize: "11px", paddingTop: "8px" }} />
+              </PieChart>
+            </ResponsiveContainer>
+          ) : <EmptyChart />}
+        </ChartCard>
 
-        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
-          <div className="flex items-center gap-2 mb-4">
-            <div className="w-8 h-8 rounded-xl bg-amber-100 flex items-center justify-center"><ShoppingBag className="w-4 h-4 text-amber-600" /></div>
-            <div>
-              <span className="text-sm font-semibold text-stone-800">訂單來源分布</span>
-              <p className="text-xs text-stone-500">{rangeLabel}各訂單來源佔比</p>
-            </div>
-          </div>
-          <div className="h-[280px]" data-testid="chart-order-source-distribution">
-            {data.orderSourceDistribution && data.orderSourceDistribution.length > 0 ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie data={data.orderSourceDistribution} cx="50%" cy="45%" innerRadius={55} outerRadius={90} paddingAngle={4} dataKey="value" nameKey="name" animationDuration={800}>
-                    {data.orderSourceDistribution.map((_entry, index) => (
-                      <Cell key={`source-${index}`} fill={PIE_COLORS[index % PIE_COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #e7e5e4", fontSize: "13px" }} formatter={(value: number) => [`${value}%`, "佔比"]} />
-                  <Legend verticalAlign="bottom" height={36} iconType="circle" iconSize={10} wrapperStyle={{ fontSize: "12px", paddingTop: "8px" }} formatter={(value: string) => <span className="text-stone-600">{value}</span>} />
-                </PieChart>
-              </ResponsiveContainer>
-            ) : (
-              <div className="flex items-center justify-center h-full"><p className="text-sm text-stone-400">暫無數據</p></div>
-            )}
-          </div>
-        </div>
+        <ChartCard icon={<ArrowRightLeft className="w-4 h-4 text-orange-600" />} bg="bg-orange-100" title="轉人工原因排行" sub={`${rangeLabel}主要轉人工原因`} testId="chart-transfer-reasons">
+          {data.transferReasons.length > 0 ? (
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={data.transferReasons} layout="vertical" margin={{ top: 5, right: 30, left: 80, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e7e5e4" />
+                <XAxis type="number" tick={{ fontSize: 11, fill: "#78716c" }} />
+                <YAxis type="category" dataKey="reason" tick={{ fontSize: 11, fill: "#78716c" }} width={75} />
+                <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #e7e5e4", fontSize: "13px" }} />
+                <Bar dataKey="count" fill="#ea580c" radius={[0, 6, 6, 0]} name="次數" animationDuration={800} />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : <EmptyChart />}
+        </ChartCard>
       </div>
 
       <div className="grid grid-cols-2 gap-4">
-        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
-          <div className="flex items-center gap-2 mb-4">
-            <div className="w-8 h-8 rounded-xl bg-orange-100 flex items-center justify-center"><ArrowRightLeft className="w-4 h-4 text-orange-600" /></div>
-            <div>
-              <span className="text-sm font-semibold text-stone-800">轉人工原因排行</span>
-              <p className="text-xs text-stone-500">{rangeLabel}主要轉人工處理原因</p>
-            </div>
-          </div>
-          <div className="h-[280px]" data-testid="chart-transfer-reasons">
-            {data.transferReasons && data.transferReasons.length > 0 ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={data.transferReasons} layout="vertical" margin={{ top: 5, right: 30, left: 80, bottom: 5 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e7e5e4" />
-                  <XAxis type="number" tick={{ fontSize: 12, fill: "#78716c" }} />
-                  <YAxis type="category" dataKey="reason" tick={{ fontSize: 12, fill: "#78716c" }} width={75} />
-                  <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #e7e5e4", fontSize: "13px" }} />
-                  <Bar dataKey="count" fill="#ea580c" radius={[0, 8, 8, 0]} name="次數" animationDuration={800} />
-                </BarChart>
-              </ResponsiveContainer>
-            ) : (
-              <div className="flex items-center justify-center h-full"><p className="text-sm text-stone-400">暫無數據</p></div>
-            )}
-          </div>
-        </div>
+        <ChartCard icon={<ShoppingBag className="w-4 h-4 text-amber-600" />} bg="bg-amber-100" title="訂單來源分布" sub={`${rangeLabel}各訂單來源`} testId="chart-order-source">
+          {data.orderSourceDistribution.length > 0 ? (
+            <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                <Pie data={data.orderSourceDistribution} cx="50%" cy="45%" innerRadius={45} outerRadius={80} paddingAngle={4} dataKey="value" nameKey="name" animationDuration={800}>
+                  {data.orderSourceDistribution.map((_e, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
+                </Pie>
+                <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #e7e5e4", fontSize: "13px" }} />
+                <Legend verticalAlign="bottom" height={36} iconType="circle" iconSize={8} wrapperStyle={{ fontSize: "11px", paddingTop: "8px" }} />
+              </PieChart>
+            </ResponsiveContainer>
+          ) : <EmptyChart />}
+        </ChartCard>
 
+        <ChartCard icon={<Monitor className="w-4 h-4 text-cyan-600" />} bg="bg-cyan-100" title="平台來源分布" sub={`${rangeLabel} LINE vs Messenger`} testId="chart-platform">
+          {data.platformDistribution.length > 0 ? (
+            <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                <Pie data={data.platformDistribution} cx="50%" cy="45%" innerRadius={45} outerRadius={80} paddingAngle={4} dataKey="value" nameKey="name" animationDuration={800}>
+                  {data.platformDistribution.map((_e, i) => <Cell key={i} fill={["#06b6d4", "#8b5cf6"][i % 2]} />)}
+                </Pie>
+                <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #e7e5e4", fontSize: "13px" }} />
+                <Legend verticalAlign="bottom" height={36} iconType="circle" iconSize={8} wrapperStyle={{ fontSize: "11px", paddingTop: "8px" }} />
+              </PieChart>
+            </ResponsiveContainer>
+          ) : <EmptyChart />}
+        </ChartCard>
+      </div>
+
+      {data.topKeywords.length > 0 && (
         <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
           <div className="flex items-center gap-2 mb-4">
-            <div className="w-8 h-8 rounded-xl bg-cyan-100 flex items-center justify-center"><Monitor className="w-4 h-4 text-cyan-600" /></div>
+            <div className="w-8 h-8 rounded-xl bg-indigo-100 flex items-center justify-center"><Search className="w-4 h-4 text-indigo-600" /></div>
             <div>
-              <span className="text-sm font-semibold text-stone-800">平台來源分布</span>
-              <p className="text-xs text-stone-500">{rangeLabel} LINE vs Messenger 佔比</p>
+              <span className="text-sm font-semibold text-stone-800">熱門關鍵字排行</span>
+              <p className="text-xs text-stone-500">客戶訊息中最常出現的關鍵字</p>
             </div>
           </div>
-          <div className="h-[280px]" data-testid="chart-platform-distribution">
-            {data.platformDistribution && data.platformDistribution.length > 0 ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie data={data.platformDistribution} cx="50%" cy="45%" innerRadius={55} outerRadius={90} paddingAngle={4} dataKey="value" nameKey="name" animationDuration={800}>
-                    {data.platformDistribution.map((_entry, index) => (
-                      <Cell key={`platform-${index}`} fill={PLATFORM_COLORS[index % PLATFORM_COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #e7e5e4", fontSize: "13px" }} formatter={(value: number) => [`${value}%`, "佔比"]} />
-                  <Legend verticalAlign="bottom" height={36} iconType="circle" iconSize={10} wrapperStyle={{ fontSize: "12px", paddingTop: "8px" }} formatter={(value: string) => <span className="text-stone-600">{value}</span>} />
-                </PieChart>
-              </ResponsiveContainer>
-            ) : (
-              <div className="flex items-center justify-center h-full"><p className="text-sm text-stone-400">暫無數據</p></div>
-            )}
+          <div className="flex flex-wrap gap-2" data-testid="section-top-keywords">
+            {data.topKeywords.map((kw, i) => (
+              <span key={i} className="inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full border border-stone-200 bg-stone-50 text-stone-700"
+                data-testid={`keyword-${i}`}>
+                <span className="w-5 h-5 rounded-full bg-indigo-100 text-indigo-600 text-xs flex items-center justify-center font-semibold">{i + 1}</span>
+                {kw.keyword}
+                <span className="text-xs text-stone-400 ml-0.5">({kw.count})</span>
+              </span>
+            ))}
           </div>
         </div>
-      </div>
+      )}
 
       <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
         <div className="flex items-center gap-2 mb-5">
           <div className="w-8 h-8 rounded-xl bg-sky-100 flex items-center justify-center"><Brain className="w-4 h-4 text-sky-600" /></div>
           <div>
-            <span className="text-sm font-semibold text-stone-800">AI 顧客語意分析報告</span>
-            <p className="text-xs text-stone-500">由 AI 自動彙總本週客戶對話趨勢</p>
+            <span className="text-sm font-semibold text-stone-800">AI 智慧營運報告</span>
+            <p className="text-xs text-stone-500">{rangeLabel}客戶對話趨勢、痛點、商品熱度與優化建議</p>
           </div>
         </div>
-        <div className="grid grid-cols-2 gap-5">
-          <div className="bg-red-50/50 rounded-2xl border border-red-100 p-4" data-testid="section-pain-points">
+
+        <div className="grid grid-cols-2 gap-4 mb-4">
+          {data.aiInsights.hotProducts.length > 0 && (
+            <div className="bg-amber-50/60 rounded-xl border border-amber-100 p-4" data-testid="section-hot-products">
+              <div className="flex items-center gap-2 mb-3">
+                <Package className="w-4 h-4 text-amber-600" />
+                <span className="text-sm font-semibold text-amber-800">熱門詢問商品</span>
+              </div>
+              <div className="space-y-2">
+                {data.aiInsights.hotProducts.map((p, i) => (
+                  <div key={i} className="flex items-center justify-between" data-testid={`hot-product-${i}`}>
+                    <div className="flex items-center gap-2">
+                      <span className="w-5 h-5 rounded-full bg-amber-200 text-amber-700 text-xs flex items-center justify-center font-semibold">{i + 1}</span>
+                      <span className="text-sm text-stone-700">{p.name}</span>
+                    </div>
+                    <span className="text-xs text-stone-500 bg-amber-100 px-2 py-0.5 rounded-full">{p.mentions} 次提及</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {data.aiInsights.customerConcerns.length > 0 && (
+            <div className="bg-rose-50/60 rounded-xl border border-rose-100 p-4" data-testid="section-customer-concerns">
+              <div className="flex items-center gap-2 mb-3">
+                <ThumbsDown className="w-4 h-4 text-rose-500" />
+                <span className="text-sm font-semibold text-rose-800">客戶在意的點</span>
+              </div>
+              <div className="space-y-2">
+                {data.aiInsights.customerConcerns.map((c, i) => (
+                  <div key={i} className="flex items-center justify-between" data-testid={`concern-${i}`}>
+                    <div className="flex items-center gap-2">
+                      <span className="w-5 h-5 rounded-full bg-rose-200 text-rose-700 text-xs flex items-center justify-center font-semibold">{i + 1}</span>
+                      <span className="text-sm text-stone-700">{c.concern}</span>
+                    </div>
+                    <span className="text-xs text-stone-500 bg-rose-100 px-2 py-0.5 rounded-full">{c.count} 次</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
+          <div className="bg-red-50/50 rounded-xl border border-red-100 p-4" data-testid="section-pain-points">
             <div className="flex items-center gap-2 mb-3">
               <Flame className="w-4 h-4 text-red-500" />
-              <span className="text-sm font-semibold text-red-700">本週三大客訴痛點</span>
+              <span className="text-sm font-semibold text-red-700">痛點與風險</span>
             </div>
-            <div className="space-y-3">
+            <div className="space-y-2.5">
               {data.aiInsights.painPoints.map((point, i) => (
                 <div key={i} className="flex gap-2">
-                  <span className="shrink-0 w-5 h-5 rounded-full bg-red-100 text-red-600 text-xs flex items-center justify-center font-semibold">{i + 1}</span>
+                  <AlertTriangle className="w-4 h-4 text-red-400 mt-0.5 shrink-0" />
                   <p className="text-sm text-stone-700 leading-relaxed">{point}</p>
                 </div>
               ))}
             </div>
           </div>
-          <div className="bg-emerald-50/50 rounded-2xl border border-emerald-100 p-4" data-testid="section-suggestions">
+          <div className="bg-emerald-50/50 rounded-xl border border-emerald-100 p-4" data-testid="section-suggestions">
             <div className="flex items-center gap-2 mb-3">
               <Lightbulb className="w-4 h-4 text-emerald-600" />
               <span className="text-sm font-semibold text-emerald-700">營運優化建議</span>
             </div>
-            <div className="space-y-3">
+            <div className="space-y-2.5">
               {data.aiInsights.suggestions.map((suggestion, i) => (
                 <div key={i} className="flex gap-2">
                   <span className="shrink-0 w-5 h-5 rounded-full bg-emerald-100 text-emerald-600 text-xs flex items-center justify-center font-semibold">{i + 1}</span>
@@ -384,7 +372,7 @@ export default function AnalyticsPage() {
 
       {healthData && (
         <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="section-system-health">
-          <div className="flex items-center gap-2 mb-5">
+          <div className="flex items-center gap-2 mb-4">
             <div className="w-8 h-8 rounded-xl bg-rose-100 flex items-center justify-center"><Activity className="w-4 h-4 text-rose-600" /></div>
             <div>
               <span className="text-sm font-semibold text-stone-800">系統健康監控</span>
@@ -394,45 +382,13 @@ export default function AnalyticsPage() {
               <span className="ml-auto text-xs text-emerald-600 font-medium bg-emerald-50 px-2.5 py-1 rounded-full" data-testid="text-health-ok">一切正常</span>
             )}
           </div>
-
-          <div className="grid grid-cols-5 gap-3 mb-5">
-            <div className="rounded-xl border border-stone-100 p-3 text-center" data-testid="health-sig-fails">
-              <div className="flex items-center justify-center mb-1.5">
-                <ShieldAlert className="w-4 h-4 text-red-400" />
-              </div>
-              <p className="text-2xl font-bold text-stone-800">{healthData.webhookSigFails}</p>
-              <p className="text-xs text-stone-500 mt-0.5">簽章失敗</p>
-            </div>
-            <div className="rounded-xl border border-stone-100 p-3 text-center" data-testid="health-dedupe-hits">
-              <div className="flex items-center justify-center mb-1.5">
-                <Copy className="w-4 h-4 text-amber-400" />
-              </div>
-              <p className="text-2xl font-bold text-stone-800">{healthData.dedupeHits}</p>
-              <p className="text-xs text-stone-500 mt-0.5">重複攔截</p>
-            </div>
-            <div className="rounded-xl border border-stone-100 p-3 text-center" data-testid="health-lock-timeouts">
-              <div className="flex items-center justify-center mb-1.5">
-                <Lock className="w-4 h-4 text-violet-400" />
-              </div>
-              <p className="text-2xl font-bold text-stone-800">{healthData.lockTimeouts}</p>
-              <p className="text-xs text-stone-500 mt-0.5">鎖逾時</p>
-            </div>
-            <div className="rounded-xl border border-stone-100 p-3 text-center" data-testid="health-order-fails">
-              <div className="flex items-center justify-center mb-1.5">
-                <PackageX className="w-4 h-4 text-orange-400" />
-              </div>
-              <p className="text-2xl font-bold text-stone-800">{healthData.orderLookupFails}</p>
-              <p className="text-xs text-stone-500 mt-0.5">查單失敗</p>
-            </div>
-            <div className="rounded-xl border border-stone-100 p-3 text-center" data-testid="health-timeout-escalations">
-              <div className="flex items-center justify-center mb-1.5">
-                <Timer className="w-4 h-4 text-sky-400" />
-              </div>
-              <p className="text-2xl font-bold text-stone-800">{healthData.timeoutEscalations}</p>
-              <p className="text-xs text-stone-500 mt-0.5">超時升級</p>
-            </div>
+          <div className="grid grid-cols-5 gap-3 mb-4">
+            <HealthCard icon={<ShieldAlert className="w-4 h-4 text-red-400" />} value={healthData.webhookSigFails} label="簽章失敗" testId="health-sig-fails" />
+            <HealthCard icon={<Copy className="w-4 h-4 text-amber-400" />} value={healthData.dedupeHits} label="重複攔截" testId="health-dedupe-hits" />
+            <HealthCard icon={<Lock className="w-4 h-4 text-violet-400" />} value={healthData.lockTimeouts} label="鎖逾時" testId="health-lock-timeouts" />
+            <HealthCard icon={<PackageX className="w-4 h-4 text-orange-400" />} value={healthData.orderLookupFails} label="查單失敗" testId="health-order-fails" />
+            <HealthCard icon={<Timer className="w-4 h-4 text-sky-400" />} value={healthData.timeoutEscalations} label="超時升級" testId="health-timeout-escalations" />
           </div>
-
           {healthData.transferReasonTop5.length > 0 && (
             <div className="bg-stone-50/50 rounded-xl border border-stone-100 p-4" data-testid="section-transfer-reasons">
               <div className="flex items-center gap-2 mb-3">
@@ -456,4 +412,50 @@ export default function AnalyticsPage() {
       )}
     </div>
   );
+}
+
+function KpiCard({ icon, bg, label, value, unit, sub, testId, highlight }: {
+  icon: React.ReactNode; bg: string; label: string; value: number | string; unit?: string; sub?: string; testId: string; highlight?: string;
+}) {
+  return (
+    <div className="bg-white rounded-2xl border border-stone-200 p-4 shadow-sm" data-testid={testId}>
+      <div className="flex items-center gap-2 mb-2">
+        <div className={`w-9 h-9 rounded-xl ${bg} flex items-center justify-center`}>{icon}</div>
+        <span className="text-xs font-medium text-stone-500">{label}</span>
+      </div>
+      <p className={`text-2xl font-bold ${highlight || "text-stone-800"}`}>{value}</p>
+      {(unit || sub) && <p className="text-xs text-stone-400 mt-0.5">{unit || sub}</p>}
+    </div>
+  );
+}
+
+function ChartCard({ icon, bg, title, sub, testId, children }: {
+  icon: React.ReactNode; bg: string; title: string; sub: string; testId: string; children: React.ReactNode;
+}) {
+  return (
+    <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
+      <div className="flex items-center gap-2 mb-3">
+        <div className={`w-8 h-8 rounded-xl ${bg} flex items-center justify-center`}>{icon}</div>
+        <div>
+          <span className="text-sm font-semibold text-stone-800">{title}</span>
+          <p className="text-xs text-stone-500">{sub}</p>
+        </div>
+      </div>
+      <div className="h-[240px]" data-testid={testId}>{children}</div>
+    </div>
+  );
+}
+
+function HealthCard({ icon, value, label, testId }: { icon: React.ReactNode; value: number; label: string; testId: string }) {
+  return (
+    <div className="rounded-xl border border-stone-100 p-3 text-center" data-testid={testId}>
+      <div className="flex items-center justify-center mb-1">{icon}</div>
+      <p className="text-xl font-bold text-stone-800">{value}</p>
+      <p className="text-xs text-stone-500 mt-0.5">{label}</p>
+    </div>
+  );
+}
+
+function EmptyChart() {
+  return <div className="flex items-center justify-center h-full"><p className="text-sm text-stone-400">暫無數據</p></div>;
 }

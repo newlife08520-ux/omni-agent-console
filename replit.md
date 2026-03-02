@@ -89,10 +89,15 @@ The system is built on a modern full-stack architecture:
 - **Per-contact lock**: `withContactLock(contactId, fn)` ensures sequential processing per contact. Prevents duplicate/out-of-order AI replies. 60s timeout prevents indefinite blocking.
 - **Transfer triggers (code-enforced)**: high-risk keywords, explicit human request keywords, order lookup failures (2+), max tool loops (3+). Order source is NOT a transfer trigger.
 
-## Analytics Upgrade
-- **New KPI**: AI resolution rate, transfer rate, order query success rate (from ai_logs)
-- **New Charts**: Issue type distribution, order source distribution, transfer reason ranking, platform distribution
-- **API**: `/api/analytics` now returns issueTypeDistribution, orderSourceDistribution, transferReasons, platformDistribution
+## Analytics Upgrade (v2)
+- **Message-based date filtering**: All analytics queries use `JOIN messages m ON m.contact_id = c.id WHERE m.created_at >= ? AND m.created_at <= ?` for accurate time-range scoping (not contacts.created_at).
+- **COUNT(DISTINCT c.id)**: Contact-level metrics use distinct contact counting to prevent inflation from per-message rows.
+- **KPI cards**: totalInboundMessages (user msgs only), totalContacts, activeContacts, resolvedCount, completionRate, aiInterceptRate, needsHumanCount, humanHandoffRate, avgMessagesPerContact, aiResolutionRate, transferRate, orderQuerySuccessRate.
+- **New charts**: messageSplit (user/AI/admin pie), statusDistribution (bar), dailyVolume (area chart with 3 series), topKeywords (tag cloud), intentDistribution, issueTypeDistribution, orderSourceDistribution, platformDistribution, transferReasons.
+- **AI Insights section**: painPoints (data-driven from keywords + rates), suggestions (actionable based on actual metrics), hotProducts (product keyword frequency from user messages), customerConcerns (regex-based concern extraction from user messages).
+- **Product keywords**: 40+ product names scanned against user messages for hot product detection.
+- **Concern keywords**: 8 concern categories (價格太貴, 等太久, 品質問題, 尺寸不合, 物流延遲, 退款進度, 操作困難, 態度不滿) with regex pattern matching.
+- **System health section**: webhookSigFails, dedupeHits, lockTimeouts, orderLookupFails, timeoutEscalations + transferReasonTop5.
 
 ## Hardening Layer (P0+P1)
 - **T101 Hard Mute**: AI skips reply when contact status is `awaiting_human` or `high_risk`, or `needs_human=1`, or within 30min mute window (`ai_muted_until`). Admin messages set 30min mute. `POST /api/contacts/:id/restore-ai` clears mute + resets status to `ai_handling`.

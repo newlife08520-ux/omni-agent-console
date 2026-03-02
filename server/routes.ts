@@ -3207,20 +3207,75 @@ export async function registerRoutes(
       startDate = now.toISOString().substring(0, 10) + " 00:00:00";
     }
 
-    const stats = storage.getAnalytics(startDate, endDate, brandId);
+    const brandFilter = brandId ? " AND c.brand_id = ?" : "";
+    const brandParam = brandId ? [brandId] : [];
+    const brandFilterDirect = brandId ? " AND brand_id = ?" : "";
+
+    const msgStats = db.prepare(`
+      SELECT 
+        COUNT(*) as total,
+        SUM(CASE WHEN m.sender_type = 'user' THEN 1 ELSE 0 END) as user_msgs,
+        SUM(CASE WHEN m.sender_type = 'ai' THEN 1 ELSE 0 END) as ai_msgs,
+        SUM(CASE WHEN m.sender_type = 'admin' THEN 1 ELSE 0 END) as admin_msgs
+      FROM messages m
+      JOIN contacts c ON m.contact_id = c.id
+      WHERE m.created_at >= ? AND m.created_at <= ?${brandFilter}
+    `).get(startDate, endDate, ...brandParam) as any;
+
+    const activeContacts = db.prepare(`
+      SELECT COUNT(DISTINCT c.id) as cnt FROM contacts c
+      JOIN messages m ON m.contact_id = c.id
+      WHERE m.created_at >= ? AND m.created_at <= ?${brandFilter}
+    `).get(startDate, endDate, ...brandParam) as { cnt: number };
+
+    const totalContactsAll = db.prepare(`
+      SELECT COUNT(*) as cnt FROM contacts WHERE 1=1${brandFilterDirect}
+    `).get(...brandParam) as { cnt: number };
+
+    const contactStatusInRange = db.prepare(`
+      SELECT 
+        c.status, c.needs_human, COUNT(DISTINCT c.id) as cnt
+      FROM contacts c
+      JOIN messages m ON m.contact_id = c.id
+      WHERE m.created_at >= ? AND m.created_at <= ?${brandFilter}
+      GROUP BY c.status, c.needs_human
+    `).all(startDate, endDate, ...brandParam) as { status: string; needs_human: number; cnt: number }[];
+
+    let resolvedCount = 0;
+    let needsHumanCount = 0;
+    let aiOnlyCount = 0;
+    const statusMap: Record<string, number> = {};
+    for (const row of contactStatusInRange) {
+      statusMap[row.status] = (statusMap[row.status] || 0) + row.cnt;
+      if (row.status === "resolved" || row.status === "closed") resolvedCount += row.cnt;
+      if (row.needs_human) needsHumanCount += row.cnt;
+      else aiOnlyCount += row.cnt;
+    }
+
+    const active = activeContacts?.cnt || 0;
+    const completionRate = active > 0 ? Math.round((resolvedCount / active) * 1000) / 10 : 0;
+    const aiInterceptRate = active > 0 ? Math.round((aiOnlyCount / active) * 1000) / 10 : 0;
+    const humanHandoffRate = active > 0 ? Math.round((needsHumanCount / active) * 1000) / 10 : 0;
+    const userMsgs = msgStats?.user_msgs || 0;
+    const aiMsgs = msgStats?.ai_msgs || 0;
+    const adminMsgs = msgStats?.admin_msgs || 0;
+    const avgMessagesPerContact = active > 0 ? Math.round(((userMsgs + aiMsgs + adminMsgs) / active) * 10) / 10 : 0;
+
+    const messageSplit = [
+      { name: "客戶訊息", value: userMsgs },
+      { name: "AI 回覆", value: aiMsgs },
+      { name: "真人回覆", value: adminMsgs },
+    ].filter(m => m.value > 0);
+
+    const statusLabels: Record<string, string> = {
+      pending: "待處理", processing: "處理中", resolved: "已解決",
+      ai_handling: "AI 處理中", awaiting_human: "待人工", high_risk: "高風險", closed: "已結案",
+    };
+    const statusDistribution = Object.entries(statusMap)
+      .map(([status, count]) => ({ name: statusLabels[status] || status, value: count }))
+      .sort((a, b) => b.value - a.value);
+
     const topKeywords = storage.getTopKeywordsFromMessages(startDate, endDate, brandId);
-    const aiLogStats = storage.getAiLogStats(startDate, endDate, brandId);
-
-    const totalInbound = stats.userMessages;
-    const completedCount = stats.resolvedContacts;
-    const totalContacts = stats.totalContacts || 1;
-    const completionRate = totalContacts > 0 ? Math.round((completedCount / totalContacts) * 1000) / 10 : 0;
-    const aiInterceptRate = totalContacts > 0 ? Math.round((stats.aiOnlyContacts / totalContacts) * 1000) / 10 : 0;
-
-    const agentPerformance = [
-      { name: "AI 助理", cases: stats.aiMessages },
-      { name: "真人客服", cases: stats.adminMessages },
-    ];
 
     const intentCategories: Record<string, string[]> = {
       "退換貨諮詢": ["退換貨", "退貨", "換貨", "退款", "瑕疵", "損壞", "保固"],
@@ -3229,7 +3284,6 @@ export async function registerRoutes(
       "商品諮詢": ["商品", "尺寸", "顏色", "品質", "庫存", "缺貨", "價格", "折扣", "優惠"],
       "轉接客服": ["真人", "轉接", "客服", "客訴", "投訴", "不滿"],
     };
-
     const intentMap: Record<string, number> = {};
     let totalKeywordHits = 0;
     for (const [category, kws] of Object.entries(intentCategories)) {
@@ -3243,7 +3297,6 @@ export async function registerRoutes(
         totalKeywordHits += catCount;
       }
     }
-
     const intentDistribution = Object.entries(intentMap)
       .map(([name, count]) => ({
         name,
@@ -3251,68 +3304,118 @@ export async function registerRoutes(
       }))
       .sort((a, b) => b.value - a.value)
       .slice(0, 5);
-
     if (intentDistribution.length === 0) {
       intentDistribution.push({ name: "尚無數據", value: 100 });
     }
 
+    const userMessages = db.prepare(`
+      SELECT m.content FROM messages m
+      JOIN contacts c ON m.contact_id = c.id
+      WHERE m.sender_type = 'user' AND m.created_at >= ? AND m.created_at <= ?${brandFilter}
+      ORDER BY m.created_at DESC LIMIT 500
+    `).all(startDate, endDate, ...brandParam) as { content: string }[];
+
+    const productKeywords = [
+      "保潔墊", "烘衣機", "涼感墊", "夢枕", "冰絲", "飛行機", "驚喜盒", "電暖毯", "落沙墊",
+      "燙衣", "攪拌杯", "內褲", "水彩盤", "背心", "掛燙", "包包", "精華液", "保養品",
+      "面膜", "乳液", "洗面乳", "防曬", "口紅", "粉底", "眼霜", "沐浴", "洗髮", "牙膏",
+      "手機殼", "充電線", "耳機", "行李箱", "鞋子", "衣服", "褲子", "裙子", "帽子",
+    ];
+    const productMentions: Record<string, number> = {};
+    for (const msg of userMessages) {
+      for (const pk of productKeywords) {
+        if (msg.content.includes(pk)) {
+          productMentions[pk] = (productMentions[pk] || 0) + 1;
+        }
+      }
+    }
+    const hotProducts = Object.entries(productMentions)
+      .map(([name, mentions]) => ({ name, mentions }))
+      .sort((a, b) => b.mentions - a.mentions)
+      .slice(0, 8);
+
+    const concernKeywords: Record<string, string> = {
+      "價格太貴": "貴|太貴|便宜|降價|打折|特價",
+      "等太久": "等很久|好慢|太慢|快一點|急|趕|催",
+      "品質問題": "瑕疵|壞掉|破損|品質差|不好用|有問題",
+      "尺寸不合": "太大|太小|不合|尺寸|版型",
+      "物流延遲": "還沒到|沒收到|物流|運送|寄到哪|什麼時候到",
+      "退款進度": "退款|什麼時候退|退多少|帳號",
+      "操作困難": "不會用|怎麼用|操作|設定|步驟",
+      "態度不滿": "態度|不理|沒回|敷衍|不滿",
+    };
+    const concernCounts: Record<string, number> = {};
+    for (const msg of userMessages) {
+      for (const [concern, pattern] of Object.entries(concernKeywords)) {
+        const regex = new RegExp(pattern);
+        if (regex.test(msg.content)) {
+          concernCounts[concern] = (concernCounts[concern] || 0) + 1;
+        }
+      }
+    }
+    const customerConcerns = Object.entries(concernCounts)
+      .map(([concern, count]) => ({ concern, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 6);
+
     const painPoints: string[] = [];
     const suggestions: string[] = [];
 
-    if (stats.needsHumanContacts > 0) {
-      const humanRate = Math.round((stats.needsHumanContacts / totalContacts) * 100);
-      painPoints.push(`${humanRate}% 的客戶需要轉接真人客服，共 ${stats.needsHumanContacts} 位客戶在此期間需要人工介入。`);
+    if (needsHumanCount > 0 && active > 0) {
+      painPoints.push(`${humanHandoffRate}% 的活躍客戶需要轉接真人客服（${needsHumanCount}/${active} 位），人工負擔偏高。`);
     }
-
     const returnKws = topKeywords.filter(k => ["退換貨", "退貨", "換貨", "退款"].includes(k.keyword));
     const returnCount = returnKws.reduce((sum, k) => sum + k.count, 0);
     if (returnCount > 0) {
-      painPoints.push(`退換貨相關訊息共 ${returnCount} 則，是客戶最常提及的問題類型之一。`);
-      suggestions.push("建議優化退換貨流程的自動化引導，減少真人客服介入率。");
+      painPoints.push(`退換貨相關訊息共 ${returnCount} 則，佔客戶訊息 ${userMsgs > 0 ? Math.round((returnCount / userMsgs) * 100) : 0}%。`);
+      suggestions.push("建議優化退換貨流程自動化引導，減少真人介入。可在知識庫中補充退換貨 FAQ。");
     }
-
     const complaintKws = topKeywords.filter(k => ["客訴", "投訴", "不滿"].includes(k.keyword));
     const complaintCount = complaintKws.reduce((sum, k) => sum + k.count, 0);
     if (complaintCount > 0) {
-      painPoints.push(`偵測到 ${complaintCount} 則客訴/不滿相關訊息，建議關注客戶情緒並及時介入。`);
+      painPoints.push(`偵測到 ${complaintCount} 則負面情緒訊息（客訴/投訴/不滿），建議優先處理。`);
     }
-
-    if (stats.avgAiRating !== null) {
-      if (stats.avgAiRating < 3.5) {
-        painPoints.push(`AI 客服平均評分僅 ${stats.avgAiRating.toFixed(1)} 分（${stats.ratedAiCount} 人評價），需要改善 AI 回覆品質。`);
-      } else {
-        suggestions.push(`AI 客服平均評分 ${stats.avgAiRating.toFixed(1)} 分（${stats.ratedAiCount} 人評價），表現良好。`);
-      }
+    if (customerConcerns.length > 0) {
+      const topConcern = customerConcerns[0];
+      painPoints.push(`客戶最常反映「${topConcern.concern}」（${topConcern.count} 次提及），建議針對此問題制定標準化回覆。`);
     }
-    if (stats.avgCsRating !== null) {
-      suggestions.push(`真人客服平均評分 ${stats.avgCsRating.toFixed(1)} 分（${stats.ratedCsCount} 人評價）。`);
+    if (hotProducts.length > 0) {
+      suggestions.push(`熱門詢問商品：${hotProducts.slice(0, 3).map(p => p.name).join("、")}。建議確認這些商品的庫存與物流狀態。`);
     }
-
-    if (aiInterceptRate < 50 && totalContacts > 3) {
-      suggestions.push("AI 攔截率偏低，建議豐富知識庫內容以提高 AI 自動處理率。");
-    } else if (aiInterceptRate >= 80) {
+    if (avgMessagesPerContact > 6) {
+      painPoints.push(`每位客戶平均 ${avgMessagesPerContact} 則訊息，對話偏長，可能代表問題未能快速解決。`);
+      suggestions.push("建議檢視常見問題的回覆效率，考慮新增快速回覆模板。");
+    }
+    if (completionRate < 30 && active > 3) {
+      painPoints.push(`處理完成率僅 ${completionRate}%，大量對話未結案。`);
+      suggestions.push("建議定期巡檢待處理對話，將已解決的對話標記為「已解決」。");
+    }
+    if (aiInterceptRate >= 80) {
       suggestions.push("AI 攔截率表現優異，大部分客戶問題都能由 AI 自動處理。");
+    } else if (aiInterceptRate < 50 && active > 3) {
+      suggestions.push("AI 攔截率偏低，建議豐富知識庫內容以提高 AI 自動處理率。");
     }
-
     if (painPoints.length === 0) painPoints.push("目前尚無明顯痛點，持續監控中。");
     if (suggestions.length === 0) suggestions.push("持續優化知識庫內容，提升客戶服務品質。");
 
+    const aiLogStats = storage.getAiLogStats(startDate, endDate, brandId);
     const aiResolutionRate = aiLogStats.totalAiResponses > 0
       ? Math.round(((aiLogStats.totalAiResponses - aiLogStats.transferTriggered) / aiLogStats.totalAiResponses) * 1000) / 10
-      : 0;
+      : (active > 0 ? Math.round((aiOnlyCount / active) * 1000) / 10 : 0);
     const transferRate = aiLogStats.totalAiResponses > 0
       ? Math.round((aiLogStats.transferTriggered / aiLogStats.totalAiResponses) * 1000) / 10
-      : 0;
+      : humanHandoffRate;
     const orderQuerySuccessRate = aiLogStats.orderQueryCount > 0
       ? Math.round((aiLogStats.orderQuerySuccess / aiLogStats.orderQueryCount) * 1000) / 10
       : 0;
 
     const issueTypeDistribution: { name: string; value: number }[] = [];
     const issueTypeCounts = db.prepare(`
-      SELECT issue_type, COUNT(*) as count FROM contacts
-      WHERE issue_type IS NOT NULL AND created_at >= ? AND created_at <= ?${brandId ? " AND brand_id = ?" : ""}
-      GROUP BY issue_type ORDER BY count DESC
-    `).all(startDate, endDate, ...(brandId ? [brandId] : [])) as { issue_type: string; count: number }[];
+      SELECT c.issue_type, COUNT(DISTINCT c.id) as count FROM contacts c
+      JOIN messages m ON m.contact_id = c.id
+      WHERE c.issue_type IS NOT NULL AND m.created_at >= ? AND m.created_at <= ?${brandFilter}
+      GROUP BY c.issue_type ORDER BY count DESC
+    `).all(startDate, endDate, ...brandParam) as { issue_type: string; count: number }[];
     const issueTypeLabels: Record<string, string> = {
       order_inquiry: "訂單查詢", product_consult: "商品諮詢", return_refund: "退貨退款",
       complaint: "客訴", order_modify: "訂單修改", general: "一般諮詢", other: "其他",
@@ -3323,39 +3426,69 @@ export async function registerRoutes(
 
     const orderSourceDistribution: { name: string; value: number }[] = [];
     const orderSourceCounts = db.prepare(`
-      SELECT order_source, COUNT(*) as count FROM contacts
-      WHERE order_source IS NOT NULL AND created_at >= ? AND created_at <= ?${brandId ? " AND brand_id = ?" : ""}
-      GROUP BY order_source ORDER BY count DESC
-    `).all(startDate, endDate, ...(brandId ? [brandId] : [])) as { order_source: string; count: number }[];
+      SELECT c.order_source, COUNT(DISTINCT c.id) as count FROM contacts c
+      JOIN messages m ON m.contact_id = c.id
+      WHERE c.order_source IS NOT NULL AND m.created_at >= ? AND m.created_at <= ?${brandFilter}
+      GROUP BY c.order_source ORDER BY count DESC
+    `).all(startDate, endDate, ...brandParam) as { order_source: string; count: number }[];
     const sourceLabels: Record<string, string> = { superlanding: "一頁商店", shopline: "SHOPLINE", unknown: "未知" };
     for (const os of orderSourceCounts) {
       orderSourceDistribution.push({ name: sourceLabels[os.order_source] || os.order_source, value: os.count });
     }
 
-    const platformDistribution = stats.contactsByPlatform.map(p => ({
+    const platformStats = db.prepare(`
+      SELECT c.platform, COUNT(DISTINCT c.id) as count FROM contacts c
+      JOIN messages m ON m.contact_id = c.id
+      WHERE m.created_at >= ? AND m.created_at <= ?${brandFilter}
+      GROUP BY c.platform
+    `).all(startDate, endDate, ...brandParam) as { platform: string; count: number }[];
+    const platformDistribution = platformStats.map(p => ({
       name: p.platform === "line" ? "LINE" : p.platform === "messenger" ? "Messenger" : p.platform,
       value: p.count,
     }));
 
+    const dailyVolumeRaw = db.prepare(`
+      SELECT date(m.created_at) as d,
+        SUM(CASE WHEN m.sender_type='user' THEN 1 ELSE 0 END) as user_cnt,
+        SUM(CASE WHEN m.sender_type='ai' THEN 1 ELSE 0 END) as ai_cnt,
+        SUM(CASE WHEN m.sender_type='admin' THEN 1 ELSE 0 END) as admin_cnt
+      FROM messages m
+      JOIN contacts c ON m.contact_id = c.id
+      WHERE m.created_at >= ? AND m.created_at <= ?${brandFilter}
+      GROUP BY date(m.created_at) ORDER BY d
+    `).all(startDate, endDate, ...brandParam) as { d: string; user_cnt: number; ai_cnt: number; admin_cnt: number }[];
+    const dailyVolume = dailyVolumeRaw.map(r => ({
+      date: r.d,
+      user: r.user_cnt || 0,
+      ai: r.ai_cnt || 0,
+      admin: r.admin_cnt || 0,
+    }));
+
     return res.json({
       kpi: {
-        todayInbound: totalInbound,
-        completedCount,
+        totalInboundMessages: userMsgs,
+        totalContacts: totalContactsAll?.cnt || 0,
+        activeContacts: active,
+        resolvedCount,
         completionRate,
         aiInterceptRate,
-        avgFrtAi: stats.aiMessages > 0 ? "即時" : "N/A",
-        avgFrtHuman: stats.adminMessages > 0 ? "依專員回覆" : "N/A",
+        needsHumanCount,
+        humanHandoffRate,
+        avgMessagesPerContact,
         aiResolutionRate,
         transferRate,
         orderQuerySuccessRate,
       },
-      agentPerformance,
+      messageSplit,
+      statusDistribution,
       intentDistribution,
-      aiInsights: { painPoints, suggestions },
+      aiInsights: { painPoints, suggestions, hotProducts, customerConcerns },
       issueTypeDistribution,
       orderSourceDistribution,
       transferReasons: aiLogStats.transferReasons.map(r => ({ ...r, reason: maskSensitiveInfo(r.reason) })),
       platformDistribution,
+      topKeywords: topKeywords.slice(0, 15),
+      dailyVolume,
     });
   });
 

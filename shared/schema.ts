@@ -181,26 +181,34 @@ export interface LoginResponse {
 
 export interface AnalyticsData {
   kpi: {
-    todayInbound: number;
-    completedCount: number;
+    totalInboundMessages: number;
+    totalContacts: number;
+    activeContacts: number;
+    resolvedCount: number;
     completionRate: number;
     aiInterceptRate: number;
-    avgFrtAi: string;
-    avgFrtHuman: string;
+    needsHumanCount: number;
+    humanHandoffRate: number;
+    avgMessagesPerContact: number;
     aiResolutionRate: number;
     transferRate: number;
     orderQuerySuccessRate: number;
   };
-  agentPerformance: { name: string; cases: number }[];
+  messageSplit: { name: string; value: number }[];
+  statusDistribution: { name: string; value: number }[];
   intentDistribution: { name: string; value: number }[];
   aiInsights: {
     painPoints: string[];
     suggestions: string[];
+    hotProducts: { name: string; mentions: number }[];
+    customerConcerns: { concern: string; count: number }[];
   };
   issueTypeDistribution: { name: string; value: number }[];
   orderSourceDistribution: { name: string; value: number }[];
   transferReasons: { reason: string; count: number }[];
   platformDistribution: { name: string; value: number }[];
+  topKeywords: { keyword: string; count: number }[];
+  dailyVolume: { date: string; user: number; ai: number; admin: number }[];
 }
 
 export const CONTACT_STATUS_LABELS: Record<ContactStatus, string> = {
