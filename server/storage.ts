@@ -398,6 +398,123 @@ export class SQLiteStorage implements IStorage {
     const result = db.prepare("DELETE FROM marketing_rules WHERE id = ?").run(id);
     return result.changes > 0;
   }
+
+  getAnalytics(startDate: string, endDate: string, brandId?: number): {
+    totalMessages: number;
+    userMessages: number;
+    aiMessages: number;
+    adminMessages: number;
+    systemMessages: number;
+    totalContacts: number;
+    resolvedContacts: number;
+    processingContacts: number;
+    pendingContacts: number;
+    needsHumanContacts: number;
+    aiOnlyContacts: number;
+    avgCsRating: number | null;
+    avgAiRating: number | null;
+    ratedCsCount: number;
+    ratedAiCount: number;
+    contactsByPlatform: { platform: string; count: number }[];
+    messagesByType: { sender_type: string; count: number }[];
+  } {
+    const brandFilter = brandId ? " AND c.brand_id = ?" : "";
+    const brandParam = brandId ? [brandId] : [];
+
+    const msgStats = db.prepare(`
+      SELECT 
+        COUNT(*) as total,
+        SUM(CASE WHEN m.sender_type = 'user' THEN 1 ELSE 0 END) as user_msgs,
+        SUM(CASE WHEN m.sender_type = 'ai' THEN 1 ELSE 0 END) as ai_msgs,
+        SUM(CASE WHEN m.sender_type = 'admin' THEN 1 ELSE 0 END) as admin_msgs,
+        SUM(CASE WHEN m.sender_type = 'system' THEN 1 ELSE 0 END) as system_msgs
+      FROM messages m
+      JOIN contacts c ON m.contact_id = c.id
+      WHERE m.created_at >= ? AND m.created_at <= ?${brandFilter}
+    `).get(startDate, endDate, ...brandParam) as any;
+
+    const contactStats = db.prepare(`
+      SELECT 
+        COUNT(*) as total,
+        SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END) as resolved,
+        SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as processing,
+        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+        SUM(CASE WHEN needs_human = 1 THEN 1 ELSE 0 END) as needs_human,
+        SUM(CASE WHEN needs_human = 0 THEN 1 ELSE 0 END) as ai_only
+      FROM contacts
+      WHERE created_at >= ? AND created_at <= ?${brandId ? " AND brand_id = ?" : ""}
+    `).get(startDate, endDate, ...brandParam) as any;
+
+    const ratingStats = db.prepare(`
+      SELECT 
+        AVG(CASE WHEN cs_rating IS NOT NULL THEN cs_rating END) as avg_cs,
+        AVG(CASE WHEN ai_rating IS NOT NULL THEN ai_rating END) as avg_ai,
+        SUM(CASE WHEN cs_rating IS NOT NULL THEN 1 ELSE 0 END) as rated_cs,
+        SUM(CASE WHEN ai_rating IS NOT NULL THEN 1 ELSE 0 END) as rated_ai
+      FROM contacts
+      WHERE created_at >= ? AND created_at <= ?${brandId ? " AND brand_id = ?" : ""}
+    `).get(startDate, endDate, ...brandParam) as any;
+
+    const platformStats = db.prepare(`
+      SELECT platform, COUNT(*) as count
+      FROM contacts
+      WHERE created_at >= ? AND created_at <= ?${brandId ? " AND brand_id = ?" : ""}
+      GROUP BY platform
+    `).all(startDate, endDate, ...brandParam) as { platform: string; count: number }[];
+
+    const msgByType = db.prepare(`
+      SELECT m.sender_type, COUNT(*) as count
+      FROM messages m
+      JOIN contacts c ON m.contact_id = c.id
+      WHERE m.created_at >= ? AND m.created_at <= ?${brandFilter}
+      GROUP BY m.sender_type
+    `).all(startDate, endDate, ...brandParam) as { sender_type: string; count: number }[];
+
+    return {
+      totalMessages: msgStats?.total || 0,
+      userMessages: msgStats?.user_msgs || 0,
+      aiMessages: msgStats?.ai_msgs || 0,
+      adminMessages: msgStats?.admin_msgs || 0,
+      systemMessages: msgStats?.system_msgs || 0,
+      totalContacts: contactStats?.total || 0,
+      resolvedContacts: contactStats?.resolved || 0,
+      processingContacts: contactStats?.processing || 0,
+      pendingContacts: contactStats?.pending || 0,
+      needsHumanContacts: contactStats?.needs_human || 0,
+      aiOnlyContacts: contactStats?.ai_only || 0,
+      avgCsRating: ratingStats?.avg_cs || null,
+      avgAiRating: ratingStats?.avg_ai || null,
+      ratedCsCount: ratingStats?.rated_cs || 0,
+      ratedAiCount: ratingStats?.rated_ai || 0,
+      contactsByPlatform: platformStats,
+      messagesByType: msgByType,
+    };
+  }
+
+  getTopKeywordsFromMessages(startDate: string, endDate: string, brandId?: number): { keyword: string; count: number }[] {
+    const brandFilter = brandId ? " AND c.brand_id = ?" : "";
+    const brandParam = brandId ? [brandId] : [];
+    const messages = db.prepare(`
+      SELECT m.content FROM messages m
+      JOIN contacts c ON m.contact_id = c.id
+      WHERE m.sender_type = 'user' AND m.created_at >= ? AND m.created_at <= ?${brandFilter}
+      ORDER BY m.created_at DESC LIMIT 500
+    `).all(startDate, endDate, ...brandParam) as { content: string }[];
+
+    const keywordMap: Record<string, number> = {};
+    const keywords = ["退換貨", "退貨", "換貨", "退款", "訂單", "查詢", "物流", "出貨", "寄送", "地址", "修改", "取消", "付款", "金額", "價格", "折扣", "優惠", "庫存", "缺貨", "商品", "尺寸", "顏色", "品質", "瑕疵", "損壞", "保固", "客訴", "投訴", "不滿", "真人", "轉接", "客服"];
+    for (const msg of messages) {
+      for (const kw of keywords) {
+        if (msg.content.includes(kw)) {
+          keywordMap[kw] = (keywordMap[kw] || 0) + 1;
+        }
+      }
+    }
+    return Object.entries(keywordMap)
+      .map(([keyword, count]) => ({ keyword, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+  }
 }
 
 export const storage = new SQLiteStorage();

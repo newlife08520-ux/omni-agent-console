@@ -2368,84 +2368,126 @@ export async function registerRoutes(
     return res.json({ success: true });
   });
 
-  app.get("/api/analytics", authMiddleware, managerOrAbove, (req, res) => {
+  app.get("/api/analytics", authMiddleware, managerOrAbove, (req: any, res) => {
     const range = (req.query.range as string) || "today";
-    const startDate = req.query.start as string;
-    const endDate = req.query.end as string;
+    const brandId = req.query.brand_id ? parseInt(req.query.brand_id as string) : undefined;
 
-    let dataKey = range;
-    if (range === "custom" && startDate && endDate) {
-      const start = new Date(startDate);
-      const end = new Date(endDate);
-      const diffDays = Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1;
-      if (diffDays <= 1) dataKey = "today";
-      else if (diffDays <= 7) dataKey = "7d";
-      else dataKey = "30d";
+    const now = new Date();
+    let startDate: string;
+    let endDate: string = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString().substring(0, 19).replace("T", " ");
+
+    if (range === "custom" && req.query.start && req.query.end) {
+      startDate = (req.query.start as string) + " 00:00:00";
+      endDate = (req.query.end as string) + " 23:59:59";
+    } else if (range === "30d") {
+      startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().substring(0, 19).replace("T", " ");
+    } else if (range === "7d") {
+      startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().substring(0, 19).replace("T", " ");
+    } else {
+      startDate = now.toISOString().substring(0, 10) + " 00:00:00";
     }
 
-    const mockDataMap: Record<string, any> = {
-      today: {
-        kpi: { todayInbound: 127, completedCount: 120, completionRate: 94.5, aiInterceptRate: 82, avgFrtAi: "2 秒", avgFrtHuman: "1 分 15 秒" },
-        agentPerformance: [
-          { name: "AI 助理", cases: 104 },
-          { name: "客服小李", cases: 35 },
-          { name: "系統管理員", cases: 18 },
-          { name: "行銷經理 Amy", cases: 8 },
-        ],
-        intentDistribution: [
-          { name: "退換貨諮詢", value: 40 },
-          { name: "產品諮詢", value: 30 },
-          { name: "物流追蹤", value: 20 },
-          { name: "帳號問題", value: 10 },
-        ],
-      },
-      "7d": {
-        kpi: { todayInbound: 843, completedCount: 798, completionRate: 94.7, aiInterceptRate: 79, avgFrtAi: "2 秒", avgFrtHuman: "1 分 32 秒" },
-        agentPerformance: [
-          { name: "AI 助理", cases: 665 },
-          { name: "客服小李", cases: 210 },
-          { name: "系統管理員", cases: 95 },
-          { name: "行銷經理 Amy", cases: 52 },
-        ],
-        intentDistribution: [
-          { name: "退換貨諮詢", value: 35 },
-          { name: "產品諮詢", value: 28 },
-          { name: "物流追蹤", value: 22 },
-          { name: "帳號問題", value: 15 },
-        ],
-      },
-      "30d": {
-        kpi: { todayInbound: 3521, completedCount: 3310, completionRate: 94.0, aiInterceptRate: 80, avgFrtAi: "3 秒", avgFrtHuman: "1 分 48 秒" },
-        agentPerformance: [
-          { name: "AI 助理", cases: 2817 },
-          { name: "客服小李", cases: 920 },
-          { name: "系統管理員", cases: 405 },
-          { name: "行銷經理 Amy", cases: 198 },
-        ],
-        intentDistribution: [
-          { name: "退換貨諮詢", value: 38 },
-          { name: "產品諮詢", value: 25 },
-          { name: "物流追蹤", value: 23 },
-          { name: "帳號問題", value: 14 },
-        ],
-      },
+    const stats = storage.getAnalytics(startDate, endDate, brandId);
+    const topKeywords = storage.getTopKeywordsFromMessages(startDate, endDate, brandId);
+
+    const totalInbound = stats.userMessages;
+    const completedCount = stats.resolvedContacts;
+    const totalContacts = stats.totalContacts || 1;
+    const completionRate = totalContacts > 0 ? Math.round((completedCount / totalContacts) * 1000) / 10 : 0;
+    const aiInterceptRate = totalContacts > 0 ? Math.round((stats.aiOnlyContacts / totalContacts) * 1000) / 10 : 0;
+
+    const agentPerformance = [
+      { name: "AI 助理", cases: stats.aiMessages },
+      { name: "真人客服", cases: stats.adminMessages },
+    ];
+
+    const intentCategories: Record<string, string[]> = {
+      "退換貨諮詢": ["退換貨", "退貨", "換貨", "退款", "瑕疵", "損壞", "保固"],
+      "訂單查詢": ["訂單", "查詢", "物流", "出貨", "寄送"],
+      "訂單修改": ["修改", "取消", "地址", "付款"],
+      "商品諮詢": ["商品", "尺寸", "顏色", "品質", "庫存", "缺貨", "價格", "折扣", "優惠"],
+      "轉接客服": ["真人", "轉接", "客服", "客訴", "投訴", "不滿"],
     };
 
-    const data = mockDataMap[dataKey] || mockDataMap.today;
+    const intentMap: Record<string, number> = {};
+    let totalKeywordHits = 0;
+    for (const [category, kws] of Object.entries(intentCategories)) {
+      let catCount = 0;
+      for (const kw of kws) {
+        const found = topKeywords.find(k => k.keyword === kw);
+        if (found) catCount += found.count;
+      }
+      if (catCount > 0) {
+        intentMap[category] = catCount;
+        totalKeywordHits += catCount;
+      }
+    }
+
+    const intentDistribution = Object.entries(intentMap)
+      .map(([name, count]) => ({
+        name,
+        value: totalKeywordHits > 0 ? Math.round((count / totalKeywordHits) * 100) : 0,
+      }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 5);
+
+    if (intentDistribution.length === 0) {
+      intentDistribution.push({ name: "尚無數據", value: 100 });
+    }
+
+    const painPoints: string[] = [];
+    const suggestions: string[] = [];
+
+    if (stats.needsHumanContacts > 0) {
+      const humanRate = Math.round((stats.needsHumanContacts / totalContacts) * 100);
+      painPoints.push(`${humanRate}% 的客戶需要轉接真人客服，共 ${stats.needsHumanContacts} 位客戶在此期間需要人工介入。`);
+    }
+
+    const returnKws = topKeywords.filter(k => ["退換貨", "退貨", "換貨", "退款"].includes(k.keyword));
+    const returnCount = returnKws.reduce((sum, k) => sum + k.count, 0);
+    if (returnCount > 0) {
+      painPoints.push(`退換貨相關訊息共 ${returnCount} 則，是客戶最常提及的問題類型之一。`);
+      suggestions.push("建議優化退換貨流程的自動化引導，減少真人客服介入率。");
+    }
+
+    const complaintKws = topKeywords.filter(k => ["客訴", "投訴", "不滿"].includes(k.keyword));
+    const complaintCount = complaintKws.reduce((sum, k) => sum + k.count, 0);
+    if (complaintCount > 0) {
+      painPoints.push(`偵測到 ${complaintCount} 則客訴/不滿相關訊息，建議關注客戶情緒並及時介入。`);
+    }
+
+    if (stats.avgAiRating !== null) {
+      if (stats.avgAiRating < 3.5) {
+        painPoints.push(`AI 客服平均評分僅 ${stats.avgAiRating.toFixed(1)} 分（${stats.ratedAiCount} 人評價），需要改善 AI 回覆品質。`);
+      } else {
+        suggestions.push(`AI 客服平均評分 ${stats.avgAiRating.toFixed(1)} 分（${stats.ratedAiCount} 人評價），表現良好。`);
+      }
+    }
+    if (stats.avgCsRating !== null) {
+      suggestions.push(`真人客服平均評分 ${stats.avgCsRating.toFixed(1)} 分（${stats.ratedCsCount} 人評價）。`);
+    }
+
+    if (aiInterceptRate < 50 && totalContacts > 3) {
+      suggestions.push("AI 攔截率偏低，建議豐富知識庫內容以提高 AI 自動處理率。");
+    } else if (aiInterceptRate >= 80) {
+      suggestions.push("AI 攔截率表現優異，大部分客戶問題都能由 AI 自動處理。");
+    }
+
+    if (painPoints.length === 0) painPoints.push("目前尚無明顯痛點，持續監控中。");
+    if (suggestions.length === 0) suggestions.push("持續優化知識庫內容，提升客戶服務品質。");
+
     return res.json({
-      ...data,
-      aiInsights: {
-        painPoints: [
-          "退換貨流程不夠直覺 — 本週有 40% 的進線與退換貨相關，多數客戶反映在會員中心找不到退貨入口，建議優化退貨按鈕的 UI 位置。",
-          "物流配送延遲投訴增加 — 近三日有 15 筆「包裹遲到」相關訊息，集中於北部地區。建議與物流商確認北區倉儲調度狀況。",
-          "限量商品庫存資訊不透明 — 多位客戶詢問官網首頁限量款包包的庫存，但系統無法即時回覆庫存量，造成客戶不滿轉人工率升高。",
-        ],
-        suggestions: [
-          "在官網商品頁面加入即時庫存顯示功能，減少因庫存不確定而產生的客服進線量，預估可降低 15% 的諮詢量。",
-          "建立自動退貨引導流程 — 當 AI 偵測到「退貨」關鍵字時，直接回覆退貨步驟圖文教學，減少真人客服介入。",
-          "針對 VIP 客戶建立優先佇列機制，確保高價值客戶的等待時間不超過 30 秒。",
-        ],
+      kpi: {
+        todayInbound: totalInbound,
+        completedCount,
+        completionRate,
+        aiInterceptRate,
+        avgFrtAi: stats.aiMessages > 0 ? "即時" : "N/A",
+        avgFrtHuman: stats.adminMessages > 0 ? "依專員回覆" : "N/A",
       },
+      agentPerformance,
+      intentDistribution,
+      aiInsights: { painPoints, suggestions },
     });
   });
 
