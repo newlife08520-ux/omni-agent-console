@@ -248,15 +248,15 @@ async function getEnrichedSystemPrompt(brandId?: number): Promise<string> {
 
 --- 轉接真人客服觸發條件 ---
 當遇到以下情況時，先用你自己的語氣回覆並說明轉接意圖，然後呼叫 transfer_to_human 工具：
-1. 多次查詢仍查不到訂單
-2. 知識庫中找不到客戶描述的商品或服務
-3. 客戶問題過於複雜，超出你的能力範圍
-4. 判斷為非本系統管轄的訂單
-5. 客戶反覆表達不滿或情緒激動
-6. 客戶明確要求轉接真人（回覆「需要轉接」「轉人工」「找真人」）
-7. 退換貨：安撫挽留無效後，提供退換貨表單（${returnFormUrl}）並轉人工
-8. 修改/取消訂單：安撫後轉人工
-9. 代客下單/付款失敗/重新出貨：涉及金流，立即轉人工
+1. 偵測到高風險關鍵字（威脅、法律、極端不滿等）
+2. 客戶明確要求轉接真人（回覆「需要轉接」「轉人工」「找真人」等）
+3. 退換貨：客戶反覆堅持退換貨（第三次以上仍堅持），安撫挽留無效後，提供退換貨表單（${returnFormUrl}）並轉人工
+4. 多次查詢仍查不到訂單（2次以上工具查詢失敗）
+5. 修改/取消訂單：安撫後轉人工
+6. 代客下單/付款失敗/重新出貨：涉及金流，立即轉人工
+7. 客戶反覆表達不滿或情緒激動
+
+注意：訂單來源（一頁商店、SHOPLINE 等）不是轉接人工的判斷依據。無論訂單來自哪個平台，只要查到就正常回覆。查不到時，告知客戶並提供進一步協助，不要自動轉人工。
 
 --- AI 身分透明規則 ---
 - 你是 AI 助手，在適當時機（如首次互動、需要轉接時）自然地讓客戶知道你是 AI，但不需要每句話都強調
@@ -264,9 +264,30 @@ async function getEnrichedSystemPrompt(brandId?: number): Promise<string> {
 - 嚴禁假裝是真人
 - 當客戶要求轉真人時，自然地回覆並呼叫 transfer_to_human
 
-(絕對規則) 當訂單查詢工具回傳 found=false 或空陣列時，你必須用你自己的語氣告知客戶查不到資料，並詢問是否需要轉接專人客服。不要使用制式模板回覆。`;
+當訂單查詢工具回傳 found=false 或空陣列時，用你自己的語氣告知客戶查不到資料，並主動詢問是否有其他資訊可以協助查詢（例如其他訂單編號、手機號碼等）。不要使用制式模板回覆，也不要自動轉人工。`;
 
   return basePrompt + brandBlock + handoffBlock + catalogBlock + knowledgeBlock + imageBlock;
+}
+
+const contactProcessingLocks = new Map<number, Promise<void>>();
+
+async function withContactLock<T>(contactId: number, fn: () => Promise<T>): Promise<T> {
+  const existing = contactProcessingLocks.get(contactId);
+  let resolve: () => void;
+  const lockPromise = new Promise<void>(r => { resolve = r; });
+  contactProcessingLocks.set(contactId, lockPromise);
+  if (existing) {
+    const timeout = new Promise<void>(r => setTimeout(r, 60000));
+    await Promise.race([existing, timeout]);
+  }
+  try {
+    return await fn();
+  } finally {
+    resolve!();
+    if (contactProcessingLocks.get(contactId) === lockPromise) {
+      contactProcessingLocks.delete(contactId);
+    }
+  }
 }
 
 const sseClients: Set<import("express").Response> = new Set();
@@ -1752,19 +1773,23 @@ export async function registerRoutes(
         const rawBody = Buffer.isBuffer(req.rawBody) ? req.rawBody : Buffer.from(req.rawBody as string);
         const hash = crypto.createHmac("SHA256", channelSecretVal).update(rawBody).digest("base64");
         if (hash !== signature) {
-          console.log("[WEBHOOK] SIGNATURE MISMATCH (warning only, still processing) - Expected:", hash, "Got:", signature);
-        } else {
-          console.log("[WEBHOOK] Signature verified OK");
+          console.log("[WEBHOOK] SIGNATURE MISMATCH - rejecting request. Expected:", hash, "Got:", signature);
+          return res.status(403).json({ message: "Invalid signature" });
         }
+        console.log("[WEBHOOK] Signature verified OK");
       } catch (sigErr: any) {
-        console.log("[WEBHOOK] Signature check error (continuing):", sigErr.message);
+        console.log("[WEBHOOK] Signature check error:", sigErr.message);
+        return res.status(403).json({ message: "Signature verification failed" });
       }
+    } else if (channelSecretVal && !signature) {
+      console.log("[WEBHOOK] Missing x-line-signature header - rejecting");
+      return res.status(403).json({ message: "Missing signature" });
     } else {
-      console.log("[WEBHOOK] Skipping signature check - secret:", !!channelSecretVal, "sig:", !!signature, "rawBody:", !!req.rawBody);
+      console.log("[WEBHOOK] Skipping signature check - no channel_secret configured");
     }
 
     res.status(200).json({ success: true });
-    console.log("[WEBHOOK] Sent 200 OK to LINE, processing events async...");
+    console.log("[WEBHOOK] Sent 200 OK to LINE (ACK < 2s), processing events async...");
 
     const humanKeywordsSetting = storage.getSetting("human_transfer_keywords");
     const HUMAN_KEYWORDS = humanKeywordsSetting
@@ -1804,7 +1829,11 @@ export async function registerRoutes(
 
       const webhookEventId = event.webhookEventId || event.timestamp?.toString();
       if (webhookEventId && storage.isEventProcessed(webhookEventId)) {
+        console.log("[WEBHOOK] Skipping duplicate event:", webhookEventId);
         continue;
+      }
+      if (webhookEventId) {
+        storage.markEventProcessed(webhookEventId);
       }
 
       try {
@@ -1837,7 +1866,9 @@ export async function registerRoutes(
               if (testMode === "true") {
                 storage.createMessage(contact.id, "line", "ai", `[測試模式] 收到您的訊息：「${text}」。`);
               } else {
-                autoReplyWithAI(contact, text, channelToken, matchedBrandId).catch(err =>
+                withContactLock(contact.id, () =>
+                  autoReplyWithAI(contact, text, channelToken, matchedBrandId)
+                ).catch(err =>
                   console.error("[Webhook] AI 自動回覆失敗:", err)
                 );
               }
@@ -1881,7 +1912,9 @@ export async function registerRoutes(
             broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
             const aiEnabledImg = matchedChannel ? matchedChannel.is_ai_enabled : 1;
             if (!contact.needs_human && aiEnabledImg) {
-              analyzeImageWithAI(imageUrl, contact.id, channelToken).catch((err) =>
+              withContactLock(contact.id, () =>
+                analyzeImageWithAI(imageUrl, contact.id, channelToken)
+              ).catch((err) =>
                 console.error("AI image analysis background error:", err)
               );
             }
@@ -1924,9 +1957,6 @@ export async function registerRoutes(
         console.error("Webhook event processing error:", err);
       }
 
-      if (webhookEventId) {
-        storage.markEventProcessed(webhookEventId);
-      }
     }
     console.log("[WEBHOOK] All events processed");
     })().catch(err => console.error("[WEBHOOK] Async event processing error:", err));
@@ -1947,12 +1977,42 @@ export async function registerRoutes(
     return res.status(403).json({ message: "驗證失敗" });
   });
 
-  app.post("/api/webhook/facebook", async (req, res) => {
+  app.post("/api/webhook/facebook", (req, res) => {
     const body = req.body;
     if (body.object !== "page") {
       return res.status(404).json({ message: "Not a page event" });
     }
 
+    const fbAppSecret = storage.getSetting("fb_app_secret");
+    if (fbAppSecret && req.rawBody) {
+      const fbSignature = req.headers["x-hub-signature-256"] as string | undefined;
+      if (!fbSignature) {
+        console.log("[FB Webhook] Missing x-hub-signature-256 header - rejecting");
+        return res.status(403).json({ message: "Missing signature" });
+      }
+      try {
+        const rawBody = Buffer.isBuffer(req.rawBody) ? req.rawBody : Buffer.from(req.rawBody as string);
+        const expectedSig = "sha256=" + crypto.createHmac("sha256", fbAppSecret).update(rawBody).digest("hex");
+        if (expectedSig !== fbSignature) {
+          console.log("[FB Webhook] SIGNATURE MISMATCH - rejecting");
+          return res.status(403).json({ message: "Invalid signature" });
+        }
+        console.log("[FB Webhook] Signature verified OK");
+      } catch (sigErr: any) {
+        console.log("[FB Webhook] Signature check error:", sigErr.message);
+        return res.status(403).json({ message: "Signature verification failed" });
+      }
+    }
+
+    res.status(200).send("EVENT_RECEIVED");
+    console.log("[FB Webhook] Sent 200 OK (ACK < 2s), processing events async...");
+
+    const humanKeywordsSetting2 = storage.getSetting("human_transfer_keywords");
+    const HUMAN_KW2 = humanKeywordsSetting2
+      ? humanKeywordsSetting2.split(",").map((k: string) => k.trim()).filter(Boolean)
+      : ["找客服", "真人", "轉人工", "人工客服", "真人客服"];
+
+    (async () => {
     for (const entry of body.entry || []) {
       const pageId = entry.id;
       const matchedChannel = storage.getChannelByBotId(pageId);
@@ -1971,6 +2031,7 @@ export async function registerRoutes(
         const msgMid = messagingEvent.message?.mid || messagingEvent.postback?.mid || "";
         const eventId = `fb_${messagingEvent.timestamp}_${senderId}_${msgMid}`;
         if (storage.isEventProcessed(eventId)) continue;
+        storage.markEventProcessed(eventId);
 
         try {
           if (messagingEvent.message) {
@@ -1987,7 +2048,9 @@ export async function registerRoutes(
                   broadcastSSE("new_message", { contact_id: contact.id, message: imgMsg, brand_id: matchedBrandId || contact.brand_id });
                   const fbAiEnabledImg = matchedChannel ? matchedChannel.is_ai_enabled : 1;
                   if (localImageUrl && !contact.needs_human && fbAiEnabledImg) {
-                    analyzeImageWithAI(localImageUrl, contact.id, null, "messenger").catch(err =>
+                    withContactLock(contact.id, () =>
+                      analyzeImageWithAI(localImageUrl, contact.id, null, "messenger")
+                    ).catch(err =>
                       console.error("[FB Webhook] AI image analysis error:", err)
                     );
                   }
@@ -2003,11 +2066,7 @@ export async function registerRoutes(
               broadcastSSE("new_message", { contact_id: contact.id, message: userMsg, brand_id: matchedBrandId || contact.brand_id });
               broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
 
-              const humanKeywordsSetting2 = storage.getSetting("human_transfer_keywords");
-              const HUMAN_KW2 = humanKeywordsSetting2
-                ? humanKeywordsSetting2.split(",").map(k => k.trim()).filter(Boolean)
-                : ["找客服", "真人", "轉人工", "人工客服", "真人客服"];
-              const needsHuman2 = HUMAN_KW2.some(kw => text.includes(kw));
+              const needsHuman2 = HUMAN_KW2.some((kw: string) => text.includes(kw));
               if (needsHuman2) {
                 storage.updateContactHumanFlag(contact.id, 1);
                 const aiMsg2 = storage.createMessage(contact.id, "messenger", "ai", "好的，我已為您轉接真人客服，請稍候片刻。");
@@ -2025,7 +2084,9 @@ export async function registerRoutes(
                 } else {
                   const testMode = storage.getSetting("test_mode");
                   if (testMode !== "true" && matchedChannel?.access_token) {
-                    autoReplyWithAI(contact, text, matchedChannel.access_token, matchedBrandId, "messenger").catch(err =>
+                    withContactLock(contact.id, () =>
+                      autoReplyWithAI(contact, text, matchedChannel.access_token, matchedBrandId, "messenger")
+                    ).catch(err =>
                       console.error("[FB Webhook] AI 自動回覆失敗:", err)
                     );
                   }
@@ -2045,11 +2106,9 @@ export async function registerRoutes(
         } catch (err) {
           console.error("[FB Webhook] 事件處理錯誤:", err);
         }
-
-        storage.markEventProcessed(eventId);
       }
     }
-    return res.status(200).send("EVENT_RECEIVED");
+    })().catch(err => console.error("[FB Webhook] Async processing error:", err));
   });
 
   const orderLookupTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [

@@ -82,6 +82,13 @@ The system is built on a modern full-stack architecture:
 - **Order Sources**: superlanding, shopline, unknown
 - **Schema maps**: CONTACT_STATUS_LABELS, CONTACT_STATUS_COLORS, ISSUE_TYPE_LABELS, ISSUE_TYPE_COLORS, ORDER_SOURCE_LABELS in shared/schema.ts
 
+## Webhook Architecture
+- **ACK-first pattern**: Both LINE and FB webhooks respond 200 immediately (< 2s), then process events asynchronously
+- **Signature verification**: LINE validates `x-line-signature` via HMAC-SHA256 (rejects 403 on mismatch). FB validates `x-hub-signature-256` via HMAC-SHA256 when `fb_app_secret` setting is configured.
+- **Idempotency**: `processed_events` table stores event IDs. Events marked processed BEFORE processing begins (at-most-once delivery). TTL cleanup removes events older than 7 days on startup.
+- **Per-contact lock**: `withContactLock(contactId, fn)` ensures sequential processing per contact. Prevents duplicate/out-of-order AI replies. 60s timeout prevents indefinite blocking.
+- **Transfer triggers (code-enforced)**: high-risk keywords, explicit human request keywords, order lookup failures (2+), max tool loops (3+). Order source is NOT a transfer trigger.
+
 ## Analytics Upgrade
 - **New KPI**: AI resolution rate, transfer rate, order query success rate (from ai_logs)
 - **New Charts**: Issue type distribution, order source distribution, transfer reason ranking, platform distribution

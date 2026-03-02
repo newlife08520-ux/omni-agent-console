@@ -124,6 +124,8 @@ export function initDatabase() {
     );
   `);
 
+  db.exec(`DELETE FROM processed_events WHERE processed_at < datetime('now', '-7 days');`);
+
   migrateContactStatusExpansion();
   migrateAiLogsTable();
   migrateBrandsAndChannels();
