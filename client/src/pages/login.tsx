@@ -27,7 +27,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
         toast({ title: "登入成功", description: `歡迎回來，${data.user.display_name}！` });
         onLogin();
       }
-    } catch {
+    } catch (_e) {
       toast({ title: "登入失敗", description: "帳號或密碼錯誤，請重試", variant: "destructive" });
     } finally {
       setLoading(false);

@@ -561,7 +561,7 @@ export async function registerRoutes(
 
   app.put("/api/channels/:id", authMiddleware, superAdminOnly, (req, res) => {
     const id = parseInt(req.params.id);
-    const { platform, channel_name, bot_id, access_token, channel_secret, is_active, brand_id } = req.body;
+    const { platform, channel_name, bot_id, access_token, channel_secret, is_active, is_ai_enabled, brand_id } = req.body;
     const data: Record<string, any> = {};
     if (platform !== undefined) data.platform = platform;
     if (channel_name !== undefined) data.channel_name = channel_name;
@@ -569,6 +569,7 @@ export async function registerRoutes(
     if (access_token !== undefined) data.access_token = access_token;
     if (channel_secret !== undefined) data.channel_secret = channel_secret;
     if (is_active !== undefined) data.is_active = is_active;
+    if (is_ai_enabled !== undefined) data.is_ai_enabled = is_ai_enabled;
     if (brand_id !== undefined) data.brand_id = brand_id;
     if (!storage.updateChannel(id, data)) return res.status(404).json({ message: "頻道不存在" });
     return res.json({ success: true });
@@ -1609,13 +1610,18 @@ export async function registerRoutes(
             broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: matchedBrandId || contact.brand_id });
             broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
           } else if (!contact.needs_human) {
-            const testMode = storage.getSetting("test_mode");
-            if (testMode === "true") {
-              storage.createMessage(contact.id, "line", "ai", `[測試模式] 收到您的訊息：「${text}」。`);
+            const aiEnabled = matchedChannel ? matchedChannel.is_ai_enabled : 1;
+            if (!aiEnabled) {
+              console.log("[WEBHOOK] AI 已關閉 (channel:", matchedChannel?.channel_name, ") - 跳過自動回覆");
             } else {
-              autoReplyWithAI(contact, text, channelToken, matchedBrandId).catch(err =>
-                console.error("[Webhook] AI 自動回覆失敗:", err)
-              );
+              const testMode = storage.getSetting("test_mode");
+              if (testMode === "true") {
+                storage.createMessage(contact.id, "line", "ai", `[測試模式] 收到您的訊息：「${text}」。`);
+              } else {
+                autoReplyWithAI(contact, text, channelToken, matchedBrandId).catch(err =>
+                  console.error("[Webhook] AI 自動回覆失敗:", err)
+                );
+              }
             }
           }
         } else if (event.type === "postback") {
@@ -1654,7 +1660,8 @@ export async function registerRoutes(
             const imgMsg = storage.createMessage(contact.id, "line", "user", "[圖片訊息]", "image", imageUrl);
             broadcastSSE("new_message", { contact_id: contact.id, message: imgMsg, brand_id: matchedBrandId || contact.brand_id });
             broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
-            if (!contact.needs_human) {
+            const aiEnabledImg = matchedChannel ? matchedChannel.is_ai_enabled : 1;
+            if (!contact.needs_human && aiEnabledImg) {
               analyzeImageWithAI(imageUrl, contact.id, channelToken).catch((err) =>
                 console.error("AI image analysis background error:", err)
               );
@@ -1675,9 +1682,12 @@ export async function registerRoutes(
           } else {
             storage.createMessage(contact.id, "line", "user", "[影片訊息] (下載失敗)");
           }
-          storage.createMessage(contact.id, "line", "ai", "(AI 系統提示) 已收到您的影片，將為您轉交專人檢視。");
-          storage.updateContactHumanFlag(contact.id, 1);
-          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: "已收到您的影片，將為您轉交專人檢視。" }], channelToken);
+          const aiEnabledVid = matchedChannel ? matchedChannel.is_ai_enabled : 1;
+          if (aiEnabledVid) {
+            storage.createMessage(contact.id, "line", "ai", "(AI 系統提示) 已收到您的影片，將為您轉交專人檢視。");
+            storage.updateContactHumanFlag(contact.id, 1);
+            await pushLineMessage(contact.platform_user_id, [{ type: "text", text: "已收到您的影片，將為您轉交專人檢視。" }], channelToken);
+          }
         } else if (event.type === "message" && event.message?.type !== "text") {
           const userId = event.source?.userId || "unknown";
           const contact = storage.getOrCreateContact("line", userId, "LINE用戶", matchedBrandId, matchedChannel?.id);
@@ -1752,7 +1762,8 @@ export async function registerRoutes(
                   const finalUrl = localImageUrl || att.payload.url;
                   const imgMsg = storage.createMessage(contact.id, "messenger", "user", "[圖片訊息]", "image", finalUrl);
                   broadcastSSE("new_message", { contact_id: contact.id, message: imgMsg, brand_id: matchedBrandId || contact.brand_id });
-                  if (localImageUrl && !contact.needs_human) {
+                  const fbAiEnabledImg = matchedChannel ? matchedChannel.is_ai_enabled : 1;
+                  if (localImageUrl && !contact.needs_human && fbAiEnabledImg) {
                     analyzeImageWithAI(localImageUrl, contact.id, null, "messenger").catch(err =>
                       console.error("[FB Webhook] AI image analysis error:", err)
                     );
@@ -1785,11 +1796,16 @@ export async function registerRoutes(
                   );
                 }
               } else if (!contact.needs_human) {
-                const testMode = storage.getSetting("test_mode");
-                if (testMode !== "true" && matchedChannel?.access_token) {
-                  autoReplyWithAI(contact, text, matchedChannel.access_token, matchedBrandId, "messenger").catch(err =>
-                    console.error("[FB Webhook] AI 自動回覆失敗:", err)
-                  );
+                const fbAiEnabled = matchedChannel ? matchedChannel.is_ai_enabled : 1;
+                if (!fbAiEnabled) {
+                  console.log("[FB WEBHOOK] AI 已關閉 (channel:", matchedChannel?.channel_name, ") - 跳過自動回覆");
+                } else {
+                  const testMode = storage.getSetting("test_mode");
+                  if (testMode !== "true" && matchedChannel?.access_token) {
+                    autoReplyWithAI(contact, text, matchedChannel.access_token, matchedBrandId, "messenger").catch(err =>
+                      console.error("[FB Webhook] AI 自動回覆失敗:", err)
+                    );
+                  }
                 }
               }
             }

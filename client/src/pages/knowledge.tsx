@@ -99,7 +99,7 @@ export default function KnowledgePage() {
       await apiRequest("PUT", "/api/settings", { key: "system_prompt", value: systemPrompt });
       queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
       toast({ title: "儲存成功", description: "全域系統指令已更新" });
-    } catch {
+    } catch (_e) {
       toast({ title: "儲存失敗", variant: "destructive" });
     } finally { setSaving(false); }
   };
@@ -111,7 +111,7 @@ export default function KnowledgePage() {
       await apiRequest("PUT", `/api/brands/${selectedBrandId}`, { system_prompt: brandPrompt });
       queryClient.invalidateQueries({ queryKey: ["/api/brands"] });
       toast({ title: "儲存成功", description: `${selectedBrand?.name || "品牌"} 的 AI 指令已更新` });
-    } catch {
+    } catch (_e) {
       toast({ title: "儲存失敗", variant: "destructive" });
     } finally { setSavingBrandPrompt(false); }
   };
@@ -137,7 +137,7 @@ export default function KnowledgePage() {
       if (!res.ok) throw new Error("Upload failed");
       queryClient.invalidateQueries({ queryKey: ["/api/knowledge-files"] });
       toast({ title: "上傳成功", description: `${file.name} 已上傳至 ${selectedBrand?.name || "全域"}` });
-    } catch { toast({ title: "上傳失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "上傳失敗", variant: "destructive" }); }
     finally { setUploading(false); }
   }, [queryClient, toast, selectedBrandId, selectedBrand]);
 
@@ -146,7 +146,7 @@ export default function KnowledgePage() {
       await apiRequest("DELETE", `/api/knowledge-files/${id}`);
       queryClient.invalidateQueries({ queryKey: ["/api/knowledge-files"] });
       toast({ title: "刪除成功" });
-    } catch { toast({ title: "刪除失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "刪除失敗", variant: "destructive" }); }
   };
 
   const handleDrop = useCallback((e: React.DragEvent) => {
@@ -183,7 +183,7 @@ export default function KnowledgePage() {
           setSandboxMessages((prev) => [...prev, { role: "ai", content: `⚠️ [沙盒提示] AI 已觸發「轉接真人客服」工具。在正式環境中，此聯絡人會被標記為「需人工處理」並暫停 AI 回覆。\n轉接原因：${data.transfer_reason || "未提供"}` }]);
         }
       }
-    } catch {
+    } catch (_e) {
       setSandboxMessages((prev) => [...prev, { role: "ai", content: "⚠️ 連線失敗，請稍後再試。" }]);
     } finally {
       setSandboxLoading(false);
@@ -242,7 +242,7 @@ export default function KnowledgePage() {
           setSandboxMessages(prev => [...prev, { role: "ai", content: `⚠️ [沙盒提示] AI 已觸發「轉接真人客服」工具。在正式環境中，此聯絡人會被標記為「需人工處理」並暫停 AI 回覆。\n轉接原因：${data.transfer_reason || "未提供"}` }]);
         }
       }
-    } catch {
+    } catch (_e) {
       setSandboxMessages(prev => [...prev, { role: "ai", content: "⚠️ 上傳失敗，請稍後再試。" }]);
     } finally {
       setSandboxUploading(false);
@@ -279,7 +279,7 @@ export default function KnowledgePage() {
       queryClient.invalidateQueries({ queryKey: ["/api/marketing-rules"] });
       toast({ title: editingRule ? "更新成功" : "新增成功" });
       setShowRuleDialog(false);
-    } catch { toast({ title: "操作失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "操作失敗", variant: "destructive" }); }
     finally { setRuleSaving(false); }
   };
 
@@ -288,7 +288,7 @@ export default function KnowledgePage() {
       await apiRequest("DELETE", `/api/marketing-rules/${id}`);
       queryClient.invalidateQueries({ queryKey: ["/api/marketing-rules"] });
       toast({ title: "刪除成功" });
-    } catch { toast({ title: "刪除失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "刪除失敗", variant: "destructive" }); }
   };
 
   const handleUploadImageAsset = useCallback(async (file: File) => {
@@ -308,7 +308,7 @@ export default function KnowledgePage() {
       if (!res.ok) throw new Error("Upload failed");
       queryClient.invalidateQueries({ queryKey: ["/api/image-assets"] });
       toast({ title: "上傳成功", description: `${file.name} 已加入素材庫` });
-    } catch { toast({ title: "上傳失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "上傳失敗", variant: "destructive" }); }
     finally { setImageAssetUploading(false); }
   }, [queryClient, toast, selectedBrandId]);
 
@@ -326,7 +326,7 @@ export default function KnowledgePage() {
       queryClient.invalidateQueries({ queryKey: ["/api/image-assets"] });
       toast({ title: "更新成功" });
       setShowAssetDialog(false);
-    } catch { toast({ title: "更新失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "更新失敗", variant: "destructive" }); }
     finally { setAssetSaving(false); }
   };
 
@@ -335,7 +335,7 @@ export default function KnowledgePage() {
       await apiRequest("DELETE", `/api/image-assets/${id}`);
       queryClient.invalidateQueries({ queryKey: ["/api/image-assets"] });
       toast({ title: "刪除成功" });
-    } catch { toast({ title: "刪除失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "刪除失敗", variant: "destructive" }); }
   };
 
   const formatFileSize = (bytes: number) => {

@@ -87,7 +87,7 @@ export default function TeamPage() {
       toast({ title: "更新成功", description: `${editName} 的資料已更新` });
       setShowEditDialog(false);
       setEditMember(null);
-    } catch {
+    } catch (_e) {
       toast({ title: "更新失敗", variant: "destructive" });
     } finally { setUpdating(false); }
   };

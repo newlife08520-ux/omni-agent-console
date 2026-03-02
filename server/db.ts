@@ -136,6 +136,11 @@ function migrateBrandsAndChannels() {
     );
   `);
 
+  const channelColNames = db.prepare("PRAGMA table_info(channels)").all() as { name: string }[];
+  if (!channelColNames.map(c => c.name).includes("is_ai_enabled")) {
+    db.exec("ALTER TABLE channels ADD COLUMN is_ai_enabled INTEGER NOT NULL DEFAULT 0");
+  }
+
   const brandColNames = db.prepare("PRAGMA table_info(brands)").all() as { name: string }[];
   if (!brandColNames.map(c => c.name).includes("return_form_url")) {
     db.exec("ALTER TABLE brands ADD COLUMN return_form_url TEXT NOT NULL DEFAULT ''");

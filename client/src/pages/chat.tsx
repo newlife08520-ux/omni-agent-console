@@ -57,7 +57,7 @@ function parseProductList(raw: string): string {
     if (Array.isArray(items)) {
       return items.map((item: any) => `${item.code || item.name || "商品"} x ${item.qty || 1}`).join("\n");
     }
-  } catch {}
+  } catch (_e) {}
   return raw;
 }
 
@@ -67,7 +67,7 @@ function formatDateTime(raw?: string): string {
     const d = new Date(raw);
     if (isNaN(d.getTime())) return raw;
     return d.toLocaleString("zh-TW", { timeZone: "Asia/Taipei", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-  } catch { return raw; }
+  } catch (_e) { return raw; }
 }
 
 const STATUS_MAP: Record<string, { label: string; color: string; dot: string }> = {
@@ -265,7 +265,7 @@ export default function ChatPage() {
         const audio = new Audio("data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgiq2up3hOMjdkjK+smXBILTRlj7CsmG9HLDVmkLCsmG9HLDVmkLCsmG5HLTVmkLCsmG5HLTVmkbGtmXBILDVmkLCsmG5HLTVnkbGtmXBILDVmkLCsmG5HLTRlkLCsmXBILjVljq+smXBJLTRlkLCsmXBJLTRlj7CsmG9ILTRlj7CsmG9ILDVmkLCsmG9ILDVmkLCsmXBILDVmkLCsmXBILDVmkLCsmXBILDVmkLCsmXBILDVmkbGtmXBILTVmkbGtmXBILTVmkbGtmXBILTVnkbGtmXBJLTVnkbGtmXBJLjZnkbKumXBJLjZokrKumnFKLjZokrKumnFKLzZokrKumnFKLzZpk7OvmnJKLzZpk7OvmnJKLzZplLOwm3NLLzZqlLOwm3NLMDdqlLOwm3NMMDdqlLOwnHRMMDdrlbSxnHRNMTdrlbSxnHRNMThslrWynXVOMjhslrWynXVOMjhtl7WynXZPMjhtl7aznndPMzhtl7aznndPMzlumLaznndQMzlumLe0n3hQNDlvmbe0n3hRNDlvmbi1oHlRNTpvmbi1oHlRNTpwmrm2oXpSNjpwmrm2oXpSNjpwm7m2oXtTNztxm7q3ontTNztxm7q3o3xUODtxnLu4o3xUODtxnLu4pHxVOTxynby5pX1WOTxynby5pX1WOj1zn726pn5XOj1zn726pn5XOz10oL67p39YPD50oL+8qIBZPD50oL+8qIBZPT91ocC9qYFaPj91ocC9qYFaPj91oc==");
         audio.volume = 0.3;
         audio.play().catch(() => {});
-      } catch {}
+      } catch (_e) {}
       if (Notification.permission === "granted") {
         new Notification("客服中心", { body: "有新的對話需要人工處理", icon: "/favicon.ico" });
       } else if (Notification.permission === "default") {
@@ -292,7 +292,7 @@ export default function ChatPage() {
             const data = await res.json();
             setMessageSearchResults(data);
           }
-        } catch {}
+        } catch (_e) {}
         setMessageSearching(false);
       }, 400);
     } else {
@@ -309,7 +309,7 @@ export default function ChatPage() {
       setMessageInput("");
       queryClient.invalidateQueries({ queryKey: ["/api/contacts", selectedId, "messages"] });
       queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
-    } catch { toast({ title: "傳送失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "傳送失敗", variant: "destructive" }); }
     finally { setSending(false); }
   }, [messageInput, selectedId, sending, queryClient, toast]);
 
@@ -317,7 +317,7 @@ export default function ChatPage() {
     try {
       await apiRequest("PUT", `/api/contacts/${contactId}/human`, { needs_human: currentFlag ? 0 : 1 });
       queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
-    } catch { toast({ title: "操作失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "操作失敗", variant: "destructive" }); }
   };
 
   const handleStatusChange = async (status: string) => {
@@ -329,14 +329,14 @@ export default function ChatPage() {
       if (status === "resolved" && selectedContact?.platform === "line") {
         toast({ title: "已標記為已解決", description: "系統將自動發送滿意度調查卡片給客戶" });
       }
-    } catch { toast({ title: "操作失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "操作失敗", variant: "destructive" }); }
   };
 
   const handleTogglePin = async (contactId: number, currentPinned: number) => {
     try {
       await apiRequest("PUT", `/api/contacts/${contactId}/pinned`, { is_pinned: currentPinned ? 0 : 1 });
       queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
-    } catch { toast({ title: "操作失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "操作失敗", variant: "destructive" }); }
   };
 
   const handleAddTag = async () => {
@@ -347,7 +347,7 @@ export default function ChatPage() {
       await apiRequest("PUT", `/api/contacts/${selectedId}/tags`, { tags: [...currentTags, newTag.trim()] });
       queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
       setNewTag("");
-    } catch { toast({ title: "新增標籤失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "新增標籤失敗", variant: "destructive" }); }
   };
 
   const handleRemoveTag = async (tagToRemove: string) => {
@@ -356,7 +356,7 @@ export default function ChatPage() {
     try {
       await apiRequest("PUT", `/api/contacts/${selectedId}/tags`, { tags: currentTags.filter((t) => t !== tagToRemove) });
       queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
-    } catch { toast({ title: "移除標籤失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "移除標籤失敗", variant: "destructive" }); }
   };
 
   const handleOrderSearch = async () => {
@@ -372,7 +372,7 @@ export default function ChatPage() {
       } else if (data.orders?.length === 0) {
         toast({ title: "未找到相關訂單" });
       }
-    } catch { toast({ title: "查詢失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "查詢失敗", variant: "destructive" }); }
     finally { setOrderSearching(false); }
   };
 
@@ -400,7 +400,7 @@ export default function ChatPage() {
       } else {
         toast({ title: `找到 ${data.orders.length} 筆訂單` });
       }
-    } catch { toast({ title: "查詢失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "查詢失敗", variant: "destructive" }); }
     finally { setOrderSearching(false); }
   };
 
@@ -414,7 +414,7 @@ export default function ChatPage() {
         }
         setProductPages(data.pages || []);
       }
-    } catch {
+    } catch (_e) {
       toast({ title: "無法載入銷售頁列表", variant: "destructive" });
     }
   };
@@ -442,7 +442,7 @@ export default function ChatPage() {
       } else {
         toast({ title: `找到 ${data.orders.length} 筆訂單` });
       }
-    } catch { toast({ title: "查詢失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "查詢失敗", variant: "destructive" }); }
     finally { setOrderSearching(false); }
   };
 
@@ -475,7 +475,7 @@ export default function ChatPage() {
       } else {
         toast({ title: "發送失敗", description: data.message, variant: "destructive" });
       }
-    } catch { toast({ title: "發送失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "發送失敗", variant: "destructive" }); }
     finally { setSendingRating(false); }
   }, [selectedId, sendingRating, selectedContact, queryClient, toast]);
 
@@ -547,7 +547,7 @@ export default function ChatPage() {
       setPendingFiles([]);
       queryClient.invalidateQueries({ queryKey: ["/api/contacts", selectedId, "messages"] });
       queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
-    } catch { toast({ title: "傳送失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "傳送失敗", variant: "destructive" }); }
     finally { setUploading(false); }
   }, [pendingFiles, selectedId, uploading, queryClient, toast]);
 

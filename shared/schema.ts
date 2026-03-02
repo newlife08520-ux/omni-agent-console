@@ -32,6 +32,7 @@ export interface Channel {
   access_token: string;
   channel_secret: string;
   is_active: number;
+  is_ai_enabled: number;
   created_at: string;
 }
 

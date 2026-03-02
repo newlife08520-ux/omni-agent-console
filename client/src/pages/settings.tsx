@@ -71,7 +71,7 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
 
   const [showChannelDialog, setShowChannelDialog] = useState(false);
   const [editingChannel, setEditingChannel] = useState<Channel | null>(null);
-  const [channelForm, setChannelForm] = useState({ platform: "line" as ChannelPlatform, channel_name: "", bot_id: "", access_token: "", channel_secret: "" });
+  const [channelForm, setChannelForm] = useState({ platform: "line" as ChannelPlatform, channel_name: "", bot_id: "", access_token: "", channel_secret: "", is_ai_enabled: 0 });
   const [channelSaving, setChannelSaving] = useState(false);
   const [testingChannel, setTestingChannel] = useState<number | null>(null);
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
@@ -90,7 +90,7 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
       } else {
         toast({ title: "更新失敗", variant: "destructive" });
       }
-    } catch { toast({ title: "更新失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "更新失敗", variant: "destructive" }); }
     finally { setRefreshingProfiles(false); }
   };
 
@@ -102,7 +102,7 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
         const data = await res.json();
         setHealthStatus(data);
       }
-    } catch {}
+    } catch (_e) {}
     finally { setHealthLoading(false); }
   };
 
@@ -122,7 +122,7 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
         toast({ title: "連線失敗", description: data.message, variant: "destructive" });
         setHealthStatus(prev => ({ ...prev, [`superlanding_brand_${brandId}`]: { status: "error", message: data.message } }));
       }
-    } catch { toast({ title: "測試失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "測試失敗", variant: "destructive" }); }
     finally { setTestingBrandSL(null); }
   };
 
@@ -172,7 +172,7 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
       queryClient.invalidateQueries({ queryKey: ["/api/brands"] });
       toast({ title: editingBrand ? "品牌已更新" : "品牌已建立" });
       setShowBrandDialog(false);
-    } catch { toast({ title: "操作失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "操作失敗", variant: "destructive" }); }
     finally { setBrandSaving(false); }
   };
 
@@ -183,18 +183,18 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
       queryClient.invalidateQueries({ queryKey: ["/api/brands"] });
       if (selectedBrandId === id) setSelectedBrandId(brands.find(b => b.id !== id)?.id || null);
       toast({ title: "品牌已刪除" });
-    } catch { toast({ title: "刪除失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "刪除失敗", variant: "destructive" }); }
   };
 
   const openAddChannel = () => {
     setEditingChannel(null);
-    setChannelForm({ platform: "line", channel_name: "", bot_id: "", access_token: "", channel_secret: "" });
+    setChannelForm({ platform: "line", channel_name: "", bot_id: "", access_token: "", channel_secret: "", is_ai_enabled: 0 });
     setShowChannelDialog(true);
   };
 
   const openEditChannel = (ch: Channel) => {
     setEditingChannel(ch);
-    setChannelForm({ platform: ch.platform as ChannelPlatform, channel_name: ch.channel_name, bot_id: ch.bot_id, access_token: ch.access_token, channel_secret: ch.channel_secret });
+    setChannelForm({ platform: ch.platform as ChannelPlatform, channel_name: ch.channel_name, bot_id: ch.bot_id, access_token: ch.access_token, channel_secret: ch.channel_secret, is_ai_enabled: ch.is_ai_enabled ?? 0 });
     setShowChannelDialog(true);
   };
 
@@ -210,7 +210,7 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
       queryClient.invalidateQueries({ queryKey: ["/api/brands", selectedBrandId, "channels"] });
       toast({ title: editingChannel ? "渠道已更新" : "渠道已建立" });
       setShowChannelDialog(false);
-    } catch { toast({ title: "操作失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "操作失敗", variant: "destructive" }); }
     finally { setChannelSaving(false); }
   };
 
@@ -219,7 +219,7 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
       await apiRequest("DELETE", `/api/channels/${id}`);
       queryClient.invalidateQueries({ queryKey: ["/api/brands", selectedBrandId, "channels"] });
       toast({ title: "渠道已刪除" });
-    } catch { toast({ title: "刪除失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "刪除失敗", variant: "destructive" }); }
   };
 
   const handleTestChannel = async (id: number) => {
@@ -235,7 +235,7 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
         toast({ title: "連線失敗", description: data.message, variant: "destructive" });
         setHealthStatus(prev => ({ ...prev, [`channel_${id}`]: { status: "error", message: data.message } }));
       }
-    } catch { toast({ title: "測試失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "測試失敗", variant: "destructive" }); }
     finally { setTestingChannel(null); }
   };
 
@@ -359,7 +359,7 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
                       </span>
                       {chStatus && <StatusBadge status={chStatus.status as HealthStatus} message={chStatus.message} />}
                     </div>
-                    <p className="text-[10px] text-stone-400 truncate">Bot ID: {ch.bot_id || "未設定"} · Token: {ch.access_token ? maskValue(ch.access_token) : "未設定"}</p>
+                    <p className="text-[10px] text-stone-400 truncate">Bot ID: {ch.bot_id || "未設定"} · Token: {ch.access_token ? maskValue(ch.access_token) : "未設定"} · AI: {ch.is_ai_enabled ? <span className="text-emerald-500">開啟</span> : <span className="text-stone-400">關閉</span>}</p>
                   </div>
                   <div className="flex items-center gap-1">
                     {ch.access_token && (
@@ -499,6 +499,17 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
                 </button>
               </div>
             </div>
+            <div className="flex items-center justify-between rounded-lg border border-stone-200 bg-stone-50 px-4 py-3">
+              <div>
+                <label className="text-sm font-medium text-stone-700">啟用 AI 自動回覆</label>
+                <p className="text-[11px] text-stone-400 mt-0.5">關閉後，此渠道收到的訊息將不會觸發 AI 回覆，僅保留人工處理</p>
+              </div>
+              <Switch
+                data-testid="switch-ai-enabled"
+                checked={channelForm.is_ai_enabled === 1}
+                onCheckedChange={(checked) => setChannelForm(f => ({ ...f, is_ai_enabled: checked ? 1 : 0 }))}
+              />
+            </div>
           </div>
           <DialogFooter>
             <Button variant="ghost" onClick={() => setShowChannelDialog(false)} className="text-xs">取消</Button>
@@ -549,7 +560,7 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
       await apiRequest("PUT", "/api/settings", { key, value: formValues[key] || "" });
       queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
       toast({ title: "儲存成功", description: "設定已更新" });
-    } catch { toast({ title: "儲存失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "儲存失敗", variant: "destructive" }); }
     finally { setSaving(""); }
   };
 
@@ -562,7 +573,7 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
       }
       queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
       toast({ title: "儲存成功", description: "所有設定已更新" });
-    } catch { toast({ title: "儲存失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "儲存失敗", variant: "destructive" }); }
     finally { setSaving(""); }
   };
 
@@ -572,7 +583,7 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
       await apiRequest("PUT", "/api/settings", { key: "test_mode", value: checked ? "true" : "false" });
       queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
       toast({ title: checked ? "安全測試模式已開啟" : "安全測試模式已關閉" });
-    } catch { toast({ title: "設定失敗", variant: "destructive" }); }
+    } catch (_e) { toast({ title: "設定失敗", variant: "destructive" }); }
   };
 
   const toggleKeyVisibility = (key: string) => setShowKeys((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -607,7 +618,7 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
         toast({ title: "連線失敗", description: data.message, variant: "destructive" });
         updateApiHealth(type, { status: "error", message: data.message });
       }
-    } catch {
+    } catch (_e) {
       toast({ title: "連線失敗", description: "無法連線至伺服器", variant: "destructive" });
       updateApiHealth(type, { status: "error", message: "無法連線至伺服器" });
     }
