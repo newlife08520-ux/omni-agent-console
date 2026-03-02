@@ -1120,36 +1120,60 @@ export async function registerRoutes(
 
   async function downloadLineContent(messageId: string, fallbackExt: string, channelAccessToken?: string | null): Promise<string | null> {
     const token = channelAccessToken || storage.getSetting("line_channel_access_token");
-    if (!token) return null;
-    try {
-      const resp = await fetch(`https://api-data.line.me/v2/bot/message/${messageId}/content`, {
-        headers: { "Authorization": `Bearer ${token}` },
-      });
-      if (!resp.ok) {
-        console.error("LINE content download failed:", resp.status, await resp.text());
-        return null;
-      }
-      const contentType = resp.headers.get("content-type") || "";
-      const mimeExtMap: Record<string, string> = {
-        "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp",
-        "video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm",
-      };
-      const ext = mimeExtMap[contentType] || fallbackExt;
-      const buffer = Buffer.from(await resp.arrayBuffer());
-      const filename = `line-${Date.now()}-${crypto.randomUUID()}${ext}`;
-      const filePath = path.join(uploadDir, filename);
-      fs.writeFileSync(filePath, buffer);
-      return `/uploads/${filename}`;
-    } catch (err) {
-      console.error("LINE content download error:", err);
+    if (!token) {
+      console.error("[downloadLineContent] No token available for messageId:", messageId);
       return null;
     }
+    const maxRetries = 3;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 15000);
+        const resp = await fetch(`https://api-data.line.me/v2/bot/message/${messageId}/content`, {
+          headers: { "Authorization": `Bearer ${token}` },
+          signal: controller.signal,
+        });
+        clearTimeout(timeout);
+        if (!resp.ok) {
+          const errText = await resp.text().catch(() => "");
+          console.error(`[downloadLineContent] Attempt ${attempt}/${maxRetries} failed: HTTP ${resp.status} - ${errText} (msgId: ${messageId})`);
+          if (resp.status === 404 || resp.status === 401 || resp.status === 403) break;
+          if (attempt < maxRetries) { await new Promise(r => setTimeout(r, 1000 * attempt)); continue; }
+          return null;
+        }
+        if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+        const contentType = resp.headers.get("content-type") || "";
+        const mimeExtMap: Record<string, string> = {
+          "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp",
+          "video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm",
+        };
+        const ext = mimeExtMap[contentType] || fallbackExt;
+        const buffer = Buffer.from(await resp.arrayBuffer());
+        const filename = `line-${Date.now()}-${crypto.randomUUID()}${ext}`;
+        const filePath = path.join(uploadDir, filename);
+        fs.writeFileSync(filePath, buffer);
+        console.log(`[downloadLineContent] Success: ${filename} (${buffer.length} bytes, attempt ${attempt})`);
+        return `/uploads/${filename}`;
+      } catch (err: any) {
+        console.error(`[downloadLineContent] Attempt ${attempt}/${maxRetries} error (msgId: ${messageId}):`, err.name === "AbortError" ? "Request timed out (15s)" : err.message);
+        if (attempt < maxRetries) { await new Promise(r => setTimeout(r, 1000 * attempt)); continue; }
+        return null;
+      }
+    }
+    return null;
   }
 
   async function downloadExternalImage(imageUrl: string): Promise<string | null> {
     try {
-      const resp = await fetch(imageUrl);
-      if (!resp.ok) return null;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      const resp = await fetch(imageUrl, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (!resp.ok) {
+        console.error(`[downloadExternalImage] Failed: HTTP ${resp.status} for ${imageUrl}`);
+        return null;
+      }
+      if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
       const contentType = resp.headers.get("content-type") || "image/jpeg";
       const extMap: Record<string, string> = { "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp" };
       const ext = extMap[contentType] || ".jpg";
@@ -1157,9 +1181,10 @@ export async function registerRoutes(
       const filename = `fb-${Date.now()}-${crypto.randomUUID()}${ext}`;
       const filePath = path.join(uploadDir, filename);
       fs.writeFileSync(filePath, buffer);
+      console.log(`[downloadExternalImage] Success: ${filename} (${buffer.length} bytes)`);
       return `/uploads/${filename}`;
-    } catch (err) {
-      console.error("External image download error:", err);
+    } catch (err: any) {
+      console.error("[downloadExternalImage] Error:", err.name === "AbortError" ? "Request timed out (15s)" : err.message);
       return null;
     }
   }
