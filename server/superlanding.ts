@@ -43,7 +43,7 @@ function mapOrder(o: any): OrderInfo {
     try {
       const parsed = JSON.parse(o.address);
       address = [parsed.state, parsed.city, parsed.addr1, parsed.addr2].filter(Boolean).join("");
-    } catch {
+    } catch (_e) {
       address = o.address;
     }
   }

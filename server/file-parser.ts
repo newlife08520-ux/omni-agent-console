@@ -83,7 +83,7 @@ async function extractDocxText(buffer: Buffer): Promise<string> {
       }
     }
     return textParts.join("\n");
-  } catch {
+  } catch (_e) {
     return "";
   }
 }
@@ -122,7 +122,7 @@ async function extractPdfText(buffer: Buffer): Promise<string> {
     const result = lines.filter(l => l.trim().length > 0).join("\n");
     if (result.trim().length > 0) return result;
     return "[PDF 無法提取文字內容 - 可能為掃描或圖片式 PDF]";
-  } catch {
+  } catch (_e) {
     return "[PDF 解析失敗]";
   }
 }

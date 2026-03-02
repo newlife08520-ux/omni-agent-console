@@ -15,7 +15,7 @@ function fixMulterFilename(originalname: string): string {
     if (/[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]/.test(decoded) || decoded !== originalname) {
       return decoded;
     }
-  } catch {}
+  } catch (_e) {}
   return originalname;
 }
 
@@ -227,7 +227,7 @@ const sseClients: Set<import("express").Response> = new Set();
 function broadcastSSE(eventType: string, data: any) {
   const payload = `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const client of sseClients) {
-    try { client.write(payload); } catch { sseClients.delete(client); }
+    try { client.write(payload); } catch (_e) { sseClients.delete(client); }
   }
 }
 
@@ -316,7 +316,7 @@ export async function registerRoutes(
             failed++;
           }
           await new Promise(r => setTimeout(r, 100));
-        } catch {
+        } catch (_e) {
           failed++;
         }
       }
@@ -340,7 +340,7 @@ export async function registerRoutes(
     res.write("event: connected\ndata: {}\n\n");
     sseClients.add(res);
     const keepAlive = setInterval(() => {
-      try { res.write(":ping\n\n"); } catch { clearInterval(keepAlive); sseClients.delete(res); }
+      try { res.write(":ping\n\n"); } catch (_e) { clearInterval(keepAlive); sseClients.delete(res); }
     }, 25000);
     req.on("close", () => {
       console.log("[SSE] Client disconnected, remaining:", sseClients.size - 1);
@@ -1197,7 +1197,7 @@ export async function registerRoutes(
       const ext = path.extname(absPath).toLowerCase();
       const mimeType = ext === ".png" ? "image/png" : ext === ".gif" ? "image/gif" : ext === ".webp" ? "image/webp" : "image/jpeg";
       return `data:${mimeType};base64,${imageBuffer.toString("base64")}`;
-    } catch {
+    } catch (_e) {
       return null;
     }
   }
@@ -1272,7 +1272,7 @@ export async function registerRoutes(
         for (const toolCall of responseMessage.tool_calls) {
           const fnName = toolCall.function.name;
           let fnArgs: Record<string, string> = {};
-          try { fnArgs = JSON.parse(toolCall.function.arguments); } catch {}
+          try { fnArgs = JSON.parse(toolCall.function.arguments); } catch (_e) {}
           const toolResult = await executeToolCall(fnName, fnArgs, {
             contactId: contactId,
             brandId: effectiveBrandId || undefined,
@@ -1418,7 +1418,7 @@ export async function registerRoutes(
         for (const toolCall of responseMessage.tool_calls) {
           const fnName = toolCall.function.name;
           let fnArgs: Record<string, string> = {};
-          try { fnArgs = JSON.parse(toolCall.function.arguments); } catch {}
+          try { fnArgs = JSON.parse(toolCall.function.arguments); } catch (_e) {}
 
           console.log(`[Webhook AI] 執行 Tool: ${fnName}，參數:`, fnArgs);
           const toolResult = await executeToolCall(fnName, fnArgs, {
@@ -2395,7 +2395,7 @@ export async function registerRoutes(
           let fnArgs: Record<string, string> = {};
           try {
             fnArgs = JSON.parse(toolCall.function.arguments);
-          } catch {
+          } catch (_e) {
             console.error("[Sandbox] Tool Call 參數解析失敗:", toolCall.function.arguments);
             chatMessages.push({
               role: "tool",
@@ -2420,7 +2420,7 @@ export async function registerRoutes(
             try {
               const parsed = JSON.parse(toolResult);
               if (parsed.image_url) sandboxImageResult = parsed;
-            } catch {}
+            } catch (_e) {}
           }
 
           chatMessages.push({
@@ -2475,7 +2475,7 @@ export async function registerRoutes(
     const fileUrl = `/uploads/${req.file.filename}`;
     const historyRaw = req.body.history;
     let history: { role: string; content: string }[] = [];
-    try { history = JSON.parse(historyRaw || "[]"); } catch {}
+    try { history = JSON.parse(historyRaw || "[]"); } catch (_e) {}
 
     if (isVideo) {
       return res.json({
