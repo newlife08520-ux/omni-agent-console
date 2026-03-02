@@ -1,8 +1,9 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, lookupOrdersByPhone, fetchPages, lookupOrdersByPageAndPhone, ensurePagesCacheLoaded, refreshPagesCache, getCachedPages, getCachedPagesAge, buildProductCatalogPrompt } from "./superlanding";
+import { fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, fetchPages, lookupOrdersByPageAndPhone, ensurePagesCacheLoaded, refreshPagesCache, getCachedPages, getCachedPagesAge, buildProductCatalogPrompt } from "./superlanding";
 import type { SuperLandingConfig } from "./superlanding";
+import type { OrderInfo } from "@shared/schema";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
@@ -570,14 +571,14 @@ export async function registerRoutes(
 
   app.get("/api/orders/lookup", authMiddleware, async (req, res) => {
     const { q } = req.query;
-    const query = (q as string || "").trim();
+    const query = (q as string || "").trim().toUpperCase();
     if (!query) return res.status(400).json({ message: "請提供訂單編號" });
     const config = getSuperLandingConfig();
     if (!config.merchantNo || !config.accessKey) {
       return res.json({ orders: [], error: "not_configured", message: "尚未設定一頁商店 API 金鑰" });
     }
     try {
-      console.log("[一頁商店] 以訂單編號查詢:", query);
+      console.log("[一頁商店] 以訂單編號查詢:", query, "(已自動大寫)");
       const order = await lookupOrderById(config, query);
       if (!order) {
         return res.json({ orders: [], message: "於一頁商店查無此訂單編號，請確認編號是否正確" });
@@ -928,13 +929,13 @@ export async function registerRoutes(
       type: "function",
       function: {
         name: "lookup_order_by_id",
-        description: "用訂單編號直接查詢訂單狀態。當客戶提供了訂單編號（如 KBT58265、DEN12345、MRQ00001 等格式）時使用此工具。",
+        description: "用訂單編號直接查詢訂單狀態。當客戶提供了訂單編號（如 KBT58265、DEN12345、MRQ00001 等格式）時使用此工具。系統會自動將小寫轉為大寫。",
         parameters: {
           type: "object",
           properties: {
             order_id: {
               type: "string",
-              description: "客戶提供的訂單編號，例如 KBT58265",
+              description: "客戶提供的訂單編號，例如 KBT58265（不區分大小寫）",
             },
           },
           required: ["order_id"],
@@ -945,7 +946,7 @@ export async function registerRoutes(
       type: "function",
       function: {
         name: "lookup_order_by_product_and_phone",
-        description: "用手機號碼查詢訂單，可選搭配商品名稱縮小範圍。三種用法：(1) 只有手機號碼：直接用手機搜尋近期訂單（今天→3天→7天→30天→90天，自動擴大），無需商品名稱；(2) 手機＋商品名稱：先比對銷售頁再搜尋；(3) 手機＋product_index：精確指定商品。客戶只要提供手機號碼就能查詢，不需要額外提供商品名稱。",
+        description: "用商品名稱＋手機號碼查詢訂單。必須提供商品名稱（或 product_index）和手機號碼。系統會根據商品名稱比對銷售頁的 page_id，再用 page_id 搭配手機號碼查詢訂單。如果客戶只提供手機號碼但沒有提供商品名稱，你必須先詢問客戶購買的是什麼商品，不要直接呼叫此工具。",
         parameters: {
           type: "object",
           properties: {
@@ -955,7 +956,7 @@ export async function registerRoutes(
             },
             product_name: {
               type: "string",
-              description: "客戶購買的商品名稱（可以是簡稱、俗稱、關鍵字片段皆可）。當無法確定 product_index 時使用。",
+              description: "客戶購買的商品名稱（可以是簡稱、俗稱、關鍵字片段皆可）。當無法確定 product_index 時使用。必填（除非已提供 product_index）。",
             },
             phone: {
               type: "string",
@@ -970,7 +971,7 @@ export async function registerRoutes(
       type: "function",
       function: {
         name: "lookup_order_by_date_and_contact",
-        description: "用下單日期範圍和聯絡資訊查詢訂單。當客戶無法提供單號和商品名稱，但能提供下單日期區間和 Email/手機/姓名時使用。",
+        description: "用下單日期範圍、聯絡資訊和 page_id 查詢訂單。必須提供 page_id（從商品比對取得）。當客戶提供了下單日期區間和 Email/手機/姓名，且能確定商品時使用。",
         parameters: {
           type: "object",
           properties: {
@@ -985,6 +986,10 @@ export async function registerRoutes(
             end_date: {
               type: "string",
               description: "結束日期，格式 YYYY-MM-DD",
+            },
+            page_id: {
+              type: "string",
+              description: "銷售頁 ID（從商品比對結果取得，若無則先用 lookup_order_by_product_and_phone 找到對應商品）",
             },
           },
           required: ["contact", "begin_date", "end_date"],
@@ -1004,8 +1009,8 @@ export async function registerRoutes(
 
     try {
       if (toolName === "lookup_order_by_id") {
-        const orderId = (args.order_id || "").trim();
-        console.log("[AI Tool Call] lookup_order_by_id，單號:", orderId);
+        const orderId = (args.order_id || "").trim().toUpperCase();
+        console.log("[AI Tool Call] lookup_order_by_id，單號:", orderId, "(已自動大寫)");
 
         if (!orderId) {
           return JSON.stringify({ success: false, error: "訂單編號為空" });
@@ -1048,30 +1053,12 @@ export async function registerRoutes(
         }
 
         if (!productName && !productIndex) {
-          console.log("[AI Tool Call] 僅手機號碼，進行全域日期範圍搜尋");
-          try {
-            const phoneResult = await lookupOrdersByPhone(config, phone);
-            if (phoneResult.orders.length > 0) {
-              const { getStatusLabel: getSL } = await import("./superlanding");
-              const orderSummaries = phoneResult.orders.slice(0, 5).map(o => ({
-                order_id: o.global_order_id,
-                status: getSL(o.status),
-                amount: o.final_total_order_amount,
-                product_list: o.product_list,
-                buyer_name: o.buyer_name,
-                tracking_number: o.tracking_number,
-                created_at: o.created_at,
-                shipped_at: o.shipped_at,
-              }));
-              console.log("[AI Tool Call] 手機號碼查到", phoneResult.orders.length, "筆訂單");
-              return JSON.stringify({ success: true, found: true, total: phoneResult.orders.length, orders: orderSummaries });
-            }
-            console.log("[AI Tool Call] 手機號碼查無訂單");
-            return JSON.stringify({ success: true, found: false, message: `以手機號碼 ${phone} 搜尋近期訂單（最多90天），查無紀錄。` });
-          } catch (err: any) {
-            console.error("[AI Tool Call] 手機號碼全域搜尋失敗:", err.message);
-            return JSON.stringify({ success: false, error: `查詢失敗：${err.message}` });
-          }
+          console.log("[AI Tool Call] 禁止：僅手機號碼無商品名稱，拒絕全域搜尋");
+          return JSON.stringify({
+            success: false,
+            error: "必須提供商品名稱或 product_index 才能查詢訂單。請先詢問客戶購買的是什麼商品，確認後再查詢。禁止僅用手機號碼進行全域搜尋。",
+            require_product: true,
+          });
         }
 
         const pages = getCachedPages();
@@ -1140,44 +1127,12 @@ export async function registerRoutes(
         }
 
         if (matchedPages.length === 0) {
-          console.log("[AI Tool Call] 銷售頁標題無匹配，改用手機號碼直查:", phone, "關鍵字:", productName);
-
-          try {
-            const phoneResult = await lookupOrdersByPhone(config, phone, productName || undefined);
-
-            if (phoneResult.orders.length > 0) {
-              const { getStatusLabel: getSL } = await import("./superlanding");
-              const orderSummaries = phoneResult.orders.slice(0, 5).map(o => ({
-                order_id: o.global_order_id,
-                status: getSL(o.status),
-                amount: o.final_total_order_amount,
-                product_list: o.product_list,
-                buyer_name: o.buyer_name,
-                tracking_number: o.tracking_number,
-                created_at: o.created_at,
-                shipped_at: o.shipped_at,
-              }));
-              const hasKeywordMatch = productName && phoneResult.orders.some(o => o.product_list.toLowerCase().includes(productName.toLowerCase()));
-              console.log("[AI Tool Call] 手機號碼查到", phoneResult.orders.length, "筆訂單", hasKeywordMatch ? "(含關鍵字匹配)" : "(無關鍵字匹配，回傳全部)");
-              return JSON.stringify({
-                success: true,
-                found: true,
-                total: phoneResult.orders.length,
-                orders: orderSummaries,
-                note: hasKeywordMatch ? undefined : `手機號碼的訂單中未找到包含「${productName}」的商品，以下是該手機號碼的所有訂單，請協助客戶確認。`,
-              });
-            }
-
-            console.log("[AI Tool Call] 手機號碼查無訂單");
-            return JSON.stringify({
-              success: true,
-              found: false,
-              message: `查無手機號碼 ${phone} 的訂單紀錄。`,
-            });
-          } catch (err: any) {
-            console.error("[AI Tool Call] 手機號碼查詢失敗:", err.message);
-            return JSON.stringify({ success: false, error: `查詢失敗：${err.message}` });
-          }
+          console.log("[AI Tool Call] 禁止：無法從商品名稱比對到銷售頁，拒絕全域搜尋。商品:", productName);
+          return JSON.stringify({
+            success: false,
+            error: `無法從「${productName}」比對到任何銷售頁商品，無法確定 page_id，禁止進行全域搜尋。請向客戶確認正確的商品名稱後再試。`,
+            require_product: true,
+          });
         }
 
         console.log("[AI Tool Call] 匹配商品:", matchedPages.length, "個銷售頁:", matchedPages.slice(0, 5).map(p => `${p.productName}(${p.pageId})`).join(", "), matchedPages.length > 5 ? "..." : "");
@@ -1200,7 +1155,7 @@ export async function registerRoutes(
         }
 
         const { getStatusLabel: getSL } = await import("./superlanding");
-        const orderSummaries = result.orders.slice(0, 5).map(o => ({
+        const orderSummaries = result.orders.map(o => ({
           order_id: o.global_order_id,
           status: getSL(o.status),
           amount: o.final_total_order_amount,
@@ -1211,28 +1166,78 @@ export async function registerRoutes(
           shipped_at: o.shipped_at,
         }));
 
-        console.log("[AI Tool Call] 查到", result.orders.length, "筆訂單");
-        return JSON.stringify({ success: true, found: true, total: result.orders.length, orders: orderSummaries });
+        console.log("[AI Tool Call] 查到", result.orders.length, "筆訂單（全部列出）");
+        const multiOrderNote = result.orders.length > 1
+          ? `此手機號碼在此商品下有 ${result.orders.length} 筆訂單，請全部列出摘要（單號、日期、金額、狀態），並詢問客戶要查看哪一筆的詳情。`
+          : undefined;
+        return JSON.stringify({ success: true, found: true, total: result.orders.length, orders: orderSummaries, note: multiOrderNote });
       }
 
       if (toolName === "lookup_order_by_date_and_contact") {
         const contact = (args.contact || "").trim();
         const beginDate = (args.begin_date || "").trim();
         const endDate = (args.end_date || "").trim();
-        console.log("[AI Tool Call] lookup_order_by_date_and_contact，聯絡:", contact, "日期:", beginDate, "~", endDate);
+        const pageId = (args.page_id || "").trim();
+        console.log("[AI Tool Call] lookup_order_by_date_and_contact，聯絡:", contact, "日期:", beginDate, "~", endDate, "page_id:", pageId || "(無)");
 
         if (!contact || !beginDate || !endDate) {
           return JSON.stringify({ success: false, error: "請提供聯絡資訊和日期範圍" });
         }
 
-        const result = await lookupOrdersByDateAndFilter(config, contact, beginDate, endDate);
+        const diffDays = Math.round((new Date(endDate).getTime() - new Date(beginDate).getTime()) / (1000 * 60 * 60 * 24));
+        if (diffDays > 31) {
+          return JSON.stringify({ success: false, error: "日期範圍不可超過 31 天，請縮小查詢範圍" });
+        }
 
-        if (result.orders.length === 0) {
+        const fetchParams: Record<string, string> = {
+          begin_date: beginDate,
+          end_date: endDate,
+        };
+        if (pageId) {
+          fetchParams.page_id = pageId;
+        } else {
+          console.warn("[AI Tool Call] lookup_order_by_date_and_contact 未提供 page_id，將在日期範圍內全域搜尋（受31天限制保護）");
+        }
+
+        let page = 1;
+        const perPage = 200;
+        const maxPages = 25;
+        let allOrders: OrderInfo[] = [];
+        let truncated = false;
+
+        while (true) {
+          const orders = await fetchOrders(config, {
+            ...fetchParams,
+            per_page: String(perPage),
+            page: String(page),
+          });
+          allOrders = allOrders.concat(orders);
+          if (orders.length < perPage) break;
+          page++;
+          if (page > maxPages) {
+            truncated = true;
+            break;
+          }
+        }
+
+        const normalizedQuery = contact.replace(/[-\s]/g, "").toLowerCase();
+        const matched = allOrders.filter((o) => {
+          const phone = o.buyer_phone.replace(/[-\s]/g, "").toLowerCase();
+          const email = o.buyer_email.toLowerCase();
+          const name = o.buyer_name.toLowerCase();
+          return (
+            (phone && (phone.includes(normalizedQuery) || normalizedQuery.includes(phone))) ||
+            (email && email === normalizedQuery) ||
+            (name && name.includes(normalizedQuery))
+          );
+        });
+
+        if (matched.length === 0) {
           return JSON.stringify({ success: true, found: false, message: "在指定日期範圍內查無相符紀錄" });
         }
 
         const { getStatusLabel: getSL2 } = await import("./superlanding");
-        const orderSummaries = result.orders.slice(0, 5).map(o => ({
+        const orderSummaries = matched.map(o => ({
           order_id: o.global_order_id,
           status: getSL2(o.status),
           amount: o.final_total_order_amount,
@@ -1240,10 +1245,14 @@ export async function registerRoutes(
           buyer_name: o.buyer_name,
           tracking_number: o.tracking_number,
           created_at: o.created_at,
+          shipped_at: o.shipped_at,
         }));
 
-        console.log("[AI Tool Call] 查到", result.orders.length, "筆訂單");
-        return JSON.stringify({ success: true, found: true, total: result.orders.length, orders: orderSummaries, truncated: result.truncated });
+        console.log("[AI Tool Call] 查到", matched.length, "筆訂單（全部列出）");
+        const multiOrderNote = matched.length > 1
+          ? `此聯絡資訊在指定日期範圍內有 ${matched.length} 筆訂單，請全部列出摘要（單號、日期、金額、狀態），並詢問客戶要查看哪一筆的詳情。`
+          : undefined;
+        return JSON.stringify({ success: true, found: true, total: matched.length, orders: orderSummaries, truncated, note: multiOrderNote });
       }
 
       return JSON.stringify({ success: false, error: `未知的工具: ${toolName}` });

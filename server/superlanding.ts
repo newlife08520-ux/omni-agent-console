@@ -400,8 +400,9 @@ export async function lookupOrderById(
   config: SuperLandingConfig,
   orderId: string
 ): Promise<OrderInfo | null> {
-  const orders = await fetchOrders(config, { global_order_id: orderId });
-  console.log("[一頁商店] 依訂單編號查詢:", orderId, "結果:", orders.length, "筆");
+  const normalizedId = orderId.trim().toUpperCase();
+  const orders = await fetchOrders(config, { global_order_id: normalizedId });
+  console.log("[一頁商店] 依訂單編號查詢:", normalizedId, "(已自動大寫) 結果:", orders.length, "筆");
   return orders.length > 0 ? orders[0] : null;
 }
 
