@@ -5,7 +5,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Calendar } from "@/components/ui/calendar";
 import { Button } from "@/components/ui/button";
-import { TrendingUp, CheckCircle2, Users, Clock, Brain, Flame, Lightbulb, BarChart3, CalendarDays, ShieldCheck, ArrowRightLeft, Search, Tag, ShoppingBag, Monitor } from "lucide-react";
+import { TrendingUp, CheckCircle2, Users, Clock, Brain, Flame, Lightbulb, BarChart3, CalendarDays, ShieldCheck, ArrowRightLeft, Search, Tag, ShoppingBag, Monitor, Activity, ShieldAlert, Copy, Lock, PackageX, Timer, ArrowRight } from "lucide-react";
 import { format } from "date-fns";
 import { zhTW } from "date-fns/locale/zh-TW";
 import type { AnalyticsData } from "@shared/schema";
@@ -36,6 +36,24 @@ export default function AnalyticsPage() {
     queryKey: ["/api/analytics", range, customStart?.toISOString(), customEnd?.toISOString()],
     queryFn: async () => {
       const res = await fetch(`/api/analytics${queryParams}`, { credentials: "include" });
+      if (!res.ok) throw new Error(`${res.status}`);
+      return res.json();
+    },
+  });
+
+  const { data: healthData } = useQuery<{
+    webhookSigFails: number;
+    dedupeHits: number;
+    lockTimeouts: number;
+    orderLookupFails: number;
+    timeoutEscalations: number;
+    totalAlerts: number;
+    transferReasonTop5: { reason: string; count: number }[];
+    alertsByType: { type: string; count: number }[];
+  }>({
+    queryKey: ["/api/analytics/health", range, customStart?.toISOString(), customEnd?.toISOString()],
+    queryFn: async () => {
+      const res = await fetch(`/api/analytics/health${queryParams}`, { credentials: "include" });
       if (!res.ok) throw new Error(`${res.status}`);
       return res.json();
     },
@@ -363,6 +381,79 @@ export default function AnalyticsPage() {
           </div>
         </div>
       </div>
+
+      {healthData && (
+        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="section-system-health">
+          <div className="flex items-center gap-2 mb-5">
+            <div className="w-8 h-8 rounded-xl bg-rose-100 flex items-center justify-center"><Activity className="w-4 h-4 text-rose-600" /></div>
+            <div>
+              <span className="text-sm font-semibold text-stone-800">系統健康監控</span>
+              <p className="text-xs text-stone-500">Webhook 安全、重複攔截、超時與轉接統計</p>
+            </div>
+            {healthData.totalAlerts === 0 && (
+              <span className="ml-auto text-xs text-emerald-600 font-medium bg-emerald-50 px-2.5 py-1 rounded-full" data-testid="text-health-ok">一切正常</span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-5 gap-3 mb-5">
+            <div className="rounded-xl border border-stone-100 p-3 text-center" data-testid="health-sig-fails">
+              <div className="flex items-center justify-center mb-1.5">
+                <ShieldAlert className="w-4 h-4 text-red-400" />
+              </div>
+              <p className="text-2xl font-bold text-stone-800">{healthData.webhookSigFails}</p>
+              <p className="text-xs text-stone-500 mt-0.5">簽章失敗</p>
+            </div>
+            <div className="rounded-xl border border-stone-100 p-3 text-center" data-testid="health-dedupe-hits">
+              <div className="flex items-center justify-center mb-1.5">
+                <Copy className="w-4 h-4 text-amber-400" />
+              </div>
+              <p className="text-2xl font-bold text-stone-800">{healthData.dedupeHits}</p>
+              <p className="text-xs text-stone-500 mt-0.5">重複攔截</p>
+            </div>
+            <div className="rounded-xl border border-stone-100 p-3 text-center" data-testid="health-lock-timeouts">
+              <div className="flex items-center justify-center mb-1.5">
+                <Lock className="w-4 h-4 text-violet-400" />
+              </div>
+              <p className="text-2xl font-bold text-stone-800">{healthData.lockTimeouts}</p>
+              <p className="text-xs text-stone-500 mt-0.5">鎖逾時</p>
+            </div>
+            <div className="rounded-xl border border-stone-100 p-3 text-center" data-testid="health-order-fails">
+              <div className="flex items-center justify-center mb-1.5">
+                <PackageX className="w-4 h-4 text-orange-400" />
+              </div>
+              <p className="text-2xl font-bold text-stone-800">{healthData.orderLookupFails}</p>
+              <p className="text-xs text-stone-500 mt-0.5">查單失敗</p>
+            </div>
+            <div className="rounded-xl border border-stone-100 p-3 text-center" data-testid="health-timeout-escalations">
+              <div className="flex items-center justify-center mb-1.5">
+                <Timer className="w-4 h-4 text-sky-400" />
+              </div>
+              <p className="text-2xl font-bold text-stone-800">{healthData.timeoutEscalations}</p>
+              <p className="text-xs text-stone-500 mt-0.5">超時升級</p>
+            </div>
+          </div>
+
+          {healthData.transferReasonTop5.length > 0 && (
+            <div className="bg-stone-50/50 rounded-xl border border-stone-100 p-4" data-testid="section-transfer-reasons">
+              <div className="flex items-center gap-2 mb-3">
+                <ArrowRight className="w-4 h-4 text-stone-500" />
+                <span className="text-xs font-semibold text-stone-700">轉接原因 Top 5</span>
+              </div>
+              <div className="space-y-2">
+                {healthData.transferReasonTop5.map((item, i) => (
+                  <div key={i} className="flex items-center justify-between text-sm" data-testid={`transfer-reason-${i}`}>
+                    <div className="flex items-center gap-2">
+                      <span className="w-5 h-5 rounded-full bg-stone-200 text-stone-600 text-xs flex items-center justify-center font-medium">{i + 1}</span>
+                      <span className="text-stone-700">{item.reason}</span>
+                    </div>
+                    <span className="text-xs font-medium text-stone-500 bg-stone-100 px-2 py-0.5 rounded-full">{item.count} 次</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

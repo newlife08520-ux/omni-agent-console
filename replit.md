@@ -93,3 +93,11 @@ The system is built on a modern full-stack architecture:
 - **New KPI**: AI resolution rate, transfer rate, order query success rate (from ai_logs)
 - **New Charts**: Issue type distribution, order source distribution, transfer reason ranking, platform distribution
 - **API**: `/api/analytics` now returns issueTypeDistribution, orderSourceDistribution, transferReasons, platformDistribution
+
+## Hardening Layer (P0+P1)
+- **T101 Hard Mute**: AI skips reply when contact status is `awaiting_human` or `high_risk`, or `needs_human=1`, or within 30min mute window (`ai_muted_until`). Admin messages set 30min mute. `POST /api/contacts/:id/restore-ai` clears mute + resets status to `ai_handling`.
+- **T102 Timeout Fallback**: 15s OpenAI call timeout, 12s tool call timeout. `consecutive_timeouts` counter per contact; 2+ consecutive timeouts → auto-escalate to `awaiting_human` with comfort message. First timeout sends gentle retry prompt.
+- **T103 System Alerts**: `system_alerts` table records webhook_sig_fail, dedupe_hit, lock_timeout, order_lookup_fail, timeout_escalation, transfer events. `GET /api/analytics/health` endpoint returns alert stats + transfer reason Top 5. 30-day TTL cleanup on startup.
+- **T104 Message Debounce**: 3s buffer per contact for text messages. Multiple texts within 3s are merged with `\n` before AI processing. Images/video bypass debounce.
+- **T201 One-click Toggle**: `POST /api/contacts/:id/transfer-human` (with reason dropdown), `POST /api/contacts/:id/restore-ai`. Chat UI has reason selector + transfer/restore buttons + "AI 靜音中" badge.
+- **T203 Sensitive Info Masking**: `maskSensitiveInfo()` utility masks phone (09xx****xx), landline, and email (ab***@domain.com) in analytics API responses (transfer reasons, alerts).

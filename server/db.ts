@@ -131,6 +131,7 @@ export function initDatabase() {
   migrateBrandsAndChannels();
   migrateShoplineFields();
   migrateSystemPrompt();
+  migrateHardMuteAndAlerts();
   seedMockData();
 }
 
@@ -360,6 +361,34 @@ function migrateSystemPrompt() {
     console.log("[DB] 已自動附加「訂單查詢決策樹 v4.3」至系統提示詞");
   }
   db.prepare("UPDATE settings SET value = ? WHERE key = 'system_prompt'").run(newValue);
+}
+
+function migrateHardMuteAndAlerts() {
+  const contactCols = db.prepare("PRAGMA table_info(contacts)").all() as { name: string }[];
+  const colNames = contactCols.map(c => c.name);
+  if (!colNames.includes("ai_muted_until")) {
+    db.exec("ALTER TABLE contacts ADD COLUMN ai_muted_until TEXT");
+  }
+  if (!colNames.includes("consecutive_timeouts")) {
+    db.exec("ALTER TABLE contacts ADD COLUMN consecutive_timeouts INTEGER NOT NULL DEFAULT 0");
+  }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS system_alerts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      alert_type TEXT NOT NULL,
+      details TEXT NOT NULL DEFAULT '',
+      brand_id INTEGER,
+      contact_id INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_system_alerts_type_date ON system_alerts(alert_type, created_at);`);
+
+  db.exec(`DELETE FROM system_alerts WHERE created_at < datetime('now', '-30 days');`);
+
+  console.log("[DB Migration] Hard Mute + System Alerts 表已就緒");
 }
 
 function seedMockData() {

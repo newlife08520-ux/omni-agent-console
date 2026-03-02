@@ -83,6 +83,22 @@ export interface IStorage {
   };
   updateContactIssueType(id: number, issueType: string | null): void;
   updateContactOrderSource(id: number, orderSource: string): void;
+  setAiMutedUntil(id: number, until: string): void;
+  isAiMuted(id: number): boolean;
+  clearAiMuted(id: number): void;
+  resetConsecutiveTimeouts(id: number): void;
+  incrementConsecutiveTimeouts(id: number): number;
+  createSystemAlert(data: { alert_type: string; details: string; brand_id?: number; contact_id?: number }): void;
+  getSystemAlertStats(startDate: string, endDate: string, brandId?: number): {
+    webhookSigFails: number;
+    dedupeHits: number;
+    lockTimeouts: number;
+    orderLookupFails: number;
+    timeoutEscalations: number;
+    totalAlerts: number;
+    transferReasonTop5: { reason: string; count: number }[];
+    alertsByType: { type: string; count: number }[];
+  };
 }
 
 export class SQLiteStorage implements IStorage {
@@ -616,6 +632,80 @@ export class SQLiteStorage implements IStorage {
 
   updateContactOrderSource(id: number, orderSource: string): void {
     db.prepare("UPDATE contacts SET order_source = ? WHERE id = ?").run(orderSource, id);
+  }
+
+  setAiMutedUntil(id: number, until: string): void {
+    db.prepare("UPDATE contacts SET ai_muted_until = ? WHERE id = ?").run(until, id);
+  }
+
+  isAiMuted(id: number): boolean {
+    const row = db.prepare("SELECT ai_muted_until FROM contacts WHERE id = ?").get(id) as { ai_muted_until: string | null } | undefined;
+    if (!row?.ai_muted_until) return false;
+    return new Date(row.ai_muted_until) > new Date();
+  }
+
+  clearAiMuted(id: number): void {
+    db.prepare("UPDATE contacts SET ai_muted_until = NULL WHERE id = ?").run(id);
+  }
+
+  resetConsecutiveTimeouts(id: number): void {
+    db.prepare("UPDATE contacts SET consecutive_timeouts = 0 WHERE id = ?").run(id);
+  }
+
+  incrementConsecutiveTimeouts(id: number): number {
+    db.prepare("UPDATE contacts SET consecutive_timeouts = consecutive_timeouts + 1 WHERE id = ?").run(id);
+    const row = db.prepare("SELECT consecutive_timeouts FROM contacts WHERE id = ?").get(id) as { consecutive_timeouts: number } | undefined;
+    return row?.consecutive_timeouts || 1;
+  }
+
+  createSystemAlert(data: { alert_type: string; details: string; brand_id?: number; contact_id?: number }): void {
+    db.prepare("INSERT INTO system_alerts (alert_type, details, brand_id, contact_id) VALUES (?, ?, ?, ?)").run(
+      data.alert_type, data.details, data.brand_id || null, data.contact_id || null
+    );
+  }
+
+  getSystemAlertStats(startDate: string, endDate: string, brandId?: number): {
+    webhookSigFails: number;
+    dedupeHits: number;
+    lockTimeouts: number;
+    orderLookupFails: number;
+    timeoutEscalations: number;
+    totalAlerts: number;
+    transferReasonTop5: { reason: string; count: number }[];
+    alertsByType: { type: string; count: number }[];
+  } {
+    const brandFilter = brandId ? " AND brand_id = ?" : "";
+    const params = brandId ? [startDate, endDate, brandId] : [startDate, endDate];
+
+    const countByType = (type: string) => {
+      const row = db.prepare(`SELECT COUNT(*) as count FROM system_alerts WHERE alert_type = ? AND created_at >= ? AND created_at <= ?${brandFilter}`).get(type, ...params) as { count: number };
+      return row?.count || 0;
+    };
+
+    const totalRow = db.prepare(`SELECT COUNT(*) as count FROM system_alerts WHERE created_at >= ? AND created_at <= ?${brandFilter}`).get(...params) as { count: number };
+
+    const transferReasons = db.prepare(`
+      SELECT details as reason, COUNT(*) as count FROM system_alerts
+      WHERE alert_type = 'transfer' AND created_at >= ? AND created_at <= ?${brandFilter}
+      GROUP BY details ORDER BY count DESC LIMIT 5
+    `).all(...params) as { reason: string; count: number }[];
+
+    const alertsByType = db.prepare(`
+      SELECT alert_type as type, COUNT(*) as count FROM system_alerts
+      WHERE created_at >= ? AND created_at <= ?${brandFilter}
+      GROUP BY alert_type ORDER BY count DESC
+    `).all(...params) as { type: string; count: number }[];
+
+    return {
+      webhookSigFails: countByType("webhook_sig_fail"),
+      dedupeHits: countByType("dedupe_hit"),
+      lockTimeouts: countByType("lock_timeout"),
+      orderLookupFails: countByType("order_lookup_fail"),
+      timeoutEscalations: countByType("timeout_escalation"),
+      totalAlerts: totalRow?.count || 0,
+      transferReasonTop5: transferReasons,
+      alertsByType,
+    };
   }
 
   getTopKeywordsFromMessages(startDate: string, endDate: string, brandId?: number): { keyword: string; count: number }[] {

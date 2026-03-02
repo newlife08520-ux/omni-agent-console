@@ -309,11 +309,31 @@ export default function ChatPage() {
     finally { setSending(false); }
   }, [messageInput, selectedId, sending, queryClient, toast]);
 
-  const handleToggleHuman = async (contactId: number, currentFlag: number) => {
+  const [transferReason, setTransferReason] = useState("");
+
+  const handleTransferHuman = async (contactId: number) => {
     try {
-      await apiRequest("PUT", `/api/contacts/${contactId}/human`, { needs_human: currentFlag ? 0 : 1 });
+      await apiRequest("POST", `/api/contacts/${contactId}/transfer-human`, { reason: transferReason || "管理員手動轉接" });
+      setTransferReason("");
       queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
+      toast({ title: "已轉接真人客服" });
     } catch (_e) { toast({ title: "操作失敗", variant: "destructive" }); }
+  };
+
+  const handleRestoreAi = async (contactId: number) => {
+    try {
+      await apiRequest("POST", `/api/contacts/${contactId}/restore-ai`, {});
+      queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
+      toast({ title: "已恢復 AI 接管" });
+    } catch (_e) { toast({ title: "操作失敗", variant: "destructive" }); }
+  };
+
+  const handleToggleHuman = async (contactId: number, currentFlag: number) => {
+    if (currentFlag) {
+      await handleRestoreAi(contactId);
+    } else {
+      await handleTransferHuman(contactId);
+    }
   };
 
   const handleStatusChange = async (status: string) => {
@@ -765,17 +785,47 @@ export default function ChatPage() {
                   </SelectContent>
                 </Select>
                 {selectedContact?.needs_human ? (
-                  <Badge variant="destructive" className="gap-1 text-xs"><Headphones className="w-3 h-3" />人工模式</Badge>
+                  <Badge variant="destructive" className="gap-1 text-xs" data-testid="badge-human-mode"><Headphones className="w-3 h-3" />人工模式</Badge>
                 ) : (
-                  <Badge variant="secondary" className="gap-1 text-xs bg-stone-100 text-stone-600"><Bot className="w-3 h-3" />AI 模式</Badge>
+                  <Badge variant="secondary" className="gap-1 text-xs bg-stone-100 text-stone-600" data-testid="badge-ai-mode"><Bot className="w-3 h-3" />AI 模式</Badge>
                 )}
-                <Button size="sm" variant={selectedContact?.needs_human ? "secondary" : "default"}
-                  onClick={() => selectedContact && handleToggleHuman(selectedContact.id, selectedContact.needs_human)}
-                  data-testid="button-toggle-human"
-                  className={`text-xs ${!selectedContact?.needs_human ? "bg-emerald-600 hover:bg-emerald-700 text-white" : ""}`}
-                >
-                  {selectedContact?.needs_human ? <><Bot className="w-3.5 h-3.5 mr-1" />恢復 AI</> : <><UserCheck className="w-3.5 h-3.5 mr-1" />轉人工</>}
-                </Button>
+                {selectedContact?.status === "awaiting_human" && (
+                  <Badge variant="outline" className="gap-1 text-xs border-orange-300 bg-orange-50 text-orange-600" data-testid="badge-ai-muted">
+                    <Circle className="w-2.5 h-2.5 fill-orange-400 text-orange-400" />AI 靜音中
+                  </Badge>
+                )}
+                {selectedContact?.needs_human ? (
+                  <Button size="sm" variant="secondary"
+                    onClick={() => selectedContact && handleRestoreAi(selectedContact.id)}
+                    data-testid="button-restore-ai"
+                    className="text-xs"
+                  >
+                    <Bot className="w-3.5 h-3.5 mr-1" />恢復 AI
+                  </Button>
+                ) : (
+                  <div className="flex items-center gap-1">
+                    <Select value={transferReason} onValueChange={setTransferReason}>
+                      <SelectTrigger className="h-7 w-[120px] text-xs border-stone-200" data-testid="select-transfer-reason">
+                        <SelectValue placeholder="轉接原因" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="管理員手動轉接">手動轉接</SelectItem>
+                        <SelectItem value="客戶情緒激動">情緒激動</SelectItem>
+                        <SelectItem value="退貨退款處理">退貨退款</SelectItem>
+                        <SelectItem value="技術問題需專人">技術問題</SelectItem>
+                        <SelectItem value="VIP 客戶優先">VIP 客戶</SelectItem>
+                        <SelectItem value="AI 無法處理">AI 無法處理</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Button size="sm" variant="default"
+                      onClick={() => selectedContact && handleTransferHuman(selectedContact.id)}
+                      data-testid="button-transfer-human"
+                      className="text-xs bg-emerald-600 hover:bg-emerald-700 text-white"
+                    >
+                      <UserCheck className="w-3.5 h-3.5 mr-1" />轉人工
+                    </Button>
+                  </div>
+                )}
               </div>
             </div>
 

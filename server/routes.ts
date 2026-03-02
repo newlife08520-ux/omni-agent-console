@@ -271,6 +271,49 @@ async function getEnrichedSystemPrompt(brandId?: number): Promise<string> {
 
 const contactProcessingLocks = new Map<number, Promise<void>>();
 
+const messageDebounceBuffers = new Map<number, { texts: string[]; timer: ReturnType<typeof setTimeout>; resolve: () => void }>();
+const DEBOUNCE_MS = 3000;
+
+function debounceTextMessage(
+  contactId: number,
+  text: string,
+  processCallback: (mergedText: string) => Promise<void>
+): void {
+  const existing = messageDebounceBuffers.get(contactId);
+  if (existing) {
+    existing.texts.push(text);
+    clearTimeout(existing.timer);
+    existing.timer = setTimeout(() => {
+      const merged = existing.texts.join("\n");
+      messageDebounceBuffers.delete(contactId);
+      processCallback(merged).catch((err) => console.error("[Debounce] callback error:", err));
+    }, DEBOUNCE_MS);
+  } else {
+    const timer = setTimeout(() => {
+      const buf = messageDebounceBuffers.get(contactId);
+      if (!buf) return;
+      const merged = buf.texts.join("\n");
+      messageDebounceBuffers.delete(contactId);
+      processCallback(merged).catch((err) => console.error("[Debounce] callback error:", err));
+    }, DEBOUNCE_MS);
+    messageDebounceBuffers.set(contactId, { texts: [text], timer, resolve: () => {} });
+  }
+}
+
+function maskSensitiveInfo(text: string): string {
+  let result = text;
+  result = result.replace(/09\d{8}/g, (m) => m.substring(0, 4) + "****" + m.substring(8));
+  result = result.replace(/(\+?886)?\d{2,3}[-\s]?\d{3,4}[-\s]?\d{3,4}/g, (m) => {
+    if (m.length < 8) return m;
+    return m.substring(0, 3) + "****" + m.substring(m.length - 2);
+  });
+  result = result.replace(/([a-zA-Z0-9._%+-]+)@([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/g, (m, local, domain) => {
+    const maskedLocal = local.length > 2 ? local.substring(0, 2) + "***" : "***";
+    return `${maskedLocal}@${domain}`;
+  });
+  return result;
+}
+
 async function withContactLock<T>(contactId: number, fn: () => Promise<T>): Promise<T> {
   const existing = contactProcessingLocks.get(contactId);
   let resolve: () => void;
@@ -979,6 +1022,35 @@ export async function registerRoutes(
     return res.json(logs);
   });
 
+  app.post("/api/contacts/:id/transfer-human", authMiddleware, (req, res) => {
+    const contactId = parseInt(req.params.id);
+    const { reason } = req.body;
+    const contact = storage.getContact(contactId);
+    if (!contact) return res.status(404).json({ message: "聯絡人不存在" });
+    const transferReason = reason || "管理員手動轉接";
+    storage.updateContactStatus(contactId, "awaiting_human");
+    storage.updateContactHumanFlag(contactId, 1);
+    const muteUntil = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    storage.setAiMutedUntil(contactId, muteUntil);
+    storage.createSystemAlert({ alert_type: "transfer", details: transferReason, brand_id: contact.brand_id || undefined, contact_id: contactId });
+    broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+    console.log(`[Transfer] contact ${contactId} 已轉人工，原因: ${transferReason}`);
+    return res.json({ success: true, status: "awaiting_human", reason: transferReason });
+  });
+
+  app.post("/api/contacts/:id/restore-ai", authMiddleware, (req, res) => {
+    const contactId = parseInt(req.params.id);
+    const contact = storage.getContact(contactId);
+    if (!contact) return res.status(404).json({ message: "聯絡人不存在" });
+    storage.updateContactStatus(contactId, "ai_handling");
+    storage.updateContactHumanFlag(contactId, 0);
+    storage.clearAiMuted(contactId);
+    storage.resetConsecutiveTimeouts(contactId);
+    broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+    console.log(`[Restore AI] contact ${contactId} 已恢復 AI 接管`);
+    return res.json({ success: true, status: "ai_handling" });
+  });
+
   app.post("/api/contacts/:id/send-rating", authMiddleware, async (req, res) => {
     const id = parseInt(req.params.id);
     const ratingType = (req.body?.type === "ai" ? "ai" : "human") as "human" | "ai";
@@ -1046,6 +1118,10 @@ export async function registerRoutes(
     broadcastSSE("new_message", { contact_id: contactId, message, brand_id: contact.brand_id });
     broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
     storage.updateContactHumanFlag(contactId, 1);
+
+    const muteUntil = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    storage.setAiMutedUntil(contactId, muteUntil);
+    console.log(`[Hard Mute] 管理員傳訊給 contact ${contactId}, AI 靜音至 ${muteUntil}`);
 
     if (contact.platform === "line") {
       const token = getLineTokenForContact(contact);
@@ -1481,6 +1557,20 @@ export async function registerRoutes(
     const apiKey = storage.getSetting("openai_api_key");
     if (!apiKey || apiKey.trim() === "") return;
 
+    const freshCheck = storage.getContact(contact.id);
+    if (freshCheck && (freshCheck.status === "awaiting_human" || freshCheck.status === "high_risk")) {
+      console.log(`[AI Mute] Contact ${contact.id} status=${freshCheck.status}, AI 靜音中 - 跳過`);
+      return;
+    }
+    if (freshCheck && freshCheck.needs_human) {
+      console.log(`[AI Mute] Contact ${contact.id} needs_human=1, AI 靜音中 - 跳過`);
+      return;
+    }
+    if (storage.isAiMuted(contact.id)) {
+      console.log(`[AI Mute] Contact ${contact.id} 靜音窗尚未結束 - 跳過`);
+      return;
+    }
+
     const startTime = Date.now();
     const toolsCalled: string[] = [];
     let transferTriggered = false;
@@ -1565,13 +1655,72 @@ export async function registerRoutes(
       const hasImageAssets = storage.getImageAssets(effectiveBrandId || undefined).length > 0;
       const allTools = [...orderLookupTools, ...humanHandoffTools, ...(hasImageAssets ? imageTools : [])];
 
-      let completion = await openai.chat.completions.create({
-        model: "gpt-5.2",
-        messages: chatMessages,
-        tools: allTools,
-        max_completion_tokens: 1000,
-        temperature: 0.7,
-      });
+      const AI_TIMEOUT_MS = 15000;
+      const TOOL_TIMEOUT_MS = 12000;
+
+      async function callOpenAIWithTimeout(params: Parameters<typeof openai.chat.completions.create>[0]) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+        try {
+          const result = await openai.chat.completions.create(params, { signal: controller.signal as any });
+          return result;
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+
+      async function callToolWithTimeout(fnName: string, fnArgs: Record<string, string>, ctx: any) {
+        return new Promise<string>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("TOOL_TIMEOUT")), TOOL_TIMEOUT_MS);
+          executeToolCall(fnName, fnArgs, ctx).then(result => {
+            clearTimeout(timer);
+            resolve(result);
+          }).catch(err => {
+            clearTimeout(timer);
+            reject(err);
+          });
+        });
+      }
+
+      let completion;
+      try {
+        completion = await callOpenAIWithTimeout({
+          model: "gpt-5.2",
+          messages: chatMessages,
+          tools: allTools,
+          max_completion_tokens: 1000,
+          temperature: 0.7,
+        });
+      } catch (timeoutErr: any) {
+        if (timeoutErr?.name === "AbortError" || timeoutErr?.message?.includes("abort")) {
+          console.log(`[AI Timeout] OpenAI 推理超時 (>${AI_TIMEOUT_MS}ms) - contact ${contact.id}`);
+          const timeoutCount = storage.incrementConsecutiveTimeouts(contact.id);
+          storage.createSystemAlert({ alert_type: "timeout_escalation", details: `OpenAI 推理超時 (第${timeoutCount}次)`, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
+          if (timeoutCount >= 2) {
+            storage.updateContactStatus(contact.id, "awaiting_human");
+            storage.updateContactHumanFlag(contact.id, 1);
+            const comfortMsg = "不好意思，系統目前處理較慢，我已為您轉接專人客服，請稍候片刻。";
+            storage.createMessage(contact.id, contact.platform, "ai", comfortMsg);
+            if (platform === "messenger") {
+              sendFBMessage(channelToken || "", contact.platform_user_id, comfortMsg).catch(() => {});
+            } else if (channelToken) {
+              pushLineMessage(contact.platform_user_id, [{ type: "text", text: comfortMsg }], channelToken).catch(() => {});
+            }
+            broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+          } else {
+            const comfortMsg = "不好意思，讓您稍等了一下！請問您方便再提供一次您的問題嗎？例如訂單編號或商品名稱，我馬上幫您查詢。";
+            storage.createMessage(contact.id, contact.platform, "ai", comfortMsg);
+            if (platform === "messenger") {
+              sendFBMessage(channelToken || "", contact.platform_user_id, comfortMsg).catch(() => {});
+            } else if (channelToken) {
+              pushLineMessage(contact.platform_user_id, [{ type: "text", text: comfortMsg }], channelToken).catch(() => {});
+            }
+            broadcastSSE("new_message", { contact_id: contact.id, brand_id: contact.brand_id });
+          }
+          return;
+        }
+        throw timeoutErr;
+      }
 
       totalTokens += completion.usage?.total_tokens || 0;
 
@@ -1591,13 +1740,25 @@ export async function registerRoutes(
 
           toolsCalled.push(fnName);
           console.log(`[Webhook AI] 執行 Tool: ${fnName}，參數:`, fnArgs);
-          const toolResult = await executeToolCall(fnName, fnArgs, {
-            contactId: contact.id,
-            brandId: effectiveBrandId || undefined,
-            channelToken: channelToken || undefined,
-            platform: contact.platform,
-            platformUserId: contact.platform_user_id,
-          });
+
+          let toolResult: string;
+          try {
+            toolResult = await callToolWithTimeout(fnName, fnArgs, {
+              contactId: contact.id,
+              brandId: effectiveBrandId || undefined,
+              channelToken: channelToken || undefined,
+              platform: contact.platform,
+              platformUserId: contact.platform_user_id,
+            });
+          } catch (toolErr: any) {
+            if (toolErr?.message === "TOOL_TIMEOUT") {
+              console.log(`[AI Timeout] 工具 ${fnName} 超時 (>${TOOL_TIMEOUT_MS}ms)`);
+              storage.createSystemAlert({ alert_type: "timeout_escalation", details: `工具 ${fnName} 超時`, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
+              toolResult = JSON.stringify({ error: true, message: "工具查詢超時，請稍後再試" });
+            } else {
+              throw toolErr;
+            }
+          }
 
           chatMessages.push({ role: "tool", tool_call_id: toolCall.id, content: toolResult });
 
@@ -1605,6 +1766,7 @@ export async function registerRoutes(
             transferTriggered = true;
             transferReason = fnArgs.reason || "AI 判斷需要人工處理";
             storage.updateContactStatus(contact.id, "awaiting_human");
+            storage.createSystemAlert({ alert_type: "transfer", details: transferReason, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
             const freshContact = storage.getContact(contact.id);
             if (freshContact?.needs_human) {
               console.log(`[Webhook AI] transfer_to_human 已觸發，停止 AI 回覆迴圈`);
@@ -1616,6 +1778,8 @@ export async function registerRoutes(
               const parsed = JSON.parse(toolResult);
               if (parsed.found === false) {
                 orderLookupFailed++;
+                const orderSource = parsed.source || "unknown";
+                storage.createSystemAlert({ alert_type: "order_lookup_fail", details: `查單失敗 (${orderSource})`, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
               }
               if (parsed.found === true && !contact.issue_type) {
                 storage.updateContactIssueType(contact.id, "order_inquiry");
@@ -1630,6 +1794,7 @@ export async function registerRoutes(
           storage.updateContactHumanFlag(contact.id, 1);
           transferTriggered = true;
           transferReason = `多次查單失敗(${orderLookupFailed}次)`;
+          storage.createSystemAlert({ alert_type: "transfer", details: transferReason, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
         }
 
         if (loopCount >= maxToolLoops && !transferTriggered) {
@@ -1637,25 +1802,50 @@ export async function registerRoutes(
           storage.updateContactStatus(contact.id, "awaiting_human");
           transferTriggered = true;
           transferReason = `AI 多輪工具呼叫未能解決(${loopCount}輪)`;
+          storage.createSystemAlert({ alert_type: "transfer", details: transferReason, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
         }
 
         const freshContact = storage.getContact(contact.id);
         if (freshContact?.needs_human) break;
 
-        completion = await openai.chat.completions.create({
-          model: "gpt-5.2",
-          messages: chatMessages,
-          tools: allTools,
-          max_completion_tokens: 1000,
-          temperature: 0.7,
-        });
+        try {
+          completion = await callOpenAIWithTimeout({
+            model: "gpt-5.2",
+            messages: chatMessages,
+            tools: allTools,
+            max_completion_tokens: 1000,
+            temperature: 0.7,
+          });
+        } catch (loopTimeoutErr: any) {
+          if (loopTimeoutErr?.name === "AbortError" || loopTimeoutErr?.message?.includes("abort")) {
+            console.log(`[AI Timeout] OpenAI 工具迴圈推理超時 - contact ${contact.id}`);
+            const loopTimeoutCount = storage.incrementConsecutiveTimeouts(contact.id);
+            storage.createSystemAlert({ alert_type: "timeout_escalation", details: `工具迴圈推理超時 (第${loopTimeoutCount}次)`, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
+            if (loopTimeoutCount >= 2) {
+              storage.updateContactStatus(contact.id, "awaiting_human");
+              storage.updateContactHumanFlag(contact.id, 1);
+              const comfortMsg = "不好意思，系統目前處理較慢，我已為您轉接專人客服，請稍候片刻。";
+              storage.createMessage(contact.id, contact.platform, "ai", comfortMsg);
+              if (platform === "messenger") {
+                sendFBMessage(channelToken || "", contact.platform_user_id, comfortMsg).catch(() => {});
+              } else if (channelToken) {
+                pushLineMessage(contact.platform_user_id, [{ type: "text", text: comfortMsg }], channelToken).catch(() => {});
+              }
+              broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+            }
+            break;
+          }
+          throw loopTimeoutErr;
+        }
         totalTokens += completion.usage?.total_tokens || 0;
         responseMessage = completion.choices[0]?.message;
       }
 
+      storage.resetConsecutiveTimeouts(contact.id);
+
       const finalContact = storage.getContact(contact.id);
-      if (finalContact?.needs_human) {
-        console.log(`[Webhook AI] 已轉接真人，跳過 AI 回覆`);
+      if (finalContact?.needs_human || storage.isAiMuted(contact.id) || finalContact?.status === "awaiting_human" || finalContact?.status === "high_risk") {
+        console.log(`[Webhook AI] 已轉接真人或靜音中，跳過 AI 回覆 (needs_human=${finalContact?.needs_human}, status=${finalContact?.status})`);
         storage.createAiLog({
           contact_id: contact.id,
           brand_id: effectiveBrandId || undefined,
@@ -1774,15 +1964,18 @@ export async function registerRoutes(
         const hash = crypto.createHmac("SHA256", channelSecretVal).update(rawBody).digest("base64");
         if (hash !== signature) {
           console.log("[WEBHOOK] SIGNATURE MISMATCH - rejecting request. Expected:", hash, "Got:", signature);
+          storage.createSystemAlert({ alert_type: "webhook_sig_fail", details: "LINE signature mismatch", brand_id: matchedBrandId || undefined });
           return res.status(403).json({ message: "Invalid signature" });
         }
         console.log("[WEBHOOK] Signature verified OK");
       } catch (sigErr: any) {
         console.log("[WEBHOOK] Signature check error:", sigErr.message);
+        storage.createSystemAlert({ alert_type: "webhook_sig_fail", details: `LINE sig error: ${sigErr.message}`, brand_id: matchedBrandId || undefined });
         return res.status(403).json({ message: "Signature verification failed" });
       }
     } else if (channelSecretVal && !signature) {
       console.log("[WEBHOOK] Missing x-line-signature header - rejecting");
+      storage.createSystemAlert({ alert_type: "webhook_sig_fail", details: "LINE missing signature header", brand_id: matchedBrandId || undefined });
       return res.status(403).json({ message: "Missing signature" });
     } else {
       console.log("[WEBHOOK] Skipping signature check - no channel_secret configured");
@@ -1830,6 +2023,7 @@ export async function registerRoutes(
       const webhookEventId = event.webhookEventId || event.timestamp?.toString();
       if (webhookEventId && storage.isEventProcessed(webhookEventId)) {
         console.log("[WEBHOOK] Skipping duplicate event:", webhookEventId);
+        storage.createSystemAlert({ alert_type: "dedupe_hit", details: `LINE event ${webhookEventId}`, brand_id: matchedBrandId || undefined });
         continue;
       }
       if (webhookEventId) {
@@ -1866,10 +2060,10 @@ export async function registerRoutes(
               if (testMode === "true") {
                 storage.createMessage(contact.id, "line", "ai", `[測試模式] 收到您的訊息：「${text}」。`);
               } else {
-                withContactLock(contact.id, () =>
-                  autoReplyWithAI(contact, text, channelToken, matchedBrandId)
-                ).catch(err =>
-                  console.error("[Webhook] AI 自動回覆失敗:", err)
+                debounceTextMessage(contact.id, text, (mergedText) =>
+                  withContactLock(contact.id, () =>
+                    autoReplyWithAI(contact, mergedText, channelToken, matchedBrandId)
+                  )
                 );
               }
             }
@@ -1995,11 +2189,13 @@ export async function registerRoutes(
         const expectedSig = "sha256=" + crypto.createHmac("sha256", fbAppSecret).update(rawBody).digest("hex");
         if (expectedSig !== fbSignature) {
           console.log("[FB Webhook] SIGNATURE MISMATCH - rejecting");
+          storage.createSystemAlert({ alert_type: "webhook_sig_fail", details: "FB signature mismatch" });
           return res.status(403).json({ message: "Invalid signature" });
         }
         console.log("[FB Webhook] Signature verified OK");
       } catch (sigErr: any) {
         console.log("[FB Webhook] Signature check error:", sigErr.message);
+        storage.createSystemAlert({ alert_type: "webhook_sig_fail", details: `FB sig error: ${sigErr.message}` });
         return res.status(403).json({ message: "Signature verification failed" });
       }
     }
@@ -2030,7 +2226,10 @@ export async function registerRoutes(
 
         const msgMid = messagingEvent.message?.mid || messagingEvent.postback?.mid || "";
         const eventId = `fb_${messagingEvent.timestamp}_${senderId}_${msgMid}`;
-        if (storage.isEventProcessed(eventId)) continue;
+        if (storage.isEventProcessed(eventId)) {
+          storage.createSystemAlert({ alert_type: "dedupe_hit", details: `FB event ${eventId}`, brand_id: matchedBrandId || undefined });
+          continue;
+        }
         storage.markEventProcessed(eventId);
 
         try {
@@ -2084,10 +2283,10 @@ export async function registerRoutes(
                 } else {
                   const testMode = storage.getSetting("test_mode");
                   if (testMode !== "true" && matchedChannel?.access_token) {
-                    withContactLock(contact.id, () =>
-                      autoReplyWithAI(contact, text, matchedChannel.access_token, matchedBrandId, "messenger")
-                    ).catch(err =>
-                      console.error("[FB Webhook] AI 自動回覆失敗:", err)
+                    debounceTextMessage(contact.id, text, (mergedText) =>
+                      withContactLock(contact.id, () =>
+                        autoReplyWithAI(contact, mergedText, matchedChannel.access_token, matchedBrandId, "messenger")
+                      )
                     );
                   }
                 }
@@ -3155,8 +3354,60 @@ export async function registerRoutes(
       aiInsights: { painPoints, suggestions },
       issueTypeDistribution,
       orderSourceDistribution,
-      transferReasons: aiLogStats.transferReasons,
+      transferReasons: aiLogStats.transferReasons.map(r => ({ ...r, reason: maskSensitiveInfo(r.reason) })),
       platformDistribution,
+    });
+  });
+
+  app.get("/api/analytics/health", authMiddleware, managerOrAbove, (req: any, res) => {
+    const range = (req.query.range as string) || "today";
+    const brandId = req.query.brand_id ? parseInt(req.query.brand_id as string) : undefined;
+
+    const now = new Date();
+    let startDate: string;
+    let endDate: string = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString().substring(0, 19).replace("T", " ");
+
+    if (range === "custom" && req.query.start && req.query.end) {
+      startDate = (req.query.start as string) + " 00:00:00";
+      endDate = (req.query.end as string) + " 23:59:59";
+    } else if (range === "30d") {
+      startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().substring(0, 19).replace("T", " ");
+    } else if (range === "7d") {
+      startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().substring(0, 19).replace("T", " ");
+    } else {
+      startDate = now.toISOString().substring(0, 10) + " 00:00:00";
+    }
+
+    const alertStats = storage.getSystemAlertStats(startDate, endDate, brandId);
+
+    const maskedTransferReasons = alertStats.transferReasonTop5.map(r => ({
+      reason: maskSensitiveInfo(r.reason),
+      count: r.count,
+    }));
+
+    const alertTypeLabels: Record<string, string> = {
+      webhook_sig_fail: "Webhook 簽章失敗",
+      dedupe_hit: "重複事件攔截",
+      lock_timeout: "處理鎖逾時",
+      order_lookup_fail: "訂單查詢失敗",
+      timeout_escalation: "AI 超時升級",
+      transfer: "轉接真人",
+    };
+
+    const alertsByTypeLabeled = alertStats.alertsByType.map(a => ({
+      type: alertTypeLabels[a.type] || a.type,
+      count: a.count,
+    }));
+
+    return res.json({
+      webhookSigFails: alertStats.webhookSigFails,
+      dedupeHits: alertStats.dedupeHits,
+      lockTimeouts: alertStats.lockTimeouts,
+      orderLookupFails: alertStats.orderLookupFails,
+      timeoutEscalations: alertStats.timeoutEscalations,
+      totalAlerts: alertStats.totalAlerts,
+      transferReasonTop5: maskedTransferReasons,
+      alertsByType: alertsByTypeLabeled,
     });
   });
 
