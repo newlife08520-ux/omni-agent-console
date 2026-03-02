@@ -92,7 +92,16 @@ const sandboxUpload = multer({
   limits: { fileSize: 20 * 1024 * 1024 },
 });
 
-function getSuperLandingConfig(): SuperLandingConfig {
+function getSuperLandingConfig(brandId?: number): SuperLandingConfig {
+  if (brandId) {
+    const brand = storage.getBrand(brandId);
+    if (brand && brand.superlanding_merchant_no && brand.superlanding_access_key) {
+      return {
+        merchantNo: brand.superlanding_merchant_no,
+        accessKey: brand.superlanding_access_key,
+      };
+    }
+  }
   return {
     merchantNo: storage.getSetting("superlanding_merchant_no") || "",
     accessKey: storage.getSetting("superlanding_access_key") || "",
@@ -142,7 +151,7 @@ async function getEnrichedSystemPrompt(brandId?: number): Promise<string> {
       brandBlock = "\n\n--- 品牌專屬指令 ---\n" + brand.system_prompt;
     }
   }
-  const config = getSuperLandingConfig();
+  const config = getSuperLandingConfig(brandId);
   const pages = await ensurePagesCacheLoaded(config);
   const catalogBlock = buildProductCatalogPrompt(pages);
   const knowledgeBlock = buildKnowledgeBlock(brandId);
@@ -701,7 +710,7 @@ export async function registerRoutes(
     const contactId = parseInt(req.params.id);
     const contact = storage.getContact(contactId);
     if (!contact) return res.status(404).json({ message: "聯絡人不存在" });
-    const config = getSuperLandingConfig();
+    const config = getSuperLandingConfig(contact.brand_id || undefined);
     if (!config.merchantNo || !config.accessKey) {
       return res.json({ orders: [], error: "not_configured", message: "尚未設定一頁商店 API 金鑰" });
     }
@@ -720,10 +729,10 @@ export async function registerRoutes(
   });
 
   app.get("/api/orders/lookup", authMiddleware, async (req, res) => {
-    const { q } = req.query;
+    const { q, brand_id } = req.query;
     const query = (q as string || "").trim().toUpperCase();
     if (!query) return res.status(400).json({ message: "請提供訂單編號" });
-    const config = getSuperLandingConfig();
+    const config = getSuperLandingConfig(brand_id ? parseInt(brand_id as string) : undefined);
     if (!config.merchantNo || !config.accessKey) {
       return res.json({ orders: [], error: "not_configured", message: "尚未設定一頁商店 API 金鑰" });
     }
@@ -746,7 +755,7 @@ export async function registerRoutes(
   });
 
   app.get("/api/orders/search", authMiddleware, async (req, res) => {
-    const { q, begin_date, end_date } = req.query;
+    const { q, begin_date, end_date, brand_id } = req.query;
     const query = (q as string || "").trim();
     const beginDate = (begin_date as string || "").trim();
     const endDate = (end_date as string || "").trim();
@@ -768,7 +777,7 @@ export async function registerRoutes(
     if (diffDays < 0) return res.status(400).json({ message: "結束日期不可早於開始日期" });
     if (diffDays >= 31) return res.status(400).json({ message: "日期範圍不可超過 31 天，請縮小查詢範圍" });
 
-    const config = getSuperLandingConfig();
+    const config = getSuperLandingConfig(brand_id ? parseInt(brand_id as string) : undefined);
     if (!config.merchantNo || !config.accessKey) {
       return res.json({ orders: [], error: "not_configured", message: "尚未設定一頁商店 API 金鑰" });
     }
@@ -792,7 +801,8 @@ export async function registerRoutes(
   });
 
   app.get("/api/orders/pages", authMiddleware, async (req, res) => {
-    const config = getSuperLandingConfig();
+    const brandId = req.query.brand_id ? parseInt(req.query.brand_id as string) : undefined;
+    const config = getSuperLandingConfig(brandId);
     if (!config.merchantNo || !config.accessKey) {
       return res.json({ pages: [], error: "not_configured", message: "尚未設定一頁商店 API 金鑰" });
     }
@@ -813,14 +823,14 @@ export async function registerRoutes(
   });
 
   app.get("/api/orders/by-product", authMiddleware, async (req, res) => {
-    const { page_id, phone } = req.query;
+    const { page_id, phone, brand_id } = req.query;
     const pageId = (page_id as string || "").trim();
     const phoneNum = (phone as string || "").trim();
 
     if (!pageId) return res.status(400).json({ message: "請選擇產品（page_id）" });
     if (!phoneNum) return res.status(400).json({ message: "請提供手機號碼" });
 
-    const config = getSuperLandingConfig();
+    const config = getSuperLandingConfig(brand_id ? parseInt(brand_id as string) : undefined);
     if (!config.merchantNo || !config.accessKey) {
       return res.json({ orders: [], error: "not_configured", message: "尚未設定一頁商店 API 金鑰" });
     }
@@ -1229,9 +1239,9 @@ export async function registerRoutes(
       return await sendImageAsset(asset, textMessage, context);
     }
 
-    const config = getSuperLandingConfig();
+    const config = getSuperLandingConfig(context?.brandId);
     if (!config.merchantNo || !config.accessKey) {
-      return JSON.stringify({ success: false, error: "系統尚未設定一頁商店 API 金鑰，無法查詢訂單。" });
+      return JSON.stringify({ success: false, error: "系統尚未設定一頁商店 API 金鑰，無法查詢訂單。請至系統設定 → 品牌管理中設定該品牌的一頁商店 API 金鑰。" });
     }
 
     try {
