@@ -20,8 +20,8 @@ The system is built on a modern full-stack architecture:
 - **Key Features**:
     - **3-Tier RBAC**: Granular access control for different user roles.
     - **Multi-Brand Workspaces**: Support for distinct brands, each with its AI persona and settings.
-    - **轉接真人客服 (Explicit Handoff)**: AI honestly identifies itself and asks if the customer wants to be transferred. Backend still sets needs_human=1 to pause AI and alert agents. Sandbox shows debug info (transfer reason + tool call log) in a red warning bubble.
-    - **一頁商店 (Super Landing) API Integration**: Triple-mode order lookup with product matching, fuzzy search, and dynamic catalog injection for AI queries.
+    - **轉接真人客服 (Explicit Handoff)**: AI honestly identifies itself and asks if the customer wants to be transferred. Backend still sets needs_human=1 to pause AI and alert agents. Sandbox shows debug info (transfer reason + tool call log) as a separate red warning bubble — debug info is NOT embedded in the AI reply text.
+    - **一頁商店 (Super Landing) API Integration**: Triple-mode order lookup with product matching, fuzzy search, and dynamic catalog injection for AI queries. Cross-brand fallback: when primary brand returns no results, automatically tries all other brands with configured API credentials. Knowledge CSV product→page_id mapping used as fallback when SuperLanding page name fuzzy matching fails.
     - **Real-time Chat**: Features include CRM panel, order lookup, VIP badges, quick replies, and image upload with AI analysis.
     - **Analytics BI Dashboard**: Provides key performance indicators, charts, and AI insights.
     - **Knowledge Base Management**: Support for various file types (xlsx, docx, pdf, csv, txt, md) for AI knowledge base and marketing rules.

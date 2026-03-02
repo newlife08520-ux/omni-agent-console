@@ -1569,6 +1569,33 @@ export async function registerRoutes(
         }
 
         if (matchedPages.length === 0) {
+          const knowledgeFiles = storage.getKnowledgeFiles(context?.brandId);
+          for (const kf of knowledgeFiles) {
+            if (!kf.content) continue;
+            const lines = kf.content.split(/\r?\n/);
+            for (const line of lines) {
+              const cols = line.split(",");
+              if (cols.length < 4) continue;
+              const officialName = cols[0]?.trim();
+              const keywords = cols[1]?.trim();
+              const pageIdStr = cols[3]?.trim();
+              const pageId = parseInt(pageIdStr);
+              if (!officialName || isNaN(pageId) || pageId <= 0) continue;
+
+              const allNames = [officialName, ...(keywords ? keywords.split(/[、,，]/) : [])].map(n => stripClean(n.trim()));
+              const cleanInput = stripClean(productName);
+              const matched = allNames.some(n => n.length >= 2 && (n.includes(cleanInput) || cleanInput.includes(n)));
+              if (matched) {
+                console.log(`[AI Tool Call] 知識庫匹配成功: 「${productName}」→「${officialName}」page_id=${pageId}`);
+                matchedPages = [{ pageId: pageId.toString(), productName: officialName }];
+                break;
+              }
+            }
+            if (matchedPages.length > 0) break;
+          }
+        }
+
+        if (matchedPages.length === 0) {
           console.log("[AI Tool Call] 禁止：無法從商品名稱比對到銷售頁，拒絕全域搜尋。商品:", productName);
           return JSON.stringify({
             success: false,
@@ -1593,11 +1620,37 @@ export async function registerRoutes(
         const result = { orders: allResults, totalFetched: allResults.length, truncated: false };
 
         if (result.orders.length === 0) {
-          return JSON.stringify({ success: true, found: false, message: `在「${matchedPages[0].productName}」中查無此手機號碼的訂單（已搜尋 ${matchedPages.length} 個相關銷售頁）` });
+          console.log(`[AI Tool Call] 品牌 ${context?.brandId || "預設"} 查無結果，嘗試跨品牌查詢...`);
+          const allBrands = storage.getBrands();
+          for (const brand of allBrands) {
+            if (brand.id === context?.brandId) continue;
+            if (!brand.superlanding_merchant_no || !brand.superlanding_access_key) continue;
+            const altConfig: SuperLandingConfig = {
+              merchantNo: brand.superlanding_merchant_no,
+              accessKey: brand.superlanding_access_key,
+            };
+            try {
+              for (const mp of matchedPages) {
+                const altResult = await lookupOrdersByPageAndPhone(altConfig, mp.pageId, phone);
+                if (altResult.orders.length > 0) {
+                  console.log(`[API 回應] 在品牌「${brand.name}」找到 ${altResult.orders.length} 筆訂單`);
+                  allResults = altResult.orders;
+                  break;
+                }
+              }
+              if (allResults.length > 0) break;
+            } catch (altErr) {
+              console.log(`[API 回應] 品牌「${brand.name}」查詢失敗:`, altErr);
+            }
+          }
+        }
+
+        if (allResults.length === 0) {
+          return JSON.stringify({ success: true, found: false, message: `所有品牌帳戶皆查無此手機號碼的訂單（已搜尋 ${matchedPages.length} 個相關銷售頁）。(絕對規則) 你現在必須立刻誠實表明你是 AI 客服小助手，告知客戶目前查不到這筆資料，並詢問是否需要轉接專人客服。` });
         }
 
         const { getStatusLabel: getSL } = await import("./superlanding");
-        const orderSummaries = result.orders.map(o => ({
+        const orderSummaries = allResults.map(o => ({
           order_id: o.global_order_id,
           status: getSL(o.status),
           amount: o.final_total_order_amount,
@@ -1608,11 +1661,11 @@ export async function registerRoutes(
           shipped_at: o.shipped_at,
         }));
 
-        console.log("[AI Tool Call] 查到", result.orders.length, "筆訂單（全部列出）");
-        const multiOrderNote = result.orders.length > 1
-          ? `此手機號碼在此商品下有 ${result.orders.length} 筆訂單，請全部列出摘要（單號、日期、金額、狀態），並詢問客戶要查看哪一筆的詳情。`
+        console.log("[AI Tool Call] 查到", allResults.length, "筆訂單（全部列出）");
+        const multiOrderNote = allResults.length > 1
+          ? `此手機號碼在此商品下有 ${allResults.length} 筆訂單，請全部列出摘要（單號、日期、金額、狀態），並詢問客戶要查看哪一筆的詳情。`
           : undefined;
-        return JSON.stringify({ success: true, found: true, total: result.orders.length, orders: orderSummaries, note: multiOrderNote });
+        return JSON.stringify({ success: true, found: true, total: allResults.length, orders: orderSummaries, note: multiOrderNote });
       }
 
       if (toolName === "lookup_order_by_date_and_contact") {
@@ -1806,9 +1859,6 @@ export async function registerRoutes(
       }
 
       let reply = responseMessage?.content || "抱歉，AI 無法生成回覆。";
-      if (sandboxTransferTriggered) {
-        reply += `\n\n---\n[沙盒除錯資訊] AI 已觸發「轉接真人客服」\n轉接原因：${sandboxTransferReason}\n呼叫紀錄：${sandboxToolLog.join(" → ")}`;
-      }
       const result: Record<string, any> = { success: true, reply, transferred: sandboxTransferTriggered };
       if (sandboxTransferTriggered) {
         result.transfer_reason = sandboxTransferReason;
