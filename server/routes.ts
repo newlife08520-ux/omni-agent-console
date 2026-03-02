@@ -204,6 +204,17 @@ async function getEnrichedSystemPrompt(brandId?: number): Promise<string> {
   return basePrompt + brandBlock + handoffBlock + catalogBlock + knowledgeBlock + imageBlock;
 }
 
+const sseClients: Set<import("express").Response> = new Set();
+
+function broadcastSSE(eventType: string, data: any) {
+  const payload = `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const client of sseClients) {
+    try { client.write(payload); } catch { sseClients.delete(client); }
+  }
+}
+
+const FB_VERIFY_TOKEN = process.env.FB_VERIFY_TOKEN || "omnichannel_fb_verify_2024";
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -215,6 +226,27 @@ export async function registerRoutes(
     const freshConfig = getSuperLandingConfig();
     refreshPagesCache(freshConfig).catch(() => {});
   }, 60 * 60 * 1000);
+
+  app.get("/api/events", (req, res) => {
+    if (!(req as any).session?.authenticated) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    res.write("event: connected\ndata: {}\n\n");
+    sseClients.add(res);
+    const keepAlive = setInterval(() => {
+      try { res.write(":ping\n\n"); } catch { clearInterval(keepAlive); sseClients.delete(res); }
+    }, 25000);
+    req.on("close", () => {
+      clearInterval(keepAlive);
+      sseClients.delete(res);
+    });
+  });
 
   app.post("/api/auth/login", (req, res) => {
     const { username, password } = req.body;
@@ -736,22 +768,37 @@ export async function registerRoutes(
     if (!contact) return res.status(404).json({ message: "聯絡人不存在" });
     const msgType = message_type || "text";
     const message = storage.createMessage(contactId, contact.platform, "admin", content || "", msgType, image_url || null);
+    broadcastSSE("new_message", { contact_id: contactId, message, brand_id: contact.brand_id });
+    broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
     storage.updateContactHumanFlag(contactId, 1);
 
-    if (image_url && contact.platform === "line") {
+    if (contact.platform === "line") {
       const token = getLineTokenForContact(contact);
       if (token) {
-        const protocol = req.headers["x-forwarded-proto"] || req.protocol;
-        const host = req.headers["x-forwarded-host"] || req.headers.host;
-        const fullImageUrl = image_url.startsWith("http") ? image_url : `${protocol}://${host}${image_url}`;
-        fetch("https://api.line.me/v2/bot/message/push", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-          body: JSON.stringify({
-            to: contact.platform_user_id,
-            messages: [{ type: "image", originalContentUrl: fullImageUrl, previewImageUrl: fullImageUrl }],
-          }),
-        }).catch((err) => console.error("LINE image push failed:", err));
+        if (image_url) {
+          const protocol = req.headers["x-forwarded-proto"] || req.protocol;
+          const host = req.headers["x-forwarded-host"] || req.headers.host;
+          const fullImageUrl = image_url.startsWith("http") ? image_url : `${protocol}://${host}${image_url}`;
+          fetch("https://api.line.me/v2/bot/message/push", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+            body: JSON.stringify({
+              to: contact.platform_user_id,
+              messages: [{ type: "image", originalContentUrl: fullImageUrl, previewImageUrl: fullImageUrl }],
+            }),
+          }).catch((err) => console.error("LINE image push failed:", err));
+        } else if (content) {
+          pushLineMessage(contact.platform_user_id, [{ type: "text", text: content }], token).catch((err) =>
+            console.error("LINE text push failed:", err)
+          );
+        }
+      }
+    } else if (contact.platform === "messenger") {
+      const fbToken = contact.channel_id ? storage.getChannel(contact.channel_id)?.access_token : null;
+      if (fbToken && content) {
+        sendFBMessage(fbToken, contact.platform_user_id, content).catch((err) =>
+          console.error("FB text push failed:", err)
+        );
       }
     }
 
@@ -1017,11 +1064,23 @@ export async function registerRoutes(
     }
   }
 
+  async function sendFBMessage(pageAccessToken: string, recipientId: string, text: string) {
+    await fetch(`https://graph.facebook.com/v19.0/me/messages?access_token=${pageAccessToken}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        recipient: { id: recipientId },
+        message: { text },
+      }),
+    });
+  }
+
   async function autoReplyWithAI(
     contact: Contact,
     userMessage: string,
     channelToken?: string | null,
-    brandId?: number
+    brandId?: number,
+    platform?: string
   ) {
     const apiKey = storage.getSetting("openai_api_key");
     if (!apiKey || apiKey.trim() === "") return;
@@ -1108,8 +1167,15 @@ export async function registerRoutes(
 
       const reply = responseMessage?.content;
       if (reply && reply.trim()) {
-        storage.createMessage(contact.id, "line", "ai", reply);
-        await pushLineMessage(contact.platform_user_id, [{ type: "text", text: reply }], channelToken);
+        const contactPlatform = platform || contact.platform || "line";
+        const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", reply);
+        broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: contact.brand_id });
+        broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+        if (contactPlatform === "messenger" && channelToken) {
+          await sendFBMessage(channelToken, contact.platform_user_id, reply);
+        } else {
+          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: reply }], channelToken);
+        }
       }
     } catch (err) {
       console.error("[Webhook AI] 自動回覆失敗:", err);
@@ -1166,11 +1232,15 @@ export async function registerRoutes(
           const displayName = event.source?.displayName || "LINE用戶";
           const text = event.message.text;
           const contact = storage.getOrCreateContact("line", userId, displayName, matchedBrandId, matchedChannel?.id);
-          storage.createMessage(contact.id, "line", "user", text);
+          const userMsg = storage.createMessage(contact.id, "line", "user", text);
+          broadcastSSE("new_message", { contact_id: contact.id, message: userMsg, brand_id: matchedBrandId || contact.brand_id });
+          broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
           const needsHuman = HUMAN_KEYWORDS.some((kw) => text.includes(kw));
           if (needsHuman) {
             storage.updateContactHumanFlag(contact.id, 1);
-            storage.createMessage(contact.id, "line", "ai", "好的，我已為您轉接真人客服，請稍候片刻。");
+            const aiMsg = storage.createMessage(contact.id, "line", "ai", "好的，我已為您轉接真人客服，請稍候片刻。");
+            broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: matchedBrandId || contact.brand_id });
+            broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
           } else if (!contact.needs_human) {
             const testMode = storage.getSetting("test_mode");
             if (testMode === "true") {
@@ -1212,7 +1282,9 @@ export async function registerRoutes(
           const messageId = event.message.id;
           const imageUrl = await downloadLineContent(messageId, ".jpg");
           if (imageUrl) {
-            storage.createMessage(contact.id, "line", "user", "[圖片訊息]", "image", imageUrl);
+            const imgMsg = storage.createMessage(contact.id, "line", "user", "[圖片訊息]", "image", imageUrl);
+            broadcastSSE("new_message", { contact_id: contact.id, message: imgMsg, brand_id: matchedBrandId || contact.brand_id });
+            broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
             if (!contact.needs_human) {
               analyzeImageWithAI(imageUrl, contact.id, channelToken).catch((err) =>
                 console.error("AI image analysis background error:", err)
@@ -1251,6 +1323,109 @@ export async function registerRoutes(
       }
     }
     return res.status(200).json({ success: true });
+  });
+
+  app.get("/api/webhook/facebook", (req, res) => {
+    const mode = req.query["hub.mode"];
+    const token = req.query["hub.verify_token"];
+    const challenge = req.query["hub.challenge"];
+    if (mode === "subscribe" && token === FB_VERIFY_TOKEN) {
+      console.log("[FB Webhook] 驗證成功");
+      return res.status(200).send(challenge);
+    }
+    return res.status(403).json({ message: "驗證失敗" });
+  });
+
+  app.post("/api/webhook/facebook", async (req, res) => {
+    const body = req.body;
+    if (body.object !== "page") {
+      return res.status(404).json({ message: "Not a page event" });
+    }
+
+    for (const entry of body.entry || []) {
+      const pageId = entry.id;
+      const matchedChannel = storage.getChannelByBotId(pageId);
+      const matchedBrandId = matchedChannel?.brand_id;
+
+      if (matchedChannel) {
+        console.log(`[FB Webhook] 動態路由 → 品牌: ${matchedChannel.brand_name}, 頻道: ${matchedChannel.channel_name}`);
+      } else {
+        console.log(`[FB Webhook] 未匹配頻道，Page ID: ${pageId}`);
+      }
+
+      for (const messagingEvent of entry.messaging || []) {
+        const senderId = messagingEvent.sender?.id;
+        if (!senderId || senderId === pageId) continue;
+
+        const msgMid = messagingEvent.message?.mid || messagingEvent.postback?.mid || "";
+        const eventId = `fb_${messagingEvent.timestamp}_${senderId}_${msgMid}`;
+        if (storage.isEventProcessed(eventId)) continue;
+
+        try {
+          if (messagingEvent.message) {
+            const text = messagingEvent.message.text || "";
+            const displayName = `FB用戶_${senderId.substring(0, 6)}`;
+            const contact = storage.getOrCreateContact("messenger", senderId, displayName, matchedBrandId, matchedChannel?.id);
+
+            if (messagingEvent.message.attachments) {
+              for (const att of messagingEvent.message.attachments) {
+                if (att.type === "image" && att.payload?.url) {
+                  const imgMsg = storage.createMessage(contact.id, "messenger", "user", "[圖片訊息]", "image", att.payload.url);
+                  broadcastSSE("new_message", { contact_id: contact.id, message: imgMsg, brand_id: matchedBrandId || contact.brand_id });
+                } else {
+                  storage.createMessage(contact.id, "messenger", "user", `[${att.type || "附件"}]`);
+                }
+              }
+              broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
+            }
+
+            if (text) {
+              const userMsg = storage.createMessage(contact.id, "messenger", "user", text);
+              broadcastSSE("new_message", { contact_id: contact.id, message: userMsg, brand_id: matchedBrandId || contact.brand_id });
+              broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
+
+              const humanKeywordsSetting2 = storage.getSetting("human_transfer_keywords");
+              const HUMAN_KW2 = humanKeywordsSetting2
+                ? humanKeywordsSetting2.split(",").map(k => k.trim()).filter(Boolean)
+                : ["找客服", "真人", "轉人工", "人工客服", "真人客服"];
+              const needsHuman2 = HUMAN_KW2.some(kw => text.includes(kw));
+              if (needsHuman2) {
+                storage.updateContactHumanFlag(contact.id, 1);
+                const aiMsg2 = storage.createMessage(contact.id, "messenger", "ai", "好的，我已為您轉接真人客服，請稍候片刻。");
+                broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg2, brand_id: matchedBrandId || contact.brand_id });
+                broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
+                if (matchedChannel?.access_token) {
+                  sendFBMessage(matchedChannel.access_token, senderId, "好的，我已為您轉接真人客服，請稍候片刻。").catch(err =>
+                    console.error("[FB Webhook] 轉人工回覆失敗:", err)
+                  );
+                }
+              } else if (!contact.needs_human) {
+                const testMode = storage.getSetting("test_mode");
+                if (testMode !== "true" && matchedChannel?.access_token) {
+                  autoReplyWithAI(contact, text, matchedChannel.access_token, matchedBrandId, "messenger").catch(err =>
+                    console.error("[FB Webhook] AI 自動回覆失敗:", err)
+                  );
+                }
+              }
+            }
+          }
+
+          if (messagingEvent.postback) {
+            const text = messagingEvent.postback.title || messagingEvent.postback.payload || "[Postback]";
+            const displayName = `FB用戶_${senderId.substring(0, 6)}`;
+            const contact = storage.getOrCreateContact("messenger", senderId, displayName, matchedBrandId, matchedChannel?.id);
+            const pbMsg = storage.createMessage(contact.id, "messenger", "user", text);
+            broadcastSSE("new_message", { contact_id: contact.id, message: pbMsg, brand_id: matchedBrandId || contact.brand_id });
+            broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
+          }
+        } catch (err) {
+          console.error("[FB Webhook] 事件處理錯誤:", err);
+        }
+
+        storage.markEventProcessed(eventId);
+      }
+    }
+    return res.status(200).send("EVENT_RECEIVED");
   });
 
   const orderLookupTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [

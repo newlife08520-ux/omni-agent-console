@@ -118,6 +118,20 @@ app.use((req, res, next) => {
     },
     () => {
       log(`serving on port ${port}`);
+
+      const domain = process.env.REPLIT_DEV_DOMAIN || process.env.REPL_SLUG
+        ? `https://${process.env.REPLIT_DEV_DOMAIN || `${process.env.REPL_SLUG}.${process.env.REPL_OWNER}.repl.co`}`
+        : `http://localhost:${port}`;
+
+      console.log("\n" + "=".repeat(70));
+      console.log("  Webhook URLs (請複製到各平台後台設定)");
+      console.log("=".repeat(70));
+      console.log(`  LINE  Webhook URL : ${domain}/api/webhook/line`);
+      console.log(`  FB    Webhook URL : ${domain}/api/webhook/facebook`);
+      console.log(`  FB    Verify Token: ${process.env.FB_VERIFY_TOKEN || "omnichannel_fb_verify_2024"}`);
+      console.log("=".repeat(70));
+      console.log(`  SSE  Events URL   : ${domain}/api/events`);
+      console.log("=".repeat(70) + "\n");
     },
   );
 })();

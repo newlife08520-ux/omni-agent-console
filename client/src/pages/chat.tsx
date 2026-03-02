@@ -141,6 +141,43 @@ export default function ChatPage() {
   const lastMessageIdRef = useRef<number>(0);
   const { selectedBrandId } = useBrand();
 
+  const sseConnectedRef = useRef(false);
+
+  useEffect(() => {
+    let es: EventSource | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout>;
+
+    function connect() {
+      es = new EventSource("/api/events");
+      es.addEventListener("connected", () => {
+        sseConnectedRef.current = true;
+        console.log("[SSE] Connected");
+      });
+      es.addEventListener("new_message", (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          queryClient.invalidateQueries({ queryKey: ["/api/contacts", data.contact_id, "messages"] });
+          queryClient.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
+        } catch {}
+      });
+      es.addEventListener("contacts_updated", () => {
+        queryClient.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
+      });
+      es.onerror = () => {
+        sseConnectedRef.current = false;
+        es?.close();
+        reconnectTimer = setTimeout(connect, 3000);
+      };
+    }
+
+    connect();
+    return () => {
+      es?.close();
+      clearTimeout(reconnectTimer);
+      sseConnectedRef.current = false;
+    };
+  }, [queryClient]);
+
   const { data: contacts = [], isLoading: contactsLoading } = useQuery<ContactWithPreview[]>({
     queryKey: ["/api/contacts", selectedBrandId],
     queryFn: async () => {
@@ -149,7 +186,7 @@ export default function ChatPage() {
       if (!res.ok) throw new Error("Failed");
       return res.json();
     },
-    refetchInterval: 3000,
+    refetchInterval: 5000,
   });
 
   const { data: messages = [], isLoading: messagesLoading } = useQuery<Message[]>({
@@ -161,7 +198,7 @@ export default function ChatPage() {
       return res.json();
     },
     enabled: !!selectedId,
-    refetchInterval: 3000,
+    refetchInterval: 5000,
   });
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {

@@ -22,7 +22,8 @@ The system is built on a modern full-stack architecture:
     - **Multi-Brand Workspaces**: Support for distinct brands, each with its AI persona and settings.
     - **轉接真人客服 (Explicit Handoff)**: AI honestly identifies itself and asks if the customer wants to be transferred. Backend still sets needs_human=1 to pause AI and alert agents. Sandbox shows debug info (transfer reason + tool call log) as a separate red warning bubble — debug info is NOT embedded in the AI reply text.
     - **一頁商店 (Super Landing) API Integration**: Triple-mode order lookup with product matching, fuzzy search, and dynamic catalog injection for AI queries. Cross-brand fallback: when primary brand returns no results, automatically tries all other brands with configured API credentials. Knowledge CSV product→page_id mapping used as fallback when SuperLanding page name fuzzy matching fails.
-    - **Real-time Chat**: Features include CRM panel, order lookup, VIP badges, quick replies, and image upload with AI analysis.
+    - **Real-time Chat (SSE)**: Server-Sent Events (SSE) push real-time message notifications to the frontend. SSE endpoint at `/api/events` (session-authenticated). Fallback 5s polling via react-query `refetchInterval`. Features include CRM panel, order lookup, VIP badges, quick replies, and image upload with AI analysis.
+    - **Facebook Messenger Webhook**: Full webhook handler at `GET/POST /api/webhook/facebook`. GET handles Hub verification (verify token: `FB_VERIFY_TOKEN` env var). POST processes messaging events, routes by Page ID→`channels.bot_id`, supports text + image attachments, human keyword transfer, and AI auto-reply via `sendFBMessage`. Admin can reply to Messenger contacts from the dashboard.
     - **Analytics BI Dashboard**: Provides key performance indicators, charts, and AI insights.
     - **Knowledge Base Management**: Support for various file types (xlsx, docx, pdf, csv, txt, md) for AI knowledge base and marketing rules.
     - **White-labeling**: Custom branding options for system name and logo.
@@ -34,7 +35,8 @@ The system is built on a modern full-stack architecture:
 ## External Dependencies
 - **OpenAI API**: Utilized for AI capabilities, including chat completion (gpt-5.2), function calling, and vision analysis.
 - **一頁商店 (Super Landing) API**: Integrated for order lookup and product page catalog retrieval (https://api.super-landing.com).
-- **LINE Messaging API**: Used for handling LINE webhooks, sending messages, and content retrieval (images, videos).
+- **LINE Messaging API**: Used for handling LINE webhooks, sending messages, and content retrieval (images, videos). Webhook at `/api/webhook/line`.
+- **Facebook Graph API (v19.0)**: Used for Facebook Messenger webhook handling and message sending via `me/messages` endpoint.
 - **React (Vite)**: Frontend framework and build tool.
 - **Express.js**: Backend web application framework.
 - **SQLite**: Database management system.
