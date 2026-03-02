@@ -1118,8 +1118,8 @@ export async function registerRoutes(
     }
   });
 
-  async function downloadLineContent(messageId: string, fallbackExt: string): Promise<string | null> {
-    const token = storage.getSetting("line_channel_access_token");
+  async function downloadLineContent(messageId: string, fallbackExt: string, channelAccessToken?: string | null): Promise<string | null> {
+    const token = channelAccessToken || storage.getSetting("line_channel_access_token");
     if (!token) return null;
     try {
       const resp = await fetch(`https://api-data.line.me/v2/bot/message/${messageId}/content`, {
@@ -1146,53 +1146,149 @@ export async function registerRoutes(
     }
   }
 
-  async function analyzeImageWithAI(imageFilePath: string, contactId: number, lineToken?: string | null) {
-    const apiKey = storage.getSetting("openai_api_key");
-    if (!apiKey || apiKey.trim() === "") return;
+  async function downloadExternalImage(imageUrl: string): Promise<string | null> {
+    try {
+      const resp = await fetch(imageUrl);
+      if (!resp.ok) return null;
+      const contentType = resp.headers.get("content-type") || "image/jpeg";
+      const extMap: Record<string, string> = { "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp" };
+      const ext = extMap[contentType] || ".jpg";
+      const buffer = Buffer.from(await resp.arrayBuffer());
+      const filename = `fb-${Date.now()}-${crypto.randomUUID()}${ext}`;
+      const filePath = path.join(uploadDir, filename);
+      fs.writeFileSync(filePath, buffer);
+      return `/uploads/${filename}`;
+    } catch (err) {
+      console.error("External image download error:", err);
+      return null;
+    }
+  }
+
+  function imageFileToDataUri(imageFilePath: string): string | null {
     try {
       const absPath = path.join(process.cwd(), imageFilePath.startsWith("/") ? imageFilePath.slice(1) : imageFilePath);
+      if (!fs.existsSync(absPath)) return null;
       const imageBuffer = fs.readFileSync(absPath);
-      const base64 = imageBuffer.toString("base64");
       const ext = path.extname(absPath).toLowerCase();
       const mimeType = ext === ".png" ? "image/png" : ext === ".gif" ? "image/gif" : ext === ".webp" ? "image/webp" : "image/jpeg";
-      const dataUri = `data:${mimeType};base64,${base64}`;
+      return `data:${mimeType};base64,${imageBuffer.toString("base64")}`;
+    } catch {
+      return null;
+    }
+  }
+
+  async function analyzeImageWithAI(imageFilePath: string, contactId: number, lineToken?: string | null, platform?: string) {
+    const apiKey = storage.getSetting("openai_api_key");
+    if (!apiKey || apiKey.trim() === "") return;
+    const contactPlatform = platform || "line";
+    try {
+      const currentImageDataUri = imageFileToDataUri(imageFilePath);
+      if (!currentImageDataUri) {
+        console.error("Cannot read image file for AI analysis:", imageFilePath);
+        return;
+      }
 
       const contact = storage.getContact(contactId);
       let systemPrompt = await getEnrichedSystemPrompt(contact?.brand_id || undefined);
+      systemPrompt += "\n\n【圖片處理指引】如果你收到了圖片，請仔細觀察圖片內容。若是商品瑕疵或損壞照片，請先安撫客戶情緒，表示重視，並啟動轉接真人客服機制(呼叫 transfer_to_human 工具)；若是訂單截圖，請嘗試從圖中辨識訂單編號、手機號碼等資訊並協助查詢；若是其他內容，請根據圖片給予適當的客服回覆。";
+
+      const recentMessages = storage.getMessages(contactId).slice(-15);
+      const chatMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+        { role: "system", content: systemPrompt },
+      ];
+      let currentImageIncluded = false;
+      for (const msg of recentMessages) {
+        if (msg.sender_type === "user") {
+          if (msg.message_type === "image" && msg.image_url) {
+            const msgDataUri = imageFileToDataUri(msg.image_url);
+            if (msgDataUri) {
+              if (msg.image_url === imageFilePath || msg.image_url.endsWith(imageFilePath.split("/").pop() || "")) {
+                currentImageIncluded = true;
+              }
+              chatMessages.push({ role: "user", content: [
+                { type: "text", text: msg.content || "客戶傳送了圖片" },
+                { type: "image_url", image_url: { url: msgDataUri } },
+              ]});
+            } else {
+              chatMessages.push({ role: "user", content: msg.content });
+            }
+          } else {
+            chatMessages.push({ role: "user", content: msg.content });
+          }
+        } else if (msg.sender_type === "ai") {
+          chatMessages.push({ role: "assistant", content: msg.content });
+        }
+      }
+      if (!currentImageIncluded) {
+        chatMessages.push({ role: "user", content: [
+          { type: "text", text: "客戶傳送了圖片" },
+          { type: "image_url", image_url: { url: currentImageDataUri } },
+        ]});
+      }
+
+      const effectiveBrandId = contact?.brand_id;
+      const hasImageAssets = storage.getImageAssets(effectiveBrandId || undefined).length > 0;
+      const allTools = [...orderLookupTools, ...humanHandoffTools, ...(hasImageAssets ? imageTools : [])];
 
       const openai = new OpenAI({ apiKey });
-      const completion = await openai.chat.completions.create({
+      let completion = await openai.chat.completions.create({
         model: "gpt-5.2",
-        messages: [
-          { role: "system", content: systemPrompt },
-          {
-            role: "user",
-            content: [
-              { type: "text", text: "請以客服身分查看這張客戶上傳的圖片，判斷是否有商品瑕疵或任何問題，並給予適當的回覆。" },
-              { type: "image_url", image_url: { url: dataUri } },
-            ],
-          },
-        ],
+        messages: chatMessages,
+        tools: allTools,
         max_completion_tokens: 1000,
         temperature: 0.7,
       });
-      const reply = completion.choices[0]?.message?.content || "已收到您的圖片，將為您進一步處理。";
-      storage.createMessage(contactId, "line", "ai", reply);
 
-      const token = lineToken || getLineTokenForContact(contact || {});
-      if (token && contact) {
-        await fetch("https://api.line.me/v2/bot/message/push", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-          body: JSON.stringify({
-            to: contact.platform_user_id,
-            messages: [{ type: "text", text: reply }],
-          }),
-        }).catch((err) => console.error("LINE AI image reply push failed:", err));
+      let responseMessage = completion.choices[0]?.message;
+      let loopCount = 0;
+      while (responseMessage?.tool_calls && responseMessage.tool_calls.length > 0 && loopCount < 3) {
+        loopCount++;
+        chatMessages.push(responseMessage as OpenAI.Chat.Completions.ChatCompletionMessageParam);
+        for (const toolCall of responseMessage.tool_calls) {
+          const fnName = toolCall.function.name;
+          let fnArgs: Record<string, string> = {};
+          try { fnArgs = JSON.parse(toolCall.function.arguments); } catch {}
+          const toolResult = await executeToolCall(fnName, fnArgs, {
+            contactId: contactId,
+            brandId: effectiveBrandId || undefined,
+            channelToken: lineToken || undefined,
+            platform: contactPlatform,
+            platformUserId: contact?.platform_user_id || "",
+          });
+          chatMessages.push({ role: "tool", tool_call_id: toolCall.id, content: toolResult });
+        }
+        const freshContact = storage.getContact(contactId);
+        if (freshContact?.needs_human) break;
+        completion = await openai.chat.completions.create({
+          model: "gpt-5.2",
+          messages: chatMessages,
+          tools: allTools,
+          max_completion_tokens: 1000,
+          temperature: 0.7,
+        });
+        responseMessage = completion.choices[0]?.message;
+      }
+
+      const finalContact = storage.getContact(contactId);
+      if (finalContact?.needs_human) return;
+
+      const reply = responseMessage?.content || "已收到您的圖片，將為您進一步處理。";
+      const aiMsg = storage.createMessage(contactId, contactPlatform, "ai", reply);
+      broadcastSSE("new_message", { contact_id: contactId, message: aiMsg, brand_id: contact?.brand_id });
+      broadcastSSE("contacts_updated", { brand_id: contact?.brand_id });
+
+      if (contactPlatform === "messenger") {
+        const fbToken = contact?.channel_id ? storage.getChannel(contact.channel_id)?.access_token : null;
+        if (fbToken) await sendFBMessage(fbToken, contact!.platform_user_id, reply);
+      } else {
+        const token = lineToken || getLineTokenForContact(contact || {});
+        if (token && contact) {
+          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: reply }], token);
+        }
       }
     } catch (err) {
       console.error("OpenAI Vision analysis error:", err);
-      storage.createMessage(contactId, "line", "ai", "已收到您的圖片，將為您轉交專人檢視。");
+      storage.createMessage(contactId, contactPlatform, "ai", "已收到您的圖片，將為您轉交專人檢視。");
     }
   }
 
@@ -1255,7 +1351,19 @@ export async function registerRoutes(
       ];
       for (const msg of recentMessages) {
         if (msg.sender_type === "user") {
-          chatMessages.push({ role: "user", content: msg.content });
+          if (msg.message_type === "image" && msg.image_url) {
+            const msgDataUri = imageFileToDataUri(msg.image_url);
+            if (msgDataUri) {
+              chatMessages.push({ role: "user", content: [
+                { type: "text", text: msg.content || "客戶傳送了圖片" },
+                { type: "image_url", image_url: { url: msgDataUri } },
+              ]});
+            } else {
+              chatMessages.push({ role: "user", content: msg.content });
+            }
+          } else {
+            chatMessages.push({ role: "user", content: msg.content });
+          }
         } else if (msg.sender_type === "ai") {
           chatMessages.push({ role: "assistant", content: msg.content });
         }
@@ -1516,7 +1624,7 @@ export async function registerRoutes(
             fetchAndUpdateLineProfile(userId, contact.id, channelToken).catch(() => {});
           }
           const messageId = event.message.id;
-          const imageUrl = await downloadLineContent(messageId, ".jpg");
+          const imageUrl = await downloadLineContent(messageId, ".jpg", channelToken);
           if (imageUrl) {
             const imgMsg = storage.createMessage(contact.id, "line", "user", "[圖片訊息]", "image", imageUrl);
             broadcastSSE("new_message", { contact_id: contact.id, message: imgMsg, brand_id: matchedBrandId || contact.brand_id });
@@ -1536,7 +1644,7 @@ export async function registerRoutes(
             fetchAndUpdateLineProfile(userId, contact.id, channelToken).catch(() => {});
           }
           const messageId = event.message.id;
-          const videoUrl = await downloadLineContent(messageId, ".mp4");
+          const videoUrl = await downloadLineContent(messageId, ".mp4", channelToken);
           if (videoUrl) {
             storage.createMessage(contact.id, "line", "user", "[影片訊息]", "video", videoUrl);
           } else {
@@ -1615,8 +1723,15 @@ export async function registerRoutes(
             if (messagingEvent.message.attachments) {
               for (const att of messagingEvent.message.attachments) {
                 if (att.type === "image" && att.payload?.url) {
-                  const imgMsg = storage.createMessage(contact.id, "messenger", "user", "[圖片訊息]", "image", att.payload.url);
+                  const localImageUrl = await downloadExternalImage(att.payload.url);
+                  const finalUrl = localImageUrl || att.payload.url;
+                  const imgMsg = storage.createMessage(contact.id, "messenger", "user", "[圖片訊息]", "image", finalUrl);
                   broadcastSSE("new_message", { contact_id: contact.id, message: imgMsg, brand_id: matchedBrandId || contact.brand_id });
+                  if (localImageUrl && !contact.needs_human) {
+                    analyzeImageWithAI(localImageUrl, contact.id, null, "messenger").catch(err =>
+                      console.error("[FB Webhook] AI image analysis error:", err)
+                    );
+                  }
                 } else {
                   storage.createMessage(contact.id, "messenger", "user", `[${att.type || "附件"}]`);
                 }

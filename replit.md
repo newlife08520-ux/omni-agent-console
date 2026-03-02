@@ -48,3 +48,17 @@ The system is built on a modern full-stack architecture:
 - **multer**: Middleware for handling `multipart/form-data`.
 - **xlsx**: Library for reading and writing Excel files.
 - **jszip**: Library for creating, reading, and editing .zip files.
+
+## Multimedia & Vision
+- **LINE Image/Video Download**: `downloadLineContent(messageId, ext, channelAccessToken)` downloads LINE content using per-channel token for multi-brand support. Falls back to global token.
+- **External Image Download**: `downloadExternalImage(url)` downloads images from external URLs (e.g., FB attachments) to local `/uploads/` folder.
+- **Image-to-DataURI**: `imageFileToDataUri(filePath)` converts local image files to base64 data URIs for OpenAI Vision API.
+- **AI Vision Analysis**: `analyzeImageWithAI(imageFilePath, contactId, lineToken, platform)` performs full vision analysis with:
+  - Conversation history including prior images as Vision content
+  - Safety fallback: explicitly injects current image if not found in recent messages
+  - Full tool-call loop (order lookup, human handoff, image assets) up to 3 rounds
+  - Multi-platform reply (LINE push / FB message)
+  - Per-brand system prompt + image handling guidelines
+- **autoReplyWithAI**: Now includes image messages in conversation context as Vision content for contextual awareness.
+- **Frontend Lightbox**: Clicking chat images opens a full-screen overlay preview instead of new tab. Close via X button or clicking backdrop.
+- **FB Webhook Images**: Downloads FB image attachments locally, triggers AI vision analysis for non-human-flagged contacts.

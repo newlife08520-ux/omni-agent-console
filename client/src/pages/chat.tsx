@@ -111,6 +111,7 @@ export default function ChatPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [sending, setSending] = useState(false);
   const [newTag, setNewTag] = useState("");
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [showQuickReplies, setShowQuickReplies] = useState(false);
   const [rightTab, setRightTab] = useState("info");
   const [orderSearch, setOrderSearch] = useState("");
@@ -843,7 +844,7 @@ export default function ChatPage() {
                                         : msg.sender_type === "ai" ? "rounded-br-md border border-emerald-100"
                                         : "rounded-br-md"
                                     }`}>
-                                      <img src={msg.image_url} alt="附件圖片" className="max-w-full max-h-[280px] object-contain cursor-pointer rounded-2xl" onClick={() => window.open(msg.image_url!, "_blank")} data-testid={`image-message-${msg.id}`} />
+                                      <img src={msg.image_url} alt="附件圖片" className="max-w-full max-h-[280px] object-contain cursor-pointer rounded-2xl hover:opacity-90 transition-opacity" onClick={() => setPreviewImage(msg.image_url!)} data-testid={`image-message-${msg.id}`} />
                                     </div>
                                   ) : msg.message_type === "video" && msg.image_url ? (
                                     <div className={`rounded-2xl overflow-hidden shadow-sm ${
@@ -1261,6 +1262,14 @@ export default function ChatPage() {
           </>
         )}
       </div>
+      {previewImage && (
+        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center" onClick={() => setPreviewImage(null)} data-testid="image-lightbox">
+          <button onClick={() => setPreviewImage(null)} className="absolute top-4 right-4 w-10 h-10 bg-white/20 hover:bg-white/30 rounded-full flex items-center justify-center transition-colors" data-testid="button-close-lightbox">
+            <X className="w-6 h-6 text-white" />
+          </button>
+          <img src={previewImage} alt="預覽圖片" className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl" onClick={(e) => e.stopPropagation()} />
+        </div>
+      )}
     </div>
   );
 }
