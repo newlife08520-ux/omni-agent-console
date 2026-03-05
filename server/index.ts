@@ -3,6 +3,8 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import session from "express-session";
+import { createClient } from "redis";
+import { RedisStore } from "connect-redis";
 import path from "path";
 import * as assignment from "./assignment";
 import { getUploadsDir } from "./data-dir";
@@ -35,14 +37,18 @@ app.use("/api", (_req, res, next) => {
 });
 app.set("etag", false);
 
-if (process.env.NODE_ENV === "production") {
-  const secret = process.env.SESSION_SECRET?.trim();
-  if (!secret) {
+const sessionSecret = process.env.SESSION_SECRET?.trim();
+if (!sessionSecret) {
+  if (process.env.NODE_ENV === "production") {
     console.error("FATAL: In production, SESSION_SECRET must be set. Refusing to start.");
     process.exit(1);
   }
-  if (!process.env.REDIS_URL?.trim()) {
-    console.error("FATAL: In production, REDIS_URL must be set for session persistence. Refusing to start.");
+}
+
+const redisUrl = process.env.REDIS_URL?.trim();
+if (!redisUrl) {
+  if (process.env.NODE_ENV === "production") {
+    console.error("FATAL: REDIS_URL must be set in production. Refusing to start.");
     process.exit(1);
   }
 }
@@ -74,35 +80,35 @@ app.use((req, res, next) => {
 
 (async () => {
   try {
-    let sessionStore: session.Store;
-    const redisUrl = process.env.REDIS_URL?.trim();
+    let store: session.Store | undefined;
+
     if (redisUrl) {
-      const { createClient } = await import("redis");
-      const { RedisStore } = await import("connect-redis");
       const redisClient = createClient({ url: redisUrl });
+      redisClient.on("error", (err) => console.error("[Redis] error", err));
       await redisClient.connect();
-      redisClient.on("error", (err: Error) => console.error("[Redis]", err.message));
-      sessionStore = new RedisStore({ client: redisClient, prefix: "omni:sess:" });
-    } else {
-      if (process.env.NODE_ENV === "production") {
-        console.error("FATAL: In production, REDIS_URL must be set. Refusing to start.");
-        process.exit(1);
-      }
+      store = new RedisStore({
+        client: redisClient,
+        prefix: "sess:",
+      });
+    }
+
+    if (!store && process.env.NODE_ENV !== "production") {
       const MemoryStore = (await import("memorystore")).default;
       const MemStore = MemoryStore(session);
-      sessionStore = new MemStore({ checkPeriod: 86400000 });
+      store = new MemStore({ checkPeriod: 86400000 });
     }
+
     app.use(
       session({
-        secret: process.env.SESSION_SECRET || "omnichannel-secret-key",
+        store,
+        secret: sessionSecret || "omnichannel-secret-key",
         resave: false,
         saveUninitialized: false,
-        store: sessionStore,
         cookie: {
           maxAge: 24 * 60 * 60 * 1000,
           httpOnly: true,
-          secure: false,
           sameSite: "lax",
+          secure: process.env.NODE_ENV === "production",
         },
       }),
     );
