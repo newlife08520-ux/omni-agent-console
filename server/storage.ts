@@ -1,6 +1,8 @@
 import db, { initDatabase, hashPassword } from "./db";
 import type { User, Contact, ContactWithPreview, Message, Setting, KnowledgeFile, TeamMember, MarketingRule, Brand, Channel, ChannelWithBrand, ImageAsset, AiLog, AgentStatus, AssignmentRecord } from "@shared/schema";
 import { CONTACT_STATUS_ALLOWED } from "@shared/schema";
+import { getRedisClient } from "./redis-client";
+import * as redisBC from "./redis-brands-channels";
 
 initDatabase();
 
@@ -16,16 +18,16 @@ export interface IStorage {
   setSetting(key: string, value: string): void;
   getBrands(): Brand[];
   getBrand(id: number): Brand | undefined;
-  createBrand(name: string, slug: string, logoUrl?: string, description?: string, systemPrompt?: string, superlandingMerchantNo?: string, superlandingAccessKey?: string): Brand;
-  updateBrand(id: number, data: Partial<Omit<Brand, "id" | "created_at">>): boolean;
-  deleteBrand(id: number): boolean;
+  createBrand(name: string, slug: string, logoUrl?: string, description?: string, systemPrompt?: string, superlandingMerchantNo?: string, superlandingAccessKey?: string, returnFormUrl?: string): Promise<Brand>;
+  updateBrand(id: number, data: Partial<Omit<Brand, "id" | "created_at">>): Promise<boolean>;
+  deleteBrand(id: number): Promise<boolean>;
   getChannels(): ChannelWithBrand[];
   getChannelsByBrand(brandId: number): Channel[];
   getChannel(id: number): Channel | undefined;
   getChannelByBotId(botId: string): ChannelWithBrand | undefined;
-  createChannel(brandId: number, platform: string, channelName: string, botId?: string, accessToken?: string, channelSecret?: string): Channel;
-  updateChannel(id: number, data: Partial<Omit<Channel, "id" | "created_at">>): boolean;
-  deleteChannel(id: number): boolean;
+  createChannel(brandId: number, platform: string, channelName: string, botId?: string, accessToken?: string, channelSecret?: string): Promise<Channel>;
+  updateChannel(id: number, data: Partial<Omit<Channel, "id" | "created_at">>): Promise<boolean>;
+  deleteChannel(id: number): Promise<boolean>;
   getContacts(brandId?: number, assignedToUserId?: number, agentIdForFlags?: number): ContactWithPreview[];
   getContact(id: number): Contact | undefined;
   updateContactHumanFlag(id: number, needsHuman: number): void;
@@ -229,7 +231,18 @@ export class SQLiteStorage implements IStorage {
     return db.prepare("SELECT * FROM brands WHERE id = ?").get(id) as Brand | undefined;
   }
 
-  createBrand(name: string, slug: string, logoUrl?: string, description?: string, systemPrompt?: string, superlandingMerchantNo?: string, superlandingAccessKey?: string, returnFormUrl?: string): Brand {
+  async createBrand(name: string, slug: string, logoUrl?: string, description?: string, systemPrompt?: string, superlandingMerchantNo?: string, superlandingAccessKey?: string, returnFormUrl?: string): Promise<Brand> {
+    const client = getRedisClient();
+    if (client) {
+      const brand = await redisBC.createBrand(client, name, slug, logoUrl, description, systemPrompt, superlandingMerchantNo, superlandingAccessKey, returnFormUrl);
+      try {
+        db.prepare(`
+          INSERT OR REPLACE INTO brands (id, name, slug, logo_url, description, system_prompt, superlanding_merchant_no, superlanding_access_key, return_form_url, shopline_store_domain, shopline_api_token, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(brand.id, brand.name, brand.slug, brand.logo_url ?? "", brand.description ?? "", brand.system_prompt ?? "", brand.superlanding_merchant_no ?? "", brand.superlanding_access_key ?? "", brand.return_form_url ?? "", brand.shopline_store_domain ?? "", brand.shopline_api_token ?? "", brand.created_at ?? "");
+      } catch (_e) { /* SQLite 可能缺欄位，忽略 */ }
+      return brand;
+    }
     const now = new Date().toISOString().replace("T", " ").substring(0, 19);
     const result = db.prepare("INSERT INTO brands (name, slug, logo_url, description, system_prompt, superlanding_merchant_no, superlanding_access_key, return_form_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
       name, slug, logoUrl || "", description || "", systemPrompt || "", superlandingMerchantNo || "", superlandingAccessKey || "", returnFormUrl || "", now
@@ -237,7 +250,24 @@ export class SQLiteStorage implements IStorage {
     return db.prepare("SELECT * FROM brands WHERE id = ?").get(Number(result.lastInsertRowid)) as Brand;
   }
 
-  updateBrand(id: number, data: Partial<Omit<Brand, "id" | "created_at">>): boolean {
+  async updateBrand(id: number, data: Partial<Omit<Brand, "id" | "created_at">>): Promise<boolean> {
+    const client = getRedisClient();
+    if (client) {
+      const ok = await redisBC.updateBrand(client, id, data);
+      if (ok) {
+        const fields: string[] = [];
+        const values: any[] = [];
+        for (const [key, val] of Object.entries(data)) {
+          fields.push(`${key} = ?`);
+          values.push(val);
+        }
+        if (fields.length > 0) {
+          values.push(id);
+          try { db.prepare(`UPDATE brands SET ${fields.join(", ")} WHERE id = ?`).run(...values); } catch (_e) { /* ignore */ }
+        }
+      }
+      return ok;
+    }
     const fields: string[] = [];
     const values: any[] = [];
     for (const [key, val] of Object.entries(data)) {
@@ -250,7 +280,18 @@ export class SQLiteStorage implements IStorage {
     return result.changes > 0;
   }
 
-  deleteBrand(id: number): boolean {
+  async deleteBrand(id: number): Promise<boolean> {
+    const client = getRedisClient();
+    if (client) {
+      const ok = await redisBC.deleteBrand(client, id);
+      if (ok) {
+        try {
+          db.prepare("DELETE FROM channels WHERE brand_id = ?").run(id);
+          db.prepare("DELETE FROM brands WHERE id = ?").run(id);
+        } catch (_e) { /* ignore */ }
+      }
+      return ok;
+    }
     db.prepare("DELETE FROM channels WHERE brand_id = ?").run(id);
     const result = db.prepare("DELETE FROM brands WHERE id = ?").run(id);
     return result.changes > 0;
@@ -282,7 +323,18 @@ export class SQLiteStorage implements IStorage {
     `).get(botId) as ChannelWithBrand | undefined;
   }
 
-  createChannel(brandId: number, platform: string, channelName: string, botId?: string, accessToken?: string, channelSecret?: string): Channel {
+  async createChannel(brandId: number, platform: string, channelName: string, botId?: string, accessToken?: string, channelSecret?: string): Promise<Channel> {
+    const client = getRedisClient();
+    if (client) {
+      const channel = await redisBC.createChannel(client, brandId, platform, channelName, botId, accessToken, channelSecret);
+      try {
+        db.prepare(`
+          INSERT OR REPLACE INTO channels (id, brand_id, platform, channel_name, bot_id, access_token, channel_secret, is_active, is_ai_enabled, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(channel.id, channel.brand_id, channel.platform, channel.channel_name, channel.bot_id ?? "", channel.access_token ?? "", channel.channel_secret ?? "", channel.is_active ?? 1, channel.is_ai_enabled ?? 0, channel.created_at ?? "");
+      } catch (_e) { /* ignore */ }
+      return channel;
+    }
     const now = new Date().toISOString().replace("T", " ").substring(0, 19);
     const result = db.prepare("INSERT INTO channels (brand_id, platform, channel_name, bot_id, access_token, channel_secret, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
       brandId, platform, channelName, botId || "", accessToken || "", channelSecret || "", now
@@ -290,7 +342,24 @@ export class SQLiteStorage implements IStorage {
     return db.prepare("SELECT * FROM channels WHERE id = ?").get(Number(result.lastInsertRowid)) as Channel;
   }
 
-  updateChannel(id: number, data: Partial<Omit<Channel, "id" | "created_at">>): boolean {
+  async updateChannel(id: number, data: Partial<Omit<Channel, "id" | "created_at">>): Promise<boolean> {
+    const client = getRedisClient();
+    if (client) {
+      const ok = await redisBC.updateChannel(client, id, data);
+      if (ok) {
+        const fields: string[] = [];
+        const values: any[] = [];
+        for (const [key, val] of Object.entries(data)) {
+          fields.push(`${key} = ?`);
+          values.push(val);
+        }
+        if (fields.length > 0) {
+          values.push(id);
+          try { db.prepare(`UPDATE channels SET ${fields.join(", ")} WHERE id = ?`).run(...values); } catch (_e) { /* ignore */ }
+        }
+      }
+      return ok;
+    }
     const fields: string[] = [];
     const values: any[] = [];
     for (const [key, val] of Object.entries(data)) {
@@ -303,7 +372,15 @@ export class SQLiteStorage implements IStorage {
     return result.changes > 0;
   }
 
-  deleteChannel(id: number): boolean {
+  async deleteChannel(id: number): Promise<boolean> {
+    const client = getRedisClient();
+    if (client) {
+      const ok = await redisBC.deleteChannel(client, id);
+      if (ok) {
+        try { db.prepare("DELETE FROM channels WHERE id = ?").run(id); } catch (_e) { /* ignore */ }
+      }
+      return ok;
+    }
     const result = db.prepare("DELETE FROM channels WHERE id = ?").run(id);
     return result.changes > 0;
   }

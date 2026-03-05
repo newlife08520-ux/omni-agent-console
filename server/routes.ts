@@ -490,10 +490,12 @@ export async function registerRoutes(
     console.log("[SSE] Client connected, total clients:", sseClients.size + 1);
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
+      "Cache-Control": "no-store, no-cache, must-revalidate",
+      Pragma: "no-cache",
       Connection: "keep-alive",
       "X-Accel-Buffering": "no",
     });
+    if (typeof res.flushHeaders === "function") res.flushHeaders();
     res.write("event: connected\ndata: {}\n\n");
     sseClients.add(res);
     const keepAlive = setInterval(() => {
@@ -1897,11 +1899,11 @@ export async function registerRoutes(
     return res.json(brand);
   });
 
-  app.post("/api/brands", authMiddleware, superAdminOnly, (req, res) => {
+  app.post("/api/brands", authMiddleware, superAdminOnly, async (req, res) => {
     const { name, slug, logo_url, description, system_prompt, superlanding_merchant_no, superlanding_access_key } = req.body;
     if (!name || !slug) return res.status(400).json({ message: "品牌名稱與代碼為必填" });
     try {
-      const brand = storage.createBrand(name, slug, logo_url, description, system_prompt, superlanding_merchant_no, superlanding_access_key);
+      const brand = await storage.createBrand(name, slug, logo_url, description, system_prompt, superlanding_merchant_no, superlanding_access_key);
       return res.json({ success: true, brand });
     } catch (err: any) {
       if (err.message?.includes("UNIQUE constraint")) {
@@ -1911,7 +1913,7 @@ export async function registerRoutes(
     }
   });
 
-  app.put("/api/brands/:id", authMiddleware, superAdminOnly, (req, res) => {
+  app.put("/api/brands/:id", authMiddleware, superAdminOnly, async (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const {
@@ -1930,14 +1932,14 @@ export async function registerRoutes(
     if (return_form_url !== undefined) data.return_form_url = return_form_url;
     if (shopline_store_domain !== undefined) data.shopline_store_domain = shopline_store_domain;
     if (shopline_api_token !== undefined) data.shopline_api_token = shopline_api_token;
-    if (!storage.updateBrand(id, data)) return res.status(404).json({ message: "品牌不存在" });
+    if (!(await storage.updateBrand(id, data))) return res.status(404).json({ message: "品牌不存在" });
     return res.json({ success: true });
   });
 
-  app.delete("/api/brands/:id", authMiddleware, superAdminOnly, (req, res) => {
+  app.delete("/api/brands/:id", authMiddleware, superAdminOnly, async (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) return res.status(400).json({ message: "無效的 ID" });
-    if (!storage.deleteBrand(id)) return res.status(404).json({ message: "品牌不存在" });
+    if (!(await storage.deleteBrand(id))) return res.status(404).json({ message: "品牌不存在" });
     return res.json({ success: true });
   });
 
@@ -1953,17 +1955,17 @@ export async function registerRoutes(
     return res.json(channels);
   });
 
-  app.post("/api/brands/:id/channels", authMiddleware, superAdminOnly, (req, res) => {
+  app.post("/api/brands/:id/channels", authMiddleware, superAdminOnly, async (req, res) => {
     const brandId = parseIdParam(req.params.id);
     if (brandId === null) return res.status(400).json({ message: "無效的 ID" });
     const { platform, channel_name, bot_id, access_token, channel_secret } = req.body;
     if (!platform || !channel_name) return res.status(400).json({ message: "平台與頻道名稱為必填" });
     if (!["line", "messenger"].includes(platform)) return res.status(400).json({ message: "平台須為 line 或 messenger" });
-    const channel = storage.createChannel(brandId, platform, channel_name, bot_id, access_token, channel_secret);
+    const channel = await storage.createChannel(brandId, platform, channel_name, bot_id, access_token, channel_secret);
     return res.json({ success: true, channel });
   });
 
-  app.put("/api/channels/:id", authMiddleware, superAdminOnly, (req, res) => {
+  app.put("/api/channels/:id", authMiddleware, superAdminOnly, async (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const { platform, channel_name, bot_id, access_token, channel_secret, is_active, is_ai_enabled, brand_id } = req.body;
@@ -1976,14 +1978,14 @@ export async function registerRoutes(
     if (is_active !== undefined) data.is_active = is_active;
     if (is_ai_enabled !== undefined) data.is_ai_enabled = is_ai_enabled;
     if (brand_id !== undefined) data.brand_id = brand_id;
-    if (!storage.updateChannel(id, data)) return res.status(404).json({ message: "頻道不存在" });
+    if (!(await storage.updateChannel(id, data))) return res.status(404).json({ message: "頻道不存在" });
     return res.json({ success: true });
   });
 
-  app.delete("/api/channels/:id", authMiddleware, superAdminOnly, (req, res) => {
+  app.delete("/api/channels/:id", authMiddleware, superAdminOnly, async (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) return res.status(400).json({ message: "無效的 ID" });
-    if (!storage.deleteChannel(id)) return res.status(404).json({ message: "頻道不存在" });
+    if (!(await storage.deleteChannel(id))) return res.status(404).json({ message: "頻道不存在" });
     return res.json({ success: true });
   });
 
@@ -2131,7 +2133,7 @@ export async function registerRoutes(
           const botInfo = await verifyRes.json();
           const botUserId = botInfo.userId || "";
           if (botUserId && !channel.bot_id) {
-            storage.updateChannel(id, { bot_id: botUserId });
+            await storage.updateChannel(id, { bot_id: botUserId });
           }
           return res.json({ success: true, message: `LINE 連線成功！Bot: ${botInfo.displayName || botInfo.basicId || "OK"}`, botUserId });
         }
@@ -2149,7 +2151,7 @@ export async function registerRoutes(
           const pageInfo = await fbRes.json();
           const pageId = pageInfo.id || "";
           if (pageId && !channel.bot_id) {
-            storage.updateChannel(id, { bot_id: pageId });
+            await storage.updateChannel(id, { bot_id: pageId });
           }
           return res.json({ success: true, message: `Facebook 連線成功！粉專: ${pageInfo.name || "OK"} (ID: ${pageId})`, botId: pageId });
         }
@@ -3538,7 +3540,7 @@ export async function registerRoutes(
     }
   }
 
-  app.post("/api/webhook/line", (req, res) => {
+  app.post("/api/webhook/line", async (req, res) => {
     try {
     console.log("===== [LINE WEBHOOK START] =====");
     console.log("[WEBHOOK] destination:", req.body?.destination);
@@ -3571,7 +3573,7 @@ export async function registerRoutes(
           channelToken = firstChannel.access_token || null;
           channelSecretVal = firstChannel.channel_secret || null;
           matchedBrandId = firstChannel.brand_id;
-          storage.updateChannel(firstChannel.id, { bot_id: destination });
+          await storage.updateChannel(firstChannel.id, { bot_id: destination });
           console.log("[WEBHOOK] AUTO-FIXED: Updated channel bot_id to", destination);
         }
       }
