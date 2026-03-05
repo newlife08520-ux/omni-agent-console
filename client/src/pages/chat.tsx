@@ -5,18 +5,33 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue, SelectGroup, SelectLabel } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Send, User, Bot, Headphones, UserCheck, Search, X, Plus, Tag,
   Circle, Zap, Star, Info, Package, Crown, ShoppingBag, Loader2,
   Paperclip, ImageIcon, Upload, CalendarDays, Filter, Phone, MessageSquare,
+  UserCog, Users, Pencil, MoreHorizontal, Copy, Link2,
 } from "lucide-react";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { apiRequest, getQueryFn } from "@/lib/queryClient";
 import { useBrand } from "@/lib/brand-context";
+import { useChatView, type ViewMode } from "@/lib/chat-view-context";
 import { useToast } from "@/hooks/use-toast";
 import type { ContactWithPreview, Message, OrderInfo, ContactStatus, IssueType, OrderSource } from "@shared/schema";
-import { CONTACT_STATUS_LABELS, CONTACT_STATUS_COLORS, ISSUE_TYPE_LABELS, ISSUE_TYPE_COLORS, ORDER_SOURCE_LABELS } from "@shared/schema";
+import type { TeamMember } from "@shared/schema";
+import { CONTACT_STATUS_LABELS, CONTACT_STATUS_COLORS, ISSUE_TYPE_LABELS, ISSUE_TYPE_COLORS, ORDER_SOURCE_LABELS, CASE_STATUS_VALUES, SYSTEM_MARK_VALUES } from "@shared/schema";
+
+/** 全站統一狀態語意色：紅=超時/高風險、橘=待處理、藍=已分配、綠=已回覆/正常、灰=待分配/離線 */
+const STATUS_SEMANTIC = {
+  danger: { bg: "bg-red-100 text-red-700 border-red-200", dot: "bg-red-500" },
+  warning: { bg: "bg-orange-100 text-orange-700 border-orange-200", dot: "bg-orange-500" },
+  assigned: { bg: "bg-blue-100 text-blue-700 border-blue-200", dot: "bg-blue-500" },
+  normal: { bg: "bg-green-100 text-green-700 border-green-200", dot: "bg-green-500" },
+  muted: { bg: "bg-stone-100 text-stone-600 border-stone-200", dot: "bg-stone-400" },
+} as const;
 
 const ORDER_STATUS_MAP: Record<string, { label: string; color: string }> = {
   new_order: { label: "新訂單", color: "bg-blue-50 text-blue-600 border-blue-200" },
@@ -71,13 +86,70 @@ function formatDateTime(raw?: string): string {
   } catch (_e) { return raw; }
 }
 
+/** 對話代碼：CV-YYYYMMDD-五位數 contact id，供備註貼上 */
+function getConversationCode(contactId: number): string {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const id = String(contactId).padStart(5, "0");
+  return `CV-${yyyy}${mm}${dd}-${id}`;
+}
+
+/** 系統預設標籤（四層之四：不可從快捷列刪除，僅供快速選取） */
+const DEFAULT_TAGS = [
+  "VIP", "緊急案件", "待追蹤", "稍後處理", "客訴", "退款", "出貨問題", "商品諮詢", "等主管確認", "回購客",
+];
+
+const CUSTOM_TAGS_STORAGE_KEY = "omni_agent_custom_tags";
+
+/** 品牌級常用標籤（四層之三）：擴充方式可為 API GET /api/brands/:id/settings 回傳 shortcut_tags: string[]，或 DB brand_settings.key = 'shortcut_tags'；此輪僅預留，快捷列仍以 DEFAULT_TAGS + 自訂為主。 */
+// const BRAND_SHORTCUT_TAGS_KEY = "shortcut_tags";
+
+/** 常用快捷標籤庫（四層之二）：自訂、可新增/刪除/排序，重整後仍存在 */
+function getCustomTags(): string[] {
+  try {
+    const raw = localStorage.getItem(CUSTOM_TAGS_STORAGE_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr.filter((t) => typeof t === "string" && t.trim()) : [];
+  } catch {
+    return [];
+  }
+}
+
+function addCustomTag(tag: string) {
+  const t = tag.trim();
+  if (!t) return;
+  const prev = getCustomTags();
+  if (prev.includes(t)) return;
+  localStorage.setItem(CUSTOM_TAGS_STORAGE_KEY, JSON.stringify([...prev, t]));
+}
+
+function removeCustomTag(tag: string) {
+  const prev = getCustomTags().filter((t) => t !== tag);
+  localStorage.setItem(CUSTOM_TAGS_STORAGE_KEY, JSON.stringify(prev));
+}
+
+function setCustomTagsOrder(ordered: string[]) {
+  const valid = ordered.filter((t) => typeof t === "string" && t.trim());
+  localStorage.setItem(CUSTOM_TAGS_STORAGE_KEY, JSON.stringify(valid));
+}
 
 const TAG_COLORS: Record<string, string> = {
-  "VIP": "bg-violet-50 text-violet-600 border-violet-200",
-  "客訴": "bg-red-50 text-red-600 border-red-200",
-  "重要": "bg-orange-50 text-orange-600 border-orange-200",
-  "回購客戶": "bg-emerald-50 text-emerald-600 border-emerald-200",
-  "新客戶": "bg-sky-50 text-sky-600 border-sky-200",
+  VIP: "bg-violet-50 text-violet-600 border-violet-200",
+  緊急案件: "bg-red-50 text-red-600 border-red-200",
+  回購客: "bg-emerald-50 text-emerald-600 border-emerald-200",
+  待追蹤: "bg-sky-50 text-sky-600 border-sky-200",
+  稍後處理: "bg-amber-50 text-amber-600 border-amber-200",
+  客訴: "bg-red-50 text-red-600 border-red-200",
+  退款: "bg-pink-50 text-pink-600 border-pink-200",
+  出貨問題: "bg-orange-50 text-orange-600 border-orange-200",
+  商品諮詢: "bg-indigo-50 text-indigo-600 border-indigo-200",
+  等主管確認: "bg-amber-50 text-amber-700 border-amber-200",
+  重要: "bg-orange-50 text-orange-600 border-orange-200",
+  回購客戶: "bg-emerald-50 text-emerald-600 border-emerald-200",
+  新客戶: "bg-sky-50 text-sky-600 border-sky-200",
 };
 
 function getTagColor(tag: string) {
@@ -107,6 +179,12 @@ export default function ChatPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [sending, setSending] = useState(false);
   const [newTag, setNewTag] = useState("");
+  const [customTags, setCustomTags] = useState<string[]>(() => getCustomTags());
+  const { data: apiTagShortcuts = [] } = useQuery<{ name: string; order: number }[]>({
+    queryKey: ["/api/settings/tag-shortcuts"],
+    queryFn: getQueryFn({ on401: "returnNull" }),
+  });
+  const shortcutTagNames = apiTagShortcuts.length > 0 ? apiTagShortcuts.sort((a, b) => a.order - b.order).map((t) => t.name) : [...DEFAULT_TAGS, ...customTags];
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [showQuickReplies, setShowQuickReplies] = useState(false);
   const [rightTab, setRightTab] = useState("info");
@@ -128,6 +206,15 @@ export default function ChatPage() {
   const [messageSearchResults, setMessageSearchResults] = useState<{ contact_id: number; contact_name: string; message_id: number; content: string; sender_type: string; created_at: string }[]>([]);
   const [messageSearching, setMessageSearching] = useState(false);
   const [platformFilter, setPlatformFilter] = useState<"all" | "line" | "messenger">("all");
+  const [showReassignDialog, setShowReassignDialog] = useState(false);
+  const [reassignAgentId, setReassignAgentId] = useState<number | null>(null);
+  const [reassignNote, setReassignNote] = useState("");
+  const [reassigning, setReassigning] = useState(false);
+  const [showAssignDialog, setShowAssignDialog] = useState(false);
+  const [assignAgentId, setAssignAgentId] = useState<number | null>(null);
+  const [assigning, setAssigning] = useState(false);
+  const { viewMode, setViewMode } = useChatView();
+  const OVERDUE_MS = 60 * 60 * 1000;
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatViewportRef = useRef<HTMLDivElement>(null);
@@ -135,10 +222,45 @@ export default function ChatPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const queryClient = useQueryClient();
   const { toast } = useToast();
+  /** 聯絡人或案件相關操作後一併刷新左側戰情摘要（單一資料來源，數字連動） */
+  const invalidateContactsAndStats = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
+    queryClient.invalidateQueries({ queryKey: ["/api/manager-stats"], exact: false });
+    queryClient.invalidateQueries({ queryKey: ["/api/agent-stats/me"] });
+  }, [queryClient]);
   const lastMessageIdRef = useRef<number>(0);
   const { selectedBrandId } = useBrand();
 
   const sseConnectedRef = useRef(false);
+
+  useEffect(() => {
+    apiRequest("POST", "/api/notifications/mark-read").catch(() => {});
+    queryClient.invalidateQueries({ queryKey: ["/api/notifications/unread-count"] });
+  }, [queryClient]);
+
+  useEffect(() => {
+    const search = typeof window !== "undefined" ? window.location.search : "";
+    const params = new URLSearchParams(search);
+    const contactParam = params.get("contact");
+    if (contactParam) {
+      const id = parseInt(contactParam, 10);
+      if (!isNaN(id)) setSelectedId(id);
+    }
+    if (params.get("tab") === "orders") setRightTab("orders");
+    const orderParam = params.get("order");
+    if (orderParam?.trim()) setOrderSearch(orderParam.trim());
+  }, []);
+
+  useEffect(() => {
+    const search = new URLSearchParams();
+    if (selectedId != null) search.set("contact", String(selectedId));
+    if (rightTab === "orders") search.set("tab", "orders");
+    const q = search.toString();
+    const url = q ? `${window.location.pathname}?${q}` : window.location.pathname;
+    if (window.location.search !== (q ? `?${q}` : "")) {
+      window.history.replaceState(null, "", url);
+    }
+  }, [selectedId, rightTab]);
 
   useEffect(() => {
     let es: EventSource | null = null;
@@ -158,14 +280,14 @@ export default function ChatPage() {
             const data = JSON.parse(e.data);
             console.log("[SSE] new_message received, contact:", data.contact_id);
             queryClient.invalidateQueries({ queryKey: ["/api/contacts", data.contact_id, "messages"] });
-            queryClient.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
+            invalidateContactsAndStats();
           } catch (err) {
             console.error("[SSE] Error parsing new_message:", err);
           }
         });
         es.addEventListener("contacts_updated", () => {
           console.log("[SSE] contacts_updated received");
-          queryClient.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
+          invalidateContactsAndStats();
         });
         es.onerror = (err) => {
           console.error("[SSE] Connection error, retry #" + retryCount, err);
@@ -187,23 +309,29 @@ export default function ChatPage() {
       clearTimeout(reconnectTimer);
       sseConnectedRef.current = false;
     };
-  }, [queryClient]);
+  }, [queryClient, invalidateContactsAndStats]);
 
-  const { data: contacts = [], isLoading: contactsLoading } = useQuery<ContactWithPreview[]>({
-    queryKey: ["/api/contacts", selectedBrandId],
+  const { data: contactsRaw, isLoading: contactsLoading } = useQuery<(ContactWithPreview & { is_urgent?: boolean; is_overdue?: boolean })[]>({
+    queryKey: ["/api/contacts", selectedBrandId, viewMode],
     queryFn: async () => {
-      const url = selectedBrandId ? `/api/contacts?brand_id=${selectedBrandId}` : "/api/contacts";
+      const params = new URLSearchParams();
+      if (selectedBrandId) params.set("brand_id", String(selectedBrandId));
+      if (viewMode === "my" || viewMode === "tracking") params.set("assigned_to_me", "1");
+      if (viewMode === "my" || viewMode === "pending") params.set("need_reply_first", "1");
+      const url = params.toString() ? `/api/contacts?${params}` : "/api/contacts";
       const res = await fetch(url, {
         credentials: "include",
         headers: { "Cache-Control": "no-cache", "Pragma": "no-cache" },
       });
       if (!res.ok) throw new Error("Failed");
-      return res.json();
+      const data = await res.json();
+      return Array.isArray(data) ? data : [];
     },
     refetchInterval: 3000,
     refetchIntervalInBackground: true,
     staleTime: 0,
   });
+  const contacts = Array.isArray(contactsRaw) ? contactsRaw : [];
 
   const { data: messages = [], isLoading: messagesLoading } = useQuery<Message[]>({
     queryKey: ["/api/contacts", selectedId, "messages"],
@@ -218,6 +346,30 @@ export default function ChatPage() {
     },
     enabled: !!selectedId,
     refetchInterval: 5000,
+  });
+
+  const { data: linkedOrderIds = [] } = useQuery<string[]>({
+    queryKey: ["/api/contacts", selectedId, "linked-orders"],
+    queryFn: async () => {
+      if (!selectedId) return [];
+      const res = await fetch(`/api/contacts/${selectedId}/linked-orders`, { credentials: "include" });
+      if (!res.ok) return [];
+      const data = await res.json();
+      return Array.isArray(data.order_ids) ? data.order_ids : [];
+    },
+    enabled: !!selectedId,
+  });
+
+  const orderIdsForLinked = orderSearchResults.map((o) => o.global_order_id);
+  const { data: linkedContactsMap = {} } = useQuery<Record<string, number | null>>({
+    queryKey: ["/api/orders/linked-contacts", orderIdsForLinked.join(",")],
+    queryFn: async () => {
+      if (orderIdsForLinked.length === 0) return {};
+      const res = await fetch(`/api/orders/linked-contacts?order_ids=${orderIdsForLinked.map(encodeURIComponent).join(",")}`, { credentials: "include" });
+      if (!res.ok) return {};
+      return res.json();
+    },
+    enabled: orderIdsForLinked.length > 0,
   });
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
@@ -271,10 +423,72 @@ export default function ChatPage() {
     prevHumanCountRef.current = humanCount;
   }, [contacts]);
 
+  const { data: authUser } = useQuery<{ user?: { id: number; role: string; username?: string; display_name?: string } }>({
+    queryKey: ["/api/auth/check"],
+    queryFn: getQueryFn({ on401: "throw" }),
+  });
+
   const selectedContact = contacts.find((c) => c.id === selectedId);
+  const isOverdue = (c: ContactWithPreview) => {
+    if ((c as ContactWithPreview).last_message_sender_type !== "user" || !c.last_message_at) return false;
+    return Date.now() - new Date(c.last_message_at.replace(" ", "T")).getTime() > OVERDUE_MS;
+  };
+  /** 緊急案件：後端回傳 is_urgent，或 fallback 狀態/優先級 */
+  const isUrgent = (c: ContactWithPreview & { is_urgent?: boolean }) =>
+    (c as any).is_urgent === true || c.status === "high_risk" || (c.case_priority != null && c.case_priority <= 2);
+  const isUnassigned = (c: ContactWithPreview) => !c.assigned_agent_id && c.needs_human === 1;
+  /** 我的案件：已分配給目前登入客服 */
+  const isMine = (c: ContactWithPreview) => authUser?.user?.id != null && c.assigned_agent_id === authUser.user.id;
+  /**
+   * 是否「輪到有人回覆」：最後一則訊息為客戶發言 + 未結案。
+   * 若最後一則為 AI / 客服 / 系統，則不算（客戶已讀或等客戶回覆）。
+   * 後端依 messages 表最後一筆的 sender_type 填入 last_message_sender_type。
+   */
+  const needReply = (c: ContactWithPreview) => {
+    const sender = c.last_message_sender_type != null ? String(c.last_message_sender_type).toLowerCase() : "";
+    return sender === "user" && !["closed", "resolved"].includes(c.status ?? "");
+  };
+  /** 待我回覆：我的案件 + 輪到我回覆（分配給我 + 最後一則為客戶 + 未結案） */
+  const needMyReply = (c: ContactWithPreview) => isMine(c) && needReply(c);
+
   const filteredContacts = contacts
-    .filter((c) => c.display_name.toLowerCase().includes(searchQuery.toLowerCase()))
-    .filter((c) => platformFilter === "all" || c.platform === platformFilter);
+    .filter((c) => (c.display_name ?? "").toLowerCase().includes(searchQuery.toLowerCase()))
+    .filter((c) => platformFilter === "all" || c.platform === platformFilter)
+    .filter((c) => {
+      if (viewMode === "my") return isMine(c) && !["closed", "resolved"].includes(c.status);
+      if (viewMode === "pending") return needMyReply(c);
+      if (viewMode === "high_risk") return isUrgent(c) && !["closed", "resolved"].includes(c.status);
+      if (viewMode === "tracking") return isMine(c) && (c as ContactWithPreview).my_flag === "tracking" && !["closed", "resolved"].includes(c.status);
+      if (viewMode === "overdue") return isOverdue(c) && !["closed", "resolved"].includes(c.status);
+      if (viewMode === "unassigned") return isUnassigned(c);
+      return true;
+    })
+    .sort((a, b) => {
+      const ac = a as ContactWithPreview & { is_urgent?: boolean };
+      const bc = b as ContactWithPreview & { is_urgent?: boolean };
+      const aUrgent = isUrgent(ac);
+      const bUrgent = isUrgent(bc);
+      if (aUrgent !== bUrgent) return aUrgent ? -1 : 1;
+      const aOverdue = isOverdue(a);
+      const bOverdue = isOverdue(b);
+      if (aOverdue !== bOverdue) return aOverdue ? -1 : 1;
+      const aUnassigned = isUnassigned(a);
+      const bUnassigned = isUnassigned(b);
+      if (aUnassigned !== bUnassigned) return aUnassigned ? -1 : 1;
+      if ((a.vip_level ?? 0) !== (b.vip_level ?? 0)) return (b.vip_level ?? 0) - (a.vip_level ?? 0);
+      const aAt = a.last_message_at || "";
+      const bAt = b.last_message_at || "";
+      return bAt.localeCompare(aAt);
+    });
+
+  /** 切換篩選後若目前選中的聯絡人不在結果內：改選第一筆或清空，避免右側顯示失效或白屏 */
+  const filteredIdsKey = filteredContacts.map((c) => c.id).join(",");
+  useEffect(() => {
+    const ids = filteredIdsKey ? filteredIdsKey.split(",").map(Number) : [];
+    const inList = selectedId != null && ids.includes(selectedId);
+    if (inList) return;
+    setSelectedId(ids.length > 0 ? ids[0] : null);
+  }, [viewMode, filteredIdsKey, selectedId]);
 
   const handleSearchChange = useCallback((value: string) => {
     setSearchQuery(value);
@@ -304,10 +518,10 @@ export default function ChatPage() {
       await apiRequest("POST", `/api/contacts/${selectedId}/messages`, { content: messageInput.trim() });
       setMessageInput("");
       queryClient.invalidateQueries({ queryKey: ["/api/contacts", selectedId, "messages"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
+      invalidateContactsAndStats();
     } catch (_e) { toast({ title: "傳送失敗", variant: "destructive" }); }
     finally { setSending(false); }
-  }, [messageInput, selectedId, sending, queryClient, toast]);
+  }, [messageInput, selectedId, sending, queryClient, toast, invalidateContactsAndStats]);
 
   const [transferReason, setTransferReason] = useState("");
 
@@ -315,7 +529,7 @@ export default function ChatPage() {
     try {
       await apiRequest("POST", `/api/contacts/${contactId}/transfer-human`, { reason: transferReason || "管理員手動轉接" });
       setTransferReason("");
-      queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
+      invalidateContactsAndStats();
       toast({ title: "已轉接真人客服" });
     } catch (_e) { toast({ title: "操作失敗", variant: "destructive" }); }
   };
@@ -323,7 +537,7 @@ export default function ChatPage() {
   const handleRestoreAi = async (contactId: number) => {
     try {
       await apiRequest("POST", `/api/contacts/${contactId}/restore-ai`, {});
-      queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
+      invalidateContactsAndStats();
       toast({ title: "已恢復 AI 接管" });
     } catch (_e) { toast({ title: "操作失敗", variant: "destructive" }); }
   };
@@ -340,18 +554,228 @@ export default function ChatPage() {
     if (!selectedId) return;
     try {
       await apiRequest("PUT", `/api/contacts/${selectedId}/status`, { status });
-      queryClient.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
       queryClient.invalidateQueries({ queryKey: ["/api/contacts", selectedId, "messages"] });
+      invalidateContactsAndStats();
       if (status === "resolved" && selectedContact?.platform === "line") {
         toast({ title: "已標記為已解決", description: "系統將自動發送滿意度調查卡片給客戶" });
       }
     } catch (_e) { toast({ title: "操作失敗", variant: "destructive" }); }
   };
 
+  const isManager = authUser?.user?.role === "super_admin" || authUser?.user?.role === "marketing_manager";
+  const isCsAgent = authUser?.user?.role === "cs_agent";
+
+  useEffect(() => {
+    if (!isCsAgent) return;
+    const setOnline = () => apiRequest("PUT", "/api/agent-status/me", { is_online: true, is_available: true }).catch(() => {});
+    setOnline();
+    const heartbeat = setInterval(setOnline, 50000);
+    return () => {
+      clearInterval(heartbeat);
+      apiRequest("PUT", "/api/agent-status/me", { is_online: false }).catch(() => {});
+    };
+  }, [isCsAgent]);
+
+  const { data: availableAgents } = useQuery<{ id: number; display_name: string; avatar_url?: string | null; is_online?: number; is_available?: number; last_active_at?: string | null; open_cases_count?: number; max_active_conversations?: number; can_assign?: boolean; on_duty?: number; work_start_time?: string; work_end_time?: string; is_in_work?: boolean }[]>({
+    queryKey: ["/api/team/available-agents"],
+    queryFn: getQueryFn({ on401: "throw" }),
+    enabled: isManager,
+  });
+  const agentList = Array.isArray(availableAgents) ? availableAgents : [];
+  const agentListByLoad = [...agentList].sort((a, b) => (a.open_cases_count ?? 0) - (b.open_cases_count ?? 0));
+
+  const formatLastActive = (lastActive: string | null | undefined) => {
+    if (!lastActive) return "從未";
+    try {
+      const d = new Date(lastActive);
+      if (Number.isNaN(d.getTime())) return "從未";
+      return d.toLocaleString("zh-TW", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    } catch {
+      return "從未";
+    }
+  };
+
+  const { data: assignmentData } = useQuery<{
+    assigned_to_user_id: number | null;
+    assigned_at: string | null;
+    assignment_status: string | null;
+    assignment_method: string | null;
+    assignment_reason?: string | null;
+    last_human_reply_at: string | null;
+    reassign_count: number;
+    needs_assignment: number;
+    response_sla_deadline_at: string | null;
+    assigned_agent_name: string | null;
+    assigned_agent_avatar_url: string | null;
+  }>({
+    queryKey: ["/api/contacts", selectedId ?? 0, "assignment"],
+    queryFn: () => apiRequest("GET", `/api/contacts/${selectedId}/assignment`) as Promise<any>,
+    enabled: !!selectedId,
+  });
+
+  const { data: contactDetail } = useQuery<{ ai_suggestions?: string | null }>({
+    queryKey: ["/api/contacts", selectedId ?? 0, "detail"],
+    queryFn: async () => {
+      const res = await fetch(`/api/contacts/${selectedId}`, { credentials: "include" });
+      if (!res.ok) throw new Error(String(res.status));
+      return res.json();
+    },
+    enabled: !!selectedId,
+  });
+  const aiSuggestions = (() => {
+    try {
+      const raw = contactDetail?.ai_suggestions;
+      if (typeof raw !== "string" || !raw) return null;
+      return JSON.parse(raw) as { issue_type?: string; status?: string; priority?: string; tags?: string[] };
+    } catch { return null; }
+  })();
+
+  const handleUnassign = async () => {
+    if (!selectedId) return;
+    try {
+      const res = await apiRequest("POST", `/api/contacts/${selectedId}/unassign`);
+      const data = await res.json();
+      if (data?.success && data != null) {
+        const { success: _s, ...payload } = data;
+        queryClient.setQueryData(["/api/contacts", selectedId, "assignment"], (prev: any) => ({ ...(prev ?? {}), ...payload }));
+        queryClient.setQueryData(["/api/contacts", selectedBrandId], (old: ContactWithPreview[] | undefined) => {
+          if (!Array.isArray(old)) return old;
+          return old.map((c) => c.id === selectedId ? { ...c, assigned_agent_id: null, assigned_agent_name: undefined, assigned_agent_avatar_url: null } : c);
+        });
+      }
+      invalidateContactsAndStats();
+      toast({ title: "已移回待分配" });
+    } catch (_e) {
+      toast({ title: "操作失敗", variant: "destructive" });
+    }
+  };
+
+  const handleAssign = async () => {
+    if (!selectedId) return;
+    try {
+      const res = await apiRequest("POST", `/api/contacts/${selectedId}/assign`);
+      const data = await res.json();
+      if (data?.success && data != null) {
+        const { success: _s, assigned_agent_id: _id, ...payload } = data;
+        const agentId = data.assigned_to_user_id ?? data.assigned_agent_id;
+        queryClient.setQueryData(
+          ["/api/contacts", selectedId, "assignment"],
+          (prev: any) => ({ ...(prev ?? {}), ...payload, assigned_to_user_id: agentId })
+        );
+        if (agentId != null) {
+          queryClient.setQueryData(["/api/contacts", selectedBrandId], (old: ContactWithPreview[] | undefined) => {
+            if (!Array.isArray(old)) return old;
+            return old.map((c) => c.id === selectedId ? { ...c, assigned_agent_id: agentId, assigned_agent_name: data.assigned_agent_name ?? c.assigned_agent_name, assigned_agent_avatar_url: data.assigned_agent_avatar_url ?? c.assigned_agent_avatar_url ?? null } : c);
+          });
+        }
+      }
+      invalidateContactsAndStats();
+      toast({ title: "已自動分配客服" });
+      setShowAssignDialog(false);
+    } catch (e: any) {
+      let msg = "分配失敗，請稍後再試";
+      const raw = e?.message ?? "";
+      const bodyStr = raw.includes(": ") ? raw.split(": ").slice(1).join(": ") : "";
+      if (bodyStr) try { const j = JSON.parse(bodyStr); if (j?.message) msg = j.message; } catch { /* ignore */ }
+      if (raw.includes("503")) msg = "目前無可接案客服（請確認有客服在即時客服頁上線，且目前時間在設定的上班時段內）";
+      if (/CHECK constraint|constraint failed|SQLITE_CONSTRAINT/i.test(raw)) msg = "分配時更新狀態失敗，請重新整理頁面後再試。";
+      toast({ title: msg, variant: "destructive" });
+      setShowAssignDialog(false);
+    }
+  };
+
+  const handleAssignToAgent = async () => {
+    if (!selectedId || assignAgentId == null) return;
+    await handleAssignToAgentWith(selectedId, assignAgentId);
+  };
+
+  const handleAssignToAgentWith = async (contactId: number, agentId: number) => {
+    setAssigning(true);
+    try {
+      const res = await apiRequest("POST", `/api/contacts/${contactId}/assign`, { agent_id: agentId }, { "X-Assign-Agent-Id": String(agentId) });
+      const data = await res.json();
+      if (data?.success && data != null) {
+        const { success: _s, assigned_agent_id: _id, ...payload } = data;
+        const assignedUserId = data.assigned_to_user_id ?? data.assigned_agent_id;
+        queryClient.setQueryData(
+          ["/api/contacts", contactId, "assignment"],
+          (prev: any) => ({ ...(prev ?? {}), ...payload, assigned_to_user_id: assignedUserId })
+        );
+        if (assignedUserId != null) {
+          queryClient.setQueryData(["/api/contacts", selectedBrandId], (old: ContactWithPreview[] | undefined) => {
+            if (!Array.isArray(old)) return old;
+            return old.map((c) => c.id === contactId ? { ...c, assigned_agent_id: assignedUserId, assigned_agent_name: data.assigned_agent_name ?? c.assigned_agent_name, assigned_agent_avatar_url: data.assigned_agent_avatar_url ?? c.assigned_agent_avatar_url ?? null } : c);
+          });
+        }
+      }
+      invalidateContactsAndStats();
+      toast({ title: "已指派給選定客服" });
+      setShowAssignDialog(false);
+      setAssignAgentId(null);
+    } catch (e: any) {
+      let msg = "指派失敗，請稍後再試";
+      const raw = e?.message ?? "";
+      const bodyStr = raw.includes(": ") ? raw.split(": ").slice(1).join(": ") : "";
+      if (bodyStr) {
+        try {
+          const j = JSON.parse(bodyStr);
+          if (j?.message) msg = j.message;
+        } catch { /* ignore */ }
+      }
+      if (/CHECK constraint|constraint failed|SQLITE_CONSTRAINT/i.test(raw)) msg = "指派時更新狀態失敗，請重新整理頁面後再試。";
+      toast({ title: msg, variant: "destructive" });
+      setShowAssignDialog(false);
+      setAssignAgentId(null);
+    } finally {
+      setAssigning(false);
+    }
+  };
+
+  const handleReassignSubmit = async () => {
+    if (!selectedId || reassignAgentId == null) return;
+    setReassigning(true);
+    try {
+      const res = await apiRequest("POST", `/api/contacts/${selectedId}/reassign`, { new_agent_id: reassignAgentId, note: reassignNote || undefined });
+      const data = await res.json();
+      if (data?.success && data != null) {
+        const { success: _s, ...payload } = data;
+        const assignedUserId = data.assigned_to_user_id ?? null;
+        queryClient.setQueryData(["/api/contacts", selectedId, "assignment"], (prev: any) => ({ ...(prev ?? {}), ...payload }));
+        queryClient.setQueryData(["/api/contacts", selectedBrandId], (old: ContactWithPreview[] | undefined) => {
+          if (!Array.isArray(old)) return old;
+          return old.map((c) => c.id === selectedId ? { ...c, assigned_agent_id: assignedUserId, assigned_agent_name: data.assigned_agent_name ?? c.assigned_agent_name, assigned_agent_avatar_url: data.assigned_agent_avatar_url ?? c.assigned_agent_avatar_url } : c);
+        });
+      }
+      invalidateContactsAndStats();
+      toast({ title: "已改派客服" });
+      setShowReassignDialog(false);
+      setReassignAgentId(null);
+      setReassignNote("");
+    } catch (e: any) {
+      let msg = "改派失敗，請稍後再試";
+      const raw = e?.message ?? "";
+      const bodyStr = raw.includes(": ") ? raw.split(": ").slice(1).join(": ") : "";
+      if (bodyStr) try { const j = JSON.parse(bodyStr); if (j?.message) msg = j.message; } catch { /* ignore */ }
+      if (/CHECK constraint|constraint failed|SQLITE_CONSTRAINT/i.test(raw)) msg = "改派時更新狀態失敗，請重新整理頁面後再試。";
+      toast({ title: msg, variant: "destructive" });
+      setShowReassignDialog(false);
+    } finally {
+      setReassigning(false);
+    }
+  };
+
   const handleTogglePin = async (contactId: number, currentPinned: number) => {
     try {
       await apiRequest("PUT", `/api/contacts/${contactId}/pinned`, { is_pinned: currentPinned ? 0 : 1 });
-      queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
+      invalidateContactsAndStats();
+    } catch (_e) { toast({ title: "操作失敗", variant: "destructive" }); }
+  };
+
+  const handleSetAgentFlag = async (contactId: number, flag: "later" | "tracking" | null) => {
+    try {
+      await apiRequest("PUT", `/api/contacts/${contactId}/agent-flag`, { flag });
+      invalidateContactsAndStats();
+      toast({ title: flag === null ? "已清除標記" : flag === "later" ? "已標記稍後處理" : "已標記追蹤中" });
     } catch (_e) { toast({ title: "操作失敗", variant: "destructive" }); }
   };
 
@@ -359,18 +783,31 @@ export default function ChatPage() {
     if (!selectedId) return;
     try {
       await apiRequest("PUT", `/api/contacts/${selectedId}/issue-type`, { issue_type: issueType || null });
-      queryClient.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
+      invalidateContactsAndStats();
     } catch (_e) { toast({ title: "更新問題類型失敗", variant: "destructive" }); }
   };
 
   const handleAddTag = async () => {
     if (!newTag.trim() || !selectedContact) return;
+    const tag = newTag.trim();
     const currentTags: string[] = JSON.parse(selectedContact.tags || "[]");
-    if (currentTags.includes(newTag.trim())) { setNewTag(""); return; }
+    if (currentTags.includes(tag)) { setNewTag(""); return; }
     try {
-      await apiRequest("PUT", `/api/contacts/${selectedId}/tags`, { tags: [...currentTags, newTag.trim()] });
-      queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
+      await apiRequest("PUT", `/api/contacts/${selectedId}/tags`, { tags: [...currentTags, tag] });
+      invalidateContactsAndStats();
       setNewTag("");
+      addCustomTag(tag);
+      setCustomTags(getCustomTags());
+    } catch (_e) { toast({ title: "新增標籤失敗", variant: "destructive" }); }
+  };
+
+  const handleAddTagWithValue = async (tag: string) => {
+    if (!selectedContact || !tag.trim()) return;
+    const currentTags: string[] = JSON.parse(selectedContact.tags || "[]");
+    if (currentTags.includes(tag.trim())) return;
+    try {
+      await apiRequest("PUT", `/api/contacts/${selectedId}/tags`, { tags: [...currentTags, tag.trim()] });
+      invalidateContactsAndStats();
     } catch (_e) { toast({ title: "新增標籤失敗", variant: "destructive" }); }
   };
 
@@ -379,7 +816,7 @@ export default function ChatPage() {
     const currentTags: string[] = JSON.parse(selectedContact.tags || "[]");
     try {
       await apiRequest("PUT", `/api/contacts/${selectedId}/tags`, { tags: currentTags.filter((t) => t !== tagToRemove) });
-      queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
+      invalidateContactsAndStats();
     } catch (_e) { toast({ title: "移除標籤失敗", variant: "destructive" }); }
   };
 
@@ -390,10 +827,24 @@ export default function ChatPage() {
       const res = await fetch(`/api/orders/lookup?q=${encodeURIComponent(orderSearch.trim())}`, { credentials: "include" });
       if (!res.ok) throw new Error("Failed");
       const data = await res.json();
-      setOrderSearchResults(data.orders || []);
+      const orders = data.orders || [];
+      setOrderSearchResults(orders);
+      if (selectedId && orders.length > 0) {
+        for (const o of orders) {
+          try {
+            await fetch(`/api/contacts/${selectedId}/link-order`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              credentials: "include",
+              body: JSON.stringify({ order_id: o.global_order_id }),
+            });
+          } catch (_) {}
+        }
+        queryClient.invalidateQueries({ queryKey: ["/api/contacts", selectedId, "linked-orders"] });
+      }
       if (data.error) {
         toast({ title: data.message || "查詢失敗", variant: "destructive" });
-      } else if (data.orders?.length === 0) {
+      } else if (orders.length === 0) {
         toast({ title: "未找到相關訂單" });
       }
     } catch (_e) { toast({ title: "查詢失敗", variant: "destructive" }); }
@@ -416,13 +867,27 @@ export default function ChatPage() {
         return;
       }
       const data = await res.json();
-      setOrderSearchResults(data.orders || []);
+      const orders = data.orders || [];
+      setOrderSearchResults(orders);
+      if (selectedId && orders.length > 0) {
+        for (const o of orders) {
+          try {
+            await fetch(`/api/contacts/${selectedId}/link-order`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              credentials: "include",
+              body: JSON.stringify({ order_id: o.global_order_id }),
+            });
+          } catch (_) {}
+        }
+        queryClient.invalidateQueries({ queryKey: ["/api/contacts", selectedId, "linked-orders"] });
+      }
       if (data.error) {
         toast({ title: data.message || "查詢失敗", variant: "destructive" });
-      } else if (data.orders?.length === 0) {
+      } else if (orders.length === 0) {
         toast({ title: data.message || "未找到相關訂單" });
       } else {
-        toast({ title: `找到 ${data.orders.length} 筆訂單` });
+        toast({ title: `找到 ${orders.length} 筆訂單` });
       }
     } catch (_e) { toast({ title: "查詢失敗", variant: "destructive" }); }
     finally { setOrderSearching(false); }
@@ -458,13 +923,27 @@ export default function ChatPage() {
         return;
       }
       const data = await res.json();
-      setOrderSearchResults(data.orders || []);
+      const orders = data.orders || [];
+      setOrderSearchResults(orders);
+      if (selectedId && orders.length > 0) {
+        for (const o of orders) {
+          try {
+            await fetch(`/api/contacts/${selectedId}/link-order`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              credentials: "include",
+              body: JSON.stringify({ order_id: o.global_order_id }),
+            });
+          } catch (_) {}
+        }
+        queryClient.invalidateQueries({ queryKey: ["/api/contacts", selectedId, "linked-orders"] });
+      }
       if (data.error) {
         toast({ title: data.message || "查詢失敗", variant: "destructive" });
-      } else if (data.orders?.length === 0) {
+      } else if (orders.length === 0) {
         toast({ title: data.message || "未找到相關訂單" });
       } else {
-        toast({ title: `找到 ${data.orders.length} 筆訂單` });
+        toast({ title: `找到 ${orders.length} 筆訂單` });
       }
     } catch (_e) { toast({ title: "查詢失敗", variant: "destructive" }); }
     finally { setOrderSearching(false); }
@@ -495,13 +974,13 @@ export default function ChatPage() {
         const typeLabel = ratingType === "ai" ? "AI 客服" : "真人客服";
         toast({ title: "已發送評價卡片", description: `${typeLabel}滿意度調查已傳送給客戶` });
         queryClient.invalidateQueries({ queryKey: ["/api/contacts", selectedId, "messages"] });
-        queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
+        invalidateContactsAndStats();
       } else {
         toast({ title: "發送失敗", description: data.message, variant: "destructive" });
       }
     } catch (_e) { toast({ title: "發送失敗", variant: "destructive" }); }
     finally { setSendingRating(false); }
-  }, [selectedId, sendingRating, selectedContact, queryClient, toast]);
+  }, [selectedId, sendingRating, selectedContact, queryClient, toast, invalidateContactsAndStats]);
 
   const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"];
   const MAX_FILE_SIZE = 10 * 1024 * 1024;
@@ -570,10 +1049,10 @@ export default function ChatPage() {
       }
       setPendingFiles([]);
       queryClient.invalidateQueries({ queryKey: ["/api/contacts", selectedId, "messages"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
+      invalidateContactsAndStats();
     } catch (_e) { toast({ title: "傳送失敗", variant: "destructive" }); }
     finally { setUploading(false); }
-  }, [pendingFiles, selectedId, uploading, queryClient, toast]);
+  }, [pendingFiles, selectedId, uploading, queryClient, toast, invalidateContactsAndStats]);
 
   const handleSendAll = useCallback(async () => {
     if (sending || uploading) return;
@@ -587,6 +1066,38 @@ export default function ChatPage() {
   const avatarColors = ["bg-emerald-500", "bg-amber-500", "bg-violet-500", "bg-sky-500", "bg-rose-400", "bg-teal-500", "bg-orange-400"];
   const getAvatarColor = (id: number) => avatarColors[id % avatarColors.length];
   const contactTags = selectedContact ? JSON.parse(selectedContact.tags || "[]") as string[] : [];
+  const getStatusSemantic = (c: ContactWithPreview): keyof typeof STATUS_SEMANTIC => {
+    if (["closed", "resolved"].includes(c.status)) return "muted";
+    if (isUrgent(c) || (c as ContactWithPreview).reassign_count > 0) return "danger";
+    if (!(c as ContactWithPreview).assigned_agent_name && c.needs_human) return "muted";
+    if ((c as ContactWithPreview).assigned_agent_name) {
+      if ((c as ContactWithPreview).last_message_sender_type === "user") return "warning";
+      return "normal";
+    }
+    if (["awaiting_human", "pending", "new_case"].includes(c.status)) return "warning";
+    return "assigned";
+  };
+
+  /** 列表用統一狀態：待分配 / 待我回覆(僅指分配給目前登入者) / 待回覆 / 等客戶回覆 / 處理中 / 已結案 */
+  const getListStatusLabel = (c: ContactWithPreview, currentUserId?: number): string => {
+    if (["closed", "resolved"].includes(c.status)) return "已結案";
+    if (!c.assigned_agent_name && c.needs_human) return "待分配";
+    if (c.assigned_agent_name && c.last_message_sender_type === "user") {
+      return currentUserId != null && c.assigned_agent_id === currentUserId ? "待我回覆" : "待回覆";
+    }
+    if (c.assigned_agent_name && (c.last_message_sender_type === "admin" || c.last_message_sender_type === "ai")) return "等客戶回覆";
+    if (c.assigned_agent_name) return "處理中";
+    return "待分配";
+  };
+
+  /** 優先程度：高(1-2) / 中(3) / 低 */
+  const getPriorityLabel = (c: ContactWithPreview): "高" | "中" | "低" | null => {
+    const p = c.case_priority;
+    if (p == null) return null;
+    if (p <= 2) return "高";
+    if (p <= 3) return "中";
+    return "低";
+  };
 
   return (
     <div className="flex h-full bg-[#faf9f5]" data-testid="chat-page">
@@ -601,6 +1112,24 @@ export default function ChatPage() {
               </button>
             )}
           </div>
+          {(isCsAgent || isManager) && (
+            <div className="flex flex-wrap gap-1 mt-2">
+              {(["all", "my", "pending", "high_risk", "tracking"] as ViewMode[]).map((vm) => (
+                <button
+                  key={vm}
+                  onClick={() => setViewMode(vm)}
+                  className={`text-[10px] font-medium py-2 px-2 rounded-lg transition-all border shrink-0 ${
+                    viewMode === vm
+                      ? "bg-stone-800 text-white border-stone-800 shadow-sm"
+                      : "bg-stone-50 text-stone-600 border-stone-200 hover:bg-stone-100"
+                  }`}
+                  data-testid={`button-view-${vm}`}
+                >
+                  {vm === "all" ? "全部" : vm === "my" ? "我的案件" : vm === "pending" ? "待我回覆" : vm === "high_risk" ? "緊急案件" : "待追蹤"}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="flex gap-1 mt-2">
             {(["all", "line", "messenger"] as const).map((pf) => (
               <button
@@ -617,6 +1146,9 @@ export default function ChatPage() {
               </button>
             ))}
           </div>
+          {(isCsAgent || isManager) && (
+            <p className="mt-2 text-[10px] text-stone-400 leading-tight">我的案件＝分配給我的；待我回覆＝輪到我回覆</p>
+          )}
         </div>
         <ScrollArea className="flex-1">
           {contactsLoading ? (
@@ -633,9 +1165,9 @@ export default function ChatPage() {
                     >
                       <Avatar className="w-8 h-8 shrink-0">
                         {contact.avatar_url && <AvatarImage src={contact.avatar_url} alt={contact.display_name} />}
-                        <AvatarFallback className={`${getAvatarColor(contact.id)} text-white text-xs font-semibold`}>{getInitials(contact.display_name)}</AvatarFallback>
+                        <AvatarFallback className={`${getAvatarColor(contact.id)} text-white text-xs font-semibold`}>{getInitials(contact.display_name ?? "")}</AvatarFallback>
                       </Avatar>
-                      <span className="text-sm font-medium text-stone-700 truncate">{contact.display_name}</span>
+                      <span className="text-sm font-medium text-stone-700 truncate">{contact.display_name ?? ""}</span>
                     </button>
                   ))}
                 </div>
@@ -667,65 +1199,96 @@ export default function ChatPage() {
               </div>
             </div>
           ) : filteredContacts.length === 0 ? (
-            <div className="p-6 text-center text-sm text-stone-400">{searchQuery ? "查無結果" : "無聯絡人"}</div>
+            <div className="p-6 text-center text-sm text-stone-400">
+              {searchQuery ? "查無結果" : viewMode === "my" ? "目前沒有分配給你的案件" : viewMode === "pending" ? "目前沒有需要你回覆的案件" : viewMode === "high_risk" ? "目前沒有緊急案件" : viewMode === "tracking" ? "目前沒有待追蹤案件" : viewMode === "overdue" ? "目前沒有逾時未回案件" : viewMode === "unassigned" ? "目前沒有待分配案件" : "無聯絡人"}
+            </div>
           ) : (
-            <div className="p-2 space-y-0.5">
+            <div className="p-2 space-y-2">
               {filteredContacts.map((contact) => {
-                const tags: string[] = JSON.parse(contact.tags || "[]");
-                const statusColors = CONTACT_STATUS_COLORS[contact.status as ContactStatus] || CONTACT_STATUS_COLORS.pending;
-                const statusLabel = CONTACT_STATUS_LABELS[contact.status as ContactStatus] || CONTACT_STATUS_LABELS.pending;
+                const c = contact as ContactWithPreview;
+                const semantic = getStatusSemantic(c);
+                const colors = STATUS_SEMANTIC[semantic];
+                const overdue = needMyReply(c) && isOverdue(contact);
+                const urgent = isUrgent(c);
+                const mine = isMine(c);
+                const listStatus = getListStatusLabel(c, authUser?.user?.id);
+                const priority = getPriorityLabel(c);
+                const unassigned = !c.assigned_agent_name && c.needs_human === 1;
+                const pendingMyReply = listStatus === "待我回覆";
                 return (
-                  <div key={contact.id} onClick={() => { setSelectedId(contact.id); lastMessageIdRef.current = 0; }}
-                    className={`w-full flex items-start gap-3 p-3 rounded-2xl text-left transition-all cursor-pointer ${selectedId === contact.id ? "bg-emerald-50/70 ring-1 ring-emerald-200" : "hover:bg-stone-50"}`}
+                  <div
+                    key={contact.id}
+                    onClick={() => { setSelectedId(contact.id); lastMessageIdRef.current = 0; }}
+                    className={`w-full flex items-start gap-2.5 p-3 rounded-xl text-left transition-all cursor-pointer border-l-[3px] ${
+                        selectedId === contact.id
+                        ? "bg-blue-50/90 border-blue-300 border-l-blue-500"
+                        : overdue
+                          ? "border-orange-300 bg-orange-50/50 hover:bg-orange-50/70 border-l-orange-500"
+                          : urgent
+                            ? "border-red-200 bg-red-50/40 hover:bg-red-50/60 border-l-red-500"
+                            : unassigned
+                              ? "border-amber-200 bg-amber-50/40 hover:bg-amber-50/60 border-l-amber-500"
+                              : "border-transparent border-l-stone-200 hover:bg-stone-50 hover:border-stone-100"
+                    }`}
                     data-testid={`contact-item-${contact.id}`}
                   >
                     <div className="relative shrink-0">
-                      <Avatar className="w-11 h-11">
+                      <Avatar className="w-10 h-10">
                         {contact.avatar_url && <AvatarImage src={contact.avatar_url} alt={contact.display_name} />}
-                        <AvatarFallback className={`${getAvatarColor(contact.id)} text-white text-sm font-semibold`}>{getInitials(contact.display_name)}</AvatarFallback>
+                        <AvatarFallback className={`${getAvatarColor(contact.id)} text-white text-xs font-semibold`}>{getInitials(contact.display_name ?? "")}</AvatarFallback>
                       </Avatar>
-                      {contact.needs_human ? (
-                        <div className="absolute -bottom-0.5 -right-0.5 w-5 h-5 bg-red-500 rounded-full border-2 border-white flex items-center justify-center animate-pulse">
-                          <Headphones className="w-3 h-3 text-white" />
-                        </div>
-                      ) : null}
+                      {unassigned && (
+                        <div className="absolute -bottom-0.5 -right-0.5 w-4 h-4 bg-orange-500 rounded-full border-2 border-white" title="待分配" />
+                      )}
                     </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center justify-between gap-1">
-                        <div className="flex items-center gap-1 min-w-0">
-                          <button
-                            onClick={(e) => { e.stopPropagation(); handleTogglePin(contact.id, contact.is_pinned); }}
-                            className="shrink-0"
-                            data-testid={`button-pin-${contact.id}`}
-                          >
-                            <Star className={`w-3.5 h-3.5 transition-colors ${contact.is_pinned ? "fill-amber-400 text-amber-400" : "text-stone-300 hover:text-amber-400"}`} />
+                    <div className="min-w-0 flex-1 space-y-1.5">
+                      {/* 第一行：姓名、平台、我的、時間 */}
+                      <div className="flex items-center justify-between gap-1.5 flex-wrap">
+                        <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
+                          <button onClick={(e) => { e.stopPropagation(); handleTogglePin(contact.id, contact.is_pinned); }} className="shrink-0" data-testid={`button-pin-${contact.id}`}>
+                            <Star className={`w-3 h-3 ${contact.is_pinned ? "fill-amber-400 text-amber-400" : "text-stone-300 hover:text-amber-400"}`} />
                           </button>
-                          <span className="text-sm font-semibold text-stone-800 truncate">{contact.display_name}</span>
-                          <span className={`shrink-0 text-[9px] font-bold px-1 py-0.5 rounded ${contact.platform === "messenger" ? "bg-blue-100 text-blue-600" : "bg-green-100 text-green-600"}`} data-testid={`badge-platform-${contact.id}`}>{contact.platform === "messenger" ? "FB" : "LINE"}</span>
-                          {contact.vip_level > 0 && <VipBadge level={contact.vip_level} />}
+                          <span className="text-sm font-semibold text-stone-800 truncate">{contact.display_name ?? ""}</span>
+                          <span className={`shrink-0 text-[9px] font-medium px-1 py-0.5 rounded ${contact.platform === "messenger" ? "bg-blue-100 text-blue-600" : "bg-green-100 text-green-600"}`}>{contact.platform === "messenger" ? "FB" : "LINE"}</span>
+                          {mine && <span className="shrink-0 text-[9px] font-bold px-1.5 py-0.5 rounded bg-blue-600 text-white" data-testid={`badge-mine-${contact.id}`}>我的</span>}
                         </div>
-                        {contact.last_message_at && <span className="text-[11px] text-stone-400 shrink-0">{formatTime(contact.last_message_at)}</span>}
+                        {contact.last_message_at && <span className="text-[10px] text-stone-500 shrink-0 font-medium">{formatTime(contact.last_message_at)}</span>}
                       </div>
-                      {contact.last_message && <p className="text-xs text-stone-500 truncate mt-0.5">{contact.last_message}</p>}
-                      <div className="flex items-center gap-1 mt-1.5 flex-wrap">
-                        {contact.needs_human ? (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 border border-red-200" data-testid={`badge-needs-human-${contact.id}`}>
-                            <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />需人工處理
+                      {/* 第二行：負責人 或 待分配；狀態（待我回覆 / 等客戶回覆 等） */}
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {unassigned ? (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md bg-orange-100 text-orange-800 border border-orange-200" title="需人工且尚未分配">待分配</span>
+                        ) : c.assigned_agent_name ? (
+                          <span className="inline-flex items-center gap-1.5 text-[10px] text-stone-700 font-medium truncate max-w-[140px]" title={`負責：${c.assigned_agent_name}`}>
+                            <Avatar className="w-4 h-4 shrink-0 border border-white shadow-sm">
+                              {c.assigned_agent_avatar_url && <AvatarImage src={c.assigned_agent_avatar_url} alt={c.assigned_agent_name} />}
+                              <AvatarFallback className="bg-blue-100 text-blue-700 text-[9px] font-semibold">{c.assigned_agent_name?.slice(0, 1) || "?"}</AvatarFallback>
+                            </Avatar>
+                            <span className="truncate">{c.assigned_agent_name}</span>
                           </span>
                         ) : null}
-                        <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${statusColors.bg}`} data-testid={`badge-status-${contact.id}`}>
-                          <span className={`w-1.5 h-1.5 rounded-full ${statusColors.dot}`} />{statusLabel}
+                        <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${pendingMyReply ? "bg-amber-100 text-amber-800 border-amber-300" : colors.bg}`} data-testid={`badge-status-${contact.id}`}>
+                          <span className={`w-1.5 h-1.5 rounded-full ${pendingMyReply ? "bg-amber-500" : colors.dot}`} />
+                          {overdue ? "超時未回" : listStatus}
                         </span>
-                        {contact.issue_type && (
-                          <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${ISSUE_TYPE_COLORS[contact.issue_type as IssueType]}`} data-testid={`badge-issue-type-${contact.id}`}>
-                            {ISSUE_TYPE_LABELS[contact.issue_type as IssueType]}
-                          </span>
-                        )}
-                        {tags.slice(0, 2).map((tag) => (
-                          <span key={tag} className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${getTagColor(tag)}`}>{tag}</span>
-                        ))}
-                        {tags.length > 2 && <span className="text-[10px] text-stone-400">+{tags.length - 2}</span>}
                       </div>
+                      {/* 第三行：最多 3 個重點（逾時/緊急/VIP），其餘用次層文字 */}
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        {overdue && <span className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded bg-orange-100 text-orange-700" title="超過回覆時限">逾時</span>}
+                        {urgent && !overdue && <span className="text-[10px] font-medium text-red-600 shrink-0" title="緊急案件">緊急</span>}
+                        {(contact.vip_level ?? 0) > 0 && <VipBadge level={contact.vip_level ?? 0} />}
+                        {!urgent && !overdue && (c.my_flag === "later" || c.my_flag === "tracking") && <span className="text-[10px] text-stone-500">{c.my_flag === "tracking" ? "追蹤" : "稍後"}</span>}
+                      </div>
+                      {contact.last_message && (
+                        <p className="text-[11px] text-stone-600 truncate leading-tight max-h-8 flex items-center gap-1" title={contact.last_message}>
+                          {c.last_message_sender_type && (
+                            <span className="shrink-0 text-[9px] text-stone-400 font-medium">
+                              {c.last_message_sender_type === "user" ? "客戶" : c.last_message_sender_type === "admin" ? "客服" : c.last_message_sender_type === "ai" ? "AI" : "系統"}：
+                            </span>
+                          )}
+                          <span className="truncate">{contact.last_message}</span>
+                        </p>
+                      )}
                     </div>
                   </div>
                 );
@@ -736,7 +1299,7 @@ export default function ChatPage() {
       </div>
 
       <div className="flex-1 flex flex-col min-w-0">
-        {!selectedId ? (
+        {!selectedId || !selectedContact ? (
           <div className="flex-1 flex items-center justify-center">
             <div className="text-center">
               <div className="w-20 h-20 mx-auto mb-4 rounded-2xl bg-stone-100 flex items-center justify-center">
@@ -772,18 +1335,63 @@ export default function ChatPage() {
               </div>
               <div className="flex items-center gap-2 shrink-0">
                 <Select value={selectedContact?.status || "pending"} onValueChange={handleStatusChange}>
-                  <SelectTrigger className="w-[130px] h-8 text-xs border-stone-200" data-testid="select-contact-status"><SelectValue /></SelectTrigger>
+                  <SelectTrigger className="w-[130px] h-8 text-xs border-stone-200" data-testid="select-contact-status"><SelectValue placeholder="案件狀態" /></SelectTrigger>
                   <SelectContent>
-                    {(Object.keys(CONTACT_STATUS_LABELS) as ContactStatus[]).map((s) => (
-                      <SelectItem key={s} value={s} data-testid={`select-status-${s}`}>
-                        <span className="flex items-center gap-1.5">
-                          <span className={`w-2 h-2 rounded-full ${CONTACT_STATUS_COLORS[s].dot}`} />
-                          {CONTACT_STATUS_LABELS[s]}
-                        </span>
-                      </SelectItem>
-                    ))}
+                    <SelectGroup>
+                      <SelectLabel className="text-[10px] text-stone-400 font-normal">案件狀態</SelectLabel>
+                      {CASE_STATUS_VALUES.map((s) => (
+                        <SelectItem key={s} value={s} data-testid={`select-status-${s}`}>
+                          <span className="flex items-center gap-1.5">
+                            <span className={`w-2 h-2 rounded-full ${CONTACT_STATUS_COLORS[s].dot}`} />
+                            {CONTACT_STATUS_LABELS[s]}
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                    <SelectGroup>
+                      <SelectLabel className="text-[10px] text-stone-400 font-normal">系統標記</SelectLabel>
+                      {SYSTEM_MARK_VALUES.map((s) => (
+                        <SelectItem key={s} value={s} data-testid={`select-status-${s}`}>
+                          <span className="flex items-center gap-1.5">
+                            <span className={`w-2 h-2 rounded-full ${CONTACT_STATUS_COLORS[s].dot}`} />
+                            {CONTACT_STATUS_LABELS[s]}
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
                   </SelectContent>
                 </Select>
+                {isManager && selectedContact?.needs_human && selectedContact?.status === "awaiting_human" && (
+                  <Button size="sm" variant="outline" className="text-xs" onClick={() => setShowAssignDialog(true)} data-testid="button-assign">
+                    <UserCog className="w-3.5 h-3.5 mr-1" />分配
+                  </Button>
+                )}
+                {isManager && selectedContact?.assigned_agent_id && (
+                  <>
+                    <Button size="sm" variant="outline" className="text-xs" onClick={() => setShowReassignDialog(true)} data-testid="button-reassign">
+                      <Users className="w-3.5 h-3.5 mr-1" />改派
+                    </Button>
+                    <Button size="sm" variant="ghost" className="text-xs text-amber-600 hover:text-amber-700" onClick={handleUnassign} data-testid="button-unassign">
+                      移回待分配
+                    </Button>
+                  </>
+                )}
+                {selectedContact?.assigned_agent_name ? (
+                  <span className="text-[11px] font-medium text-stone-700 flex items-center gap-1.5">
+                    <Avatar className="w-4 h-4 shrink-0">
+                      {(selectedContact as ContactWithPreview).assigned_agent_avatar_url && <AvatarImage src={(selectedContact as ContactWithPreview).assigned_agent_avatar_url} alt={selectedContact.assigned_agent_name} />}
+                      <AvatarFallback className="bg-violet-100 text-violet-700 text-[10px]">{selectedContact.assigned_agent_name.slice(0, 1)}</AvatarFallback>
+                    </Avatar>
+                    已分配：{selectedContact.assigned_agent_name}
+                  </span>
+                ) : selectedContact?.needs_human === 1 ? (
+                  <span className="text-[11px] text-amber-600">待分配</span>
+                ) : selectedContact?.status === "ai_handling" ? (
+                  <span className="text-[11px] text-sky-600">AI處理中</span>
+                ) : (() => {
+                  const tags = JSON.parse(selectedContact?.tags || "[]");
+                  return tags.includes("午休待處理") ? <span className="text-[11px] text-stone-500">午休待回覆</span> : null;
+                })()}
                 {selectedContact?.needs_human ? (
                   <Badge variant="destructive" className="gap-1 text-xs" data-testid="badge-human-mode"><Headphones className="w-3 h-3" />人工模式</Badge>
                 ) : (
@@ -794,6 +1402,71 @@ export default function ChatPage() {
                     <Circle className="w-2.5 h-2.5 fill-orange-400 text-orange-400" />AI 靜音中
                   </Badge>
                 )}
+                <Button size="sm" variant="outline" className="text-xs" onClick={() => setRightTab("orders")} data-testid="button-view-orders">
+                  <ShoppingBag className="w-3.5 h-3.5 mr-1" />查看訂單
+                </Button>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button size="sm" variant="ghost" className="h-8 w-8 p-0" data-testid="button-copy-menu"><Copy className="w-3.5 h-3.5" /></Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="min-w-[180px]">
+                    <DropdownMenuItem
+                      onClick={() => {
+                        const url = selectedId != null ? `${window.location.origin}${window.location.pathname}?contact=${selectedId}` : "";
+                        if (url) navigator.clipboard.writeText(url).then(() => toast({ title: "已複製對話連結" }));
+                      }}
+                      data-testid="menu-copy-chat-link"
+                    >
+                      <Link2 className="w-3.5 h-3.5 mr-2" />複製對話連結
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onClick={() => {
+                        if (selectedId != null) {
+                          const code = getConversationCode(selectedId);
+                          navigator.clipboard.writeText(code).then(() => toast({ title: "已複製對話代碼" }));
+                        }
+                      }}
+                      data-testid="menu-copy-chat-code"
+                    >
+                      <Copy className="w-3.5 h-3.5 mr-2" />複製對話代碼
+                    </DropdownMenuItem>
+                    {linkedOrderIds.length > 0 && (
+                      <>
+                        <DropdownMenuItem
+                          onClick={() => {
+                            const oid = linkedOrderIds[0];
+                            const url = `${window.location.origin}${window.location.pathname}?tab=orders&order=${encodeURIComponent(oid)}`;
+                            navigator.clipboard.writeText(url).then(() => toast({ title: "已複製訂單連結" }));
+                          }}
+                          data-testid="menu-copy-order-link"
+                        >
+                          <Link2 className="w-3.5 h-3.5 mr-2" />複製訂單連結
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onClick={() => {
+                            navigator.clipboard.writeText(linkedOrderIds[0]).then(() => toast({ title: "已複製訂單編號" }));
+                          }}
+                          data-testid="menu-copy-order-id"
+                        >
+                          <Copy className="w-3.5 h-3.5 mr-2" />複製訂單編號
+                        </DropdownMenuItem>
+                      </>
+                    )}
+                    <DropdownMenuItem
+                      onClick={() => {
+                        if (selectedId != null) {
+                          const code = getConversationCode(selectedId);
+                          const url = `${window.location.origin}${window.location.pathname}?contact=${selectedId}`;
+                          const text = `客服對話：${code}\n查看連結：${url}`;
+                          navigator.clipboard.writeText(text).then(() => toast({ title: "已複製備註用格式" }));
+                        }
+                      }}
+                      data-testid="menu-copy-note-format"
+                    >
+                      <Copy className="w-3.5 h-3.5 mr-2" />複製備註用格式
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
                 {selectedContact?.needs_human ? (
                   <Button size="sm" variant="secondary"
                     onClick={() => selectedContact && handleRestoreAi(selectedContact.id)}
@@ -829,18 +1502,54 @@ export default function ChatPage() {
               </div>
             </div>
 
-            <div className="flex items-center gap-2 px-5 py-2 border-b border-stone-100 bg-[#faf9f5]/50 flex-wrap">
-              <Tag className="w-3.5 h-3.5 text-stone-400 shrink-0" />
-              {contactTags.map((tag) => (
-                <span key={tag} className={`inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full border ${getTagColor(tag)}`}>
-                  {tag}<button onClick={() => handleRemoveTag(tag)} className="hover:opacity-70" data-testid={`button-remove-tag-${tag}`}><X className="w-3 h-3" /></button>
-                </span>
-              ))}
-              <div className="flex items-center gap-1">
-                <Input data-testid="input-add-tag" placeholder="新增標籤..." value={newTag} onChange={(e) => setNewTag(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleAddTag(); } }}
-                  className="h-6 w-24 text-xs bg-transparent border-stone-200 px-2" />
-                <Button size="icon" variant="ghost" className="h-6 w-6" onClick={handleAddTag} data-testid="button-add-tag"><Plus className="w-3 h-3" /></Button>
+            <div className="px-5 py-2.5 border-b border-stone-100 bg-[#faf9f5]/50 space-y-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <Tag className="w-3.5 h-3.5 text-stone-400 shrink-0" />
+                {contactTags.map((tag) => (
+                  <span key={tag} className={`inline-flex items-center gap-1.5 text-xs font-medium pl-2.5 pr-1 py-1 rounded-full border ${getTagColor(tag)}`}>
+                    <span className="truncate max-w-[120px]">{tag}</span>
+                    <button type="button" onClick={() => handleRemoveTag(tag)} className="shrink-0 w-5 h-5 rounded-full flex items-center justify-center hover:bg-black/10 transition-colors" title="移除標籤" data-testid={`button-remove-tag-${tag}`}><X className="w-3 h-3" /></button>
+                  </span>
+                ))}
+                <div className="flex items-center gap-1">
+                  <Input data-testid="input-add-tag" placeholder="新增標籤..." value={newTag} onChange={(e) => setNewTag(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleAddTag(); } }}
+                    className="h-7 w-28 text-xs bg-white border-stone-200 px-2" />
+                  <Button type="button" size="icon" variant="ghost" className="h-7 w-7" onClick={handleAddTag} data-testid="button-add-tag"><Plus className="w-3.5 h-3.5" /></Button>
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[10px] text-stone-400 shrink-0">快速選取：</span>
+                {shortcutTagNames
+                  .filter((t, i, arr) => arr.indexOf(t) === i)
+                  .filter((t) => !contactTags.includes(t))
+                  .slice(0, 16)
+                  .map((tag) => {
+                    const isCustom = apiTagShortcuts.length === 0 && customTags.includes(tag);
+                    return (
+                      <span key={tag} className="inline-flex items-center gap-0.5">
+                        <button
+                          type="button"
+                          onClick={() => handleAddTagWithValue(tag)}
+                          className={`text-[11px] font-medium pl-2 pr-1.5 py-0.5 rounded-full border hover:opacity-90 ${getTagColor(tag)}`}
+                          data-testid={`button-quick-tag-${tag}`}
+                        >
+                          +{tag}
+                        </button>
+                        {isCustom && (
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); removeCustomTag(tag); setCustomTags(getCustomTags()); }}
+                            className="w-4 h-4 rounded-full flex items-center justify-center text-stone-400 hover:bg-stone-200 hover:text-stone-700"
+                            title="從快捷列移除（本機）"
+                            data-testid={`button-remove-quick-tag-${tag}`}
+                          >
+                            <X className="w-2.5 h-2.5" />
+                          </button>
+                        )}
+                      </span>
+                    );
+                  })}
               </div>
             </div>
 
@@ -952,80 +1661,102 @@ export default function ChatPage() {
                   </TabsList>
 
                   <TabsContent value="info" className="flex-1 overflow-auto m-0">
-                    <div className="p-4 space-y-4">
-                      <div className="text-center pb-3 border-b border-stone-100">
-                        <Avatar className="w-16 h-16 mx-auto mb-2">
-                          {selectedContact?.avatar_url && <AvatarImage src={selectedContact.avatar_url} alt={selectedContact.display_name} />}
-                          <AvatarFallback className={`${getAvatarColor(selectedContact?.id || 0)} text-white text-xl font-bold`}>{selectedContact ? getInitials(selectedContact.display_name) : "?"}</AvatarFallback>
-                        </Avatar>
-                        <p className="font-semibold text-stone-800">{selectedContact?.display_name}</p>
-                        {selectedContact && selectedContact.vip_level > 0 && <div className="mt-1"><VipBadge level={selectedContact.vip_level} /></div>}
-                      </div>
+                    <div className="p-3 space-y-3">
+                      {/* 1. 案件總覽卡 */}
+                      <Card className="border-stone-200 shadow-sm">
+                        <CardHeader className="py-2 px-3">
+                          <CardTitle className="text-xs font-semibold text-stone-600">案件總覽</CardTitle>
+                        </CardHeader>
+                        <CardContent className="px-3 pb-3 pt-0 space-y-1.5 text-[11px]">
+                          <div className="flex justify-between"><span className="text-stone-500">狀態</span><span className="font-medium text-stone-700">{selectedContact?.status ? (CONTACT_STATUS_LABELS as Record<string, string>)[selectedContact.status] || selectedContact.status : "—"}</span></div>
+                          <div className="flex justify-between"><span className="text-stone-500">優先級</span><span className={selectedContact && isUrgent(selectedContact) ? "text-red-600 font-medium" : "text-stone-700"}>{selectedContact && isUrgent(selectedContact) ? "緊急案件" : (selectedContact?.case_priority != null && selectedContact.case_priority <= 2 ? "優先處理" : "一般")}</span></div>
+                          <div className="flex justify-between"><span className="text-stone-500">最後一句</span><span className="text-stone-700">{(selectedContact as ContactWithPreview)?.last_message_sender_type === "user" ? "客戶" : (selectedContact as ContactWithPreview)?.last_message_sender_type === "admin" ? "客服" : (selectedContact as ContactWithPreview)?.last_message_sender_type === "ai" ? "AI" : "—"}</span></div>
+                          {selectedContact?.last_message_at && <div className="flex justify-between"><span className="text-stone-500">最後互動</span><span className="text-stone-700">{formatDateTime(selectedContact.last_message_at)}</span></div>}
+                          {selectedContact && needReply(selectedContact) && isOverdue(selectedContact) && <div className="flex justify-between"><span className="text-stone-500">逾時</span><span className="text-red-600 font-medium">是</span></div>}
+                          <div className="flex justify-between items-center"><span className="text-stone-500">問題類型</span><Select value={selectedContact?.issue_type || "none"} onValueChange={(v) => handleIssueTypeChange(v === "none" ? "" : v)}><SelectTrigger className="w-[100px] h-6 text-[10px] border-stone-200" data-testid="select-issue-type" /><SelectContent><SelectItem value="none">未分類</SelectItem>{(Object.keys(ISSUE_TYPE_LABELS) as IssueType[]).map((it) => <SelectItem key={it} value={it}>{ISSUE_TYPE_LABELS[it]}</SelectItem>)}</SelectContent></Select></div>
+                        </CardContent>
+                      </Card>
 
-                      <div className="space-y-2">
-                        <div className="flex justify-between text-xs">
-                          <span className="text-stone-500">平台</span>
-                          <span className={`font-medium ${selectedContact?.platform === "messenger" ? "text-blue-600" : "text-green-600"}`} data-testid="text-info-platform">{selectedContact?.platform === "messenger" ? "Facebook Messenger" : "LINE"}</span>
-                        </div>
-                        {selectedContact?.brand_name && (
-                          <div className="flex justify-between text-xs">
-                            <span className="text-stone-500">品牌</span>
-                            <span className="text-stone-800" data-testid="text-info-brand">{selectedContact.brand_name}</span>
-                          </div>
-                        )}
-                        {selectedContact?.channel_name && (
-                          <div className="flex justify-between text-xs">
-                            <span className="text-stone-500">渠道</span>
-                            <span className="text-stone-800" data-testid="text-info-channel">{selectedContact.channel_name}</span>
-                          </div>
-                        )}
-                        <div className="flex justify-between text-xs">
-                          <span className="text-stone-500">平台 ID</span>
-                          <span className="text-stone-800 font-mono text-[11px] truncate max-w-[140px]">{selectedContact?.platform_user_id}</span>
-                        </div>
-                        {selectedContact && selectedContact.order_count > 0 && (
-                          <>
-                            <div className="flex justify-between text-xs">
-                              <span className="text-stone-500">訂單數</span>
-                              <span className="text-stone-800">{selectedContact.order_count} 筆</span>
+                      {/* 2. 負責人卡 */}
+                      <Card className="border-stone-200 shadow-sm">
+                        <CardHeader className="py-2 px-3">
+                          <CardTitle className="text-xs font-semibold text-stone-600">負責人</CardTitle>
+                        </CardHeader>
+                        <CardContent className="px-3 pb-3 pt-0">
+                          {(selectedContact?.assigned_agent_id ?? assignmentData?.assigned_to_user_id) ? (() => {
+                            const assigneeId = selectedContact?.assigned_agent_id ?? assignmentData?.assigned_to_user_id;
+                            const assigneeFromList = agentList.find((a) => a.id === assigneeId);
+                            const name = selectedContact?.assigned_agent_name ?? assignmentData?.assigned_agent_name ?? "-";
+                            const avatarUrl = selectedContact?.assigned_agent_avatar_url ?? assignmentData?.assigned_agent_avatar_url;
+                            return (
+                              <div className="flex items-center gap-2">
+                                <Avatar className="w-10 h-10 shrink-0 ring-2 ring-white shadow-sm"><AvatarImage src={avatarUrl} alt={name} /><AvatarFallback className="bg-blue-100 text-blue-700 text-sm font-semibold">{name?.slice(0, 1) || "?"}</AvatarFallback></Avatar>
+                                <div className="min-w-0 flex-1">
+                                  <p className="text-sm font-semibold text-stone-800 truncate">{name}</p>
+                                  <div className="flex items-center gap-1.5 flex-wrap text-[10px]">
+                                    <span className={assigneeFromList?.is_online === 1 ? "text-green-600" : "text-stone-400"}>{assigneeFromList?.is_online === 1 ? "在線" : "離線"}</span>
+                                    {assigneeFromList && <span className="text-stone-500">{assigneeFromList.is_in_work ? "上班中" : "下班"}</span>}
+                                    <span className="text-stone-500">負載 {assigneeFromList?.open_cases_count ?? 0}/{assigneeFromList?.max_active_conversations ?? 10}</span>
+                                    <span className="text-stone-500">指派：{assignmentData?.assignment_method === "manual" ? "手動" : assignmentData?.assignment_method === "reassign" ? "改派" : "自動"}</span>
+                                  </div>
+                                </div>
+                                {isManager && <Button size="sm" variant="outline" className="shrink-0 h-7 px-2 text-[10px]" onClick={() => setShowReassignDialog(true)} data-testid="button-change-assignee"><Pencil className="w-3 h-3 mr-0.5" />改派</Button>}
+                              </div>
+                            );
+                          })() : (
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-sm text-stone-500">待分配</p>
+                              {isManager && <Button size="sm" variant="default" className="h-7 text-xs" onClick={() => setShowAssignDialog(true)} data-testid="button-assign-from-panel">指派</Button>}
                             </div>
-                            <div className="flex justify-between text-xs">
-                              <span className="text-stone-500">累計消費</span>
-                              <span className="text-stone-800 font-semibold">${selectedContact.total_spent.toLocaleString()}</span>
-                            </div>
-                          </>
-                        )}
-                        <div className="flex justify-between text-xs">
-                          <span className="text-stone-500">建立日期</span>
-                          <span className="text-stone-800">{selectedContact?.created_at ? formatDate(selectedContact.created_at) : "-"}</span>
+                          )}
+                        </CardContent>
+                      </Card>
+
+                      {/* 3. 案件屬性卡 */}
+                      <Card className="border-stone-200 shadow-sm">
+                        <CardHeader className="py-2 px-3">
+                          <CardTitle className="text-xs font-semibold text-stone-600">案件屬性</CardTitle>
+                        </CardHeader>
+                        <CardContent className="px-3 pb-3 pt-0 space-y-1 text-[11px]">
+                          <div className="flex justify-between"><span className="text-stone-500">平台</span><span className={`font-medium ${selectedContact?.platform === "messenger" ? "text-blue-600" : "text-green-600"}`} data-testid="text-info-platform">{selectedContact?.platform === "messenger" ? "FB" : "LINE"}</span></div>
+                          {selectedContact?.brand_name && <div className="flex justify-between"><span className="text-stone-500">品牌</span><span className="text-stone-800 truncate max-w-[120px]" data-testid="text-info-brand">{selectedContact.brand_name}</span></div>}
+                          {selectedContact?.channel_name && <div className="flex justify-between"><span className="text-stone-500">渠道</span><span className="text-stone-800 truncate max-w-[120px]" data-testid="text-info-channel">{selectedContact.channel_name}</span></div>}
+                          <div className="flex justify-between"><span className="text-stone-500">平台 ID</span><span className="text-stone-600 font-mono text-[10px] truncate max-w-[100px]">{selectedContact?.platform_user_id}</span></div>
+                          <div className="flex justify-between"><span className="text-stone-500">建立日期</span><span className="text-stone-700">{selectedContact?.created_at ? formatDate(selectedContact.created_at) : "—"}</span></div>
+                          {assignmentData?.assignment_reason && <div className="flex justify-between"><span className="text-stone-500">轉人工原因</span><span className="text-stone-700 text-[10px] truncate max-w-[120px]">{assignmentData.assignment_reason}</span></div>}
+                          {assignmentData?.response_sla_deadline_at && <div className="flex justify-between"><span className="text-stone-500">SLA 截止</span><span className="text-stone-700">{formatDateTime(assignmentData.response_sla_deadline_at)}</span></div>}
+                        </CardContent>
+                      </Card>
+
+                      {/* 4. AI 建議卡 */}
+                      {aiSuggestions && (aiSuggestions.issue_type || aiSuggestions.status || aiSuggestions.priority || (aiSuggestions.tags?.length)) ? (
+                        <Card className="border-indigo-200 bg-indigo-50/30 shadow-sm">
+                          <CardHeader className="py-2 px-3">
+                            <CardTitle className="text-xs font-semibold text-indigo-800 flex items-center gap-1"><Bot className="w-3 h-3" /> AI 建議</CardTitle>
+                          </CardHeader>
+                          <CardContent className="px-3 pb-3 pt-0 space-y-1 text-[11px]">
+                            {aiSuggestions.issue_type && <div className="flex justify-between"><span className="text-stone-500">建議問題類型</span><span className="text-indigo-700 font-medium">{(ISSUE_TYPE_LABELS as Record<string, string>)[aiSuggestions.issue_type] || aiSuggestions.issue_type}</span></div>}
+                            {aiSuggestions.status && <div className="flex justify-between"><span className="text-stone-500">建議狀態</span><span className="text-indigo-700">{aiSuggestions.status}</span></div>}
+                            {aiSuggestions.priority && <div className="flex justify-between"><span className="text-stone-500">建議優先級</span><span className="text-indigo-700">{aiSuggestions.priority}</span></div>}
+                            {aiSuggestions.tags?.length ? <div className="flex flex-wrap gap-1 mt-1"><span className="text-stone-500 text-[10px] w-full">建議標籤</span>{aiSuggestions.tags.map((t) => <Badge key={t} variant="secondary" className="text-[10px]">{t}</Badge>)}</div> : null}
+                          </CardContent>
+                        </Card>
+                      ) : null}
+
+                      {isCsAgent && selectedContact && selectedContact.assigned_agent_id === authUser?.user?.id && (
+                        <div className="flex flex-wrap gap-1.5">
+                          <Button size="sm" variant={(selectedContact as ContactWithPreview).my_flag === "later" ? "default" : "outline"} className="h-7 text-xs" onClick={() => handleSetAgentFlag(selectedContact.id, (selectedContact as ContactWithPreview).my_flag === "later" ? null : "later")} data-testid="button-flag-later">稍後處理</Button>
+                          <Button size="sm" variant={(selectedContact as ContactWithPreview).my_flag === "tracking" ? "default" : "outline"} className="h-7 text-xs" onClick={() => handleSetAgentFlag(selectedContact.id, (selectedContact as ContactWithPreview).my_flag === "tracking" ? null : "tracking")} data-testid="button-flag-tracking">追蹤中</Button>
+                          {(selectedContact as ContactWithPreview).my_flag && <Button size="sm" variant="ghost" className="h-7 text-xs text-stone-500" onClick={() => handleSetAgentFlag(selectedContact.id, null)}>清除</Button>}
                         </div>
-                        <div className="flex justify-between items-center text-xs">
-                          <span className="text-stone-500">問題類型</span>
-                          <Select value={selectedContact?.issue_type || "none"} onValueChange={(v) => handleIssueTypeChange(v === "none" ? "" : v)}>
-                            <SelectTrigger className="w-[120px] h-7 text-[11px] border-stone-200" data-testid="select-issue-type"><SelectValue placeholder="未分類" /></SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="none" data-testid="select-issue-type-none">未分類</SelectItem>
-                              {(Object.keys(ISSUE_TYPE_LABELS) as IssueType[]).map((it) => (
-                                <SelectItem key={it} value={it} data-testid={`select-issue-type-${it}`}>
-                                  {ISSUE_TYPE_LABELS[it]}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
+                      )}
+
+                      {(selectedContact?.ai_rating != null || selectedContact?.cs_rating != null) && (
+                        <div className="space-y-1 text-[11px]">
+                          {selectedContact?.ai_rating != null && <div className="flex justify-between text-indigo-600" data-testid="text-ai-rating"><span>AI 評分</span><span>{"⭐".repeat(selectedContact.ai_rating)}</span></div>}
+                          {selectedContact?.cs_rating != null && <div className="flex justify-between text-amber-600" data-testid="text-cs-rating"><span>真人評分</span><span>{"⭐".repeat(selectedContact.cs_rating)}</span></div>}
                         </div>
-                        {selectedContact?.ai_rating != null && (
-                          <div className="flex justify-between text-xs" data-testid="text-ai-rating">
-                            <span className="text-indigo-500 flex items-center gap-1"><Bot className="w-3 h-3" />AI 客服評分</span>
-                            <span className="text-indigo-500 font-semibold">{"⭐".repeat(selectedContact.ai_rating)}（{selectedContact.ai_rating} 分）</span>
-                          </div>
-                        )}
-                        {selectedContact?.cs_rating != null && (
-                          <div className="flex justify-between text-xs" data-testid="text-cs-rating">
-                            <span className="text-emerald-600 flex items-center gap-1"><UserCheck className="w-3 h-3" />真人客服評分</span>
-                            <span className="text-amber-500 font-semibold">{"⭐".repeat(selectedContact.cs_rating)}（{selectedContact.cs_rating} 分）</span>
-                          </div>
-                        )}
-                      </div>
+                      )}
                     </div>
                   </TabsContent>
 
@@ -1187,6 +1918,22 @@ export default function ChatPage() {
                                 <div className="flex items-center justify-between gap-1 flex-wrap">
                                   <span className="text-xs font-mono font-semibold text-stone-800" data-testid={`order-id-${i}`}>{order.global_order_id}</span>
                                   <div className="flex items-center gap-1">
+                                    {linkedContactsMap[order.global_order_id] != null ? (
+                                      <a
+                                        href={`?contact=${linkedContactsMap[order.global_order_id]}`}
+                                        onClick={(e) => { e.preventDefault(); setSelectedId(linkedContactsMap[order.global_order_id]!); setRightTab("info"); }}
+                                        className="text-[10px] font-medium text-emerald-600 hover:underline inline-flex items-center gap-0.5"
+                                        data-testid={`order-view-chat-${i}`}
+                                      >
+                                        <MessageSquare className="w-3 h-3" />查看對話
+                                      </a>
+                                    ) : null}
+                                    <Button size="sm" variant="ghost" className="h-6 w-6 p-0" title="複製訂單編號" onClick={() => { navigator.clipboard.writeText(order.global_order_id).then(() => toast({ title: "已複製訂單編號" })); }} data-testid={`order-copy-id-${i}`}>
+                                      <Copy className="w-3 h-3" />
+                                    </Button>
+                                    <Button size="sm" variant="ghost" className="h-6 w-6 p-0" title="複製訂單連結" onClick={() => { const u = `${window.location.origin}${window.location.pathname}?tab=orders&order=${encodeURIComponent(order.global_order_id)}`; navigator.clipboard.writeText(u).then(() => toast({ title: "已複製訂單連結" })); }} data-testid={`order-copy-link-${i}`}>
+                                      <Link2 className="w-3 h-3" />
+                                    </Button>
                                     {order.source && order.source !== "unknown" && (
                                       <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${order.source === "shopline" ? "bg-indigo-100 text-indigo-700" : "bg-teal-100 text-teal-700"}`} data-testid={`order-source-${i}`}>
                                         {ORDER_SOURCE_LABELS[order.source as OrderSource] || order.source}
@@ -1311,31 +2058,32 @@ export default function ChatPage() {
                     )}
                   </div>
                   <input type="file" ref={fileInputRef} accept="image/jpeg,image/png,image/gif,image/webp" multiple onChange={handleFileSelect} className="hidden" data-testid="input-file-upload" />
-                  <Button size="icon" variant="ghost" className="h-10 w-10 text-stone-400 hover:text-emerald-600 hover:bg-emerald-50" onClick={() => fileInputRef.current?.click()} data-testid="button-attach-file">
+                  <Button size="icon" variant="ghost" className="h-10 w-10 text-stone-400 hover:text-emerald-600 hover:bg-emerald-50" onClick={() => fileInputRef.current?.click()} data-testid="button-attach-file" title="附加圖片">
                     <Paperclip className="w-5 h-5" />
                   </Button>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    className="h-10 w-10 text-indigo-400 hover:text-indigo-500 hover:bg-indigo-50 disabled:opacity-40 disabled:cursor-not-allowed"
-                    onClick={() => handleSendRating("ai")}
-                    disabled={sendingRating || !selectedContact || selectedContact.platform !== "line" || selectedContact.ai_rating != null}
-                    title={selectedContact?.ai_rating != null ? "AI 評分已完成" : "發送 AI 客服評價卡片"}
-                    data-testid="button-send-ai-rating"
-                  >
-                    {sendingRating ? <Loader2 className="w-4 h-4 animate-spin" /> : <span className="relative"><Star className="w-4 h-4 fill-current" /><Bot className="w-2.5 h-2.5 absolute -top-1 -right-1.5" /></span>}
-                  </Button>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    className="h-10 w-10 text-amber-400 hover:text-amber-500 hover:bg-amber-50 disabled:opacity-40 disabled:cursor-not-allowed"
-                    onClick={() => handleSendRating("human")}
-                    disabled={sendingRating || !selectedContact || selectedContact.platform !== "line" || selectedContact.cs_rating != null}
-                    title={selectedContact?.cs_rating != null ? "真人評分已完成" : "發送真人客服評價卡片"}
-                    data-testid="button-send-rating"
-                  >
-                    {sendingRating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Star className="w-5 h-5 fill-current" />}
-                  </Button>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button size="icon" variant="ghost" className="h-10 w-10 text-stone-400 hover:text-stone-600 hover:bg-stone-100" data-testid="button-more-actions" title="更多操作">
+                        <MoreHorizontal className="w-5 h-5" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start" className="w-48">
+                      <DropdownMenuItem
+                        onClick={() => handleSendRating("ai")}
+                        disabled={sendingRating || !selectedContact || selectedContact.platform !== "line" || selectedContact.ai_rating != null}
+                        data-testid="button-send-ai-rating"
+                      >
+                        {selectedContact?.ai_rating != null ? "AI 評分已完成" : "發送 AI 評價卡片"}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onClick={() => handleSendRating("human")}
+                        disabled={sendingRating || !selectedContact || selectedContact.platform !== "line" || selectedContact.cs_rating != null}
+                        data-testid="button-send-rating"
+                      >
+                        {selectedContact?.cs_rating != null ? "真人評分已完成" : "發送真人評價卡片"}
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                   <Input data-testid="input-message" placeholder="輸入訊息以真人客服身分回覆..." value={messageInput} onChange={(e) => setMessageInput(e.target.value)}
                     onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSendAll(); } }} disabled={sending || uploading} className="bg-stone-50 border-stone-200" />
                   <Button onClick={handleSendAll} disabled={(!messageInput.trim() && pendingFiles.length === 0) || sending || uploading} data-testid="button-send-message" className="bg-emerald-600 hover:bg-emerald-700 text-white px-4">
@@ -1348,6 +2096,125 @@ export default function ChatPage() {
           </>
         )}
       </div>
+
+      <Dialog open={showReassignDialog} onOpenChange={(open) => { setShowReassignDialog(open); if (!open) { setReassignAgentId(null); setReassignNote(""); } }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>改派客服</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div>
+              <label className="text-sm font-medium text-stone-700">指派給</label>
+              <Select value={reassignAgentId != null ? String(reassignAgentId) : ""} onValueChange={(v) => setReassignAgentId(v ? parseInt(v, 10) : null)}>
+                <SelectTrigger className="mt-1 border-stone-200">
+                  <SelectValue placeholder="選擇客服（依處理量由少到多）" />
+                </SelectTrigger>
+                <SelectContent>
+                  {agentListByLoad.map((a) => {
+                    const isCurrent = a.id === (selectedContact?.assigned_agent_id ?? assignmentData?.assigned_to_user_id);
+                    return (
+                      <SelectItem key={a.id} value={String(a.id)}>
+                        <span className="flex flex-col items-start gap-0.5">
+                          <span className="flex items-center gap-2">
+                            <Avatar className="w-5 h-5 shrink-0">
+                              {a.avatar_url && <AvatarImage src={a.avatar_url} alt={a.display_name} />}
+                              <AvatarFallback className="bg-stone-300 text-white text-[10px]">{a.display_name?.slice(0, 1) || "?"}</AvatarFallback>
+                            </Avatar>
+                            {a.display_name}
+                            {isCurrent && <span className="text-[10px] text-amber-600">（目前負責）</span>}
+                            {a.is_online === 1 ? <span className="text-[10px] text-emerald-600">在線</span> : <span className="text-[10px] text-stone-400">離線</span>}
+                            {a.is_in_work ? <span className="text-[10px] text-stone-600">上班中</span> : <span className="text-[10px] text-stone-400">下班</span>}
+                            <span className="text-[10px] text-stone-500">處理中 {a.open_cases_count ?? 0}/{a.max_active_conversations ?? 10}</span>
+                          </span>
+                        </span>
+                      </SelectItem>
+                    );
+                  })}
+                </SelectContent>
+              </Select>
+              {reassignAgentId != null && reassignAgentId === (selectedContact?.assigned_agent_id ?? assignmentData?.assigned_to_user_id) && (
+                <p className="text-[11px] text-amber-600 mt-1">請選擇其他客服以完成改派</p>
+              )}
+            </div>
+            <div>
+              <label className="text-sm font-medium text-stone-700">備註（選填）</label>
+              <Input value={reassignNote} onChange={(e) => setReassignNote(e.target.value)} placeholder="改派原因..." className="mt-1 border-stone-200" />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowReassignDialog(false)}>取消</Button>
+            <Button
+              onClick={handleReassignSubmit}
+              disabled={reassignAgentId == null || reassigning || reassignAgentId === (selectedContact?.assigned_agent_id ?? assignmentData?.assigned_to_user_id)}
+              data-testid="button-reassign-submit"
+            >
+              {reassigning ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : null}確認改派
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showAssignDialog} onOpenChange={(open) => { setShowAssignDialog(open); if (!open) setAssignAgentId(null); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>指派客服</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div>
+              <Button variant="outline" className="w-full justify-center border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-60" onClick={handleAssign} disabled={assignAgentId != null} data-testid="button-assign-auto">
+                自動分配（依負載與時段）
+              </Button>
+              {assignAgentId != null && (
+                <p className="text-[11px] text-amber-600 mt-2 text-center font-medium">已選擇手動指定，請按下方「指派給選定客服」</p>
+              )}
+              <p className="text-[11px] text-stone-500 mt-2 text-center">或手動指定客服（不受在線/時段限制）</p>
+              <p className="text-[11px] text-stone-500 mt-1 text-center">在線狀態依客服是否開啟「即時客服」頁面更新，可依「最後活動」時間確認</p>
+            </div>
+            <div>
+              <label className="text-sm font-medium text-stone-700">指定給</label>
+              <Select value={assignAgentId != null ? String(assignAgentId) : ""} onValueChange={(v) => setAssignAgentId(v ? parseInt(v, 10) : null)}>
+                <SelectTrigger className="mt-1 border-stone-200">
+                  <SelectValue placeholder="選擇客服（依處理量由少到多）" />
+                </SelectTrigger>
+                <SelectContent>
+                  {agentListByLoad.map((a) => (
+                    <SelectItem key={a.id} value={String(a.id)}>
+                      <span className="flex flex-col items-start gap-0.5">
+                        <span className="flex items-center gap-2">
+                          <Avatar className="w-5 h-5 shrink-0">
+                            {a.avatar_url && <AvatarImage src={a.avatar_url} alt={a.display_name} />}
+                            <AvatarFallback className="bg-stone-300 text-white text-[10px]">{a.display_name?.slice(0, 1) || "?"}</AvatarFallback>
+                          </Avatar>
+                          {a.display_name}
+                          {a.is_online === 1 ? <span className="text-[10px] text-emerald-600">在線</span> : <span className="text-[10px] text-stone-400">離線</span>}
+                          {a.is_in_work ? <span className="text-[10px] text-stone-600">上班中</span> : <span className="text-[10px] text-stone-400">下班</span>}
+                          <span className="text-[10px] text-stone-500">處理中 {a.open_cases_count ?? 0}/{a.max_active_conversations ?? 10}</span>
+                        </span>
+                        <span className="text-[10px] text-stone-500 ml-7">最後活動：{formatLastActive(a.last_active_at)}</span>
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowAssignDialog(false)}>取消</Button>
+            <Button
+              onClick={() => {
+                if (selectedId != null && assignAgentId != null) {
+                  handleAssignToAgentWith(selectedId, assignAgentId);
+                }
+              }}
+              disabled={assignAgentId == null || assigning}
+              data-testid="button-assign-to-agent"
+            >
+              {assigning ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : null}指派給選定客服
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {previewImage && (
         <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center" onClick={() => setPreviewImage(null)} data-testid="image-lightbox">
           <button onClick={() => setPreviewImage(null)} className="absolute top-4 right-4 w-10 h-10 bg-white/20 hover:bg-white/30 rounded-full flex items-center justify-center transition-colors" data-testid="button-close-lightbox">

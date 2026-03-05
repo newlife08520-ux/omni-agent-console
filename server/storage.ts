@@ -1,5 +1,6 @@
 import db, { initDatabase, hashPassword } from "./db";
-import type { User, Contact, ContactWithPreview, Message, Setting, KnowledgeFile, TeamMember, MarketingRule, Brand, Channel, ChannelWithBrand, ImageAsset, AiLog } from "@shared/schema";
+import type { User, Contact, ContactWithPreview, Message, Setting, KnowledgeFile, TeamMember, MarketingRule, Brand, Channel, ChannelWithBrand, ImageAsset, AiLog, AgentStatus, AssignmentRecord } from "@shared/schema";
+import { CONTACT_STATUS_ALLOWED } from "@shared/schema";
 
 initDatabase();
 
@@ -25,7 +26,7 @@ export interface IStorage {
   createChannel(brandId: number, platform: string, channelName: string, botId?: string, accessToken?: string, channelSecret?: string): Channel;
   updateChannel(id: number, data: Partial<Omit<Channel, "id" | "created_at">>): boolean;
   deleteChannel(id: number): boolean;
-  getContacts(brandId?: number): ContactWithPreview[];
+  getContacts(brandId?: number, assignedToUserId?: number, agentIdForFlags?: number): ContactWithPreview[];
   getContact(id: number): Contact | undefined;
   updateContactHumanFlag(id: number, needsHuman: number): void;
   updateContactStatus(id: number, status: string): void;
@@ -35,6 +36,9 @@ export interface IStorage {
   updateContactRating(id: number, rating: number): void;
   updateContactAiRating(id: number, rating: number): void;
   updateContactProfile(id: number, displayName: string, avatarUrl: string | null): void;
+  getTagShortcuts(): { name: string; order: number }[];
+  setTagShortcuts(tags: { name: string; order: number }[]): void;
+  updateContactAiSuggestions(id: number, suggestions: { issue_type?: string; status?: string; priority?: string; tags?: string[] }): void;
   getContactByPlatformUser(platform: string, platformUserId: string): Contact | undefined;
   isEventProcessed(eventId: string): boolean;
   markEventProcessed(eventId: string): void;
@@ -99,6 +103,49 @@ export interface IStorage {
     transferReasonTop5: { reason: string; count: number }[];
     alertsByType: { type: string; count: number }[];
   };
+  getAgentStatus(userId: number): AgentStatus | undefined;
+  upsertAgentStatus(data: Partial<AgentStatus> & { user_id: number }): void;
+  getAssignmentHistory(contactId: number): AssignmentRecord[];
+  createAssignmentRecord(contactId: number, assignedToAgentId: number, assignedByAgentId: number | null, reassignedFromAgentId: number | null, note: string | null): AssignmentRecord;
+  updateContactAssignment(contactId: number, assignedAgentId: number | null, firstAssignedAt?: string): void;
+  getOpenCasesCountForAgent(agentId: number): number;
+  incrementAgentTodayAssigned(agentId: number): void;
+  resetAgentDailyCountsIfNewDay(): void;
+  updateContactIntentLevel(contactId: number, level: string | null): void;
+  updateContactOrderNumberType(contactId: number, type: string | null): void;
+  updateContactCasePriority(contactId: number, priority: number | null): void;
+  updateContactClosed(contactId: number, closedByAgentId: number): void;
+  getUnreadHumanCaseCount(): number;
+  markCaseNotificationsRead(contactId?: number): void;
+  createCaseNotification(contactId: number, channel?: string): void;
+  updateUserOnline(userId: number, isOnline: number, isAvailable?: number): void;
+  updateUserLastActive(userId: number): void;
+  getAgentContactFlags(agentId: number, contactIds: number[]): Record<number, "later" | "tracking">;
+  setAgentContactFlag(agentId: number, contactId: number, flag: "later" | "tracking" | null): void;
+  updateContactLastHumanReply(contactId: number): void;
+  incrementContactReassignCount(contactId: number): void;
+  updateContactAssignmentStatus(contactId: number, status: string): void;
+  getGlobalSchedule(): { work_start_time: string; work_end_time: string; lunch_start_time: string; lunch_end_time: string };
+  getAgentPerformanceStats(agentId: number): {
+    today_new: number;
+    open_cases: number;
+    processing: number;
+    closed_today: number;
+    closed_total: number;
+    avg_first_reply_minutes: number | null;
+    avg_close_minutes: number | null;
+    close_rate: number | null;
+    resolve_rate: number | null;
+  };
+  getSupervisorReport(): {
+    today_total: number;
+    pending_count: number;
+    transfer_count: number;
+    lunch_pending_count: number;
+    by_agent: { agent_id: number; display_name: string; today_assigned: number; open_cases: number; closed_today: number }[];
+    tag_rank: { tag: string; count: number }[];
+    category_ratio: { label: string; count: number }[];
+  };
 }
 
 export class SQLiteStorage implements IStorage {
@@ -134,7 +181,31 @@ export class SQLiteStorage implements IStorage {
   }
 
   getTeamMembers(): TeamMember[] {
-    return db.prepare("SELECT id, username, display_name, role, created_at FROM users ORDER BY created_at ASC").all() as TeamMember[];
+    const rows = db.prepare(`
+      SELECT u.id, u.username, u.display_name, u.role, u.created_at, u.avatar_url,
+             u.is_online, u.is_available, u.last_active_at,
+             a.max_active_conversations, a.auto_assign_enabled
+      FROM users u
+      LEFT JOIN agent_status a ON u.id = a.user_id
+      ORDER BY u.created_at ASC
+    `).all() as (TeamMember & { max_active_conversations?: number; auto_assign_enabled?: number })[];
+    return rows.map((r) => {
+      const open = this.getOpenCasesCountForAgent(r.id);
+      return {
+        id: r.id,
+        username: r.username,
+        display_name: r.display_name,
+        role: r.role,
+        created_at: r.created_at,
+        avatar_url: r.avatar_url ?? null,
+        is_online: r.is_online ?? 0,
+        is_available: r.is_available ?? 1,
+        last_active_at: r.last_active_at ?? null,
+        max_active_conversations: r.max_active_conversations ?? 10,
+        open_cases_count: open,
+        auto_assign_enabled: r.auto_assign_enabled ?? 1,
+      };
+    });
   }
 
   getSetting(key: string): string | null {
@@ -237,19 +308,35 @@ export class SQLiteStorage implements IStorage {
     return result.changes > 0;
   }
 
-  getContacts(brandId?: number): ContactWithPreview[] {
-    let query = "SELECT c.*, b.name as brand_name, ch.channel_name FROM contacts c LEFT JOIN brands b ON c.brand_id = b.id LEFT JOIN channels ch ON c.channel_id = ch.id";
+  getContacts(brandId?: number, assignedToUserId?: number, agentIdForFlags?: number): ContactWithPreview[] {
+    let query = "SELECT c.*, b.name as brand_name, ch.channel_name, u.display_name as assigned_agent_name, u.avatar_url as assigned_agent_avatar_url FROM contacts c LEFT JOIN brands b ON c.brand_id = b.id LEFT JOIN channels ch ON c.channel_id = ch.id LEFT JOIN users u ON c.assigned_agent_id = u.id";
     const params: any[] = [];
+    const conditions: string[] = [];
     if (brandId) {
-      query += " WHERE c.brand_id = ?";
+      conditions.push("c.brand_id = ?");
       params.push(brandId);
     }
-    query += " ORDER BY c.is_pinned DESC, c.last_message_at DESC";
-    const contacts = db.prepare(query).all(...params) as (Contact & { brand_name?: string; channel_name?: string })[];
-    return contacts.map((c) => {
-      const lastMsg = db.prepare("SELECT content FROM messages WHERE contact_id = ? ORDER BY created_at DESC LIMIT 1").get(c.id) as { content: string } | undefined;
-      return { ...c, last_message: lastMsg?.content || "" };
+    if (assignedToUserId != null) {
+      conditions.push("c.assigned_agent_id = ?");
+      params.push(assignedToUserId);
+    }
+    if (conditions.length) query += " WHERE " + conditions.join(" AND ");
+    query += " ORDER BY c.is_pinned DESC, (CASE WHEN c.case_priority IS NULL THEN 999 ELSE c.case_priority END) ASC, c.last_message_at DESC";
+    const contacts = db.prepare(query).all(...params) as (Contact & { brand_name?: string; channel_name?: string; assigned_agent_name?: string; assigned_agent_avatar_url?: string | null })[];
+    const withPreview = contacts.map((c) => {
+      const lastRow = db.prepare("SELECT content, sender_type FROM messages WHERE contact_id = ? ORDER BY created_at DESC LIMIT 1").get(c.id) as { content: string; sender_type: string } | undefined;
+      const rawType = lastRow?.sender_type;
+      const senderType = (rawType != null && ["user", "ai", "admin", "system"].includes(String(rawType).toLowerCase()))
+        ? (String(rawType).toLowerCase() as ContactWithPreview["last_message_sender_type"])
+        : undefined;
+      return { ...c, last_message: lastRow?.content || "", last_message_sender_type: senderType };
     });
+    const agentId = assignedToUserId ?? agentIdForFlags;
+    if (agentId != null && withPreview.length > 0) {
+      const flags = this.getAgentContactFlags(agentId, withPreview.map((c) => c.id));
+      return withPreview.map((c) => ({ ...c, my_flag: flags[c.id] ?? null }));
+    }
+    return withPreview;
   }
 
   getContact(id: number): Contact | undefined {
@@ -261,6 +348,9 @@ export class SQLiteStorage implements IStorage {
   }
 
   updateContactStatus(id: number, status: string): void {
+    if (!CONTACT_STATUS_ALLOWED.includes(status as any)) {
+      throw new Error(`不合法的 contact status: ${status}，允許值: ${CONTACT_STATUS_ALLOWED.join(", ")}`);
+    }
     db.prepare("UPDATE contacts SET status = ? WHERE id = ?").run(status, id);
   }
 
@@ -286,6 +376,28 @@ export class SQLiteStorage implements IStorage {
 
   updateContactProfile(id: number, displayName: string, avatarUrl: string | null): void {
     db.prepare("UPDATE contacts SET display_name = ?, avatar_url = ? WHERE id = ?").run(displayName, avatarUrl, id);
+  }
+
+  getTagShortcuts(): { name: string; order: number }[] {
+    try {
+      const raw = this.getSetting("tag_shortcuts");
+      if (!raw) return [];
+      const arr = JSON.parse(raw);
+      if (!Array.isArray(arr)) return [];
+      return arr.filter((t: any) => t && typeof t.name === "string").map((t: any, i: number) => ({ name: String(t.name).trim(), order: typeof t.order === "number" ? t.order : i }));
+    } catch {
+      return [];
+    }
+  }
+
+  setTagShortcuts(tags: { name: string; order: number }[]): void {
+    const valid = tags.filter((t) => t && typeof t.name === "string").map((t, i) => ({ name: String(t.name).trim(), order: typeof t.order === "number" ? t.order : i }));
+    this.setSetting("tag_shortcuts", JSON.stringify(valid));
+  }
+
+  updateContactAiSuggestions(id: number, suggestions: { issue_type?: string; status?: string; priority?: string; tags?: string[] }): void {
+    const json = JSON.stringify(suggestions);
+    db.prepare("UPDATE contacts SET ai_suggestions = ? WHERE id = ?").run(json, id);
   }
 
   getContactByPlatformUser(platform: string, platformUserId: string): Contact | undefined {
@@ -334,7 +446,7 @@ export class SQLiteStorage implements IStorage {
     if (!contact) {
       const now = new Date().toISOString().replace("T", " ").substring(0, 19);
       const result = db.prepare("INSERT INTO contacts (platform, platform_user_id, display_name, needs_human, is_pinned, status, tags, vip_level, order_count, total_spent, brand_id, channel_id, created_at) VALUES (?, ?, ?, 0, 0, 'pending', '[]', 0, 0, 0, ?, ?, ?)").run(platform, platformUserId, displayName, brandId || null, channelId || null, now);
-      contact = { id: Number(result.lastInsertRowid), platform, platform_user_id: platformUserId, display_name: displayName, avatar_url: null, needs_human: 0, is_pinned: 0, status: "pending", tags: "[]", vip_level: 0, order_count: 0, total_spent: 0, cs_rating: null, ai_rating: null, last_message_at: null, created_at: now, brand_id: brandId || null, channel_id: channelId || null };
+      contact = { id: Number(result.lastInsertRowid), platform, platform_user_id: platformUserId, display_name: displayName, avatar_url: null, needs_human: 0, is_pinned: 0, status: "pending", tags: "[]", vip_level: 0, order_count: 0, total_spent: 0, cs_rating: null, ai_rating: null, last_message_at: null, created_at: now, brand_id: brandId || null, channel_id: channelId || null, issue_type: null, order_source: null, assigned_agent_id: null, intent_level: null, order_number_type: null, first_assigned_at: null, closed_at: null, closed_by_agent_id: null, case_priority: null };
     } else {
       let needsUpdate = false;
       let newBrandId = contact.brand_id;
@@ -355,7 +467,7 @@ export class SQLiteStorage implements IStorage {
         contact.channel_id = newChannelId;
       }
     }
-    return contact;
+    return contact as Contact;
   }
 
   getKnowledgeFiles(brandId?: number): KnowledgeFile[] {
@@ -705,6 +817,375 @@ export class SQLiteStorage implements IStorage {
       totalAlerts: totalRow?.count || 0,
       transferReasonTop5: transferReasons,
       alertsByType,
+    };
+  }
+
+  getAgentStatus(userId: number): AgentStatus | undefined {
+    return db.prepare("SELECT * FROM agent_status WHERE user_id = ?").get(userId) as AgentStatus | undefined;
+  }
+
+  upsertAgentStatus(data: Partial<AgentStatus> & { user_id: number }): void {
+    const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+    const existing = db.prepare("SELECT user_id FROM agent_status WHERE user_id = ?").get(data.user_id);
+    const cols = ["priority", "on_duty", "lunch_break", "pause_new_cases", "today_assigned_count", "open_cases_count", "work_start_time", "work_end_time", "lunch_start_time", "lunch_end_time", "max_active_conversations", "auto_assign_enabled", "updated_at"];
+    const vals = [
+      data.priority ?? 1,
+      data.on_duty ?? 1,
+      data.lunch_break ?? 0,
+      data.pause_new_cases ?? 0,
+      data.today_assigned_count ?? 0,
+      data.open_cases_count ?? 0,
+      data.work_start_time ?? "09:00",
+      data.work_end_time ?? "18:00",
+      data.lunch_start_time ?? "12:00",
+      data.lunch_end_time ?? "13:00",
+      data.max_active_conversations ?? 10,
+      data.auto_assign_enabled ?? 1,
+      now,
+    ];
+    if (existing) {
+      db.prepare(`UPDATE agent_status SET ${cols.map((c) => `${c} = ?`).join(", ")} WHERE user_id = ?`).run(...vals, data.user_id);
+    } else {
+      db.prepare(`INSERT INTO agent_status (user_id, ${cols.join(", ")}) VALUES (?, ${cols.map(() => "?").join(", ")})`).run(data.user_id, ...vals);
+    }
+  }
+
+  getAssignmentHistory(contactId: number): AssignmentRecord[] {
+    return db.prepare("SELECT * FROM assignment_history WHERE contact_id = ? ORDER BY assigned_at ASC").all(contactId) as AssignmentRecord[];
+  }
+
+  createAssignmentRecord(
+    contactId: number,
+    assignedToAgentId: number,
+    assignedByAgentId: number | null,
+    reassignedFromAgentId: number | null,
+    note: string | null,
+    actionType?: string | null,
+    operatorUserId?: number | null
+  ): AssignmentRecord {
+    const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+    const hasExtra = actionType != null || operatorUserId != null;
+    if (hasExtra) {
+      const result = db.prepare(
+        "INSERT INTO assignment_history (contact_id, assigned_to_agent_id, assigned_by_agent_id, reassigned_from_agent_id, note, action_type, operator_user_id) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      ).run(contactId, assignedToAgentId, assignedByAgentId, reassignedFromAgentId, note, actionType ?? null, operatorUserId ?? null);
+      return {
+        id: Number(result.lastInsertRowid),
+        contact_id: contactId,
+        assigned_to_agent_id: assignedToAgentId,
+        assigned_at: now,
+        assigned_by_agent_id: assignedByAgentId,
+        reassigned_from_agent_id: reassignedFromAgentId,
+        note,
+        action_type: actionType ?? null,
+        operator_user_id: operatorUserId ?? null,
+      };
+    }
+    const result = db.prepare(
+      "INSERT INTO assignment_history (contact_id, assigned_to_agent_id, assigned_by_agent_id, reassigned_from_agent_id, note) VALUES (?, ?, ?, ?, ?)"
+    ).run(contactId, assignedToAgentId, assignedByAgentId, reassignedFromAgentId, note);
+    return {
+      id: Number(result.lastInsertRowid),
+      contact_id: contactId,
+      assigned_to_agent_id: assignedToAgentId,
+      assigned_at: now,
+      assigned_by_agent_id: assignedByAgentId,
+      reassigned_from_agent_id: reassignedFromAgentId,
+      note,
+    };
+  }
+
+  updateContactAssignment(
+    contactId: number,
+    assignedAgentId: number | null,
+    firstAssignedAt?: string,
+    assignmentMethod?: string | null,
+    needsAssignment?: number,
+    assignmentReason?: string | null,
+    responseSlaDeadlineAt?: string | null
+  ): void {
+    const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+    if (assignedAgentId == null) {
+      db.prepare(
+        "UPDATE contacts SET assigned_agent_id = NULL, assigned_at = NULL, assignment_status = ?, assignment_method = NULL, needs_assignment = ? WHERE id = ?"
+      ).run("unassigned", needsAssignment ?? 1, contactId);
+      return;
+    }
+    if (firstAssignedAt !== undefined) {
+      db.prepare(
+        "UPDATE contacts SET assigned_agent_id = ?, first_assigned_at = ?, assigned_at = ?, assignment_status = 'assigned', assignment_method = ?, needs_assignment = 0, assignment_reason = ?, response_sla_deadline_at = ? WHERE id = ?"
+      ).run(
+        assignedAgentId,
+        firstAssignedAt || null,
+        now,
+        assignmentMethod ?? "auto",
+        assignmentReason ?? null,
+        responseSlaDeadlineAt ?? null,
+        contactId
+      );
+    } else {
+      db.prepare(
+        "UPDATE contacts SET assigned_agent_id = ?, assigned_at = ?, assignment_status = 'assigned', assignment_method = ? WHERE id = ?"
+      ).run(assignedAgentId, now, assignmentMethod ?? "reassign", contactId);
+    }
+  }
+
+  getOpenCasesCountForAgent(agentId: number): number {
+    const row = db.prepare(
+      "SELECT COUNT(*) as count FROM contacts WHERE assigned_agent_id = ? AND status NOT IN ('closed', 'resolved')"
+    ).get(agentId) as { count: number } | undefined;
+    return row?.count ?? 0;
+  }
+
+  incrementAgentTodayAssigned(agentId: number): void {
+    db.prepare("UPDATE agent_status SET today_assigned_count = today_assigned_count + 1, updated_at = datetime('now') WHERE user_id = ?").run(agentId);
+  }
+
+  resetAgentDailyCountsIfNewDay(): void {
+    const today = new Date().toISOString().slice(0, 10);
+    const rows = db.prepare("SELECT user_id, updated_at FROM agent_status").all() as { user_id: number; updated_at: string }[];
+    for (const r of rows) {
+      const updatedDate = r.updated_at?.slice(0, 10) || "";
+      if (updatedDate && updatedDate !== today) {
+        db.prepare("UPDATE agent_status SET today_assigned_count = 0, updated_at = datetime('now') WHERE user_id = ?").run(r.user_id);
+      }
+    }
+  }
+
+  updateContactIntentLevel(contactId: number, level: string | null): void {
+    db.prepare("UPDATE contacts SET intent_level = ? WHERE id = ?").run(level, contactId);
+  }
+
+  updateContactOrderNumberType(contactId: number, type: string | null): void {
+    db.prepare("UPDATE contacts SET order_number_type = ? WHERE id = ?").run(type, contactId);
+  }
+
+  updateContactCasePriority(contactId: number, priority: number | null): void {
+    db.prepare("UPDATE contacts SET case_priority = ? WHERE id = ?").run(priority, contactId);
+  }
+
+  updateContactClosed(contactId: number, closedByAgentId: number): void {
+    const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+    db.prepare("UPDATE contacts SET closed_at = ?, closed_by_agent_id = ?, status = 'closed' WHERE id = ?").run(now, closedByAgentId, contactId);
+  }
+
+  getUnreadHumanCaseCount(): number {
+    const row = db.prepare(
+      "SELECT COUNT(*) as count FROM case_notifications WHERE read_at IS NULL"
+    ).get() as { count: number } | undefined;
+    return row?.count ?? 0;
+  }
+
+  markCaseNotificationsRead(contactId?: number): void {
+    const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+    if (contactId != null) {
+      db.prepare("UPDATE case_notifications SET read_at = ? WHERE contact_id = ? AND read_at IS NULL").run(now, contactId);
+    } else {
+      db.prepare("UPDATE case_notifications SET read_at = ? WHERE read_at IS NULL").run(now);
+    }
+  }
+
+  createCaseNotification(contactId: number, channel: string = "in_app"): void {
+    db.prepare("INSERT INTO case_notifications (contact_id, channel) VALUES (?, ?)").run(contactId, channel);
+  }
+
+  updateUserOnline(userId: number, isOnline: number, isAvailable?: number): void {
+    const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+    if (isAvailable !== undefined) {
+      db.prepare("UPDATE users SET is_online = ?, is_available = ?, last_active_at = ? WHERE id = ?").run(isOnline, isAvailable, now, userId);
+    } else {
+      db.prepare("UPDATE users SET is_online = ?, last_active_at = ? WHERE id = ?").run(isOnline, now, userId);
+    }
+  }
+
+  updateUserLastActive(userId: number): void {
+    const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+    db.prepare("UPDATE users SET last_active_at = ? WHERE id = ?").run(now, userId);
+  }
+
+  getAgentContactFlags(agentId: number, contactIds: number[]): Record<number, "later" | "tracking"> {
+    const out: Record<number, "later" | "tracking"> = {};
+    if (contactIds.length === 0) return out;
+    const placeholders = contactIds.map(() => "?").join(",");
+    const rows = db.prepare(`SELECT contact_id, flag FROM agent_contact_flags WHERE agent_id = ? AND contact_id IN (${placeholders})`).all(agentId, ...contactIds) as { contact_id: number; flag: string }[];
+    for (const r of rows) {
+      if (r.flag === "later" || r.flag === "tracking") out[r.contact_id] = r.flag;
+    }
+    return out;
+  }
+
+  setAgentContactFlag(agentId: number, contactId: number, flag: "later" | "tracking" | null): void {
+    const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+    if (flag == null) {
+      db.prepare("DELETE FROM agent_contact_flags WHERE agent_id = ? AND contact_id = ?").run(agentId, contactId);
+    } else {
+      db.prepare("INSERT INTO agent_contact_flags (agent_id, contact_id, flag, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(agent_id, contact_id) DO UPDATE SET flag = ?, updated_at = ?").run(agentId, contactId, flag, now, flag, now);
+    }
+  }
+
+  updateUserAvatar(userId: number, avatarUrl: string | null): void {
+    db.prepare("UPDATE users SET avatar_url = ? WHERE id = ?").run(avatarUrl, userId);
+  }
+
+  updateContactLastHumanReply(contactId: number): void {
+    const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+    db.prepare("UPDATE contacts SET last_human_reply_at = ? WHERE id = ?").run(now, contactId);
+  }
+
+  incrementContactReassignCount(contactId: number): void {
+    db.prepare("UPDATE contacts SET reassign_count = COALESCE(reassign_count, 0) + 1 WHERE id = ?").run(contactId);
+  }
+
+  updateContactAssignmentStatus(contactId: number, status: string): void {
+    db.prepare("UPDATE contacts SET assignment_status = ? WHERE id = ?").run(status, contactId);
+  }
+
+  updateContactNeedsAssignment(contactId: number, value: number): void {
+    db.prepare("UPDATE contacts SET needs_assignment = ? WHERE id = ?").run(value, contactId);
+  }
+
+  getGlobalSchedule(): { work_start_time: string; work_end_time: string; lunch_start_time: string; lunch_end_time: string } {
+    const workStart = this.getSetting("work_start_time") || "09:00";
+    const workEnd = this.getSetting("work_end_time") || "18:00";
+    const lunchStart = this.getSetting("lunch_start_time") || "12:30";
+    const lunchEnd = this.getSetting("lunch_end_time") || "13:30";
+    return { work_start_time: workStart, work_end_time: workEnd, lunch_start_time: lunchStart, lunch_end_time: lunchEnd };
+  }
+
+  getSlaMinutes(): number {
+    const v = this.getSetting("human_first_reply_sla_minutes");
+    const n = parseInt(v || "10", 10);
+    return isNaN(n) || n < 1 ? 10 : Math.min(n, 120);
+  }
+
+  getAssignmentAutoEnabled(): boolean {
+    return this.getSetting("assignment_auto_enabled") !== "0";
+  }
+
+  getAssignmentTimeoutReassignEnabled(): boolean {
+    return this.getSetting("assignment_timeout_reassign_enabled") !== "0";
+  }
+
+  getAgentPerformanceStats(agentId: number): {
+    today_new: number;
+    open_cases: number;
+    processing: number;
+    closed_today: number;
+    closed_total: number;
+    avg_first_reply_minutes: number | null;
+    avg_close_minutes: number | null;
+    close_rate: number | null;
+    resolve_rate: number | null;
+  } {
+    const today = new Date().toISOString().slice(0, 10);
+    const todayNewRow = db.prepare(
+      "SELECT COUNT(*) as c FROM contacts WHERE assigned_agent_id = ? AND date(first_assigned_at) = date(?)"
+    ).get(agentId, today) as { c: number };
+    const openCases = this.getOpenCasesCountForAgent(agentId);
+    const processingRow = db.prepare(
+      "SELECT COUNT(*) as c FROM contacts WHERE assigned_agent_id = ? AND status IN ('assigned','processing','waiting_customer')"
+    ).get(agentId) as { c: number };
+    const closedTodayRow = db.prepare(
+      "SELECT COUNT(*) as c FROM contacts WHERE closed_by_agent_id = ? AND date(closed_at) = date(?)"
+    ).get(agentId, today) as { c: number };
+    const closedTotalRow = db.prepare(
+      "SELECT COUNT(*) as c FROM contacts WHERE closed_by_agent_id = ?"
+    ).get(agentId) as { c: number };
+    const closedTotal = closedTotalRow?.c ?? 0;
+    const totalHandled = closedTotal + openCases;
+    const closeRate = totalHandled > 0 ? closedTotal / totalHandled : null;
+    let avgFirstReply: number | null = null;
+    let avgClose: number | null = null;
+    const firstReplyRows = db.prepare(`
+      SELECT c.id, c.first_assigned_at,
+             (SELECT MIN(m.created_at) FROM messages m WHERE m.contact_id = c.id AND m.sender_type = 'admin' AND m.created_at >= c.first_assigned_at) as first_admin_at
+      FROM contacts c WHERE c.assigned_agent_id = ? AND c.first_assigned_at IS NOT NULL
+    `).all(agentId) as { id: number; first_assigned_at: string; first_admin_at: string | null }[];
+    const diffs = firstReplyRows.filter((r) => r.first_admin_at).map((r) => (new Date(r.first_admin_at!).getTime() - new Date(r.first_assigned_at).getTime()) / 60000);
+    if (diffs.length > 0) avgFirstReply = diffs.reduce((a, b) => a + b, 0) / diffs.length;
+    const closeTimeRows = db.prepare(
+      "SELECT first_assigned_at, closed_at FROM contacts WHERE closed_by_agent_id = ? AND closed_at IS NOT NULL AND first_assigned_at IS NOT NULL"
+    ).all(agentId) as { first_assigned_at: string; closed_at: string }[];
+    const closeDiffs = closeTimeRows.map((r) => (new Date(r.closed_at).getTime() - new Date(r.first_assigned_at).getTime()) / 60000);
+    if (closeDiffs.length > 0) avgClose = closeDiffs.reduce((a, b) => a + b, 0) / closeDiffs.length;
+    return {
+      today_new: todayNewRow?.c ?? 0,
+      open_cases: openCases,
+      processing: processingRow?.c ?? 0,
+      closed_today: closedTodayRow?.c ?? 0,
+      closed_total: closedTotal,
+      avg_first_reply_minutes: avgFirstReply,
+      avg_close_minutes: avgClose,
+      close_rate: closeRate,
+      resolve_rate: closeRate,
+    };
+  }
+
+  getSupervisorReport(): {
+    today_total: number;
+    pending_count: number;
+    transfer_count: number;
+    lunch_pending_count: number;
+    by_agent: { agent_id: number; display_name: string; today_assigned: number; open_cases: number; closed_today: number }[];
+    tag_rank: { tag: string; count: number }[];
+    category_ratio: { label: string; count: number }[];
+  } {
+    const today = new Date().toISOString().slice(0, 10);
+    const todayTotalRow = db.prepare("SELECT COUNT(*) as c FROM contacts WHERE date(created_at) = date(?)").get(today) as { c: number };
+    const pendingRow = db.prepare(
+      "SELECT COUNT(*) as c FROM contacts WHERE status IN ('awaiting_human','pending','new_case','pending_info','pending_order_id') AND (status != 'closed' AND status != 'resolved')"
+    ).get() as { c: number };
+    const transferRow = db.prepare(
+      "SELECT COUNT(*) as c FROM contacts WHERE needs_human = 1 AND date(created_at) <= date(?)"
+    ).get(today) as { c: number };
+    const members = this.getTeamMembers().filter((m) => m.role === "cs_agent");
+    const byAgent = members.map((m) => {
+      const todayAssignedRow = db.prepare(
+        "SELECT COUNT(*) as c FROM contacts WHERE assigned_agent_id = ? AND date(first_assigned_at) = date(?)"
+      ).get(m.id, today) as { c: number };
+      const openCases = this.getOpenCasesCountForAgent(m.id);
+      const closedTodayRow = db.prepare(
+        "SELECT COUNT(*) as c FROM contacts WHERE closed_by_agent_id = ? AND date(closed_at) = date(?)"
+      ).get(m.id, today) as { c: number };
+      return {
+        agent_id: m.id,
+        display_name: m.display_name,
+        today_assigned: todayAssignedRow?.c ?? 0,
+        open_cases: openCases,
+        closed_today: closedTodayRow?.c ?? 0,
+      };
+    });
+    const contacts = db.prepare("SELECT tags FROM contacts").all() as { tags: string }[];
+    const tagCount: Record<string, number> = {};
+    for (const c of contacts) {
+      try {
+        const arr = JSON.parse(c.tags || "[]");
+        for (const t of arr) {
+          tagCount[t] = (tagCount[t] || 0) + 1;
+        }
+      } catch (_) {}
+    }
+    const tagRank = Object.entries(tagCount).map(([tag, count]) => ({ tag, count })).sort((a, b) => b.count - a.count).slice(0, 10);
+    const categoryLabels = ["訂單查詢", "出貨延遲", "缺貨/欠貨", "退款/取消", "商品諮詢", "優惠詢問", "客訴"];
+    const categoryRatio = categoryLabels.map((label) => {
+      const count = contacts.filter((c) => {
+        try {
+          const arr = JSON.parse(c.tags || "[]");
+          return arr.includes(label);
+        } catch (_) {
+          return false;
+        }
+      }).length;
+      return { label, count };
+    }).filter((r) => r.count > 0);
+    return {
+      today_total: todayTotalRow?.c ?? 0,
+      pending_count: pendingRow?.c ?? 0,
+      transfer_count: transferRow?.c ?? 0,
+      lunch_pending_count: 0,
+      by_agent: byAgent,
+      tag_rank: tagRank,
+      category_ratio: categoryRatio,
     };
   }
 

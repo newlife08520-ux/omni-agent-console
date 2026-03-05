@@ -1,8 +1,10 @@
 import Database from "better-sqlite3";
 import path from "path";
 import crypto from "crypto";
+import { getDataDir, ensureDataDirs } from "./data-dir";
 
-const dbPath = path.resolve(process.cwd(), "omnichannel.db");
+ensureDataDirs();
+const dbPath = path.join(getDataDir(), "omnichannel.db");
 const db = new Database(dbPath);
 
 db.pragma("journal_mode = WAL");
@@ -132,7 +134,598 @@ export function initDatabase() {
   migrateShoplineFields();
   migrateSystemPrompt();
   migrateHardMuteAndAlerts();
+  migrateCaseManagement();
+  migrateContactStatusCaseFlow();
+  ensureContactStatusIncludesAssigned();
+  migrateAgentDutyFields();
+  migrateAgentContactFlags();
+  migrateContactOrderLinks();
+  migrateMetaCommentCenter();
+  migrateMetaCommentPhase1();
+  migrateMetaCommentPhase2();
+  migrateMetaCommentPhase3();
   seedMockData();
+}
+
+/** Phase 1：粉專→品牌→LINE 設定表、留言表擴欄、貼文/商品判定來源、商品關鍵字表 */
+function migrateMetaCommentPhase1() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS meta_page_settings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      page_id TEXT NOT NULL UNIQUE,
+      page_name TEXT,
+      brand_id INTEGER NOT NULL,
+      line_general TEXT,
+      line_after_sale TEXT,
+      auto_hide_sensitive INTEGER NOT NULL DEFAULT 0,
+      auto_reply_enabled INTEGER NOT NULL DEFAULT 0,
+      auto_route_line_enabled INTEGER NOT NULL DEFAULT 0,
+      default_reply_template_id INTEGER,
+      default_sensitive_template_id INTEGER,
+      default_flow TEXT,
+      default_product_name TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (brand_id) REFERENCES brands(id),
+      FOREIGN KEY (default_reply_template_id) REFERENCES meta_comment_templates(id),
+      FOREIGN KEY (default_sensitive_template_id) REFERENCES meta_comment_templates(id)
+    );
+  `);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS meta_product_keywords (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      brand_id INTEGER,
+      keyword TEXT NOT NULL,
+      product_name TEXT NOT NULL,
+      match_scope TEXT NOT NULL CHECK(match_scope IN ('post','comment')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (brand_id) REFERENCES brands(id)
+    );
+  `);
+  const commentCols = (db.prepare("PRAGMA table_info(meta_comments)").all() as { name: string }[]).map((c) => c.name);
+  const phase1Cols = [
+    "reply_error", "platform_error", "auto_replied_at", "auto_hidden_at", "auto_routed_at",
+    "detected_product_name", "detected_product_source", "detected_post_title_source", "post_display_name",
+    "target_line_type", "target_line_value",
+  ];
+  for (const col of phase1Cols) {
+    if (!commentCols.includes(col)) {
+      const typ = col.includes("_at") ? "TEXT" : "TEXT";
+      db.exec(`ALTER TABLE meta_comments ADD COLUMN ${col} ${typ}`);
+      console.log("[DB Migration] meta_comments 已新增 " + col);
+    }
+  }
+}
+
+/** Phase 2：公開留言 Webhook 原始 payload、隱藏錯誤、平台動作紀錄 */
+function migrateMetaCommentPhase2() {
+  const commentCols = (db.prepare("PRAGMA table_info(meta_comments)").all() as { name: string }[]).map((c) => c.name);
+  if (!commentCols.includes("raw_webhook_payload")) {
+    db.exec("ALTER TABLE meta_comments ADD COLUMN raw_webhook_payload TEXT");
+    console.log("[DB Migration] meta_comments 已新增 raw_webhook_payload");
+  }
+  if (!commentCols.includes("hide_error")) {
+    db.exec("ALTER TABLE meta_comments ADD COLUMN hide_error TEXT");
+    console.log("[DB Migration] meta_comments 已新增 hide_error");
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS meta_comment_actions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      comment_id INTEGER NOT NULL,
+      action_type TEXT NOT NULL,
+      executed_at TEXT NOT NULL DEFAULT (datetime('now')),
+      success INTEGER NOT NULL DEFAULT 0,
+      error_message TEXT,
+      platform_response TEXT,
+      executor TEXT,
+      FOREIGN KEY (comment_id) REFERENCES meta_comments(id)
+    );
+  `);
+}
+
+/** Phase 3：主狀態、自動執行防重複 */
+function migrateMetaCommentPhase3() {
+  const commentCols = (db.prepare("PRAGMA table_info(meta_comments)").all() as { name: string }[]).map((c) => c.name);
+  if (!commentCols.includes("main_status")) {
+    db.exec("ALTER TABLE meta_comments ADD COLUMN main_status TEXT");
+    console.log("[DB Migration] meta_comments 已新增 main_status");
+  }
+  if (!commentCols.includes("auto_execution_run_at")) {
+    db.exec("ALTER TABLE meta_comments ADD COLUMN auto_execution_run_at TEXT");
+    console.log("[DB Migration] meta_comments 已新增 auto_execution_run_at");
+  }
+}
+
+/** 對話與訂單雙向綁定：客服在該對話中查過某訂單即建立連結 */
+function migrateContactOrderLinks() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS contact_order_links (
+      contact_id INTEGER NOT NULL,
+      global_order_id TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'manual',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (contact_id, global_order_id),
+      FOREIGN KEY (contact_id) REFERENCES contacts(id)
+    );
+  `);
+}
+
+/** Meta 留言互動中心：留言、模板、貼文 mapping、規則 */
+function migrateMetaCommentCenter() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS meta_comments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      brand_id INTEGER,
+      page_id TEXT NOT NULL,
+      page_name TEXT,
+      post_id TEXT NOT NULL,
+      post_name TEXT,
+      comment_id TEXT NOT NULL UNIQUE,
+      commenter_id TEXT,
+      commenter_name TEXT NOT NULL,
+      message TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      replied_at TEXT,
+      is_hidden INTEGER NOT NULL DEFAULT 0,
+      is_dm_sent INTEGER NOT NULL DEFAULT 0,
+      is_human_handled INTEGER NOT NULL DEFAULT 0,
+      contact_id INTEGER,
+      ai_intent TEXT,
+      issue_type TEXT,
+      priority TEXT DEFAULT 'normal',
+      ai_suggest_hide INTEGER NOT NULL DEFAULT 0,
+      ai_suggest_human INTEGER NOT NULL DEFAULT 0,
+      reply_first TEXT,
+      reply_second TEXT,
+      tags TEXT NOT NULL DEFAULT '[]',
+      FOREIGN KEY (brand_id) REFERENCES brands(id),
+      FOREIGN KEY (contact_id) REFERENCES contacts(id)
+    );
+    CREATE TABLE IF NOT EXISTS meta_comment_templates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      brand_id INTEGER,
+      category TEXT NOT NULL,
+      name TEXT NOT NULL,
+      reply_first TEXT NOT NULL DEFAULT '',
+      reply_second TEXT NOT NULL DEFAULT '',
+      reply_comfort TEXT NOT NULL DEFAULT '',
+      reply_dm_guide TEXT NOT NULL DEFAULT '',
+      tone_hint TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (brand_id) REFERENCES brands(id)
+    );
+    CREATE TABLE IF NOT EXISTS meta_post_mappings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      brand_id INTEGER NOT NULL,
+      page_id TEXT,
+      page_name TEXT,
+      post_id TEXT NOT NULL,
+      post_name TEXT,
+      product_name TEXT,
+      primary_url TEXT,
+      fallback_url TEXT,
+      tone_hint TEXT,
+      auto_comment_enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (brand_id) REFERENCES brands(id)
+    );
+    CREATE TABLE IF NOT EXISTS meta_comment_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      brand_id INTEGER,
+      page_id TEXT,
+      post_id TEXT,
+      priority INTEGER NOT NULL DEFAULT 0,
+      rule_type TEXT NOT NULL CHECK(rule_type IN ('use_template','hide','send_dm','to_human','add_tag')),
+      keyword_pattern TEXT NOT NULL,
+      template_id INTEGER,
+      tag_value TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (brand_id) REFERENCES brands(id),
+      FOREIGN KEY (template_id) REFERENCES meta_comment_templates(id)
+    );
+  `);
+  const ruleCols = (db.prepare("PRAGMA table_info(meta_comment_rules)").all() as { name: string }[]).map((c) => c.name);
+  if (!ruleCols.includes("enabled")) {
+    db.exec("ALTER TABLE meta_comment_rules ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1");
+    console.log("[DB Migration] meta_comment_rules.enabled 已新增");
+  }
+  const commentCols = (db.prepare("PRAGMA table_info(meta_comments)").all() as { name: string }[]).map((c) => c.name);
+  if (!commentCols.includes("applied_rule_id")) {
+    db.exec("ALTER TABLE meta_comments ADD COLUMN applied_rule_id INTEGER REFERENCES meta_comment_rules(id)");
+    db.exec("ALTER TABLE meta_comments ADD COLUMN applied_template_id INTEGER REFERENCES meta_comment_templates(id)");
+    db.exec("ALTER TABLE meta_comments ADD COLUMN applied_mapping_id INTEGER REFERENCES meta_post_mappings(id)");
+    db.exec("ALTER TABLE meta_comments ADD COLUMN reply_link_source TEXT");
+    console.log("[DB Migration] meta_comments 已新增 applied_rule_id, applied_template_id, applied_mapping_id, reply_link_source");
+  }
+  if (!commentCols.includes("is_simulated")) {
+    db.exec("ALTER TABLE meta_comments ADD COLUMN is_simulated INTEGER NOT NULL DEFAULT 0");
+    console.log("[DB Migration] meta_comments 已新增 is_simulated");
+  }
+  if (!commentCols.includes("assigned_agent_id")) {
+    db.exec("ALTER TABLE meta_comments ADD COLUMN assigned_agent_id INTEGER");
+    db.exec("ALTER TABLE meta_comments ADD COLUMN assigned_agent_name TEXT");
+    db.exec("ALTER TABLE meta_comments ADD COLUMN assigned_agent_avatar_url TEXT");
+    db.exec("ALTER TABLE meta_comments ADD COLUMN assignment_method TEXT");
+    db.exec("ALTER TABLE meta_comments ADD COLUMN assigned_at TEXT");
+    console.log("[DB Migration] meta_comments 已新增 分派欄位 assigned_agent_* / assignment_method / assigned_at");
+  }
+  if (!commentCols.includes("classifier_source")) {
+    db.exec("ALTER TABLE meta_comments ADD COLUMN classifier_source TEXT");
+    db.exec("ALTER TABLE meta_comments ADD COLUMN matched_rule_keyword TEXT");
+    console.log("[DB Migration] meta_comments 已新增 classifier_source, matched_rule_keyword");
+  }
+  if (!commentCols.includes("reply_flow_type")) {
+    db.exec("ALTER TABLE meta_comments ADD COLUMN reply_flow_type TEXT");
+    console.log("[DB Migration] meta_comments 已新增 reply_flow_type");
+  }
+  if (!commentCols.includes("matched_risk_rule_id")) {
+    db.exec("ALTER TABLE meta_comments ADD COLUMN matched_risk_rule_id INTEGER");
+    db.exec("ALTER TABLE meta_comments ADD COLUMN matched_rule_bucket TEXT");
+    console.log("[DB Migration] meta_comments 已新增 matched_risk_rule_id, matched_rule_bucket");
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS meta_comment_risk_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      rule_name TEXT NOT NULL DEFAULT '',
+      rule_bucket TEXT NOT NULL CHECK(rule_bucket IN ('whitelist','direct_hide','hide_and_route','route_only','gray_area')),
+      keyword_pattern TEXT NOT NULL DEFAULT '',
+      match_type TEXT NOT NULL DEFAULT 'contains' CHECK(match_type IN ('contains','exact','regex')),
+      priority INTEGER NOT NULL DEFAULT 0,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      brand_id INTEGER,
+      page_id TEXT,
+      action_reply INTEGER NOT NULL DEFAULT 0,
+      action_hide INTEGER NOT NULL DEFAULT 0,
+      action_route_line INTEGER NOT NULL DEFAULT 0,
+      route_line_type TEXT CHECK(route_line_type IN ('general','after_sale','none') OR route_line_type IS NULL),
+      action_mark_to_human INTEGER NOT NULL DEFAULT 0,
+      action_use_template_id INTEGER,
+      notes TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (brand_id) REFERENCES brands(id),
+      FOREIGN KEY (action_use_template_id) REFERENCES meta_comment_templates(id)
+    );
+  `);
+  const riskRuleCount = (db.prepare("SELECT COUNT(*) as c FROM meta_comment_risk_rules").get() as { c: number }).c;
+  if (riskRuleCount === 0) {
+    const now = new Date().toISOString();
+    const seed = (bucket: string, keyword: string, reply: number, hide: number, route: number, lineType: string | null, toHuman: number) =>
+      db.prepare(`
+        INSERT INTO meta_comment_risk_rules (rule_name, rule_bucket, keyword_pattern, match_type, priority, enabled, action_reply, action_hide, action_route_line, route_line_type, action_mark_to_human, created_at, updated_at)
+        VALUES (?, ?, ?, 'contains', 0, 1, ?, ?, ?, ?, ?, ?, ?)
+      `).run(`種子: ${keyword}`, bucket, keyword, reply, hide, route, lineType, toHuman, now, now);
+    for (const k of ["有貨", "哪裡買", "怎麼買", "價格", "官網", "連結", "適合我嗎", "孕婦可以嗎", "敏感肌可以嗎"]) seed("whitelist", k, 1, 0, 0, null, 0);
+    for (const k of ["淘寶", "蝦皮", "爛", "雷", "地雷", "不推薦", "盤", "騙", "垃圾", "浪費錢", "誇大", "不實", "呵呵", "笑死", "智商稅"]) seed("direct_hide", k, 0, 1, 0, null, 0);
+    for (const k of ["訂單", "沒收到", "漏寄", "少寄", "退貨", "退款", "取消", "改地址", "客服", "聯絡不上", "品質", "過敏", "瑕疵", "發票", "付款", "物流", "配送", "已讀不回"]) seed("hide_and_route", k, 1, 1, 1, "after_sale", 1);
+    for (const k of ["批發", "合作", "團購", "客製", "報價", "大量購買", "企業合作", "特殊需求"]) seed("route_only", k, 1, 0, 1, "general", 0);
+    for (const k of ["哈哈", "呵", "笑死", "太扯", "真的假的", "好喔", "不回喔"]) seed("gray_area", k, 0, 0, 0, null, 0);
+    console.log("[DB Migration] meta_comment_risk_rules 已寫入種子規則");
+  }
+  const mappingCols = (db.prepare("PRAGMA table_info(meta_post_mappings)").all() as { name: string }[]).map((c) => c.name);
+  if (!mappingCols.includes("preferred_flow")) {
+    db.exec("ALTER TABLE meta_post_mappings ADD COLUMN preferred_flow TEXT");
+    console.log("[DB Migration] meta_post_mappings 已新增 preferred_flow");
+  }
+  // 種子：若尚無留言則新增範例資料，方便驗收
+  const commentCount = (db.prepare("SELECT COUNT(*) as c FROM meta_comments").get() as { c: number }).c;
+  if (commentCount === 0) {
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO meta_comments (page_id, page_name, post_id, post_name, comment_id, commenter_name, message, created_at, ai_intent, priority)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run("page_demo", "示範粉專", "post_001", "春季活動貼文", "seed_comment_1", "王小明", "請問這款現在還有貨嗎？想買兩瓶", now, "product_inquiry", "normal");
+    db.prepare(`
+      INSERT INTO meta_comments (page_id, page_name, post_id, post_name, comment_id, commenter_name, message, created_at, ai_intent, priority, ai_suggest_human)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run("page_demo", "示範粉專", "post_002", "商品介紹貼文", "seed_comment_2", "陳小姐", "我上週訂的還沒收到，可以幫我查嗎？很急", now, "refund_after_sale", "high", 1);
+    console.log("[DB Migration] Meta 留言互動中心已寫入 2 筆範例留言");
+  }
+  const templateCount = (db.prepare("SELECT COUNT(*) as c FROM meta_comment_templates").get() as { c: number }).c;
+  if (templateCount === 0) {
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO meta_comment_templates (brand_id, category, name, reply_first, reply_second, reply_comfort, reply_dm_guide, tone_hint, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(null, "product_inquiry", "一般商品詢問（示範）", "您好，目前都有現貨喔～", "喜歡的話可以從這裡下單：{primary_url} 有問題再跟我說～", "不好意思造成您的困擾，我們會盡快為您處理。", "請私訊我們提供訂單編號，專人為您查詢。", "親切、活潑", now);
+    console.log("[DB Migration] Meta 留言互動中心已寫入 1 筆範例模板");
+  }
+  const lineTplCount = (db.prepare("SELECT COUNT(*) as c FROM meta_comment_templates WHERE category IN ('line_general','line_after_sale','line_promotion')").get() as { c: number }).c;
+  if (lineTplCount === 0) {
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO meta_comment_templates (brand_id, category, name, reply_first, reply_second, reply_comfort, reply_dm_guide, tone_hint, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(null, "line_general", "LINE 一般協助型", "", "", "", "這題比較適合由客服一對一幫你確認，我們把 LINE 放這邊給你 🤍\n如果想更快確認細節，LINE 客服這邊會比較方便協助你～", "自然、友善", now);
+    db.prepare(`
+      INSERT INTO meta_comment_templates (brand_id, category, name, reply_first, reply_second, reply_comfort, reply_dm_guide, tone_hint, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(null, "line_after_sale", "LINE 售後／客訴型", "", "", "抱歉讓你有不好的感受，這邊先跟你說聲不好意思 🙏\n為了更快幫你確認，麻煩加入 LINE 客服並提供資訊，我們會盡快協助你處理。", "抱歉讓你有不好的感受，這邊先跟你說聲不好意思 🙏\n為了更快幫你確認，麻煩加入 LINE 客服並提供資訊，我們會盡快協助你處理。", "誠懇、同理", now);
+    db.prepare(`
+      INSERT INTO meta_comment_templates (brand_id, category, name, reply_first, reply_second, reply_comfort, reply_dm_guide, tone_hint, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(null, "line_promotion", "LINE 導購型", "", "", "", "如果你想直接看更完整內容或讓客服幫你挑選，這邊也可以直接找我們 LINE 客服 ✨", "親切、邀請", now);
+    console.log("[DB Migration] Meta 留言分流中心已寫入 3 筆 LINE 導流話術模板");
+  }
+  const templateCols = (db.prepare("PRAGMA table_info(meta_comment_templates)").all() as { name: string }[]).map((c) => c.name);
+  if (!templateCols.includes("reply_private")) {
+    db.exec("ALTER TABLE meta_comment_templates ADD COLUMN reply_private TEXT");
+    console.log("[DB Migration] meta_comment_templates 已新增 reply_private（私訊版文案）");
+  }
+  const safeTplCount = (db.prepare("SELECT COUNT(*) as c FROM meta_comment_templates WHERE category IN ('safe_confirm_order','safe_confirm_emotional','external_platform_order','fraud_impersonation')").get() as { c: number }).c;
+  const now = new Date().toISOString();
+  const safeTplCols = (db.prepare("PRAGMA table_info(meta_comment_templates)").all() as { name: string }[]).map((c) => c.name);
+  const hasReplyPrivate = safeTplCols.includes("reply_private");
+  if (safeTplCount === 0) {
+    const ins = hasReplyPrivate
+      ? (brand: null, cat: string, name: string, r1: string, r2: string, rc: string, rd: string, rp: string, tone: string) =>
+          db.prepare(`
+            INSERT INTO meta_comment_templates (brand_id, category, name, reply_first, reply_second, reply_comfort, reply_dm_guide, reply_private, tone_hint, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(brand, cat, name, r1, r2, rc, rd, rp, tone, now)
+      : (brand: null, cat: string, name: string, r1: string, r2: string, rc: string, rd: string, _rp: string, tone: string) =>
+          db.prepare(`
+            INSERT INTO meta_comment_templates (brand_id, category, name, reply_first, reply_second, reply_comfort, reply_dm_guide, tone_hint, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(brand, cat, name, r1, r2, rc, rd, tone, now);
+    const dmOrder = "先跟您確認：若您是透過我們官方通路下單，請提供「訂單編號 + 下單手機」，我們會立刻幫您查。若是其他平台購買，建議向該平台客服確認會最快。";
+    const dmEmo = "不好意思讓您有不好的感受。我們先確認來源：請提供訂單編號與下單手機，我們會立刻幫您查；若為他平台購買，會引導您到正確客服。";
+    const dmPlatform = "若您是在蝦皮／其他平台購買，訂單與出貨以該平台為準，建議先聯繫該平台客服。若為官方通路下單，請提供訂單編號與下單手機，我們可幫您查。";
+    const dmFraud = "先提醒：我們不會用私人帳號要求轉帳或驗證碼。請提供對話截圖、付款資訊與對方帳號，我們協助確認是否冒用並給建議；必要時請同步報警與通知平台。";
+    ins(null, "safe_confirm_order", "待確認訂單來源｜安全確認（通用）",
+      "我先幫您確認一下 🙏\n若您是透過我們**官方通路**下單，麻煩您加入 LINE 並提供「訂單編號 / 下單手機 / 收件資訊」，我們會立刻為您查詢處理。\n若是其他平台購買，建議也同步向原購買平台客服確認，通常處理會更快。",
+      "👉 請私訊我們 LINE：{after_sale_line_url}\n送出「訂單編號 + 下單手機」我們就能快速幫您查到進度。",
+      "為了保護您的個資，也方便我們加速查詢，麻煩您私訊 LINE：{after_sale_line_url}\n送出「訂單編號 + 下單手機」，我們會立刻幫您確認進度與後續處理。",
+      "為了保護您的個資，也方便我們加速查詢，麻煩您私訊 LINE：{after_sale_line_url}\n送出「訂單編號 + 下單手機」，我們會立刻幫您確認進度與後續處理。",
+      dmOrder, "誠懇、不承諾");
+    ins(null, "safe_confirm_emotional", "待確認訂單來源｜情緒客訴版",
+      "真的抱歉讓您有不好的感受 🙏\n我們先協助您把狀況確認清楚：麻煩您加入 LINE 私訊訂單資訊，我們會立刻幫您查。\n若您是在其他平台購買，也會引導您到正確客服，避免延誤處理。",
+      "👉 請私訊 LINE：{after_sale_line_url}\n直接貼上「訂單編號 / 下單手機 / 問題截圖」，我們會更快協助您。",
+      "", "", dmEmo, "誠懇、同理、不承諾");
+    ins(null, "external_platform_order", "他平台訂單｜導正方向",
+      "我先跟您確認一下～如果您是在 **蝦皮 / 其他平台** 購買，訂單與出貨會以該平台系統為準，建議先聯繫原購買平台客服，處理會最快。\n若您是透過我們**官方通路**下單，也歡迎加入 LINE 私訊訂單資訊，我們一樣可以幫您確認。",
+      "若是官方通路訂單 👉 {after_sale_line_url}\n私訊「訂單編號 + 下單手機」我們立刻幫您查。",
+      "", "", dmPlatform, "中性、導正");
+    ins(null, "fraud_impersonation", "疑似詐騙／冒用｜蒐證引導",
+      "真的辛苦了…先提醒您：我們不會用私人帳號要求轉帳或提供驗證碼。\n麻煩您加入 LINE 私訊提供「對話截圖 / 付款資訊 / 對方帳號」，我們先協助您確認是否為冒用，並提供後續建議（必要時也建議同步報警與通知平台）。",
+      "👉 請私訊 LINE：{after_sale_line_url}\n直接貼上「對話截圖 + 付款證明」，我們會協助您確認與整理處理方向。",
+      "", "", dmFraud, "謹慎、同理、不承認");
+    console.log("[DB Migration] Meta 安全確認模板已寫入 4 筆（待確認訂單／他平台／詐騙蒐證，含私訊版）");
+  } else if (hasReplyPrivate) {
+    const dmOrder = "先跟您確認：若您是透過我們官方通路下單，請提供「訂單編號 + 下單手機」，我們會立刻幫您查。若是其他平台購買，建議向該平台客服確認會最快。";
+    const dmEmo = "不好意思讓您有不好的感受。我們先確認來源：請提供訂單編號與下單手機，我們會立刻幫您查；若為他平台購買，會引導您到正確客服。";
+    const dmPlatform = "若您是在蝦皮／其他平台購買，訂單與出貨以該平台為準，建議先聯繫該平台客服。若為官方通路下單，請提供訂單編號與下單手機，我們可幫您查。";
+    const dmFraud = "先提醒：我們不會用私人帳號要求轉帳或驗證碼。請提供對話截圖、付款資訊與對方帳號，我們協助確認是否冒用並給建議；必要時請同步報警與通知平台。";
+    db.prepare("UPDATE meta_comment_templates SET reply_private = ? WHERE category = 'safe_confirm_order'").run(dmOrder);
+    db.prepare("UPDATE meta_comment_templates SET reply_private = ? WHERE category = 'safe_confirm_emotional'").run(dmEmo);
+    db.prepare("UPDATE meta_comment_templates SET reply_private = ? WHERE category = 'external_platform_order'").run(dmPlatform);
+    db.prepare("UPDATE meta_comment_templates SET reply_private = ? WHERE category = 'fraud_impersonation'").run(dmFraud);
+    console.log("[DB Migration] Meta 安全確認模板已補上 reply_private（私訊版）");
+  }
+  const mappingCount = (db.prepare("SELECT COUNT(*) as c FROM meta_post_mappings").get() as { c: number }).c;
+  if (mappingCount === 0) {
+    const firstBrand = db.prepare("SELECT id FROM brands LIMIT 1").get() as { id: number } | undefined;
+    if (firstBrand) {
+      const now = new Date().toISOString();
+      db.prepare(`
+        INSERT INTO meta_post_mappings (brand_id, page_id, page_name, post_id, post_name, product_name, primary_url, tone_hint, auto_comment_enabled, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(firstBrand.id, "page_demo", "示範粉專", "post_001", "春季活動貼文", "經典精華液", "https://example.com/product/a", "親切、活潑", 1, now);
+      console.log("[DB Migration] Meta 留言互動中心已寫入 1 筆範例貼文對應");
+    }
+  }
+  console.log("[DB Migration] Meta 留言互動中心表已就緒");
+}
+
+function migrateAgentContactFlags() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_contact_flags (
+      agent_id INTEGER NOT NULL,
+      contact_id INTEGER NOT NULL,
+      flag TEXT NOT NULL CHECK(flag IN ('later','tracking')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (agent_id, contact_id),
+      FOREIGN KEY (agent_id) REFERENCES users(id),
+      FOREIGN KEY (contact_id) REFERENCES contacts(id)
+    );
+  `);
+}
+
+function migrateAgentDutyFields() {
+  const userCols = db.prepare("PRAGMA table_info(users)").all() as { name: string }[];
+  const userNames = userCols.map((c) => c.name);
+  if (!userNames.includes("is_online")) {
+    db.exec("ALTER TABLE users ADD COLUMN is_online INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!userNames.includes("is_available")) {
+    db.exec("ALTER TABLE users ADD COLUMN is_available INTEGER NOT NULL DEFAULT 1");
+  }
+  if (!userNames.includes("last_active_at")) {
+    db.exec("ALTER TABLE users ADD COLUMN last_active_at TEXT");
+  }
+  if (!userNames.includes("avatar_url")) {
+    db.exec("ALTER TABLE users ADD COLUMN avatar_url TEXT");
+  }
+
+  const agentCols = db.prepare("PRAGMA table_info(agent_status)").all() as { name: string }[];
+  const agentNames = agentCols.map((c) => c.name);
+  if (!agentNames.includes("max_active_conversations")) {
+    db.exec("ALTER TABLE agent_status ADD COLUMN max_active_conversations INTEGER NOT NULL DEFAULT 10");
+  }
+  if (!agentNames.includes("auto_assign_enabled")) {
+    db.exec("ALTER TABLE agent_status ADD COLUMN auto_assign_enabled INTEGER NOT NULL DEFAULT 1");
+  }
+
+  const contactCols = db.prepare("PRAGMA table_info(contacts)").all() as { name: string }[];
+  const contactNames = contactCols.map((c) => c.name);
+  if (!contactNames.includes("last_human_reply_at")) {
+    db.exec("ALTER TABLE contacts ADD COLUMN last_human_reply_at TEXT");
+  }
+  if (!contactNames.includes("reassign_count")) {
+    db.exec("ALTER TABLE contacts ADD COLUMN reassign_count INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!contactNames.includes("assignment_status")) {
+    db.exec("ALTER TABLE contacts ADD COLUMN assignment_status TEXT");
+  }
+  if (!contactNames.includes("assigned_at")) {
+    db.exec("ALTER TABLE contacts ADD COLUMN assigned_at TEXT");
+  }
+  if (!contactNames.includes("assignment_method")) {
+    db.exec("ALTER TABLE contacts ADD COLUMN assignment_method TEXT");
+  }
+  if (!contactNames.includes("needs_assignment")) {
+    db.exec("ALTER TABLE contacts ADD COLUMN needs_assignment INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!contactNames.includes("assignment_reason")) {
+    db.exec("ALTER TABLE contacts ADD COLUMN assignment_reason TEXT");
+  }
+  if (!contactNames.includes("response_sla_deadline_at")) {
+    db.exec("ALTER TABLE contacts ADD COLUMN response_sla_deadline_at TEXT");
+  }
+
+  const histCols = db.prepare("PRAGMA table_info(assignment_history)").all() as { name: string }[];
+  const histNames = histCols.map((c) => c.name);
+  if (!histNames.includes("action_type")) {
+    db.exec("ALTER TABLE assignment_history ADD COLUMN action_type TEXT");
+  }
+  if (!histNames.includes("operator_user_id")) {
+    db.exec("ALTER TABLE assignment_history ADD COLUMN operator_user_id INTEGER");
+  }
+
+  const defaultSchedule = [
+    ["work_start_time", "09:00"],
+    ["work_end_time", "18:00"],
+    ["lunch_start_time", "12:30"],
+    ["lunch_end_time", "13:30"],
+    ["human_first_reply_sla_minutes", "10"],
+    ["assignment_auto_enabled", "1"],
+    ["assignment_timeout_reassign_enabled", "1"],
+  ];
+  const insertSetting = db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)");
+  for (const [key, value] of defaultSchedule) {
+    insertSetting.run(key, value);
+  }
+
+  console.log("[DB Migration] 客服值班欄位（在線、負載、SLA、全域時段、分配紀錄）已就緒");
+}
+
+const CASE_FLOW_STATUSES = "('pending','processing','resolved','ai_handling','awaiting_human','high_risk','closed','new_case','pending_info','pending_order_id','assigned','waiting_customer','resolved_observe','reopened')";
+
+function migrateContactStatusCaseFlow() {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='contacts'").get() as { sql: string } | undefined;
+  const tableSql = row?.sql || "";
+  if (tableSql.includes("'assigned'")) return;
+  const checkMatch = tableSql.match(/CHECK\s*\(\s*status\s+IN\s*\([\s\S]*?\)\s*\)/);
+  if (!checkMatch) return;
+  console.log("[DB Migration] 擴充 contacts.status 支援案件流程狀態...");
+  applyContactStatusCaseFlowMigration(tableSql, checkMatch[0]);
+}
+
+/** 強制確保 contacts.status 的 CHECK 包含 assigned 等狀態（若先前 migration 未生效可補跑） */
+function ensureContactStatusIncludesAssigned() {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='contacts'").get() as { sql: string } | undefined;
+  const tableSql = row?.sql || "";
+  if (tableSql.includes("'assigned'") && tableSql.includes("'waiting_customer'")) return;
+  const checkMatch = tableSql.match(/CHECK\s*\(\s*status\s+IN\s*\([\s\S]*?\)\s*\)/);
+  let checkOld: string | null = checkMatch ? checkMatch[0] : null;
+  if (!checkOld) {
+    const idx = tableSql.indexOf("CHECK");
+    const parenStart = idx >= 0 ? tableSql.indexOf("(", idx) : -1;
+    if (parenStart >= 0) {
+      let depth = 1;
+      for (let i = parenStart + 1; i < tableSql.length; i++) {
+        if (tableSql[i] === "(") depth++;
+        else if (tableSql[i] === ")") { depth--; if (depth === 0) { checkOld = tableSql.slice(idx, i + 1); break; } }
+      }
+      if (checkOld && !checkOld.includes("status")) checkOld = null;
+    }
+  }
+  if (!checkOld) return;
+  console.log("[DB Migration] 補強 contacts.status CHECK，加入 assigned / waiting_customer 等狀態...");
+  applyContactStatusCaseFlowMigration(tableSql, checkOld);
+}
+
+function applyContactStatusCaseFlowMigration(tableSql: string, checkOld: string) {
+  const newSql = tableSql.replace(checkOld, `CHECK(status IN ${CASE_FLOW_STATUSES})`);
+  const createTableReplaced = newSql
+    .replace(/CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?(?:[\w.]*\.)?("?)contacts("?)\s*(\()/gi, "CREATE TABLE $1$2contacts_case_flow$3 $4");
+  if (createTableReplaced === newSql) return;
+  db.pragma("foreign_keys = OFF");
+  db.exec("DROP TABLE IF EXISTS contacts_case_flow;");
+  db.exec(createTableReplaced);
+  const cols = db.prepare("PRAGMA table_info(contacts)").all() as { name: string }[];
+  const colNames = cols.map((c) => c.name).join(",");
+  db.exec(`INSERT INTO contacts_case_flow (${colNames}) SELECT ${colNames} FROM contacts;`);
+  db.exec("DROP TABLE contacts;");
+  db.exec("ALTER TABLE contacts_case_flow RENAME TO contacts;");
+  db.pragma("foreign_keys = ON");
+  console.log("[DB Migration] contacts.status 已支援案件流程狀態（含 assigned）");
+}
+
+function migrateCaseManagement() {
+  const contactCols = db.prepare("PRAGMA table_info(contacts)").all() as { name: string }[];
+  const contactColNames = contactCols.map((c) => c.name);
+  const newCols: [string, string][] = [
+    ["assigned_agent_id", "INTEGER"],
+    ["intent_level", "TEXT"],
+    ["order_number_type", "TEXT"],
+    ["first_assigned_at", "TEXT"],
+    ["closed_at", "TEXT"],
+    ["closed_by_agent_id", "INTEGER"],
+    ["case_priority", "INTEGER"],
+  ];
+  for (const [col, typ] of newCols) {
+    if (!contactColNames.includes(col)) {
+      db.exec(`ALTER TABLE contacts ADD COLUMN ${col} ${typ}`);
+    }
+  }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_status (
+      user_id INTEGER PRIMARY KEY,
+      priority INTEGER NOT NULL DEFAULT 1,
+      on_duty INTEGER NOT NULL DEFAULT 1,
+      lunch_break INTEGER NOT NULL DEFAULT 0,
+      pause_new_cases INTEGER NOT NULL DEFAULT 0,
+      today_assigned_count INTEGER NOT NULL DEFAULT 0,
+      open_cases_count INTEGER NOT NULL DEFAULT 0,
+      work_start_time TEXT NOT NULL DEFAULT '09:00',
+      work_end_time TEXT NOT NULL DEFAULT '18:00',
+      lunch_start_time TEXT NOT NULL DEFAULT '12:00',
+      lunch_end_time TEXT NOT NULL DEFAULT '13:00',
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS assignment_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      contact_id INTEGER NOT NULL,
+      assigned_to_agent_id INTEGER NOT NULL,
+      assigned_at TEXT NOT NULL DEFAULT (datetime('now')),
+      assigned_by_agent_id INTEGER,
+      reassigned_from_agent_id INTEGER,
+      note TEXT,
+      FOREIGN KEY (contact_id) REFERENCES contacts(id),
+      FOREIGN KEY (assigned_to_agent_id) REFERENCES users(id)
+    );
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_assignment_history_contact ON assignment_history(contact_id);`);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS case_notifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      contact_id INTEGER NOT NULL,
+      channel TEXT NOT NULL DEFAULT 'in_app',
+      read_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (contact_id) REFERENCES contacts(id)
+    );
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_case_notifications_contact ON case_notifications(contact_id);`);
+
+  console.log("[DB Migration] 案件管理、客服狀態、分配紀錄表已就緒");
 }
 
 function migrateContactStatusExpansion() {
@@ -198,6 +791,9 @@ function migrateContactStatusExpansion() {
     }
     if (!contactColNames.includes("order_source")) {
       db.exec("ALTER TABLE contacts ADD COLUMN order_source TEXT");
+    }
+    if (!contactColNames.includes("ai_suggestions")) {
+      db.exec("ALTER TABLE contacts ADD COLUMN ai_suggestions TEXT");
     }
   }
 }

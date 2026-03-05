@@ -28,9 +28,11 @@ export interface ShoplineDateFilterResult {
   source: "shopline";
 }
 
-function buildBaseUrl(config: ShoplineConfig): string {
-  const domain = config.storeDomain.replace(/^https?:\/\//, "").replace(/\/$/, "");
-  return `https://${domain}/api/${SHOPLINE_API_VERSION}`;
+/** SHOPLINE Open API 固定 base（Token 識別商店），見 https://open-api.docs.shoplineapp.com/docs/openapi-request-example */
+const SHOPLINE_OPEN_API_BASE = "https://open.shopline.io";
+
+function buildBaseUrl(_config: ShoplineConfig): string {
+  return `${SHOPLINE_OPEN_API_BASE}/${SHOPLINE_API_VERSION}`;
 }
 
 function mapShoplineOrder(o: any): OrderInfo {
@@ -163,6 +165,7 @@ async function shoplineRequest(
         Accept: "application/json",
         "Content-Type": "application/json",
         Authorization: `Bearer ${config.apiToken}`,
+        "User-Agent": process.env.SHOPLINE_USER_AGENT || "OmniAgentConsole/1.0",
       },
     });
 
@@ -187,24 +190,38 @@ async function shoplineRequest(
   }
 }
 
+/** 官方 Get Orders 回傳 items；Search Orders 亦同。相容舊格式 orders / data */
+function parseOrdersResponse(data: any): any[] {
+  const raw = data.items ?? data.orders ?? data.data ?? [];
+  return Array.isArray(raw) ? raw : [];
+}
+
 export async function fetchShoplineOrders(
   config: ShoplineConfig,
   params: Record<string, string> = {}
 ): Promise<OrderInfo[]> {
-  const data = await shoplineRequest(config, "/orders", params);
+  const query = params.query ?? params.keyword ?? params.order_number;
+  const endpoint = query != null && String(query).trim() !== ""
+    ? "/orders/search"
+    : "/orders";
+  const searchParams: Record<string, string> = { ...params };
+  if (endpoint === "/orders/search" && query !== undefined) {
+    searchParams.query = String(query).trim();
+    delete searchParams.keyword;
+    delete searchParams.order_number;
+  }
+  const data = await shoplineRequest(config, endpoint, searchParams);
 
+  const orders = parseOrdersResponse(data);
   console.log(
-    "[SHOPLINE] 回傳結果: page=",
-    data.page || data.current_page || 1,
+    "[SHOPLINE] 回傳結果:",
+    endpoint,
+    "count=",
+    orders.length,
     "total=",
-    data.total || data.total_count || "N/A",
-    "orders count=",
-    Array.isArray(data.orders || data.items || data.data)
-      ? (data.orders || data.items || data.data).length
-      : "N/A"
+    data.pagination?.total ?? data.total ?? "N/A"
   );
 
-  const orders = data.orders || data.items || data.data || [];
   if (!Array.isArray(orders)) {
     console.error("[SHOPLINE] 回傳格式異常，非陣列:", typeof orders);
     return [];

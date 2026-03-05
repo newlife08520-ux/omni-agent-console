@@ -1,11 +1,12 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
-import { Users, Shield, Headphones, TrendingUp, Mail, Plus, Trash2, UserPlus, Pencil } from "lucide-react";
+import { Users, Shield, Headphones, TrendingUp, Mail, Plus, Trash2, UserPlus, Pencil, Upload, Circle, Loader2 } from "lucide-react";
 import { apiRequest, getQueryFn } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import type { TeamMember } from "@shared/schema";
@@ -29,6 +30,8 @@ export default function TeamPage() {
   const [editRole, setEditRole] = useState("cs_agent");
   const [creating, setCreating] = useState(false);
   const [updating, setUpdating] = useState(false);
+  const [uploadingAvatar, setUploadingAvatar] = useState<number | null>(null);
+  const avatarInputRef = useRef<HTMLInputElement>(null);
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -103,6 +106,37 @@ export default function TeamPage() {
     }
   };
 
+  const handleAvatarClick = (memberId: number) => {
+    avatarInputRef.current?.setAttribute("data-member-id", String(memberId));
+    avatarInputRef.current?.click();
+  };
+
+  const handleAvatarFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    const memberIdStr = e.currentTarget.getAttribute("data-member-id");
+    const memberId = memberIdStr ? parseInt(memberIdStr, 10) : null;
+    if (!file || !memberId || Number.isNaN(memberId)) return;
+    e.target.value = "";
+    setUploadingAvatar(memberId);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await fetch(`/api/team/${memberId}/avatar`, {
+        method: "POST",
+        body: form,
+        credentials: "include",
+      });
+      if (!res.ok) throw new Error(await res.text());
+      queryClient.invalidateQueries({ queryKey: ["/api/team"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/team/available-agents"] });
+      toast({ title: "頭像已更新" });
+    } catch (_e) {
+      toast({ title: "上傳失敗", variant: "destructive" });
+    } finally {
+      setUploadingAvatar(null);
+    }
+  };
+
   if (isLoading) {
     return <div className="flex items-center justify-center h-full"><p className="text-stone-400">載入中...</p></div>;
   }
@@ -157,25 +191,54 @@ export default function TeamPage() {
           <Users className="w-4 h-4 text-stone-400" />
           <span className="text-sm font-semibold text-stone-800">團隊成員列表</span>
         </div>
+        <input ref={avatarInputRef} type="file" accept=".jpg,.jpeg,.png,.webp" className="hidden" data-member-id="" onChange={handleAvatarFile} />
         <div className="divide-y divide-stone-100">
           {members.map((member) => {
             const roleInfo = ROLE_MAP[member.role] || ROLE_MAP.cs_agent;
             const RoleIcon = roleInfo.icon;
+            const isCsAgent = member.role === "cs_agent";
             return (
               <div key={member.id} className="flex items-center gap-4 px-5 py-4 hover:bg-stone-50 transition-colors" data-testid={`team-member-${member.id}`}>
-                <Avatar className="w-12 h-12 shrink-0">
-                  <AvatarFallback className={`${getAvatarColor(member.id)} text-white font-semibold text-base`}>{member.display_name.charAt(0)}</AvatarFallback>
-                </Avatar>
+                <button type="button" onClick={() => handleAvatarClick(member.id)} className="relative shrink-0 rounded-full focus:outline-none focus:ring-2 focus:ring-emerald-400">
+                  <Avatar className="w-12 h-12">
+                    {member.avatar_url && <AvatarImage src={member.avatar_url} alt={member.display_name} />}
+                    <AvatarFallback className={`${getAvatarColor(member.id)} text-white font-semibold text-base`}>{member.display_name.charAt(0)}</AvatarFallback>
+                  </Avatar>
+                  {uploadingAvatar === member.id && (
+                    <span className="absolute inset-0 rounded-full bg-black/40 flex items-center justify-center">
+                      <Loader2 className="w-5 h-5 text-white animate-spin" />
+                    </span>
+                  )}
+                  <span className="absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full bg-white border border-stone-200 flex items-center justify-center">
+                    <Upload className="w-2.5 h-2.5 text-stone-500" />
+                  </span>
+                </button>
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-sm font-semibold text-stone-800">{member.display_name}</span>
                     <span className={`inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-full border ${roleInfo.color}`}>
                       <RoleIcon className="w-3 h-3" />{roleInfo.label}
                     </span>
+                    {isCsAgent && (
+                      <>
+                        {member.is_online === 1 ? (
+                          <span className="inline-flex items-center gap-0.5 text-[10px] text-emerald-600"><Circle className="w-2 h-2 fill-current" />在線</span>
+                        ) : (
+                          <span className="text-[10px] text-stone-400">離線</span>
+                        )}
+                        <span className="text-[10px] text-stone-500">
+                          {member.open_cases_count ?? 0}/{member.max_active_conversations ?? 10} 對話
+                        </span>
+                        {member.auto_assign_enabled === 1 && <span className="text-[10px] text-sky-600">自動分配</span>}
+                      </>
+                    )}
                   </div>
                   <div className="flex items-center gap-1.5 mt-0.5">
                     <Mail className="w-3 h-3 text-stone-400" />
                     <span className="text-xs text-stone-500">@{member.username}</span>
+                    {isCsAgent && member.last_active_at && (
+                      <span className="text-[10px] text-stone-400">· 最後活動 {new Date(member.last_active_at).toLocaleString("zh-TW", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>
+                    )}
                   </div>
                 </div>
                 <div className="flex items-center gap-1">

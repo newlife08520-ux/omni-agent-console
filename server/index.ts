@@ -3,12 +3,12 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import session from "express-session";
-import MemoryStore from "memorystore";
 import path from "path";
+import * as assignment from "./assignment";
+import { getUploadsDir } from "./data-dir";
 
 const app = express();
 const httpServer = createServer(app);
-const MemStore = MemoryStore(session);
 
 declare module "http" {
   interface IncomingMessage {
@@ -35,20 +35,17 @@ app.use("/api", (_req, res, next) => {
 });
 app.set("etag", false);
 
-app.use(
-  session({
-    secret: process.env.SESSION_SECRET || "omnichannel-secret-key",
-    resave: false,
-    saveUninitialized: false,
-    store: new MemStore({ checkPeriod: 86400000 }),
-    cookie: {
-      maxAge: 24 * 60 * 60 * 1000,
-      httpOnly: true,
-      secure: false,
-      sameSite: "lax",
-    },
-  }),
-);
+if (process.env.NODE_ENV === "production") {
+  const secret = process.env.SESSION_SECRET?.trim();
+  if (!secret) {
+    console.error("FATAL: In production, SESSION_SECRET must be set. Refusing to start.");
+    process.exit(1);
+  }
+  if (!process.env.REDIS_URL?.trim()) {
+    console.error("FATAL: In production, REDIS_URL must be set for session persistence. Refusing to start.");
+    process.exit(1);
+  }
+}
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
@@ -64,23 +61,11 @@ export function log(message: string, source = "express") {
 app.use((req, res, next) => {
   const start = Date.now();
   const path = req.path;
-  let capturedJsonResponse: Record<string, any> | undefined = undefined;
-
-  const originalResJson = res.json;
-  res.json = function (bodyJson, ...args) {
-    capturedJsonResponse = bodyJson;
-    return originalResJson.apply(res, [bodyJson, ...args]);
-  };
 
   res.on("finish", () => {
     const duration = Date.now() - start;
     if (path.startsWith("/api")) {
-      let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
-      if (capturedJsonResponse) {
-        logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
-      }
-
-      log(logLine);
+      log(`${req.method} ${path} ${res.statusCode} in ${duration}ms`);
     }
   });
 
@@ -88,45 +73,86 @@ app.use((req, res, next) => {
 });
 
 (async () => {
-  app.use("/uploads", express.static(path.resolve(process.cwd(), "uploads")));
-  await registerRoutes(httpServer, app);
+  try {
+    let sessionStore: session.Store;
+    const redisUrl = process.env.REDIS_URL?.trim();
+    if (redisUrl) {
+      const { createClient } = await import("redis");
+      const { RedisStore } = await import("connect-redis");
+      const redisClient = createClient({ url: redisUrl });
+      await redisClient.connect();
+      redisClient.on("error", (err: Error) => console.error("[Redis]", err.message));
+      sessionStore = new RedisStore({ client: redisClient, prefix: "omni:sess:" });
+    } else {
+      if (process.env.NODE_ENV === "production") {
+        console.error("FATAL: In production, REDIS_URL must be set. Refusing to start.");
+        process.exit(1);
+      }
+      const MemoryStore = (await import("memorystore")).default;
+      const MemStore = MemoryStore(session);
+      sessionStore = new MemStore({ checkPeriod: 86400000 });
+    }
+    app.use(
+      session({
+        secret: process.env.SESSION_SECRET || "omnichannel-secret-key",
+        resave: false,
+        saveUninitialized: false,
+        store: sessionStore,
+        cookie: {
+          maxAge: 24 * 60 * 60 * 1000,
+          httpOnly: true,
+          secure: false,
+          sameSite: "lax",
+        },
+      }),
+    );
 
-  app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
-    const status = err.status || err.statusCode || 500;
-    const message = err.message || "Internal Server Error";
+    app.use("/uploads", express.static(getUploadsDir()));
+    await registerRoutes(httpServer, app);
 
-    console.error("Internal Server Error:", err);
+    app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+      const status = err.status || err.statusCode || 500;
+      const message = err.message || "Internal Server Error";
 
-    if (res.headersSent) {
-      return next(err);
+      console.error("Internal Server Error:", err);
+
+      if (res.headersSent) {
+        return next(err);
+      }
+
+      return res.status(status).json({ message });
+    });
+
+    if (process.env.NODE_ENV === "production") {
+      serveStatic(app);
+    } else {
+      const { setupVite } = await import("./vite");
+      await setupVite(httpServer, app);
     }
 
-    return res.status(status).json({ message });
-  });
+    const port = parseInt(process.env.PORT || "5001", 10);
 
-  // importantly only setup vite in development and after
-  // setting up all the other routes so the catch-all route
-  // doesn't interfere with the other routes
-  if (process.env.NODE_ENV === "production") {
-    serveStatic(app);
-  } else {
-    const { setupVite } = await import("./vite");
-    await setupVite(httpServer, app);
-  }
+    httpServer.on("error", (err: NodeJS.ErrnoException) => {
+      console.error("[server] Listen error:", err.message);
+      if (err.code === "EADDRINUSE") {
+        console.error(`[server] Port ${port} is already in use. Change PORT or stop the other process.`);
+      }
+      process.exit(1);
+    });
 
-  // ALWAYS serve the app on the port specified in the environment variable PORT
-  // Other ports are firewalled. Default to 5000 if not specified.
-  // this serves both the API and the client.
-  // It is the only port that is not firewalled.
-  const port = parseInt(process.env.PORT || "5000", 10);
-  httpServer.listen(
-    {
-      port,
-      host: "0.0.0.0",
-      reusePort: true,
-    },
-    () => {
+    httpServer.listen(port, "0.0.0.0", () => {
       log(`serving on port ${port}`);
+
+      setInterval(() => {
+        try {
+          const results = assignment.runOverdueReassign();
+          if (results.some((r) => r.reassigned)) {
+            console.log("[assignment] 逾時重分配:", results.filter((r) => r.reassigned).map((r) => r.contactId));
+          }
+        } catch (e) {
+          console.error("[assignment] runOverdueReassign error:", e);
+        }
+      }, 60 * 1000);
 
       const domain = process.env.APP_DOMAIN
         ? `https://${process.env.APP_DOMAIN}`
@@ -141,6 +167,9 @@ app.use((req, res, next) => {
       console.log("=".repeat(70));
       console.log(`  SSE  Events URL   : ${domain}/api/events`);
       console.log("=".repeat(70) + "\n");
-    },
-  );
+    });
+  } catch (err) {
+    console.error("[server] Startup failed:", err);
+    process.exit(1);
+  }
 })();

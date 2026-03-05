@@ -4,3 +4,24 @@ dist
 server/public
 vite.config.ts.*
 *.tar.gz
+.env
+omnichannel.db
+uploads/
+# env
+.env
+.env.*
+!.env.example
+
+# database
+*.db
+*.db-wal
+*.db-shm
+data/
+
+# uploads / generated files
+uploads/
+*.log
+
+# local tool / cache folders
+.local/
+.replit/

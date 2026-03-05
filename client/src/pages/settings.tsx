@@ -11,7 +11,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Eye, EyeOff, Save, Key, Shield, MessageSquare, Plug, Loader2, Palette, Type, Image,
   MessageCircle, Zap, AlertTriangle, ShoppingBag, Building2, Plus, Pencil, Trash2,
-  Hash, CheckCircle, XCircle, ExternalLink, RefreshCw, Wifi, WifiOff, CircleDot,
+  Hash, CheckCircle, XCircle, ExternalLink, RefreshCw, Wifi, WifiOff, CircleDot, Users, Tag, ChevronUp, ChevronDown,
 } from "lucide-react";
 import { apiRequest, getQueryFn } from "@/lib/queryClient";
 import { useBrand } from "@/lib/brand-context";
@@ -52,6 +52,104 @@ function StatusBadge({ status, message }: { status: HealthStatus; message?: stri
       <StatusDot status={status} />
       {c.label}
     </span>
+  );
+}
+
+function ScheduleForm() {
+  const queryClient = useQueryClient();
+  const { data: schedule, isLoading } = useQuery<{ work_start_time: string; work_end_time: string; lunch_start_time: string; lunch_end_time: string }>({
+    queryKey: ["/api/settings/schedule"],
+    queryFn: getQueryFn({ on401: "throw" }),
+  });
+  const [form, setForm] = useState({ work_start_time: "09:00", work_end_time: "18:00", lunch_start_time: "12:30", lunch_end_time: "13:30" });
+  const [saving, setSaving] = useState(false);
+  const { toast } = useToast();
+  useEffect(() => {
+    if (schedule) setForm(schedule);
+  }, [schedule]);
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const updated = await apiRequest("PUT", "/api/settings/schedule", form) as { work_start_time: string; work_end_time: string; lunch_start_time: string; lunch_end_time: string };
+      queryClient.setQueryData(["/api/settings/schedule"], updated);
+      toast({ title: "已儲存客服時段" });
+    } catch (_e) {
+      toast({ title: "儲存失敗", variant: "destructive" });
+    } finally {
+      setSaving(false);
+    }
+  };
+  if (isLoading) return <div className="text-xs text-stone-400">載入中...</div>;
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      <div>
+        <label className="text-xs font-medium text-stone-600 block mb-1">上班開始</label>
+        <Input type="time" value={form.work_start_time} onChange={(e) => setForm((p) => ({ ...p, work_start_time: e.target.value }))} className="bg-stone-50 border-stone-200" />
+      </div>
+      <div>
+        <label className="text-xs font-medium text-stone-600 block mb-1">下班時間</label>
+        <Input type="time" value={form.work_end_time} onChange={(e) => setForm((p) => ({ ...p, work_end_time: e.target.value }))} className="bg-stone-50 border-stone-200" />
+      </div>
+      <div>
+        <label className="text-xs font-medium text-stone-600 block mb-1">午休開始</label>
+        <Input type="time" value={form.lunch_start_time} onChange={(e) => setForm((p) => ({ ...p, lunch_start_time: e.target.value }))} className="bg-stone-50 border-stone-200" />
+      </div>
+      <div>
+        <label className="text-xs font-medium text-stone-600 block mb-1">午休結束</label>
+        <Input type="time" value={form.lunch_end_time} onChange={(e) => setForm((p) => ({ ...p, lunch_end_time: e.target.value }))} className="bg-stone-50 border-stone-200" />
+      </div>
+      <div className="col-span-2 sm:col-span-4 flex justify-end">
+        <Button size="sm" onClick={handleSave} disabled={saving} className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs">
+          <Save className="w-3.5 h-3.5 mr-1" />{saving ? "儲存中..." : "儲存時段"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function AssignmentRulesForm() {
+  const { data: rules, isLoading } = useQuery<{ human_first_reply_sla_minutes: number; assignment_auto_enabled: boolean; assignment_timeout_reassign_enabled: boolean }>({
+    queryKey: ["/api/settings/assignment-rules"],
+    queryFn: getQueryFn({ on401: "throw" }),
+  });
+  const [form, setForm] = useState({ human_first_reply_sla_minutes: 10, assignment_auto_enabled: true, assignment_timeout_reassign_enabled: true });
+  const [saving, setSaving] = useState(false);
+  const { toast } = useToast();
+  useEffect(() => {
+    if (rules) setForm({ human_first_reply_sla_minutes: rules.human_first_reply_sla_minutes, assignment_auto_enabled: rules.assignment_auto_enabled, assignment_timeout_reassign_enabled: rules.assignment_timeout_reassign_enabled });
+  }, [rules]);
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await apiRequest("PUT", "/api/settings/assignment-rules", form);
+      toast({ title: "已儲存分配規則" });
+    } catch (_e) {
+      toast({ title: "儲存失敗", variant: "destructive" });
+    } finally {
+      setSaving(false);
+    }
+  };
+  if (isLoading) return <div className="text-xs text-stone-400">載入中...</div>;
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-4">
+        <label className="text-xs font-medium text-stone-600">首次回覆 SLA（分鐘）</label>
+        <Input type="number" min={1} max={120} value={form.human_first_reply_sla_minutes} onChange={(e) => setForm((p) => ({ ...p, human_first_reply_sla_minutes: Math.min(120, Math.max(1, parseInt(e.target.value, 10) || 10)) }))} className="w-20 h-8 text-xs bg-stone-50 border-stone-200" />
+      </div>
+      <div className="flex items-center justify-between gap-4">
+        <span className="text-xs font-medium text-stone-600">啟用自動分配</span>
+        <Switch checked={form.assignment_auto_enabled} onCheckedChange={(v) => setForm((p) => ({ ...p, assignment_auto_enabled: v }))} />
+      </div>
+      <div className="flex items-center justify-between gap-4">
+        <span className="text-xs font-medium text-stone-600">逾時未回覆自動重分配</span>
+        <Switch checked={form.assignment_timeout_reassign_enabled} onCheckedChange={(v) => setForm((p) => ({ ...p, assignment_timeout_reassign_enabled: v }))} />
+      </div>
+      <div className="flex justify-end pt-2">
+        <Button size="sm" onClick={handleSave} disabled={saving} className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs">
+          <Save className="w-3.5 h-3.5 mr-1" />{saving ? "儲存中..." : "儲存規則"}
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -581,6 +679,98 @@ function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
   );
 }
 
+function TagShortcutsManager() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  const { data: list = [], isLoading } = useQuery<{ name: string; order: number }[]>({
+    queryKey: ["/api/settings/tag-shortcuts"],
+    queryFn: getQueryFn({ on401: "throw" }),
+  });
+  const [newName, setNewName] = useState("");
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [editValue, setEditValue] = useState("");
+
+  const saveList = async (tags: { name: string; order: number }[]) => {
+    try {
+      await apiRequest("PUT", "/api/settings/tag-shortcuts", { tags });
+      queryClient.invalidateQueries({ queryKey: ["/api/settings/tag-shortcuts"] });
+      toast({ title: "已儲存標籤設定" });
+    } catch (_e) {
+      toast({ title: "儲存失敗", variant: "destructive" });
+    }
+  };
+
+  const handleAdd = () => {
+    const name = newName.trim();
+    if (!name) return;
+    const next = [...list, { name, order: list.length }];
+    saveList(next);
+    setNewName("");
+  };
+
+  const handleDelete = (index: number) => {
+    const next = list.filter((_, i) => i !== index).map((t, i) => ({ ...t, order: i }));
+    saveList(next);
+    setEditingIndex(null);
+  };
+
+  const handleRename = (index: number, newVal: string) => {
+    if (editingIndex !== index) return;
+    const val = newVal.trim();
+    if (!val) { setEditingIndex(null); return; }
+    const next = list.map((t, i) => (i === index ? { ...t, name: val } : t));
+    saveList(next);
+    setEditingIndex(null);
+  };
+
+  const handleMove = (index: number, dir: number) => {
+    const to = index + dir;
+    if (to < 0 || to >= list.length) return;
+    const next = [...list];
+    [next[index], next[to]] = [next[to], next[index]];
+    saveList(next.map((t, i) => ({ ...t, order: i })));
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2 mb-4">
+        <div className="w-8 h-8 rounded-xl bg-sky-100 flex items-center justify-center"><Tag className="w-4 h-4 text-sky-600" /></div>
+        <div>
+          <span className="text-sm font-semibold text-stone-800">快速選取常駐標籤</span>
+          <p className="text-xs text-stone-500">管理對話頁「快速選取」區的標籤，可新增、刪除、改名、排序，重整後仍存在</p>
+        </div>
+      </div>
+      {isLoading ? (
+        <p className="text-xs text-stone-400">載入中...</p>
+      ) : (
+        <>
+          <div className="flex gap-2">
+            <Input placeholder="新增標籤名稱" value={newName} onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleAdd()} className="bg-stone-50 border-stone-200 text-sm max-w-[180px]" data-testid="input-new-tag-shortcut" />
+            <Button size="sm" onClick={handleAdd} disabled={!newName.trim()} className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs" data-testid="button-add-tag-shortcut"><Plus className="w-3.5 h-3.5 mr-1" />新增</Button>
+          </div>
+          <ul className="space-y-1.5">
+            {list.map((t, i) => (
+              <li key={`${t.name}-${i}`} className="flex items-center gap-2 py-1.5 px-2 rounded-lg bg-stone-50 border border-stone-100">
+                <div className="flex items-center gap-0.5 shrink-0">
+                  <Button type="button" size="icon" variant="ghost" className="h-6 w-6" onClick={() => handleMove(i, -1)} disabled={i === 0} data-testid={`button-tag-up-${i}`}><ChevronUp className="w-3 h-3" /></Button>
+                  <Button type="button" size="icon" variant="ghost" className="h-6 w-6" onClick={() => handleMove(i, 1)} disabled={i === list.length - 1} data-testid={`button-tag-down-${i}`}><ChevronDown className="w-3 h-3" /></Button>
+                </div>
+                {editingIndex === i ? (
+                  <Input value={editValue} onChange={(e) => setEditValue(e.target.value)} onBlur={() => handleRename(i, editValue)} onKeyDown={(e) => { if (e.key === "Enter") handleRename(i, editValue); if (e.key === "Escape") setEditingIndex(null); }} className="h-7 text-xs flex-1" autoFocus data-testid={`input-rename-tag-${i}`} />
+                ) : (
+                  <span className="text-sm text-stone-800 flex-1 truncate" onDoubleClick={() => { setEditingIndex(i); setEditValue(t.name); }} data-testid={`text-tag-name-${i}`}>{t.name}</span>
+                )}
+                <Button type="button" size="icon" variant="ghost" className="h-7 w-7 text-stone-400 hover:text-red-600" onClick={() => handleDelete(i)} data-testid={`button-delete-tag-${i}`}><Trash2 className="w-3.5 h-3.5" /></Button>
+              </li>
+            ))}
+          </ul>
+          {list.length === 0 && <p className="text-xs text-stone-400">尚無標籤，請新增後儲存。此列表會顯示在對話頁的「快速選取」區。</p>}
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function SettingsPage({ userRole }: SettingsPageProps) {
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
   const [formValues, setFormValues] = useState<Record<string, string>>({});
@@ -687,7 +877,7 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
   }
 
   const apiKeyFields = [
-    { key: "openai_api_key", label: "OpenAI API 金鑰", icon: Key, placeholder: "sk-...", description: "用於 AI 自動回覆功能 (模型: gpt-5.2)", testType: "openai" },
+    { key: "openai_api_key", label: "OpenAI API 金鑰", icon: Key, placeholder: "sk-...", description: "用於 AI 自動回覆（模型可由環境變數 OPENAI_MODEL 或系統設定 openai_model 指定）", testType: "openai" },
   ];
 
   return (
@@ -830,6 +1020,38 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
           </div>
         </div>
       </div>
+
+      {isSuperAdmin && (
+        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="section-tag-shortcuts">
+          <TagShortcutsManager />
+        </div>
+      )}
+
+      {isSuperAdmin && (
+        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="section-schedule">
+          <div className="flex items-center gap-2 mb-4">
+            <div className="w-8 h-8 rounded-xl bg-violet-100 flex items-center justify-center"><CircleDot className="w-4 h-4 text-violet-600" /></div>
+            <div>
+              <span className="text-sm font-semibold text-stone-800">人工客服服務時段</span>
+              <p className="text-xs text-stone-500">AI 回覆為 24 小時；此設定僅影響「真人回覆」是否有人接案。轉人工時若在午休或下班時段，AI 會主動提醒客人稍後由專人回覆。</p>
+            </div>
+          </div>
+          <ScheduleForm />
+        </div>
+      )}
+
+      {isSuperAdmin && (
+        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="section-assignment-rules">
+          <div className="flex items-center gap-2 mb-4">
+            <div className="w-8 h-8 rounded-xl bg-sky-100 flex items-center justify-center"><Users className="w-4 h-4 text-sky-600" /></div>
+            <div>
+              <span className="text-sm font-semibold text-stone-800">客服分配規則</span>
+              <p className="text-xs text-stone-500">SLA 逾時分鐘數、是否自動分配、逾時是否自動改派</p>
+            </div>
+          </div>
+          <AssignmentRulesForm />
+        </div>
+      )}
 
       {isSuperAdmin && (
         <>

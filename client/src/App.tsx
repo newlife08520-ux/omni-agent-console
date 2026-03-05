@@ -1,21 +1,68 @@
-import { Switch, Route, useLocation, Redirect } from "wouter";
+import React from "react";
+import { Switch, Route, Link } from "wouter";
 import { queryClient, getQueryFn } from "./lib/queryClient";
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppSidebar } from "@/components/app-sidebar";
 import { BrandProvider } from "@/lib/brand-context";
+import { ChatViewProvider } from "@/lib/chat-view-context";
 import LoginPage from "@/pages/login";
 import ChatPage from "@/pages/chat";
+import CommentCenterPage from "./pages/comment-center";
 import SettingsPage from "@/pages/settings";
 import KnowledgePage from "@/pages/knowledge";
 import TeamPage from "@/pages/team";
 import AnalyticsPage from "@/pages/analytics";
+import PerformancePage from "@/pages/performance";
 import NotFound from "@/pages/not-found";
 import { Button } from "@/components/ui/button";
-import { LogOut, User, ShieldAlert } from "lucide-react";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { LogOut, ShieldAlert, RefreshCw, Building2, Settings, Bell, Eye } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
-import type { Setting, UserRole, ROLE_LABELS } from "@shared/schema";
+import { useBrand } from "@/lib/brand-context";
+import type { Setting } from "@shared/schema";
+
+class AppErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean; error: unknown }
+> {
+  state = { hasError: false, error: undefined as unknown };
+
+  static getDerivedStateFromError(error: unknown) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: unknown) {
+    console.error("App error:", error);
+    if (error instanceof Error) console.error("App error stack:", error.stack);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      const msg =
+        this.state.error instanceof Error
+          ? this.state.error.message
+          : "頁面載入時發生問題，請重新整理再試。";
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-[#faf9f5] p-4">
+          <div className="text-center max-w-md">
+            <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-red-50 flex items-center justify-center">
+              <ShieldAlert className="w-8 h-8 text-red-400" />
+            </div>
+            <h2 className="text-lg font-semibold text-stone-800">發生錯誤</h2>
+            <p className="text-sm text-stone-500 mt-2">{msg}</p>
+            <Button className="mt-6" onClick={() => window.location.reload()} data-testid="button-reload">
+              <RefreshCw className="w-4 h-4 mr-2" />
+              重新整理
+            </Button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 const ROLE_DISPLAY: Record<string, string> = {
   super_admin: "超級管理員",
@@ -23,12 +70,106 @@ const ROLE_DISPLAY: Record<string, string> = {
   cs_agent: "客服人員",
 };
 
+function AppHeader({
+  systemName,
+  logoUrl,
+  onLogout,
+  userRole,
+}: {
+  systemName: string;
+  logoUrl: string;
+  onLogout: () => void;
+  userRole: string;
+}) {
+  const { selectedBrand, selectedBrandId } = useBrand();
+  const title = selectedBrand?.name || systemName;
+  const canSettings = userRole === "super_admin" || userRole === "marketing_manager";
+  const isManager = userRole === "super_admin" || userRole === "marketing_manager";
+  const { data: unreadData } = useQuery<{ count: number }>({
+    queryKey: ["/api/notifications/unread-count"],
+    queryFn: getQueryFn({ on401: "returnNull" }),
+    refetchInterval: 30000,
+  });
+  const unreadCount = unreadData?.count ?? 0;
+  const { data: managerStats } = useQuery<{ urgent: number; unassigned: number }>({
+    queryKey: ["/api/manager-stats", selectedBrandId ?? "all"],
+    queryFn: async () => {
+      const url = selectedBrandId ? `/api/manager-stats?brand_id=${selectedBrandId}` : "/api/manager-stats";
+      const res = await fetch(url, { credentials: "include" });
+      if (!res.ok) throw new Error(String(res.status));
+      return res.json();
+    },
+    enabled: isManager,
+    refetchInterval: 15000,
+  });
+  return (
+    <header className="flex items-center justify-between gap-4 px-5 py-3 border-b border-stone-200 bg-white/95 backdrop-blur-sm shrink-0">
+      <div className="flex items-center gap-3 min-w-0">
+        {logoUrl ? (
+          <img src={logoUrl} alt="" className="w-9 h-9 rounded-xl object-cover shrink-0" />
+        ) : (
+          <div className="w-9 h-9 rounded-xl bg-stone-700 flex items-center justify-center shrink-0">
+            <Building2 className="w-5 h-5 text-white" />
+          </div>
+        )}
+        <div className="min-w-0">
+          <h1 className="text-sm font-semibold text-stone-800 truncate" data-testid="text-header-title">{title}</h1>
+          <p className="text-[11px] text-stone-500 truncate">{selectedBrand ? "品牌工作區" : "全通路中控台"}</p>
+        </div>
+      </div>
+      <div className="flex items-center gap-3 shrink-0">
+        <span className="inline-flex items-center gap-1 text-[11px] text-stone-500">
+          <Eye className="w-3.5 h-3.5" />
+          {userRole === "cs_agent" ? "客服" : "主管"}
+        </span>
+        {isManager && (managerStats?.urgent != null || managerStats?.unassigned != null) && (
+          <span className="inline-flex items-center gap-2 text-[11px]">
+            <span className="text-red-600 font-medium">緊急 {managerStats?.urgent ?? 0}</span>
+            <span className="text-stone-400">|</span>
+            <span className="text-amber-600 font-medium">待分配 {managerStats?.unassigned ?? 0}</span>
+          </span>
+        )}
+        <Link href="/">
+          <span className="inline-flex items-center gap-1.5 text-xs text-stone-500 hover:text-stone-700 px-2 py-1.5 rounded-md hover:bg-stone-100 cursor-pointer relative">
+            <Bell className="w-3.5 h-3.5" />
+            通知
+            {unreadCount > 0 && (
+              <span className="min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-red-500 text-white text-[10px] font-bold">
+                {unreadCount > 99 ? "99+" : unreadCount}
+              </span>
+            )}
+          </span>
+        </Link>
+        {canSettings && (
+          <Link href="/settings">
+            <span className="inline-flex items-center gap-1.5 text-xs text-stone-500 hover:text-stone-700 px-2 py-1.5 rounded-md hover:bg-stone-100 cursor-pointer">
+              <Settings className="w-3.5 h-3.5" />設定
+            </span>
+          </Link>
+        )}
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={onLogout}
+          data-testid="button-logout"
+          className="text-xs text-stone-500 hover:text-stone-700 hover:bg-stone-100"
+        >
+          <LogOut className="w-3.5 h-3.5 mr-1.5" />
+          登出
+        </Button>
+      </div>
+    </header>
+  );
+}
+
 const ROUTE_ACCESS: Record<string, string[]> = {
   "/": ["super_admin", "marketing_manager", "cs_agent"],
+  "/comment-center": ["super_admin", "marketing_manager", "cs_agent"],
   "/settings": ["super_admin", "marketing_manager"],
   "/knowledge": ["super_admin", "marketing_manager"],
   "/team": ["super_admin"],
   "/analytics": ["super_admin", "marketing_manager"],
+  "/performance": ["super_admin", "marketing_manager", "cs_agent"],
 };
 
 function AccessDenied() {
@@ -55,8 +196,8 @@ function GuardedRoute({ path, component: Component, userRole }: { path: string; 
 
 interface AuthUser {
   id: number;
-  username: string;
-  display_name: string;
+  username?: string;
+  display_name?: string;
   role: string;
 }
 
@@ -66,63 +207,56 @@ function AuthenticatedApp({ user }: { user: AuthUser }) {
     queryClient.invalidateQueries({ queryKey: ["/api/auth/check"] });
   };
 
-  const { data: settings = [] } = useQuery<Setting[]>({
+  const { data: settingsData } = useQuery<Setting[] | null>({
     queryKey: ["/api/settings"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
-
+  const settings = Array.isArray(settingsData) ? settingsData : [];
   const settingsMap: Record<string, string> = {};
   settings.forEach((s) => { settingsMap[s.key] = s.value; });
 
   return (
     <BrandProvider>
-      <div className="flex h-screen w-full bg-[#faf9f5]">
-        <AppSidebar
+      <ChatViewProvider>
+        <div className="flex h-screen w-full bg-[#faf9f5]">
+          <AppSidebar
+          user={user}
           userRole={user.role}
           systemName={settingsMap.system_name || "AI 客服中控台"}
           logoUrl={settingsMap.logo_url || ""}
         />
         <div className="flex flex-col flex-1 min-w-0">
-          <header className="flex items-center justify-end gap-3 px-5 py-2.5 border-b border-stone-200 bg-white/80 backdrop-blur-sm">
-            <div className="flex items-center gap-2 text-xs text-stone-500">
-              <User className="w-3.5 h-3.5" />
-              <span data-testid="text-current-user">{user.display_name}</span>
-              <span className="px-1.5 py-0.5 rounded bg-stone-100 text-stone-600 text-[10px] font-medium">
-                {ROLE_DISPLAY[user.role] || user.role}
-              </span>
-            </div>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={handleLogout}
-              data-testid="button-logout"
-              className="text-xs text-stone-500 hover:text-stone-700 hover:bg-stone-100"
-            >
-              <LogOut className="w-3.5 h-3.5 mr-1.5" />
-              登出
-            </Button>
-          </header>
+          <AppHeader
+            systemName={settingsMap.system_name || "AI 客服中控台"}
+            logoUrl={settingsMap.logo_url || ""}
+            onLogout={handleLogout}
+            userRole={user.role}
+          />
           <main className="flex-1 overflow-auto">
             <Switch>
               <GuardedRoute path="/" component={ChatPage} userRole={user.role} />
+              <GuardedRoute path="/comment-center" component={CommentCenterPage} userRole={user.role} />
               <GuardedRoute path="/settings" component={SettingsPage} userRole={user.role} />
               <GuardedRoute path="/knowledge" component={KnowledgePage} userRole={user.role} />
               <GuardedRoute path="/team" component={TeamPage} userRole={user.role} />
               <GuardedRoute path="/analytics" component={AnalyticsPage} userRole={user.role} />
+              <GuardedRoute path="/performance" component={PerformancePage} userRole={user.role} />
               <Route component={NotFound} />
             </Switch>
           </main>
         </div>
       </div>
+      </ChatViewProvider>
     </BrandProvider>
   );
 }
 
 function AppContent() {
-  const { data, isLoading } = useQuery<{ authenticated: boolean; user?: AuthUser }>({
+  const { data, isLoading, isError } = useQuery<{ authenticated?: boolean; user?: AuthUser } | null>({
     queryKey: ["/api/auth/check"],
     queryFn: getQueryFn({ on401: "returnNull" }),
     staleTime: 0,
+    retry: false,
   });
 
   if (isLoading) {
@@ -136,7 +270,11 @@ function AppContent() {
     );
   }
 
-  if (!data?.authenticated || !data?.user) {
+  if (isError || data == null) {
+    return <LoginPage onLogin={() => queryClient.invalidateQueries({ queryKey: ["/api/auth/check"] })} />;
+  }
+
+  if (!data.authenticated || !data.user) {
     return <LoginPage onLogin={() => queryClient.invalidateQueries({ queryKey: ["/api/auth/check"] })} />;
   }
 
@@ -148,7 +286,9 @@ function App() {
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <Toaster />
-        <AppContent />
+        <AppErrorBoundary>
+          <AppContent />
+        </AppErrorBoundary>
       </TooltipProvider>
     </QueryClientProvider>
   );

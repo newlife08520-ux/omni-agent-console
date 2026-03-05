@@ -1,11 +1,34 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
+import * as metaCommentsStorage from "./meta-comments-storage";
+import { resolveCommentMetadata } from "./meta-comment-resolver";
+import { replyToComment, hideComment } from "./meta-facebook-comment-api";
+import { checkHighRiskByRule, checkLineRedirectByRule, checkSafeConfirmByRule, COMFORT_MESSAGE } from "./meta-comment-guardrail";
+import {
+  classifyMessageForSafeAfterSale,
+  FALLBACK_AFTER_SALE_LINE_LABEL,
+  SAFE_IMAGE_ONLY_REPLY,
+  isShortOrAmbiguousImageCaption,
+  getImageDmReplyForShortCaption,
+  getImageDmTemplateNameForShortCaption,
+  shouldEscalateImageSupplement,
+  IMAGE_SUPPLEMENT_ESCALATE_MESSAGE,
+} from "./safe-after-sale-classifier";
+import { runAutoExecution, computeMainStatus } from "./meta-comment-auto-execute";
+import * as riskRules from "./meta-comment-risk-rules";
 import db from "./db";
 import { fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, fetchPages, lookupOrdersByPageAndPhone, ensurePagesCacheLoaded, refreshPagesCache, getCachedPages, getCachedPagesAge, buildProductCatalogPrompt } from "./superlanding";
 import type { SuperLandingConfig } from "./superlanding";
-import type { OrderInfo, Contact, ContactStatus, IssueType } from "@shared/schema";
+import type { OrderInfo, Contact, ContactStatus, IssueType, MetaCommentTemplate, MetaComment } from "@shared/schema";
 import { unifiedLookupById, unifiedLookupByProductAndPhone, unifiedLookupByDateAndContact, getUnifiedStatusLabel } from "./order-service";
+import * as assignment from "./assignment";
+import {
+  detectIntentLevel,
+  classifyOrderNumber,
+  computeCasePriority,
+  suggestTagsFromContent,
+} from "./intent-and-order";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
@@ -29,13 +52,14 @@ function stripBOM(content: string): string {
 }
 import OpenAI from "openai";
 import { parseFileContent, isImageFile } from "./file-parser";
+import { getUploadsDir, getDataDir } from "./data-dir";
 
-const uploadDir = path.resolve(process.cwd(), "uploads");
+const uploadDir = getUploadsDir();
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-const imageAssetsDir = path.resolve(process.cwd(), "uploads", "image-assets");
+const imageAssetsDir = path.join(getUploadsDir(), "image-assets");
 if (!fs.existsSync(imageAssetsDir)) {
   fs.mkdirSync(imageAssetsDir, { recursive: true });
 }
@@ -109,6 +133,27 @@ const sandboxUpload = multer({
     cb(null, ALLOWED_MEDIA_EXTENSIONS.includes(ext) && mimeOk);
   },
   limits: { fileSize: 20 * 1024 * 1024 },
+});
+
+const avatarsDir = path.join(getUploadsDir(), "avatars");
+if (!fs.existsSync(avatarsDir)) {
+  fs.mkdirSync(avatarsDir, { recursive: true });
+}
+const avatarUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, avatarsDir),
+    filename: (req, file, cb) => {
+      const userId = (req as any).params?.id || "0";
+      const ext = (path.extname(file.originalname) || ".jpg").toLowerCase();
+      if (!ALLOWED_IMAGE_EXTENSIONS.includes(ext)) return cb(null, `avatar-${userId}-${Date.now()}.jpg`);
+      cb(null, `avatar-${userId}-${Date.now()}${ext}`);
+    },
+  }),
+  fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    cb(null, ALLOWED_IMAGE_EXTENSIONS.includes(ext));
+  },
+  limits: { fileSize: 5 * 1024 * 1024 },
 });
 
 const HIGH_RISK_KEYWORDS = [
@@ -266,7 +311,21 @@ async function getEnrichedSystemPrompt(brandId?: number): Promise<string> {
 
 當訂單查詢工具回傳 found=false 或空陣列時，用你自己的語氣告知客戶查不到資料，並主動詢問是否有其他資訊可以協助查詢（例如其他訂單編號、手機號碼等）。不要使用制式模板回覆，也不要自動轉人工。`;
 
-  return basePrompt + brandBlock + handoffBlock + catalogBlock + knowledgeBlock + imageBlock;
+  const schedule = storage.getGlobalSchedule();
+  const unavailableReason = assignment.getUnavailableReason();
+  const humanHoursBlock = `
+
+--- 人工客服服務時段（僅影響真人回覆，你 AI 24 小時在線）---
+人工客服可接案時段：上班 ${schedule.work_start_time}–${schedule.work_end_time}，午休 ${schedule.lunch_start_time}–${schedule.lunch_end_time}，下班 ${schedule.work_end_time} 後無人接案。
+當你要呼叫 transfer_to_human 時：若目前是午休或已下班，請在回覆中主動告知客人「目前是午休／已超過服務時間，轉人工可能暫時沒人即時回覆，需求會先記錄，專人會在午休後／上班後盡快處理，請稍候。」不要假裝有人正在看。`;
+  const nowStatusHint = unavailableReason === "lunch"
+    ? `【目前狀態】現在為午休時段（${schedule.lunch_start_time}–${schedule.lunch_end_time}），若轉人工請主動提醒客人稍後由專人回覆。`
+    : unavailableReason === "after_hours"
+      ? `【目前狀態】目前已超過人工服務時間（${schedule.work_end_time} 後），若轉人工請主動提醒客人需求已記錄，上班後會處理。`
+      : "";
+  const humanHoursBlockWithStatus = humanHoursBlock + (nowStatusHint ? "\n" + nowStatusHint : "");
+
+  return basePrompt + brandBlock + handoffBlock + humanHoursBlockWithStatus + catalogBlock + knowledgeBlock + imageBlock;
 }
 
 const contactProcessingLocks = new Map<number, Promise<void>>();
@@ -314,6 +373,14 @@ function maskSensitiveInfo(text: string): string {
   return result;
 }
 
+/** 依目前人工服務時段設定，回傳轉人工無人可接時的系統提示（午休／下班／全員忙碌） */
+function getTransferUnavailableSystemMessage(reason: "lunch" | "after_hours" | "all_paused" | null): string {
+  const schedule = storage.getGlobalSchedule();
+  if (reason === "lunch") return `目前客服同仁正在午休時段（${schedule.lunch_start_time}–${schedule.lunch_end_time}），我先幫您記錄需求，專人會在午休後盡快為您確認與回覆唷。`;
+  if (reason === "after_hours") return "目前已超過客服服務時間，您的需求我已先幫您記錄，專人將於上班時段儘快為您處理，請您稍等唷。";
+  return "目前人工客服暫時忙碌中，已幫您排入待處理清單，上班後會依序回覆。";
+}
+
 async function withContactLock<T>(contactId: number, fn: () => Promise<T>): Promise<T> {
   const existing = contactProcessingLocks.get(contactId);
   let resolve: () => void;
@@ -343,6 +410,18 @@ function broadcastSSE(eventType: string, data: any) {
 }
 
 const FB_VERIFY_TOKEN = process.env.FB_VERIFY_TOKEN || "omnichannel_fb_verify_2024";
+
+/** 解析路由 :id 參數為正整數，無效時回傳 null（用於統一回傳 400 避免靜默失敗） */
+function parseIdParam(value: string | undefined): number | null {
+  if (value == null || value === "") return null;
+  const n = parseInt(value, 10);
+  if (Number.isNaN(n) || n < 1 || !Number.isInteger(n)) return null;
+  return n;
+}
+
+function getOpenAIModel(): string {
+  return process.env.OPENAI_MODEL || storage.getSetting("openai_model") || "gpt-5.2";
+}
 
 export async function registerRoutes(
   httpServer: Server,
@@ -421,9 +500,9 @@ export async function registerRoutes(
       try { res.write(":ping\n\n"); } catch (_e) { clearInterval(keepAlive); sseClients.delete(res); }
     }, 25000);
     req.on("close", () => {
-      console.log("[SSE] Client disconnected, remaining:", sseClients.size - 1);
       clearInterval(keepAlive);
       sseClients.delete(res);
+      console.log("[SSE] Client disconnected, remaining:", sseClients.size);
     });
   });
 
@@ -434,11 +513,15 @@ export async function registerRoutes(
     }
     const user = storage.authenticateUser(username, password);
     if (user) {
-      (req as any).session.authenticated = true;
-      (req as any).session.userId = user.id;
-      (req as any).session.userRole = user.role;
-      (req as any).session.username = user.username;
-      (req as any).session.displayName = user.display_name;
+      const s = (req as any).session;
+      s.authenticated = true;
+      s.userId = user.id;
+      s.userRole = user.role;
+      s.username = user.username;
+      s.displayName = user.display_name;
+      if (user.role === "cs_agent") {
+        storage.updateUserOnline(user.id, 1, 1);
+      }
       return res.json({
         success: true,
         message: "登入成功",
@@ -461,6 +544,11 @@ export async function registerRoutes(
 
   app.post("/api/auth/logout", (req, res) => {
     const s = (req as any).session;
+    const userId = s?.userId;
+    const role = s?.userRole ?? s?.role;
+    if (userId != null && role === "cs_agent") {
+      storage.updateUserOnline(userId, 0);
+    }
     s.authenticated = false;
     s.userId = null;
     s.userRole = null;
@@ -554,11 +642,11 @@ export async function registerRoutes(
         }
         const openai = new OpenAI({ apiKey });
         await openai.chat.completions.create({
-          model: "gpt-5.2",
+          model: getOpenAIModel(),
           messages: [{ role: "user", content: "hi" }],
           max_completion_tokens: 5,
         });
-        return res.json({ success: true, message: "OpenAI 連線成功 (模型: gpt-5.2)" });
+        return res.json({ success: true, message: `OpenAI 連線成功 (模型: ${getOpenAIModel()})` });
       }
 
       if (type === "line") {
@@ -604,13 +692,1207 @@ export async function registerRoutes(
     }
   });
 
+  // --- Meta 留言互動中心 ---
+  app.get("/api/meta-comments", authMiddleware, (req: any, res) => {
+    const brand_id = req.query.brand_id ? parseInt(String(req.query.brand_id)) : undefined;
+    const page_id = req.query.page_id ? String(req.query.page_id) : undefined;
+    const post_id = req.query.post_id ? String(req.query.post_id) : undefined;
+    const status = (req.query.status as metaCommentsStorage.MetaCommentStatusFilter) || "all";
+    const source = (req.query.source as "all" | "real" | "simulated") || "all";
+    const archive_delay_minutes = req.query.archive_delay_minutes != null ? parseInt(String(req.query.archive_delay_minutes)) : 5;
+    const list = metaCommentsStorage.getMetaComments({ brand_id, page_id, post_id, status, source, archive_delay_minutes });
+    const enriched = list.map((c) => {
+      let brandName: string | null = null;
+      if (c.brand_id != null) brandName = storage.getBrand(c.brand_id)?.name ?? null;
+      if (brandName == null && c.page_id) {
+        const pageSettings = metaCommentsStorage.getMetaPageSettingsByPageId(c.page_id);
+        if (pageSettings?.brand_id != null) brandName = storage.getBrand(pageSettings.brand_id)?.name ?? null;
+      }
+      const mainStatus = c.main_status || computeMainStatus(c);
+      return { ...c, brand_name: brandName ?? null, main_status: mainStatus };
+    });
+    res.setHeader("Content-Type", "application/json");
+    return res.json(enriched);
+  });
+  app.get("/api/meta-comments/summary", authMiddleware, (req: any, res) => {
+    const brand_id = req.query.brand_id ? parseInt(String(req.query.brand_id)) : undefined;
+    const summary = metaCommentsStorage.getMetaCommentsSummary({ brand_id: brand_id ?? null });
+    res.setHeader("Content-Type", "application/json");
+    return res.json(summary);
+  });
+  app.get("/api/meta-comments/health", authMiddleware, (req: any, res) => {
+    const brand_id = req.query.brand_id ? parseInt(String(req.query.brand_id)) : undefined;
+    const health = metaCommentsStorage.getMetaCommentsHealth({ brand_id: brand_id ?? null });
+    res.setHeader("Content-Type", "application/json");
+    return res.json(health);
+  });
+  app.get("/api/meta-comments/spot-check", authMiddleware, (req: any, res) => {
+    const brand_id = req.query.brand_id ? parseInt(String(req.query.brand_id)) : undefined;
+    const limit = req.query.limit != null ? parseInt(String(req.query.limit)) : 20;
+    const rows = metaCommentsStorage.getMetaCommentsRandomCompleted({ brand_id: brand_id ?? null, limit });
+    const enriched = rows.map((c) => {
+      let brandName: string | null = null;
+      if (c.brand_id != null) brandName = storage.getBrand(c.brand_id)?.name ?? null;
+      if (brandName == null && c.page_id) {
+        const pageSettings = metaCommentsStorage.getMetaPageSettingsByPageId(c.page_id);
+        if (pageSettings?.brand_id != null) brandName = storage.getBrand(pageSettings.brand_id)?.name ?? null;
+      }
+      const mainStatus = c.main_status || computeMainStatus(c);
+      return { ...c, brand_name: brandName ?? null, main_status: mainStatus };
+    });
+    res.setHeader("Content-Type", "application/json");
+    return res.json(enriched);
+  });
+  app.get("/api/meta-comments/gray-spot-check", authMiddleware, (req: any, res) => {
+    const brand_id = req.query.brand_id ? parseInt(String(req.query.brand_id)) : undefined;
+    const limit = req.query.limit != null ? parseInt(String(req.query.limit)) : 20;
+    const rows = metaCommentsStorage.getMetaCommentsGraySpotCheck({ brand_id: brand_id ?? null, limit });
+    const enriched = rows.map((c) => {
+      let brandName: string | null = null;
+      if (c.brand_id != null) brandName = storage.getBrand(c.brand_id)?.name ?? null;
+      if (brandName == null && c.page_id) {
+        const pageSettings = metaCommentsStorage.getMetaPageSettingsByPageId(c.page_id);
+        if (pageSettings?.brand_id != null) brandName = storage.getBrand(pageSettings.brand_id)?.name ?? null;
+      }
+      const mainStatus = c.main_status || computeMainStatus(c);
+      return { ...c, brand_name: brandName ?? null, main_status: mainStatus };
+    });
+    res.setHeader("Content-Type", "application/json");
+    return res.json(enriched);
+  });
+  app.get("/api/meta-comment-risk-rules", authMiddleware, (req: any, res) => {
+    const brand_id = req.query.brand_id ? parseInt(String(req.query.brand_id)) : undefined;
+    const bucket = (req.query.bucket as "whitelist" | "direct_hide" | "hide_and_route" | "route_only" | "gray_area") || undefined;
+    const page_id = req.query.page_id != null && req.query.page_id !== "" ? String(req.query.page_id) : undefined;
+    const enabled = req.query.enabled === "1" ? 1 : req.query.enabled === "0" ? 0 : undefined;
+    const q = req.query.q != null && String(req.query.q).trim() !== "" ? String(req.query.q).trim() : undefined;
+    const list = riskRules.getRiskRules({ brand_id: brand_id ?? null, bucket: bucket ?? null, page_id: page_id ?? null, enabled: enabled ?? null, q: q ?? null });
+    res.setHeader("Content-Type", "application/json");
+    return res.json(list);
+  });
+  app.get("/api/meta-comment-risk-rules/:id", authMiddleware, (req: any, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "無效的 ID" });
+    const row = riskRules.getRiskRule(id);
+    if (!row) return res.status(404).json({ message: "規則不存在" });
+    return res.json(row);
+  });
+  app.post("/api/meta-comment-risk-rules", authMiddleware, (req: any, res) => {
+    const body = req.body || {};
+    const row = riskRules.createRiskRule({
+      rule_name: body.rule_name ?? "",
+      rule_bucket: body.rule_bucket,
+      keyword_pattern: body.keyword_pattern ?? "",
+      match_type: body.match_type ?? "contains",
+      priority: body.priority ?? 0,
+      enabled: body.enabled !== undefined ? (body.enabled ? 1 : 0) : 1,
+      brand_id: body.brand_id ?? null,
+      page_id: body.page_id ?? null,
+      action_reply: body.action_reply ? 1 : 0,
+      action_hide: body.action_hide ? 1 : 0,
+      action_route_line: body.action_route_line ? 1 : 0,
+      route_line_type: body.route_line_type ?? null,
+      action_mark_to_human: body.action_mark_to_human ? 1 : 0,
+      action_use_template_id: body.action_use_template_id ?? null,
+      notes: body.notes ?? null,
+    });
+    res.setHeader("Content-Type", "application/json");
+    return res.json(row);
+  });
+  app.put("/api/meta-comment-risk-rules/:id", authMiddleware, (req: any, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "無效的 ID" });
+    const body = req.body || {};
+    riskRules.updateRiskRule(id, {
+      rule_name: body.rule_name,
+      rule_bucket: body.rule_bucket,
+      keyword_pattern: body.keyword_pattern,
+      match_type: body.match_type,
+      priority: body.priority,
+      enabled: body.enabled !== undefined ? (body.enabled ? 1 : 0) : undefined,
+      brand_id: body.brand_id,
+      page_id: body.page_id,
+      action_reply: body.action_reply !== undefined ? (body.action_reply ? 1 : 0) : undefined,
+      action_hide: body.action_hide !== undefined ? (body.action_hide ? 1 : 0) : undefined,
+      action_route_line: body.action_route_line !== undefined ? (body.action_route_line ? 1 : 0) : undefined,
+      route_line_type: body.route_line_type,
+      action_mark_to_human: body.action_mark_to_human !== undefined ? (body.action_mark_to_human ? 1 : 0) : undefined,
+      action_use_template_id: body.action_use_template_id,
+      notes: body.notes,
+    });
+    return res.json({ success: true });
+  });
+  app.delete("/api/meta-comment-risk-rules/:id", authMiddleware, (req: any, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "無效的 ID" });
+    const ok = riskRules.deleteRiskRule(id);
+    if (!ok) return res.status(404).json({ message: "規則不存在" });
+    return res.json({ success: true });
+  });
+  app.post("/api/meta-comments/test-rules", authMiddleware, (req: any, res) => {
+    const body = req.body || {};
+    const message = (body.message ?? "").trim();
+    const brand_id = body.brand_id != null ? parseInt(String(body.brand_id)) : undefined;
+    const page_id = body.page_id ?? null;
+    const { matches, final: result, reason, decisionSummary } = riskRules.evaluateRiskRulesWithCandidates(message, brand_id ?? null, page_id);
+    const pageSettings = metaCommentsStorage.getMetaPageSettingsByPageId(page_id || "");
+    let targetLineName = "";
+    if (result && result.action_route_line && result.route_line_type && pageSettings) {
+      targetLineName = result.route_line_type === "after_sale" ? (pageSettings.line_after_sale || "售後 LINE") : (pageSettings.line_general || "一般 LINE");
+    }
+    res.setHeader("Content-Type", "application/json");
+    return res.json({
+      message,
+      matches,
+      final: result,
+      reason,
+      decisionSummary: decisionSummary ?? "",
+      matched: !!result,
+      matched_rule_id: result?.matched_rule_id ?? null,
+      matched_rule_bucket: result?.matched_rule_bucket ?? null,
+      matched_keyword: result?.matched_keyword ?? null,
+      rule_name: result?.rule_name ?? null,
+      action_reply: !!result?.action_reply,
+      action_hide: !!result?.action_hide,
+      action_route_line: !!result?.action_route_line,
+      route_line_type: result?.route_line_type ?? null,
+      target_line_display: targetLineName || (result?.route_line_type ?? ""),
+      action_mark_to_human: !!result?.action_mark_to_human,
+    });
+  });
+  // 可指派客服名單（用於留言分派下拉；須在 /:id 前註冊）
+  app.get("/api/meta-comments/assignable-agents", authMiddleware, (req: any, res) => {
+    const members = storage.getTeamMembers().filter((m: any) => m.role === "cs_agent" || m.role === "super_admin" || m.role === "marketing_manager");
+    const list = members.map((m: any) => {
+      const u = storage.getUserById(m.id);
+      return {
+        id: m.id,
+        display_name: m.display_name || u?.display_name || m.username,
+        avatar_url: (u as any)?.avatar_url ?? null,
+      };
+    });
+    res.setHeader("Content-Type", "application/json");
+    return res.json(list);
+  });
+  app.get("/api/meta-comments/:id", authMiddleware, (req: any, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "無效的 ID" });
+    const row = metaCommentsStorage.getMetaComment(id);
+    if (!row) return res.status(404).json({ message: "留言不存在" });
+    let brandName: string | null = null;
+    if (row.brand_id != null) brandName = storage.getBrand(row.brand_id)?.name ?? null;
+    if (brandName == null && row.page_id) {
+      const pageSettings = metaCommentsStorage.getMetaPageSettingsByPageId(row.page_id);
+      if (pageSettings?.brand_id != null) brandName = storage.getBrand(pageSettings.brand_id)?.name ?? null;
+    }
+    const mainStatus = row.main_status || computeMainStatus(row);
+    return res.json({ ...row, brand_name: brandName ?? null, main_status: mainStatus });
+  });
+  app.post("/api/meta-comments/:id/mark-gray-reviewed", authMiddleware, (req: any, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "無效的 ID" });
+    const row = metaCommentsStorage.getMetaComment(id);
+    if (!row) return res.status(404).json({ message: "留言不存在" });
+    const current = row.main_status || computeMainStatus(row);
+    if (current !== "gray_area") return res.status(400).json({ message: "僅灰區留言可標記已檢視" });
+    metaCommentsStorage.updateMetaComment(id, { main_status: "completed" });
+    return res.json({ success: true, main_status: "completed" });
+  });
+  // 模擬 Webhook：僅供內測，接收類 Meta 留言 payload 寫入一筆模擬留言
+  app.post("/api/meta-comments/simulate-webhook", authMiddleware, (req: any, res) => {
+    res.setHeader("Content-Type", "application/json");
+    const body = req.body || {};
+    const value = body.entry?.[0]?.changes?.[0]?.value ?? body;
+    const commentId = value.comment_id || value.id || `sim_webhook_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const from = value.from ?? {};
+    const commenterName = typeof from.name === "string" ? from.name : (body.commenter_name || "模擬用戶");
+    const commenterId = from.id ?? body.commenter_id ?? null;
+    const message = value.message ?? body.message ?? "";
+    const postId = value.post_id ?? body.post_id ?? "post_sim";
+    const pageId = value.page_id ?? body.page_id ?? "page_sim";
+    try {
+      const resolved = resolveCommentMetadata({
+        brand_id: body.brand_id ?? null,
+        page_id: pageId,
+        post_id: postId,
+        post_name: body.post_name ?? "模擬貼文",
+        message: message || "(空訊息)",
+      });
+      const row = metaCommentsStorage.createMetaComment({
+        brand_id: body.brand_id ?? null,
+        page_id: pageId,
+        page_name: body.page_name ?? "模擬粉專",
+        post_id: postId,
+        post_name: body.post_name ?? "模擬貼文",
+        comment_id: commentId,
+        commenter_id: commenterId,
+        commenter_name: commenterName,
+        message: message || "(空訊息)",
+        is_simulated: 1,
+        ...resolved,
+      });
+      console.log("[meta-comments] simulate-webhook 建立留言 id=%s", row.id);
+      setImmediate(() => runAutoExecution(row.id).catch((e: any) => console.error("[meta-comments] runAutoExecution error:", e?.message)));
+      return res.json(row);
+    } catch (e: any) {
+      console.error("[meta-comments] simulate-webhook 錯誤:", e?.message);
+      if (e.message?.includes("UNIQUE")) return res.status(400).json({ message: "該留言 ID 已存在" });
+      return res.status(500).json({ message: e?.message || "建立失敗" });
+    }
+  });
+
+  // 一鍵建立預設測試案例（一般詢問、價格、哪裡買、活動、客訴、退款）
+  app.post("/api/meta-comments/seed-test-cases", authMiddleware, (req: any, res) => {
+    res.setHeader("Content-Type", "application/json");
+    const body = req.body || {};
+    const brandId = body.brand_id ?? null;
+    const pageId = body.page_id || "page_demo";
+    const pageName = body.page_name || "示範粉專";
+    const postId = body.post_id || "post_001";
+    const postName = body.post_name || "測試貼文";
+    const cases = [
+      { name: "測試A", message: "請問這款現在還有貨嗎？想買兩瓶", label: "一般商品詢問" },
+      { name: "測試B", message: "多少錢？", label: "價格詢問" },
+      { name: "測試C", message: "哪裡可以買？", label: "哪裡買" },
+      { name: "測試D", message: "+1 想抽", label: "活動互動" },
+      { name: "測試E", message: "我上週訂的還沒收到，你們是不是都不回訊息", label: "客訴" },
+      { name: "測試F", message: "我要退款", label: "退款" },
+    ];
+    const created: MetaComment[] = [];
+    const ts = Date.now();
+    for (let i = 0; i < cases.length; i++) {
+      const c = cases[i];
+      const commentId = `sim_seed_${ts}_${i}_${Math.random().toString(36).slice(2)}`;
+      try {
+        const isSensitive = ["測試E", "測試F"].includes(c.name) || ["客訴", "退款"].some((l) => c.label.includes(l));
+        const resolved = resolveCommentMetadata({
+          brand_id: brandId,
+          page_id: pageId,
+          post_id: postId,
+          post_name: postName,
+          message: c.message,
+          is_sensitive_or_complaint: isSensitive,
+        });
+        const row = metaCommentsStorage.createMetaComment({
+          brand_id: brandId,
+          page_id: pageId,
+          page_name: pageName,
+          post_id: postId,
+          post_name: postName,
+          comment_id: commentId,
+          commenter_name: c.name,
+          message: c.message,
+          is_simulated: 1,
+          ...resolved,
+        });
+        created.push(row);
+      } catch (_) {}
+    }
+    console.log("[meta-comments] seed-test-cases 建立 %s 筆", created.length);
+    setImmediate(() => {
+      created.forEach((r) => runAutoExecution(r.id).catch((e: any) => console.error("[meta-comments] runAutoExecution error:", e?.message)));
+    });
+    return res.json({ created: created.length, ids: created.map((r) => r.id), comments: created });
+  });
+
+  // 測試此 mapping：建立一筆模擬留言並回傳，供前端跳轉到該則驗證導購連結
+  app.post("/api/meta-comments/test-mapping", authMiddleware, (req: any, res) => {
+    res.setHeader("Content-Type", "application/json");
+    const mappingId = req.body?.mapping_id != null ? parseInt(String(req.body.mapping_id)) : NaN;
+    if (Number.isNaN(mappingId)) return res.status(400).json({ message: "請提供 mapping_id" });
+    const mappings = metaCommentsStorage.getMetaPostMappings();
+    const mapping = mappings.find((m) => m.id === mappingId);
+    if (!mapping) return res.status(404).json({ message: "找不到該對應" });
+    const commentId = `sim_mapping_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    try {
+      const resolved = resolveCommentMetadata({
+        brand_id: mapping.brand_id,
+        page_id: mapping.page_id || "page_demo",
+        post_id: mapping.post_id,
+        post_name: mapping.post_name || "測試貼文",
+        message: "請問這款哪裡買？",
+      });
+      const row = metaCommentsStorage.createMetaComment({
+        brand_id: mapping.brand_id,
+        page_id: mapping.page_id || "page_demo",
+        page_name: mapping.page_name || "測試粉專",
+        post_id: mapping.post_id,
+        post_name: mapping.post_name || "測試貼文",
+        comment_id: commentId,
+        commenter_name: "測試用戶",
+        message: "請問這款哪裡買？",
+        is_simulated: 1,
+        ...resolved,
+      });
+      console.log("[meta-comments] test-mapping 建立留言 id=%s for mapping id=%s", row.id, mappingId);
+      return res.json(row);
+    } catch (e: any) {
+      return res.status(500).json({ message: e?.message || "建立失敗" });
+    }
+  });
+
+  app.post("/api/meta-comments", authMiddleware, (req: any, res) => {
+    const body = req.body || {};
+    const isSimulated = body.is_simulated ? 1 : 0;
+    const commentId = body.comment_id || (isSimulated ? `sim_${Date.now()}_${Math.random().toString(36).slice(2)}` : `mock_${Date.now()}_${Math.random().toString(36).slice(2)}`);
+    try {
+      const resolved = resolveCommentMetadata({
+        brand_id: body.brand_id ?? null,
+        page_id: body.page_id || "page_sim",
+        post_id: body.post_id || "post_sim",
+        post_name: body.post_name,
+        message: body.message || "",
+        is_sensitive_or_complaint: body.priority === "urgent" || ["complaint", "refund_after_sale"].includes(body.ai_intent || ""),
+      });
+      const row = metaCommentsStorage.createMetaComment({
+        brand_id: body.brand_id,
+        page_id: body.page_id || "page_sim",
+        page_name: body.page_name,
+        post_id: body.post_id || "post_sim",
+        post_name: body.post_name,
+        comment_id: commentId,
+        commenter_id: body.commenter_id,
+        commenter_name: body.commenter_name || "未知",
+        message: body.message || "",
+        ai_intent: body.ai_intent,
+        issue_type: body.issue_type,
+        priority: body.priority || "normal",
+        ai_suggest_hide: body.ai_suggest_hide ? 1 : 0,
+        ai_suggest_human: body.ai_suggest_human ? 1 : 0,
+        reply_first: body.reply_first,
+        reply_second: body.reply_second,
+        is_simulated: isSimulated,
+        ...resolved,
+      });
+      return res.json(row);
+    } catch (e: any) {
+      if (e.message?.includes("UNIQUE")) return res.status(400).json({ message: "該留言 ID 已存在" });
+      return res.status(500).json({ message: e?.message || "建立失敗" });
+    }
+  });
+  app.put("/api/meta-comments/:id", authMiddleware, (req: any, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "無效的 ID" });
+    const row = metaCommentsStorage.getMetaComment(id);
+    if (!row) return res.status(404).json({ message: "留言不存在" });
+    const body = req.body || {};
+    metaCommentsStorage.updateMetaComment(id, {
+      replied_at: body.replied_at !== undefined ? body.replied_at : undefined,
+      is_hidden: body.is_hidden !== undefined ? (body.is_hidden ? 1 : 0) : undefined,
+      is_dm_sent: body.is_dm_sent !== undefined ? (body.is_dm_sent ? 1 : 0) : undefined,
+      is_human_handled: body.is_human_handled !== undefined ? (body.is_human_handled ? 1 : 0) : undefined,
+      contact_id: body.contact_id !== undefined ? body.contact_id : undefined,
+      reply_first: body.reply_first !== undefined ? body.reply_first : undefined,
+      reply_second: body.reply_second !== undefined ? body.reply_second : undefined,
+      issue_type: body.issue_type,
+      priority: body.priority,
+      tags: body.tags,
+      ai_intent: body.ai_intent !== undefined ? body.ai_intent : undefined,
+      applied_template_id: body.applied_template_id !== undefined ? body.applied_template_id : undefined,
+      reply_link_source: body.reply_link_source !== undefined ? body.reply_link_source : undefined,
+      assigned_agent_id: body.assigned_agent_id !== undefined ? body.assigned_agent_id : undefined,
+      assigned_agent_name: body.assigned_agent_name !== undefined ? body.assigned_agent_name : undefined,
+      assigned_agent_avatar_url: body.assigned_agent_avatar_url !== undefined ? body.assigned_agent_avatar_url : undefined,
+      assignment_method: body.assignment_method !== undefined ? body.assignment_method : undefined,
+      assigned_at: body.assigned_at !== undefined ? body.assigned_at : undefined,
+      main_status: body.main_status !== undefined ? body.main_status : undefined,
+    });
+    const updated = metaCommentsStorage.getMetaComment(id)!;
+    if (!updated.main_status && body.main_status == null) {
+      metaCommentsStorage.updateMetaComment(id, { main_status: computeMainStatus(updated) });
+    }
+    return res.json(metaCommentsStorage.getMetaComment(id));
+  });
+  // 指派留言給客服
+  app.post("/api/meta-comments/:id/assign", authMiddleware, (req: any, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "無效的 ID" });
+    const comment = metaCommentsStorage.getMetaComment(id);
+    if (!comment) return res.status(404).json({ message: "留言不存在" });
+    const { agent_id, agent_name, agent_avatar_url } = req.body || {};
+    if (agent_id == null) return res.status(400).json({ message: "請選擇負責人" });
+    const now = new Date().toISOString();
+    metaCommentsStorage.updateMetaComment(id, {
+      assigned_agent_id: Number(agent_id),
+      assigned_agent_name: agent_name ?? String(agent_id),
+      assigned_agent_avatar_url: agent_avatar_url ?? null,
+      assignment_method: "manual",
+      assigned_at: now,
+    });
+    return res.json(metaCommentsStorage.getMetaComment(id));
+  });
+  // 移回待分配
+  app.post("/api/meta-comments/:id/unassign", authMiddleware, (req: any, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "無效的 ID" });
+    const comment = metaCommentsStorage.getMetaComment(id);
+    if (!comment) return res.status(404).json({ message: "留言不存在" });
+    metaCommentsStorage.updateMetaComment(id, {
+      assigned_agent_id: null,
+      assigned_agent_name: null,
+      assigned_agent_avatar_url: null,
+      assignment_method: null,
+      assigned_at: null,
+    });
+    return res.json(metaCommentsStorage.getMetaComment(id));
+  });
+  app.post("/api/meta-comments/:id/suggest-reply", authMiddleware, async (req: any, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "無效的 ID" });
+    const comment = metaCommentsStorage.getMetaComment(id);
+    if (!comment) return res.status(404).json({ message: "留言不存在" });
+    const openaiKey = storage.getSetting("openai_api_key");
+    if (!openaiKey) return res.status(400).json({ message: "請先設定 OpenAI API 金鑰" });
+    const model = process.env.OPENAI_MODEL || storage.getSetting("openai_model") || "gpt-4o-mini";
+    const INTENTS = "product_inquiry, price_inquiry, where_to_buy, ingredient_effect, activity_engage, dm_guide, complaint, refund_after_sale, spam_competitor";
+
+    try {
+      const openai = new OpenAI({ apiKey: openaiKey });
+      const msg = comment.message;
+      let appliedRuleId: number | null = null;
+      let appliedTemplateId: number | null = null;
+      let useTemplateForReply: MetaCommentTemplate | null = null;
+
+      // ---------- Step 0a: 共用安全確認分流（非本店／他平台／詐騙／待確認來源 → 安全模板，不先承認責任）
+      const safeConfirm = checkSafeConfirmByRule(msg);
+      if (safeConfirm.matched) {
+        const categoryByType: Record<string, string> = {
+          fraud_impersonation: "fraud_impersonation",
+          external_platform: "external_platform_order",
+          safe_confirm_order: "safe_confirm_order",
+        };
+        const tplCategory = categoryByType[safeConfirm.type];
+        const tpl = metaCommentsStorage.getMetaCommentTemplateByCategory(comment.brand_id ?? undefined, tplCategory);
+        const pageSettings = metaCommentsStorage.getMetaPageSettingsByPageId(comment.page_id || "");
+        const rawLine = (pageSettings?.line_after_sale ?? "").trim();
+        const lineUrl = rawLine || FALLBACK_AFTER_SALE_LINE_LABEL;
+        if (!rawLine && comment.page_id) {
+          console.warn("[SafeAfterSale] 售後 LINE 未設定（待補資料）", { page_id: comment.page_id, comment_id: id });
+        }
+        const replacePlaceholder = (s: string) => (s || "").replace(/\{after_sale_line_url\}/g, lineUrl);
+        const first = replacePlaceholder(tpl?.reply_first ?? "").trim();
+        const second = (tpl?.reply_second && replacePlaceholder(tpl.reply_second).trim()) || null;
+        metaCommentsStorage.updateMetaComment(id, {
+          ai_intent: safeConfirm.type === "fraud_impersonation" ? "fraud_impersonation" : "external_or_unknown_order",
+          priority: "urgent",
+          ai_suggest_hide: safeConfirm.suggest_hide ? 1 : 0,
+          ai_suggest_human: safeConfirm.suggest_human ? 1 : 0,
+          reply_first: first || null,
+          reply_second: second,
+          applied_rule_id: null,
+          applied_template_id: tpl?.id ?? null,
+          applied_mapping_id: null,
+          reply_link_source: "none",
+          classifier_source: "rule",
+          matched_rule_keyword: safeConfirm.keyword,
+          reply_flow_type: "comfort_line",
+        });
+        const updated = metaCommentsStorage.getMetaComment(id)!;
+        return res.json({ ...updated, classifier_source: "rule" as const, matched_rule_keyword: safeConfirm.keyword });
+      }
+
+      // ---------- Step 0: Deterministic rule-based guardrail（客訴/退款/爆氣/催單/品質抱怨先擋 → 安撫+導 LINE，不交給 AI）
+      const guardrail = checkHighRiskByRule(msg);
+      if (guardrail.matched) {
+        console.log("[meta-comments] suggest-reply guardrail hit: id=%s keyword=%s intent=%s", id, guardrail.keyword, guardrail.intent);
+        const lineAfterSaleTpl = metaCommentsStorage.getMetaCommentTemplateByCategory(comment.brand_id ?? undefined, "line_after_sale");
+        const comfortFirst = (lineAfterSaleTpl?.reply_comfort || lineAfterSaleTpl?.reply_dm_guide || COMFORT_MESSAGE).trim();
+        metaCommentsStorage.updateMetaComment(id, {
+          ai_intent: guardrail.intent,
+          priority: "urgent",
+          ai_suggest_hide: guardrail.suggest_hide ? 1 : 0,
+          ai_suggest_human: 1,
+          reply_first: comfortFirst || COMFORT_MESSAGE,
+          reply_second: null,
+          applied_rule_id: appliedRuleId,
+          applied_template_id: lineAfterSaleTpl?.id ?? null,
+          applied_mapping_id: null,
+          reply_link_source: "none",
+          classifier_source: "rule",
+          matched_rule_keyword: guardrail.keyword,
+          reply_flow_type: "comfort_line",
+        });
+        const updated = metaCommentsStorage.getMetaComment(id)!;
+        return res.json({ ...updated, classifier_source: "rule" as const, matched_rule_keyword: guardrail.keyword });
+      }
+
+      // ---------- Step 0b: Deterministic「建議導 LINE」關鍵字（適合我/推薦/更詳細/幫我挑/哪款比較/不知道怎麼選）→ 直接簡答+導 LINE，不交給 AI
+      const lineRedirectRule = checkLineRedirectByRule(msg);
+      if (lineRedirectRule.matched) {
+        console.log("[meta-comments] suggest-reply line_redirect rule hit: id=%s keyword=%s", id, lineRedirectRule.keyword);
+        const lineGeneralTpl = metaCommentsStorage.getMetaCommentTemplateByCategory(comment.brand_id ?? undefined, "line_general");
+        const lineSecond = (lineGeneralTpl?.reply_dm_guide || "這題比較適合由客服一對一幫你確認，我們把 LINE 放這邊給你 🤍").trim();
+        const shortPrompt = "你是社群小編。請針對留言回覆「一則簡短公開回答」（一句話即可）。只回傳 JSON：{\"reply_first\":\"...\"}";
+        const shortRes = await openai.chat.completions.create({
+          model,
+          messages: [
+            { role: "system", content: shortPrompt },
+            { role: "user", content: `留言：「${msg}」` },
+          ],
+          response_format: { type: "json_object" },
+        });
+        const shortText = shortRes.choices[0]?.message?.content || "{}";
+        const shortParsed = JSON.parse(shortText) as { reply_first?: string };
+        const reply_first_line = (shortParsed.reply_first || "感謝您的留言～").trim();
+        metaCommentsStorage.updateMetaComment(id, {
+          ai_intent: "dm_guide",
+          priority: "normal",
+          ai_suggest_hide: 0,
+          ai_suggest_human: 1,
+          reply_first: reply_first_line,
+          reply_second: lineSecond,
+          applied_rule_id: appliedRuleId,
+          applied_template_id: lineGeneralTpl?.id ?? null,
+          applied_mapping_id: null,
+          reply_link_source: "none",
+          classifier_source: "rule",
+          matched_rule_keyword: lineRedirectRule.keyword,
+          reply_flow_type: "line_redirect",
+        });
+        const updated = metaCommentsStorage.getMetaComment(id)!;
+        return res.json({ ...updated, classifier_source: "rule" as const, matched_rule_keyword: lineRedirectRule.keyword });
+      }
+
+      // ---------- Step 1: 規則先判斷（僅啟用中的規則，依 priority 降序，關鍵字包含即視為命中）
+      const allRules = metaCommentsStorage.getMetaCommentRules(comment.brand_id ?? undefined);
+      const enabledRules = allRules.filter((r) => r.enabled !== 0).sort((a, b) => b.priority - a.priority);
+      for (const r of enabledRules) {
+        if (!r.keyword_pattern || !msg.includes(r.keyword_pattern)) continue;
+        appliedRuleId = r.id;
+        if (r.rule_type === "to_human") {
+          metaCommentsStorage.updateMetaComment(id, {
+            is_human_handled: 1,
+            ai_intent: comment.ai_intent || "complaint",
+            priority: "urgent",
+            ai_suggest_human: 1,
+            applied_rule_id: r.id,
+            applied_template_id: null,
+            applied_mapping_id: null,
+            reply_first: "感謝您的留言，我們已轉專人為您處理，請私訊我們以利後續聯繫。",
+            reply_second: null,
+            reply_link_source: "none",
+          });
+          const updated = metaCommentsStorage.getMetaComment(id);
+          return res.json(updated);
+        }
+        if (r.rule_type === "hide") {
+          metaCommentsStorage.updateMetaComment(id, {
+            is_hidden: 1,
+            applied_rule_id: r.id,
+            applied_template_id: null,
+            applied_mapping_id: null,
+            reply_first: null,
+            reply_second: null,
+            reply_link_source: "none",
+          });
+          const updated = metaCommentsStorage.getMetaComment(id);
+          return res.json(updated);
+        }
+        if (r.rule_type === "use_template" && r.template_id) {
+          const templates = metaCommentsStorage.getMetaCommentTemplates(comment.brand_id ?? undefined);
+          const t = templates.find((x) => x.id === r.template_id);
+          if (t) {
+            useTemplateForReply = t;
+            appliedTemplateId = t.id;
+          }
+        }
+        break; // 只取第一條命中的規則
+      }
+
+      // ---------- Step 2: AI 分類意圖（先分流：商品/價格/哪裡買/活動/需要導 LINE/訂單售後/客訴/垃圾）
+      const classifyPrompt = `你是粉專留言意圖分類器。只回傳 JSON，不要其他文字。
+意圖必須是以下「 exactly 一個」：${INTENTS}
+重要規則：
+- 「多少錢」「價格」「價錢」「幾元」→ price_inquiry。
+- 「哪裡買」「怎麼買」「下單」→ where_to_buy。
+- 「成分」「功效」「敏感肌」「適用」→ ingredient_effect。
+- 「+1」「抽」「已完成」「好燒」「想抽」→ activity_engage。
+- 「哪款適合我」「哪款比較適合」「幫我推薦」「推薦」「想了解更詳細」「更詳細」「想拿優惠」「可以私訊嗎」「一對一」→ 一律 dm_guide，suggest_human 設 true（表示建議導 LINE 一對一）。
+- 「沒收到」「還沒到」「退款」「品質差」「不回訊息」「客訴」「要退」→ complaint 或 refund_after_sale，is_high_risk=true。
+- 售後、查訂單、物流問題 → refund_after_sale，is_high_risk=true。
+高風險時只產安撫不導購。dm_guide 表示適合導 LINE 一對一協助。
+回傳格式：{"intent":"上述其一", "is_high_risk": true或false, "suggest_hide": true或false, "suggest_human": true或false}`;
+      const classifyRes = await openai.chat.completions.create({
+        model,
+        messages: [
+          { role: "system", content: classifyPrompt },
+          { role: "user", content: `留言：「${msg}」` },
+        ],
+        response_format: { type: "json_object" },
+      });
+      const classifyText = classifyRes.choices[0]?.message?.content || "{}";
+      const cls = JSON.parse(classifyText) as { intent?: string; is_high_risk?: boolean; suggest_hide?: boolean; suggest_human?: boolean };
+      let isHighRisk = !!cls.is_high_risk;
+      const suggestHide = !!cls.suggest_hide;
+      let intent = cls.intent && INTENTS.includes(cls.intent) ? cls.intent : "product_inquiry";
+      let suggestHuman = !!cls.suggest_human;
+      if (msg.includes("有貨") && intent === "product_inquiry") isHighRisk = false;
+      if (!isHighRisk && (msg.includes("適合") || msg.includes("推薦") || msg.includes("更詳細") || msg.includes("想了解更") || msg.includes("幫我挑") || msg.includes("哪款比較"))) {
+        intent = "dm_guide";
+        suggestHuman = true;
+      }
+      const priority = isHighRisk ? "urgent" : (comment.priority || "normal");
+      metaCommentsStorage.updateMetaComment(id, {
+        ai_intent: intent,
+        priority,
+        ai_suggest_hide: suggestHide ? 1 : 0,
+        ai_suggest_human: suggestHuman ? 1 : 0,
+        classifier_source: "ai",
+        matched_rule_keyword: null,
+      });
+
+      // ---------- Step 3: 高風險 → 只產安撫+導 LINE，不產第二則；寫入 reply_flow_type=comfort_line
+      if (isHighRisk) {
+        const comfortTpl = metaCommentsStorage.getMetaCommentTemplateByCategory(comment.brand_id ?? undefined, "line_after_sale");
+        const fallbackComfort = comfortTpl?.reply_comfort || comfortTpl?.reply_dm_guide || "感謝您的留言，我們已收到並會盡快由專人與您聯繫，請私訊我們以利處理。";
+        const comfortPrompt = "你是社群小編。此留言為客訴/退款/負面情緒，請回覆一段簡短安撫並引導私訊或專人處理，不要推銷。只回傳 JSON：{\"reply_comfort\":\"...\"}";
+        const comfortRes = await openai.chat.completions.create({
+          model,
+          messages: [
+            { role: "system", content: comfortPrompt },
+            { role: "user", content: `留言：「${msg}」` },
+          ],
+          response_format: { type: "json_object" },
+        });
+        const comfortText = comfortRes.choices[0]?.message?.content || "{}";
+        const comfortParsed = JSON.parse(comfortText) as { reply_comfort?: string };
+        const reply_comfort = (comfortParsed.reply_comfort || fallbackComfort).trim();
+        metaCommentsStorage.updateMetaComment(id, {
+          reply_first: reply_comfort || fallbackComfort,
+          reply_second: null,
+          applied_rule_id: appliedRuleId,
+          applied_template_id: appliedTemplateId,
+          applied_mapping_id: null,
+          reply_link_source: "none",
+          classifier_source: "ai",
+          matched_rule_keyword: null,
+          reply_flow_type: "comfort_line",
+        });
+        const updated = metaCommentsStorage.getMetaComment(id)!;
+        return res.json({ ...updated, classifier_source: "ai" as const, matched_rule_keyword: null });
+      }
+
+      // ---------- Step 3b: 需要導 LINE（dm_guide 或 suggest_human）→ 公開簡答 + 第二則導 LINE 話術
+      const shouldRedirectLine = intent === "dm_guide" || suggestHuman;
+      if (shouldRedirectLine) {
+        const lineGeneralTpl = metaCommentsStorage.getMetaCommentTemplateByCategory(comment.brand_id ?? undefined, "line_general");
+        const lineSecond = (lineGeneralTpl?.reply_dm_guide || "這題比較適合由客服一對一幫你確認，我們把 LINE 放這邊給你 🤍").trim();
+        const shortPrompt = "你是社群小編。請針對留言回覆「一則簡短公開回答」（一句話即可）。只回傳 JSON：{\"reply_first\":\"...\"}";
+        const shortRes = await openai.chat.completions.create({
+          model,
+          messages: [
+            { role: "system", content: shortPrompt },
+            { role: "user", content: `留言：「${msg}」` },
+          ],
+          response_format: { type: "json_object" },
+        });
+        const shortText = shortRes.choices[0]?.message?.content || "{}";
+        const shortParsed = JSON.parse(shortText) as { reply_first?: string };
+        const reply_first_line = (shortParsed.reply_first || "感謝您的留言～").trim();
+        metaCommentsStorage.updateMetaComment(id, {
+          reply_first: reply_first_line,
+          reply_second: lineSecond,
+          applied_rule_id: appliedRuleId,
+          applied_template_id: lineGeneralTpl?.id ?? appliedTemplateId,
+          applied_mapping_id: null,
+          reply_link_source: "none",
+          classifier_source: "ai",
+          matched_rule_keyword: null,
+          reply_flow_type: "line_redirect",
+        });
+        const updated = metaCommentsStorage.getMetaComment(id)!;
+        return res.json({ ...updated, classifier_source: "ai" as const, matched_rule_keyword: null });
+      }
+
+      // ---------- Step 4: 取得 mapping（僅 auto_comment_enabled=1）；定義 fallback：無 mapping 時連結為空、reply_link_source='none'
+      const mapping = metaCommentsStorage.getMappingForComment(comment.brand_id, comment.page_id, comment.post_id);
+      const productUrl = mapping ? (mapping.primary_url || mapping.fallback_url || "") : "";
+      const linkSource = mapping ? "post_mapping" : "none";
+      const toneHint = mapping?.tone_hint || "親切、自然";
+      const preferredFlow = (mapping as { preferred_flow?: string } | null)?.preferred_flow;
+
+      // ---------- Step 4b: 貼文偏好為「優先導 LINE」或「僅售後」→ 此則走簡答+導 LINE
+      if (preferredFlow === "line_redirect" || preferredFlow === "support_only") {
+        const lineGeneralTpl = metaCommentsStorage.getMetaCommentTemplateByCategory(comment.brand_id ?? undefined, "line_general");
+        const lineSecond = (lineGeneralTpl?.reply_dm_guide || "這題比較適合由客服一對一幫你確認，我們把 LINE 放這邊給你 🤍").trim();
+        const shortPrompt = "你是社群小編。請針對留言回覆「一則簡短公開回答」（一句話即可）。只回傳 JSON：{\"reply_first\":\"...\"}";
+        const shortRes = await openai.chat.completions.create({
+          model,
+          messages: [
+            { role: "system", content: shortPrompt },
+            { role: "user", content: `留言：「${msg}」` },
+          ],
+          response_format: { type: "json_object" },
+        });
+        const shortText = shortRes.choices[0]?.message?.content || "{}";
+        const shortParsed = JSON.parse(shortText) as { reply_first?: string };
+        const reply_first_line = (shortParsed.reply_first || "感謝您的留言～").trim();
+        metaCommentsStorage.updateMetaComment(id, {
+          reply_first: reply_first_line,
+          reply_second: lineSecond,
+          applied_rule_id: appliedRuleId,
+          applied_template_id: lineGeneralTpl?.id ?? appliedTemplateId,
+          applied_mapping_id: mapping?.id ?? null,
+          reply_link_source: "none",
+          classifier_source: "ai",
+          matched_rule_keyword: null,
+          reply_flow_type: "line_redirect",
+        });
+        const updated = metaCommentsStorage.getMetaComment(id)!;
+        return res.json({ ...updated, classifier_source: "ai" as const, matched_rule_keyword: null });
+      }
+
+      // ---------- Step 5: 產生回覆（規則命中 use_template 時用模板覆蓋 AI；否則 AI 雙段式）
+      let reply_first: string;
+      let reply_second: string;
+      if (useTemplateForReply) {
+        reply_first = useTemplateForReply.reply_first || "";
+        reply_second = (useTemplateForReply.reply_second || "").replace(/\{primary_url\}/g, productUrl || "").trim();
+        if (productUrl && !reply_second.includes(productUrl)) reply_second = reply_second ? reply_second + " " + productUrl : productUrl;
+      } else {
+        const dualPrompt = `你是社群小編。請針對留言先回覆「第一則：解答問題」，再回覆「第二則：自然導購」，語氣參考：${toneHint}。簡短、有人味，不要罐頭。
+若下方有提供導購連結，第二則必須自然帶入該連結。若沒有連結則第二則只溫和邀請官網或私訊，不要編造連結。`;
+        const userContent = productUrl
+          ? `留言：「${msg}」\n請回覆 JSON：{"reply_first":"第一則解答", "reply_second":"第二則導購，結尾帶入此連結：${productUrl}"}`
+          : `留言：「${msg}」\n請回覆 JSON：{"reply_first":"第一則解答", "reply_second":"第二則溫和邀請至官網或私訊詢問，不要貼任何網址"}`;
+        const dualRes = await openai.chat.completions.create({
+          model,
+          messages: [{ role: "system", content: dualPrompt }, { role: "user", content: userContent }],
+          response_format: { type: "json_object" },
+        });
+        const dualText = dualRes.choices[0]?.message?.content || "{}";
+        const dualParsed = JSON.parse(dualText) as { reply_first?: string; reply_second?: string };
+        reply_first = dualParsed.reply_first || "";
+        reply_second = dualParsed.reply_second || "";
+        if (productUrl && reply_second && !reply_second.includes(productUrl)) reply_second = reply_second.trim() + " " + productUrl;
+      }
+
+      const replyFlowType = productUrl ? "product_link" : "public_only";
+      metaCommentsStorage.updateMetaComment(id, {
+        reply_first: reply_first || null,
+        reply_second: reply_second || null,
+        applied_rule_id: appliedRuleId,
+        applied_template_id: appliedTemplateId,
+        applied_mapping_id: mapping?.id ?? null,
+        reply_link_source: linkSource,
+        classifier_source: "ai",
+        matched_rule_keyword: null,
+        reply_flow_type: replyFlowType,
+      });
+      const updated = metaCommentsStorage.getMetaComment(id)!;
+      return res.json({ ...updated, classifier_source: "ai" as const, matched_rule_keyword: null });
+    } catch (e: any) {
+      return res.status(500).json({ message: e?.message || "AI 建議失敗" });
+    }
+  });
+
+  app.get("/api/meta-comment-templates", authMiddleware, (req: any, res) => {
+    const brand_id = req.query.brand_id ? parseInt(String(req.query.brand_id)) : undefined;
+    const list = metaCommentsStorage.getMetaCommentTemplates(brand_id);
+    return res.json(list);
+  });
+  app.post("/api/meta-comment-templates", authMiddleware, (req: any, res) => {
+    const body = req.body || {};
+    const row = metaCommentsStorage.createMetaCommentTemplate({
+      brand_id: body.brand_id,
+      category: body.category || "product_inquiry",
+      name: body.name || "未命名",
+      reply_first: body.reply_first,
+      reply_second: body.reply_second,
+      reply_comfort: body.reply_comfort,
+      reply_dm_guide: body.reply_dm_guide,
+      tone_hint: body.tone_hint,
+    });
+    return res.json(row);
+  });
+  app.put("/api/meta-comment-templates/:id", authMiddleware, (req: any, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "無效的 ID" });
+    const body = req.body || {};
+    metaCommentsStorage.updateMetaCommentTemplate(id, body);
+    return res.json(metaCommentsStorage.getMetaCommentTemplates().find((t) => t.id === id));
+  });
+  app.delete("/api/meta-comment-templates/:id", authMiddleware, (req: any, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "無效的 ID" });
+    const ok = metaCommentsStorage.deleteMetaCommentTemplate(id);
+    return res.json({ success: ok });
+  });
+
+  app.get("/api/meta-pages", authMiddleware, (req: any, res) => {
+    const brand_id = req.query.brand_id ? parseInt(String(req.query.brand_id)) : undefined;
+    const list = metaCommentsStorage.getMetaPagesForDropdown(brand_id ?? undefined);
+    return res.json(list);
+  });
+  app.get("/api/meta-pages/:pageId/posts", authMiddleware, (req: any, res) => {
+    const pageId = String(req.params.pageId || "");
+    const brand_id = req.query.brand_id ? parseInt(String(req.query.brand_id)) : undefined;
+    const list = metaCommentsStorage.getMetaPostsByPage(pageId, brand_id ?? undefined);
+    return res.json(list);
+  });
+  app.get("/api/meta-products", authMiddleware, (req: any, res) => {
+    const q = req.query.q ? String(req.query.q) : undefined;
+    const brand_id = req.query.brand_id ? parseInt(String(req.query.brand_id)) : undefined;
+    const list = metaCommentsStorage.searchMetaProducts(q, brand_id ?? undefined);
+    return res.json(list);
+  });
+  app.get("/api/meta-post-mappings", authMiddleware, (req: any, res) => {
+    const brand_id = req.query.brand_id ? parseInt(String(req.query.brand_id)) : undefined;
+    const q = (req.query.q as string) || "";
+    let list = metaCommentsStorage.getMetaPostMappings(brand_id ?? undefined);
+    if (q.trim()) {
+      const lower = q.trim().toLowerCase();
+      list = list.filter(
+        (m) =>
+          (m.page_name || "").toLowerCase().includes(lower) ||
+          (m.post_name || "").toLowerCase().includes(lower) ||
+          (m.post_id || "").toLowerCase().includes(lower) ||
+          (m.product_name || "").toLowerCase().includes(lower)
+      );
+    }
+    return res.json(list);
+  });
+  app.post("/api/meta-post-mappings", authMiddleware, (req: any, res) => {
+    const body = req.body || {};
+    if (!body.brand_id) return res.status(400).json({ message: "brand_id 必填" });
+    const pageId = body.page_id ?? null;
+    const postId = (body.post_id || "").trim();
+    if (!postId) return res.status(400).json({ message: "貼文 ID 必填" });
+    const enabled = body.auto_comment_enabled !== 0 ? 1 : 0;
+    if (enabled && metaCommentsStorage.hasDuplicateEnabledMapping(body.brand_id, pageId, postId)) {
+      return res.status(400).json({ message: "同一粉專＋貼文已存在啟用中的對應，請勿重複建立" });
+    }
+    const row = metaCommentsStorage.createMetaPostMapping({
+      brand_id: body.brand_id,
+      page_id: pageId,
+      page_name: body.page_name,
+      post_id: postId,
+      post_name: body.post_name,
+      product_name: body.product_name,
+      primary_url: body.primary_url,
+      fallback_url: body.fallback_url,
+      tone_hint: body.tone_hint,
+      auto_comment_enabled: enabled,
+      preferred_flow: body.preferred_flow ?? null,
+    });
+    return res.json(row);
+  });
+  app.put("/api/meta-post-mappings/:id", authMiddleware, (req: any, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "無效的 ID" });
+    const body = req.body || {};
+    const pageId = body.page_id !== undefined ? body.page_id : undefined;
+    const postId = body.post_id !== undefined ? (body.post_id || "").trim() : undefined;
+    const enabled = body.auto_comment_enabled !== undefined ? (body.auto_comment_enabled !== 0 ? 1 : 0) : undefined;
+    const existing = metaCommentsStorage.getMetaPostMappings().find((m) => m.id === id);
+    if (existing && (pageId !== undefined || postId !== undefined || enabled !== undefined)) {
+      const finalPageId = pageId !== undefined ? pageId : existing.page_id;
+      const finalPostId = postId !== undefined ? postId : existing.post_id;
+      const finalEnabled = enabled !== undefined ? enabled : existing.auto_comment_enabled;
+      if (finalEnabled && metaCommentsStorage.hasDuplicateEnabledMapping(existing.brand_id, finalPageId, finalPostId, id)) {
+        return res.status(400).json({ message: "同一粉專＋貼文已存在啟用中的對應，請勿重複" });
+      }
+    }
+    metaCommentsStorage.updateMetaPostMapping(id, body);
+    const list = metaCommentsStorage.getMetaPostMappings();
+    return res.json(list.find((m) => m.id === id));
+  });
+  app.delete("/api/meta-post-mappings/:id", authMiddleware, (req: any, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "無效的 ID" });
+    const ok = metaCommentsStorage.deleteMetaPostMapping(id);
+    return res.json({ success: ok });
+  });
+
+  app.get("/api/meta-comment-rules", authMiddleware, (req: any, res) => {
+    const brand_id = req.query.brand_id ? parseInt(String(req.query.brand_id)) : undefined;
+    const list = metaCommentsStorage.getMetaCommentRules(brand_id);
+    return res.json(list);
+  });
+  app.post("/api/meta-comment-rules", authMiddleware, (req: any, res) => {
+    const body = req.body || {};
+    const row = metaCommentsStorage.createMetaCommentRule({
+      brand_id: body.brand_id,
+      page_id: body.page_id,
+      post_id: body.post_id,
+      priority: body.priority ?? 0,
+      rule_type: body.rule_type || "use_template",
+      keyword_pattern: body.keyword_pattern || "",
+      template_id: body.template_id,
+      tag_value: body.tag_value,
+      enabled: body.enabled !== 0 ? 1 : 0,
+    });
+    return res.json(row);
+  });
+  app.put("/api/meta-comment-rules/:id", authMiddleware, (req: any, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "無效的 ID" });
+    const existing = metaCommentsStorage.getMetaCommentRule(id);
+    if (!existing) return res.status(404).json({ message: "規則不存在" });
+    const body = req.body || {};
+    metaCommentsStorage.updateMetaCommentRule(id, {
+      brand_id: body.brand_id !== undefined ? body.brand_id : undefined,
+      page_id: body.page_id !== undefined ? body.page_id : undefined,
+      post_id: body.post_id !== undefined ? body.post_id : undefined,
+      priority: body.priority !== undefined ? body.priority : undefined,
+      rule_type: body.rule_type,
+      keyword_pattern: body.keyword_pattern,
+      template_id: body.template_id !== undefined ? body.template_id : undefined,
+      tag_value: body.tag_value !== undefined ? body.tag_value : undefined,
+      enabled: body.enabled !== undefined ? (body.enabled ? 1 : 0) : undefined,
+    });
+    const updated = metaCommentsStorage.getMetaCommentRule(id);
+    return res.json(updated);
+  });
+  app.delete("/api/meta-comment-rules/:id", authMiddleware, (req: any, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "無效的 ID" });
+    const ok = metaCommentsStorage.deleteMetaCommentRule(id);
+    return res.json({ success: ok });
+  });
+
+  app.post("/api/meta-comments/:id/resolve", authMiddleware, (req: any, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "無效的 ID" });
+    const comment = metaCommentsStorage.getMetaComment(id);
+    if (!comment) return res.status(404).json({ message: "留言不存在" });
+    const resolved = resolveCommentMetadata({
+      brand_id: comment.brand_id,
+      page_id: comment.page_id,
+      post_id: comment.post_id,
+      post_name: comment.post_name,
+      post_title_from_graph: (comment as any).post_display_name && (comment as any).detected_post_title_source === "graph_api" ? (comment as any).post_display_name : null,
+      message: comment.message,
+      is_sensitive_or_complaint: comment.priority === "urgent" || ["complaint", "refund_after_sale"].includes(comment.ai_intent || ""),
+    });
+    metaCommentsStorage.updateMetaComment(id, {
+      post_display_name: resolved.post_display_name,
+      detected_post_title_source: resolved.detected_post_title_source,
+      detected_product_name: resolved.detected_product_name,
+      detected_product_source: resolved.detected_product_source,
+      target_line_type: resolved.target_line_type,
+      target_line_value: resolved.target_line_value,
+    });
+    return res.json(metaCommentsStorage.getMetaComment(id));
+  });
+
+  app.post("/api/meta-comments/:id/reply", authMiddleware, async (req: any, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "無效的 ID" });
+    const comment = metaCommentsStorage.getMetaComment(id);
+    if (!comment) return res.status(404).json({ message: "留言不存在" });
+    const message = (req.body?.message as string)?.trim();
+    if (!message) return res.status(400).json({ message: "請提供 message（回覆內容）" });
+    const channel = storage.getChannelByBotId(comment.page_id);
+    if (!channel?.access_token) {
+      metaCommentsStorage.updateMetaComment(id, {
+        reply_error: "缺少該粉專的 Page access token",
+        platform_error: "未設定或未匹配 channel",
+      });
+      metaCommentsStorage.insertMetaCommentAction({ comment_id: id, action_type: "reply", success: 0, error_message: "缺少 Page token", executor: "user" });
+      return res.status(400).json({ message: "此粉專尚未設定 Page access token，無法發佈回覆" });
+    }
+    const result = await replyToComment({
+      commentId: comment.comment_id,
+      message,
+      pageAccessToken: channel.access_token,
+    });
+    const now = new Date().toISOString();
+    if (result.success) {
+      metaCommentsStorage.updateMetaComment(id, {
+        replied_at: now,
+        reply_error: null,
+        platform_error: null,
+      });
+      metaCommentsStorage.insertMetaCommentAction({
+        comment_id: id,
+        action_type: "reply",
+        success: 1,
+        platform_response: result.platform_response ?? null,
+        executor: "user",
+      });
+      const updated = metaCommentsStorage.getMetaComment(id)!;
+      metaCommentsStorage.updateMetaComment(id, { main_status: computeMainStatus(updated) });
+      return res.json(metaCommentsStorage.getMetaComment(id));
+    }
+    const errMsg = [result.error, result.platform_code && `(code: ${result.platform_code})`].filter(Boolean).join(" ");
+    metaCommentsStorage.updateMetaComment(id, {
+      reply_error: result.error ?? "未知錯誤",
+      platform_error: result.platform_response ?? errMsg,
+      main_status: "failed",
+    });
+    metaCommentsStorage.insertMetaCommentAction({
+      comment_id: id,
+      action_type: "reply",
+      success: 0,
+      error_message: result.error ?? undefined,
+      platform_response: result.platform_response ?? undefined,
+      executor: "user",
+    });
+    return res.status(502).json({
+      message: "平台發佈回覆失敗",
+      error: result.error,
+      platform_code: result.platform_code,
+    });
+  });
+
+  app.post("/api/meta-comments/:id/hide", authMiddleware, async (req: any, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "無效的 ID" });
+    const comment = metaCommentsStorage.getMetaComment(id);
+    if (!comment) return res.status(404).json({ message: "留言不存在" });
+    const channel = storage.getChannelByBotId(comment.page_id);
+    if (!channel?.access_token) {
+      const errMsg = "缺少該粉專的 Page access token";
+      metaCommentsStorage.updateMetaComment(id, { hide_error: errMsg, platform_error: "未設定或未匹配 channel" });
+      metaCommentsStorage.insertMetaCommentAction({ comment_id: id, action_type: "hide", success: 0, error_message: errMsg, executor: "user" });
+      return res.status(400).json({ message: "此粉專尚未設定 Page access token，無法隱藏留言" });
+    }
+    const result = await hideComment({
+      commentId: comment.comment_id,
+      pageAccessToken: channel.access_token,
+    });
+    const now = new Date().toISOString();
+    if (result.success) {
+      metaCommentsStorage.updateMetaComment(id, {
+        is_hidden: 1,
+        auto_hidden_at: now,
+        hide_error: null,
+      });
+      metaCommentsStorage.insertMetaCommentAction({
+        comment_id: id,
+        action_type: "hide",
+        success: 1,
+        platform_response: result.platform_response ?? null,
+        executor: "user",
+      });
+      const updated = metaCommentsStorage.getMetaComment(id)!;
+      metaCommentsStorage.updateMetaComment(id, { main_status: computeMainStatus(updated) });
+      return res.json(metaCommentsStorage.getMetaComment(id));
+    }
+    const errMsg = [result.error, result.platform_code && `(code: ${result.platform_code})`].filter(Boolean).join(" ");
+    metaCommentsStorage.updateMetaComment(id, { hide_error: result.error ?? "未知錯誤", platform_error: errMsg, main_status: "failed" });
+    metaCommentsStorage.insertMetaCommentAction({
+      comment_id: id,
+      action_type: "hide",
+      success: 0,
+      error_message: result.error ?? undefined,
+      platform_response: result.platform_response ?? undefined,
+      executor: "user",
+    });
+    return res.status(502).json({
+      message: "平台隱藏留言失敗",
+      error: result.error,
+      platform_code: result.platform_code,
+    });
+  });
+
+  app.get("/api/meta-page-settings", authMiddleware, (req: any, res) => {
+    const brand_id = req.query.brand_id ? parseInt(String(req.query.brand_id)) : undefined;
+    const list = metaCommentsStorage.getMetaPageSettingsList(brand_id);
+    return res.json(list);
+  });
+  app.get("/api/meta-page-settings/:id", authMiddleware, (req: any, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "無效的 ID" });
+    const row = metaCommentsStorage.getMetaPageSettings(id);
+    if (!row) return res.status(404).json({ message: "找不到該設定" });
+    return res.json(row);
+  });
+  app.get("/api/meta-page-settings/by-page/:pageId", authMiddleware, (req: any, res) => {
+    const pageId = String(req.params.pageId || "");
+    if (!pageId) return res.status(400).json({ message: "請提供 page_id" });
+    const row = metaCommentsStorage.getMetaPageSettingsByPageId(pageId);
+    if (!row) return res.status(404).json({ message: "找不到該粉專設定" });
+    return res.json(row);
+  });
+  app.post("/api/meta-page-settings", authMiddleware, (req: any, res) => {
+    const body = req.body || {};
+    if (!body.page_id?.trim()) return res.status(400).json({ message: "請提供 page_id" });
+    if (body.brand_id == null) return res.status(400).json({ message: "請提供 brand_id" });
+    try {
+      const row = metaCommentsStorage.createMetaPageSettings({
+        page_id: body.page_id.trim(),
+        page_name: body.page_name?.trim() || null,
+        brand_id: Number(body.brand_id),
+        line_general: body.line_general?.trim() || null,
+        line_after_sale: body.line_after_sale?.trim() || null,
+        auto_hide_sensitive: body.auto_hide_sensitive ? 1 : 0,
+        auto_reply_enabled: body.auto_reply_enabled ? 1 : 0,
+        auto_route_line_enabled: body.auto_route_line_enabled ? 1 : 0,
+        default_reply_template_id: body.default_reply_template_id != null ? Number(body.default_reply_template_id) : null,
+        default_sensitive_template_id: body.default_sensitive_template_id != null ? Number(body.default_sensitive_template_id) : null,
+        default_flow: body.default_flow?.trim() || null,
+        default_product_name: body.default_product_name?.trim() || null,
+      });
+      return res.json(row);
+    } catch (e: any) {
+      if (e.message?.includes("UNIQUE")) return res.status(400).json({ message: "該 page_id 已存在設定" });
+      return res.status(500).json({ message: e?.message || "建立失敗" });
+    }
+  });
+  app.put("/api/meta-page-settings/:id", authMiddleware, (req: any, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "無效的 ID" });
+    const existing = metaCommentsStorage.getMetaPageSettings(id);
+    if (!existing) return res.status(404).json({ message: "找不到該設定" });
+    const body = req.body || {};
+    metaCommentsStorage.updateMetaPageSettings(id, {
+      page_name: body.page_name !== undefined ? body.page_name : undefined,
+      brand_id: body.brand_id !== undefined ? Number(body.brand_id) : undefined,
+      line_general: body.line_general !== undefined ? body.line_general : undefined,
+      line_after_sale: body.line_after_sale !== undefined ? body.line_after_sale : undefined,
+      auto_hide_sensitive: body.auto_hide_sensitive !== undefined ? (body.auto_hide_sensitive ? 1 : 0) : undefined,
+      auto_reply_enabled: body.auto_reply_enabled !== undefined ? (body.auto_reply_enabled ? 1 : 0) : undefined,
+      auto_route_line_enabled: body.auto_route_line_enabled !== undefined ? (body.auto_route_line_enabled ? 1 : 0) : undefined,
+      default_reply_template_id: body.default_reply_template_id !== undefined ? (body.default_reply_template_id == null ? null : Number(body.default_reply_template_id)) : undefined,
+      default_sensitive_template_id: body.default_sensitive_template_id !== undefined ? (body.default_sensitive_template_id == null ? null : Number(body.default_sensitive_template_id)) : undefined,
+      default_flow: body.default_flow !== undefined ? body.default_flow : undefined,
+      default_product_name: body.default_product_name !== undefined ? body.default_product_name : undefined,
+    });
+    return res.json(metaCommentsStorage.getMetaPageSettings(id));
+  });
+  app.delete("/api/meta-page-settings/:id", authMiddleware, (req: any, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "無效的 ID" });
+    const ok = metaCommentsStorage.deleteMetaPageSettings(id);
+    return res.json({ success: ok });
+  });
+
+  app.get("/api/meta-product-keywords", authMiddleware, (req: any, res) => {
+    const brand_id = req.query.brand_id ? parseInt(String(req.query.brand_id)) : undefined;
+    const list = metaCommentsStorage.getMetaProductKeywords(brand_id);
+    return res.json(list);
+  });
+  app.post("/api/meta-product-keywords", authMiddleware, (req: any, res) => {
+    const body = req.body || {};
+    if (!body.keyword?.trim()) return res.status(400).json({ message: "請提供 keyword" });
+    if (!body.product_name?.trim()) return res.status(400).json({ message: "請提供 product_name" });
+    if (!["post", "comment"].includes(body.match_scope)) return res.status(400).json({ message: "match_scope 須為 post 或 comment" });
+    const row = metaCommentsStorage.createMetaProductKeyword({
+      brand_id: body.brand_id != null ? Number(body.brand_id) : null,
+      keyword: body.keyword.trim(),
+      product_name: body.product_name.trim(),
+      match_scope: body.match_scope,
+    });
+    return res.json(row);
+  });
+  app.delete("/api/meta-product-keywords/:id", authMiddleware, (req: any, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "無效的 ID" });
+    const ok = metaCommentsStorage.deleteMetaProductKeyword(id);
+    return res.json({ success: ok });
+  });
+
   app.get("/api/brands", authMiddleware, (_req, res) => {
     const brands = storage.getBrands();
     return res.json(brands);
   });
 
   app.get("/api/brands/:id", authMiddleware, (req, res) => {
-    const brand = storage.getBrand(parseInt(req.params.id));
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
+    const brand = storage.getBrand(id);
     if (!brand) return res.status(404).json({ message: "品牌不存在" });
     return res.json(brand);
   });
@@ -630,8 +1912,13 @@ export async function registerRoutes(
   });
 
   app.put("/api/brands/:id", authMiddleware, superAdminOnly, (req, res) => {
-    const id = parseInt(req.params.id);
-    const { name, slug, logo_url, description, system_prompt, superlanding_merchant_no, superlanding_access_key } = req.body;
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
+    const {
+      name, slug, logo_url, description, system_prompt,
+      superlanding_merchant_no, superlanding_access_key, return_form_url,
+      shopline_store_domain, shopline_api_token,
+    } = req.body;
     const data: Record<string, string> = {};
     if (name !== undefined) data.name = name;
     if (slug !== undefined) data.slug = slug;
@@ -640,18 +1927,23 @@ export async function registerRoutes(
     if (system_prompt !== undefined) data.system_prompt = system_prompt;
     if (superlanding_merchant_no !== undefined) data.superlanding_merchant_no = superlanding_merchant_no;
     if (superlanding_access_key !== undefined) data.superlanding_access_key = superlanding_access_key;
+    if (return_form_url !== undefined) data.return_form_url = return_form_url;
+    if (shopline_store_domain !== undefined) data.shopline_store_domain = shopline_store_domain;
+    if (shopline_api_token !== undefined) data.shopline_api_token = shopline_api_token;
     if (!storage.updateBrand(id, data)) return res.status(404).json({ message: "品牌不存在" });
     return res.json({ success: true });
   });
 
   app.delete("/api/brands/:id", authMiddleware, superAdminOnly, (req, res) => {
-    const id = parseInt(req.params.id);
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
     if (!storage.deleteBrand(id)) return res.status(404).json({ message: "品牌不存在" });
     return res.json({ success: true });
   });
 
   app.get("/api/brands/:id/channels", authMiddleware, (req, res) => {
-    const brandId = parseInt(req.params.id);
+    const brandId = parseIdParam(req.params.id);
+    if (brandId === null) return res.status(400).json({ message: "無效的 ID" });
     const channels = storage.getChannelsByBrand(brandId);
     return res.json(channels);
   });
@@ -662,7 +1954,8 @@ export async function registerRoutes(
   });
 
   app.post("/api/brands/:id/channels", authMiddleware, superAdminOnly, (req, res) => {
-    const brandId = parseInt(req.params.id);
+    const brandId = parseIdParam(req.params.id);
+    if (brandId === null) return res.status(400).json({ message: "無效的 ID" });
     const { platform, channel_name, bot_id, access_token, channel_secret } = req.body;
     if (!platform || !channel_name) return res.status(400).json({ message: "平台與頻道名稱為必填" });
     if (!["line", "messenger"].includes(platform)) return res.status(400).json({ message: "平台須為 line 或 messenger" });
@@ -671,7 +1964,8 @@ export async function registerRoutes(
   });
 
   app.put("/api/channels/:id", authMiddleware, superAdminOnly, (req, res) => {
-    const id = parseInt(req.params.id);
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const { platform, channel_name, bot_id, access_token, channel_secret, is_active, is_ai_enabled, brand_id } = req.body;
     const data: Record<string, any> = {};
     if (platform !== undefined) data.platform = platform;
@@ -687,13 +1981,15 @@ export async function registerRoutes(
   });
 
   app.delete("/api/channels/:id", authMiddleware, superAdminOnly, (req, res) => {
-    const id = parseInt(req.params.id);
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
     if (!storage.deleteChannel(id)) return res.status(404).json({ message: "頻道不存在" });
     return res.json({ success: true });
   });
 
   app.post("/api/brands/:id/test-superlanding", authMiddleware, superAdminOnly, async (req, res) => {
-    const id = parseInt(req.params.id);
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const brand = storage.getBrand(id);
     if (!brand) return res.status(404).json({ message: "品牌不存在" });
     const merchantNo = brand.superlanding_merchant_no || storage.getSetting("superlanding_merchant_no") || "";
@@ -718,27 +2014,38 @@ export async function registerRoutes(
   });
 
   app.post("/api/brands/:id/test-shopline", authMiddleware, superAdminOnly, async (req, res) => {
-    const id = parseInt(req.params.id);
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const brand = storage.getBrand(id);
     if (!brand) return res.status(404).json({ message: "品牌不存在" });
-    const storeDomain = brand.shopline_store_domain || "";
-    const apiToken = brand.shopline_api_token || "";
-    if (!storeDomain || !apiToken) {
-      return res.json({ success: false, message: "此品牌尚未設定 SHOPLINE 商店域名或 API Token" });
+    const apiToken = (brand.shopline_api_token || "").trim();
+    if (!apiToken) {
+      return res.json({ success: false, message: "此品牌尚未設定 SHOPLINE API Token" });
     }
+    // SHOPLINE Open API 使用固定 base：https://open.shopline.io（Token 會識別商店）
+    const openApiBase = "https://open.shopline.io/v1";
+    const testUrl = `${openApiBase}/orders?per_page=1`;
     try {
-      const domain = storeDomain.replace(/^https?:\/\//, "").replace(/\/$/, "");
-      const baseUrl = `https://${domain}/api/v1`;
-      const slRes = await fetch(`${baseUrl}/orders.json?per_page=1`, {
-        headers: { Accept: "application/json", Authorization: `Bearer ${apiToken}` },
+      const slRes = await fetch(testUrl, {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${apiToken}`,
+          "User-Agent": process.env.SHOPLINE_USER_AGENT || "OmniAgentConsole/1.0",
+        },
       });
       if (slRes.ok) {
         const data = await slRes.json();
-        const total = data.total || data.orders?.length || "N/A";
+        const items = data.items ?? data.orders ?? data.data ?? [];
+        const total = data.pagination?.total ?? data.total ?? (Array.isArray(items) ? items.length : 0);
         return res.json({ success: true, message: `SHOPLINE 連線成功！取得訂單資料 (${total})` });
       }
       const errText = await slRes.text().catch(() => "");
-      return res.json({ success: false, message: `SHOPLINE 連線失敗 (HTTP ${slRes.status})：${errText || "請確認商店域名與 API Token 是否正確"}` });
+      const errSummary = errText.length > 200 ? errText.slice(0, 200) + "…" : errText;
+      return res.json({
+        success: false,
+        message: `SHOPLINE 連線失敗 (HTTP ${slRes.status})：${errSummary || "請確認 API Token 是否正確、是否已向 SHOPLINE 申請 OpenAPI 權限"}`,
+      });
     } catch (fetchErr: any) {
       const detail = fetchErr?.cause?.code || fetchErr?.code || fetchErr?.message || "未知網路錯誤";
       return res.json({ success: false, message: `SHOPLINE 連線失敗（網路錯誤）：${detail}` });
@@ -754,7 +2061,7 @@ export async function registerRoutes(
     } else {
       try {
         const openai = new OpenAI({ apiKey });
-        await openai.chat.completions.create({ model: "gpt-5.2", messages: [{ role: "user", content: "hi" }], max_completion_tokens: 5 });
+        await openai.chat.completions.create({ model: getOpenAIModel(), messages: [{ role: "user", content: "hi" }], max_completion_tokens: 5 });
         results.openai = { status: "ok", message: "連線正常" };
       } catch (err: any) {
         results.openai = { status: "error", message: `連線失敗: ${err.message}` };
@@ -810,7 +2117,8 @@ export async function registerRoutes(
   });
 
   app.post("/api/channels/:id/test", authMiddleware, superAdminOnly, async (req, res) => {
-    const id = parseInt(req.params.id);
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const channel = storage.getChannel(id);
     if (!channel) return res.status(404).json({ message: "頻道不存在" });
     if (channel.platform === "line") {
@@ -854,20 +2162,106 @@ export async function registerRoutes(
     return res.json({ success: false, message: `暫不支援 ${channel.platform} 頻道測試` });
   });
 
+  /** 緊急案件判定：任一符合即為緊急（UI 顯示用，內部仍可用 status/case_priority） */
+  const URGENT_TAGS = ["客訴", "退款", "轉主管", "緊急案件"];
+  const OVERDUE_MS = 60 * 60 * 1000;
+  const isUrgentContact = (c: any): boolean => {
+    if (["closed", "resolved"].includes(c.status)) return false;
+    if (c.status === "high_risk" || (c.case_priority != null && c.case_priority <= 2)) return true;
+    try {
+      const tags = JSON.parse(c.tags || "[]");
+      if (Array.isArray(tags) && URGENT_TAGS.some((t: string) => tags.includes(t))) return true;
+    } catch (_) {}
+    if (c.vip_level > 0 && String(c.last_message_sender_type || "").toLowerCase() === "user" && c.last_message_at) {
+      const t = new Date(String(c.last_message_at).replace(" ", "T")).getTime();
+      if (Date.now() - t > OVERDUE_MS) return true;
+    }
+    if (c.response_sla_deadline_at) {
+      const deadline = new Date(String(c.response_sla_deadline_at).replace(" ", "T")).getTime();
+      if (Date.now() > deadline) return true;
+    }
+    return false;
+  };
+  const isOverdueContact = (c: any): boolean => {
+    if (["closed", "resolved"].includes(c.status)) return false;
+    if (String(c.last_message_sender_type || "").toLowerCase() !== "user" || !c.last_message_at) return false;
+    const t = new Date(String(c.last_message_at).replace(" ", "T")).getTime();
+    return Date.now() - t > OVERDUE_MS;
+  };
+
+  /** AI 建議：依最近訊息關鍵字建議 issue_type / status / priority（最小可行，人工可覆寫） */
+  function suggestAiFromMessages(contactId: number): { issue_type?: string; status?: string; priority?: string; tags?: string[] } {
+    const messages = storage.getMessages(contactId).slice(-20);
+    const text = messages.filter((m) => m.sender_type === "user").map((m) => m.content || "").join(" ");
+    const lower = text.toLowerCase();
+    const suggestions: { issue_type?: string; status?: string; priority?: string; tags?: string[] } = {};
+    if (/\b(退款|退費|取消訂單|退訂)\b/.test(text)) { suggestions.issue_type = "return_refund"; (suggestions.tags = suggestions.tags || []).push("退款"); }
+    else if (/\b(客訴|投訴|抱怨|申訴)\b/.test(text)) { suggestions.issue_type = "complaint"; (suggestions.tags = suggestions.tags || []).push("客訴"); }
+    else if (/\b(出貨|寄送|物流|漏件|沒收到|延遲)\b/.test(text)) { suggestions.issue_type = "order_modify"; (suggestions.tags = suggestions.tags || []).push("出貨問題"); }
+    else if (/\b(訂單|查詢|編號|序號)\b/.test(text)) { suggestions.issue_type = "order_inquiry"; }
+    else if (/\b(商品|規格|尺寸|顏色|怎麼用)\b/.test(text)) { suggestions.issue_type = "product_consult"; (suggestions.tags = suggestions.tags || []).push("商品諮詢"); }
+    if (/\b(轉主管|找主管|人工|真人|客服)\b/.test(text)) (suggestions.tags = suggestions.tags || []).push("等主管確認");
+    if (/\b(緊急|很急|快點|都不回|爛|負評)\b/.test(text) || (suggestions.issue_type === "complaint" || suggestions.issue_type === "return_refund")) suggestions.priority = "優先處理";
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg?.sender_type === "user") suggestions.status = "待處理";
+    else if (lastMsg?.sender_type === "admin" || lastMsg?.sender_type === "ai") suggestions.status = "等客戶回覆";
+    return suggestions;
+  }
+
   app.get("/api/contacts", authMiddleware, (req: any, res) => {
     const brandId = req.query.brand_id ? parseInt(req.query.brand_id as string) : undefined;
-    const contacts = storage.getContacts(brandId);
-    return res.json(contacts);
+    const assignedToMe = req.query.assigned_to_me === "1" || req.query.assigned_to_me === "true";
+    const needReplyFirst = req.query.need_reply_first === "1" || req.query.need_reply_first === "true";
+    const userId = req.session?.userId;
+    const assignedToUserId = assignedToMe && userId ? userId : undefined;
+    const agentIdForFlags = userId ?? undefined;
+    let contacts = storage.getContacts(brandId, assignedToUserId, agentIdForFlags);
+    if (needReplyFirst) {
+      contacts = [...contacts].sort((a, b) => {
+        const aNeeds = (a as any).last_message_sender_type === "user" ? 0 : 1;
+        const bNeeds = (b as any).last_message_sender_type === "user" ? 0 : 1;
+        if (aNeeds !== bNeeds) return aNeeds - bNeeds;
+        const aAt = a.last_message_at || "";
+        const bAt = b.last_message_at || "";
+        return bAt.localeCompare(aAt);
+      });
+    }
+    const withFlags = (contacts as any[]).map((c) => {
+      if (!c || typeof c !== "object") return c;
+      try {
+        return {
+          ...c,
+          is_urgent: isUrgentContact(c),
+          is_overdue: isOverdueContact(c),
+        };
+      } catch (err) {
+        return { ...c, is_urgent: false, is_overdue: false };
+      }
+    });
+    return res.json(withFlags);
   });
 
   app.get("/api/contacts/:id", authMiddleware, (req, res) => {
-    const contact = storage.getContact(parseInt(req.params.id));
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
+    const contact = storage.getContact(id) as any;
     if (!contact) return res.status(404).json({ message: "聯絡人不存在" });
+    if (!["closed", "resolved"].includes(contact.status)) {
+      try {
+        const suggested = suggestAiFromMessages(id);
+        if (Object.keys(suggested).length > 0) {
+          storage.updateContactAiSuggestions(id, suggested);
+          contact.ai_suggestions = JSON.stringify(suggested);
+        }
+      } catch (_) {}
+    }
+    if (!contact.ai_suggestions && (contact as any).ai_suggestions === undefined) contact.ai_suggestions = null;
     return res.json(contact);
   });
 
   app.put("/api/contacts/:id/human", authMiddleware, (req, res) => {
-    const id = parseInt(req.params.id);
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
     storage.updateContactHumanFlag(id, req.body.needs_human ? 1 : 0);
     return res.json({ success: true });
   });
@@ -959,25 +2353,32 @@ export async function registerRoutes(
   }
 
   app.put("/api/contacts/:id/status", authMiddleware, async (req, res) => {
-    const id = parseInt(req.params.id);
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const { status } = req.body;
-    if (!["pending", "processing", "resolved", "ai_handling", "awaiting_human", "high_risk", "closed"].includes(status)) {
+    const validStatuses = ["pending", "processing", "resolved", "ai_handling", "awaiting_human", "high_risk", "closed", "new_case", "pending_info", "pending_order_id", "assigned", "waiting_customer", "resolved_observe", "reopened"];
+    if (!validStatuses.includes(status)) {
       return res.status(400).json({ message: "Invalid status" });
     }
-    storage.updateContactStatus(id, status);
+    const contact = storage.getContact(id);
+    if (status === "closed" && contact?.assigned_agent_id) {
+      assignment.closeCase(id, contact.assigned_agent_id);
+    } else {
+      storage.updateContactStatus(id, status);
+    }
     broadcastSSE("contacts_updated", { contact_id: id });
 
-    if (status === "resolved") {
-      const contact = storage.getContact(id);
-      if (contact) {
+    if (status === "resolved" || status === "closed") {
+      const contactForRating = storage.getContact(id);
+      if (contactForRating) {
         let ratingSent = false;
-        if (contact.needs_human === 1 && contact.cs_rating == null) {
-          if (contact.platform === "line") {
-            const token = getLineTokenForContact(contact);
+        if (contactForRating.needs_human === 1 && contactForRating.cs_rating == null) {
+          if (contactForRating.platform === "line") {
+            const token = getLineTokenForContact(contactForRating);
             if (token) {
               try {
-                await sendRatingFlexMessage(contact, "human");
-                storage.createMessage(id, contact.platform, "system", "(系統提示) 已自動發送真人客服滿意度調查卡片給客戶");
+                await sendRatingFlexMessage(contactForRating, "human");
+                storage.createMessage(id, contactForRating.platform, "system", "(系統提示) 已自動發送真人客服滿意度調查卡片給客戶");
                 ratingSent = true;
               } catch (err) {
                 console.error("Auto rating (human) send failed:", err);
@@ -985,13 +2386,13 @@ export async function registerRoutes(
             }
           }
         }
-        if (!ratingSent && contact.ai_rating == null) {
-          if (contact.platform === "line") {
-            const token = getLineTokenForContact(contact);
+        if (!ratingSent && contactForRating.ai_rating == null) {
+          if (contactForRating.platform === "line") {
+            const token = getLineTokenForContact(contactForRating);
             if (token) {
               try {
-                await sendRatingFlexMessage(contact, "ai");
-                storage.createMessage(id, contact.platform, "system", "(系統提示) 已自動發送 AI 客服滿意度調查卡片給客戶");
+                await sendRatingFlexMessage(contactForRating, "ai");
+                storage.createMessage(id, contactForRating.platform, "system", "(系統提示) 已自動發送 AI 客服滿意度調查卡片給客戶");
               } catch (err) {
                 console.error("Auto rating (ai) send failed:", err);
               }
@@ -1005,7 +2406,8 @@ export async function registerRoutes(
   });
 
   app.put("/api/contacts/:id/issue-type", authMiddleware, async (req, res) => {
-    const id = parseInt(req.params.id);
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const { issue_type } = req.body;
     const validTypes = ["order_inquiry", "product_consult", "return_refund", "complaint", "order_modify", "general", "other"];
     if (issue_type && !validTypes.includes(issue_type)) {
@@ -1017,29 +2419,43 @@ export async function registerRoutes(
   });
 
   app.get("/api/contacts/:id/ai-logs", authMiddleware, (req, res) => {
-    const id = parseInt(req.params.id);
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const logs = storage.getAiLogs(id);
     return res.json(logs);
   });
 
   app.post("/api/contacts/:id/transfer-human", authMiddleware, (req, res) => {
-    const contactId = parseInt(req.params.id);
+    const contactId = parseIdParam(req.params.id);
+    if (contactId === null) return res.status(400).json({ message: "無效的 ID" });
     const { reason } = req.body;
     const contact = storage.getContact(contactId);
     if (!contact) return res.status(404).json({ message: "聯絡人不存在" });
     const transferReason = reason || "管理員手動轉接";
     storage.updateContactStatus(contactId, "awaiting_human");
     storage.updateContactHumanFlag(contactId, 1);
+    storage.updateContactAssignmentStatus(contactId, "waiting_human");
+    storage.createCaseNotification(contactId, "in_app");
+    const assignedAgentId = assignment.assignCase(contactId);
+    if (assignedAgentId == null && assignment.isAllAgentsUnavailable()) {
+      storage.updateContactNeedsAssignment(contactId, 1);
+      const tags = JSON.parse(contact.tags || "[]");
+      if (!tags.includes("午休待處理")) storage.updateContactTags(contactId, [...tags, "午休待處理"]);
+      const reason = assignment.getUnavailableReason();
+      storage.createMessage(contactId, contact.platform, "system", getTransferUnavailableSystemMessage(reason));
+    }
     const muteUntil = new Date(Date.now() + 30 * 60 * 1000).toISOString();
     storage.setAiMutedUntil(contactId, muteUntil);
     storage.createSystemAlert({ alert_type: "transfer", details: transferReason, brand_id: contact.brand_id || undefined, contact_id: contactId });
     broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-    console.log(`[Transfer] contact ${contactId} 已轉人工，原因: ${transferReason}`);
-    return res.json({ success: true, status: "awaiting_human", reason: transferReason });
+    broadcastSSE("new_message", { contact_id: contactId });
+    console.log(`[Transfer] contact ${contactId} 已轉人工，原因: ${transferReason}${assignedAgentId != null ? `，已分配客服 ${assignedAgentId}` : "，待分配（全員忙碌）"}`);
+    return res.json({ success: true, status: assignedAgentId != null ? "assigned" : "awaiting_human", reason: transferReason, assigned_agent_id: assignedAgentId ?? undefined, all_busy: assignedAgentId == null && assignment.isAllAgentsUnavailable() });
   });
 
   app.post("/api/contacts/:id/restore-ai", authMiddleware, (req, res) => {
-    const contactId = parseInt(req.params.id);
+    const contactId = parseIdParam(req.params.id);
+    if (contactId === null) return res.status(400).json({ message: "無效的 ID" });
     const contact = storage.getContact(contactId);
     if (!contact) return res.status(404).json({ message: "聯絡人不存在" });
     storage.updateContactStatus(contactId, "ai_handling");
@@ -1052,7 +2468,8 @@ export async function registerRoutes(
   });
 
   app.post("/api/contacts/:id/send-rating", authMiddleware, async (req, res) => {
-    const id = parseInt(req.params.id);
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const ratingType = (req.body?.type === "ai" ? "ai" : "human") as "human" | "ai";
     const contact = storage.getContact(id);
     if (!contact) return res.status(404).json({ message: "聯絡人不存在" });
@@ -1080,15 +2497,29 @@ export async function registerRoutes(
   });
 
   app.put("/api/contacts/:id/tags", authMiddleware, (req, res) => {
-    const id = parseInt(req.params.id);
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const { tags } = req.body;
     if (!Array.isArray(tags)) return res.status(400).json({ message: "tags must be an array" });
     storage.updateContactTags(id, tags);
     return res.json({ success: true });
   });
 
+  app.put("/api/contacts/:id/agent-flag", authMiddleware, (req: any, res) => {
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
+    const userId = req.session?.userId;
+    if (!userId) return res.status(401).json({ message: "未登入" });
+    const { flag } = req.body || {};
+    const v = flag === "later" || flag === "tracking" ? flag : null;
+    if (flag !== undefined && flag !== null && v === null) return res.status(400).json({ message: "flag 須為 'later'、'tracking' 或 null" });
+    storage.setAgentContactFlag(userId, id, v);
+    return res.json({ success: true, flag: v });
+  });
+
   app.put("/api/contacts/:id/pinned", authMiddleware, (req, res) => {
-    const id = parseInt(req.params.id);
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const { is_pinned } = req.body;
     storage.updateContactPinned(id, is_pinned ? 1 : 0);
     return res.json({ success: true });
@@ -1101,20 +2532,23 @@ export async function registerRoutes(
   });
 
   app.get("/api/contacts/:id/messages", authMiddleware, (req, res) => {
-    const contactId = parseInt(req.params.id);
+    const contactId = parseIdParam(req.params.id);
+    if (contactId === null) return res.status(400).json({ message: "無效的 ID" });
     const sinceId = parseInt(req.query.since_id as string) || 0;
     if (sinceId > 0) return res.json(storage.getMessagesSince(contactId, sinceId));
     return res.json(storage.getMessages(contactId));
   });
 
   app.post("/api/contacts/:id/messages", authMiddleware, (req, res) => {
-    const contactId = parseInt(req.params.id);
+    const contactId = parseIdParam(req.params.id);
+    if (contactId === null) return res.status(400).json({ message: "無效的 ID" });
     const { content, message_type, image_url } = req.body;
     if (!content && !image_url) return res.status(400).json({ message: "content or image_url is required" });
     const contact = storage.getContact(contactId);
     if (!contact) return res.status(404).json({ message: "聯絡人不存在" });
     const msgType = message_type || "text";
     const message = storage.createMessage(contactId, contact.platform, "admin", content || "", msgType, image_url || null);
+    storage.updateContactLastHumanReply(contactId);
     broadcastSSE("new_message", { contact_id: contactId, message, brand_id: contact.brand_id });
     broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
     storage.updateContactHumanFlag(contactId, 1);
@@ -1163,7 +2597,8 @@ export async function registerRoutes(
   });
 
   app.get("/api/contacts/:id/orders", authMiddleware, async (req, res) => {
-    const contactId = parseInt(req.params.id);
+    const contactId = parseIdParam(req.params.id);
+    if (contactId === null) return res.status(400).json({ message: "無效的 ID" });
     const contact = storage.getContact(contactId);
     if (!contact) return res.status(404).json({ message: "聯絡人不存在" });
     const config = getSuperLandingConfig(contact.brand_id || undefined);
@@ -1182,6 +2617,51 @@ export async function registerRoutes(
       console.error("[一頁商店] 聯絡人訂單查詢失敗:", err.message);
       return res.json({ orders: [], error: err.message, message: errorMap[err.message] || `查詢失敗：${err.message}` });
     }
+  });
+
+  app.post("/api/contacts/:id/link-order", authMiddleware, (req: any, res) => {
+    const contactId = parseIdParam(req.params.id);
+    if (contactId === null) return res.status(400).json({ message: "無效的 ID" });
+    const orderId = (req.body?.order_id as string)?.trim();
+    if (!orderId) return res.status(400).json({ message: "請提供 order_id" });
+    const contact = storage.getContact(contactId);
+    if (!contact) return res.status(404).json({ message: "聯絡人不存在" });
+    try {
+      db.prepare(
+        "INSERT OR IGNORE INTO contact_order_links (contact_id, global_order_id, source) VALUES (?, ?, 'manual')"
+      ).run(contactId, orderId.toUpperCase());
+      return res.json({ ok: true });
+    } catch (e: any) {
+      console.error("[link-order]", e);
+      return res.status(500).json({ message: e?.message || "寫入失敗" });
+    }
+  });
+
+  app.get("/api/contacts/:id/linked-orders", authMiddleware, (req, res) => {
+    const contactId = parseIdParam(req.params.id);
+    if (contactId === null) return res.status(400).json({ message: "無效的 ID" });
+    const contact = storage.getContact(contactId);
+    if (!contact) return res.status(404).json({ message: "聯絡人不存在" });
+    const rows = db.prepare("SELECT global_order_id FROM contact_order_links WHERE contact_id = ? ORDER BY created_at DESC")
+      .all(contactId) as { global_order_id: string }[];
+    return res.json({ order_ids: rows.map((r) => r.global_order_id) });
+  });
+
+  app.get("/api/orders/linked-contacts", authMiddleware, (req, res) => {
+    const raw = (req.query.order_ids as string) || "";
+    const orderIds = raw.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
+    if (orderIds.length === 0) return res.json({});
+    const placeholders = orderIds.map(() => "?").join(",");
+    const rows = db.prepare(
+      `SELECT global_order_id, contact_id FROM contact_order_links WHERE global_order_id IN (${placeholders})`
+    ).all(...orderIds) as { global_order_id: string; contact_id: number }[];
+    const map: Record<string, number> = {};
+    for (const r of rows) {
+      if (map[r.global_order_id] == null) map[r.global_order_id] = r.contact_id;
+    }
+    const result: Record<string, number | null> = {};
+    for (const id of orderIds) result[id] = map[id] ?? null;
+    return res.json(result);
   });
 
   app.get("/api/orders/lookup", authMiddleware, async (req, res) => {
@@ -1382,7 +2862,7 @@ export async function registerRoutes(
 
   function imageFileToDataUri(imageFilePath: string): string | null {
     try {
-      const absPath = path.join(process.cwd(), imageFilePath.startsWith("/") ? imageFilePath.slice(1) : imageFilePath);
+      const absPath = path.join(getDataDir(), imageFilePath.startsWith("/") ? imageFilePath.slice(1) : imageFilePath);
       if (!fs.existsSync(absPath)) return null;
       const imageBuffer = fs.readFileSync(absPath);
       const ext = path.extname(absPath).toLowerCase();
@@ -1448,7 +2928,7 @@ export async function registerRoutes(
 
       const openai = new OpenAI({ apiKey });
       let completion = await openai.chat.completions.create({
-        model: "gpt-5.2",
+        model: getOpenAIModel(),
         messages: chatMessages,
         tools: allTools,
         max_completion_tokens: 1000,
@@ -1476,7 +2956,7 @@ export async function registerRoutes(
         const freshContact = storage.getContact(contactId);
         if (freshContact?.needs_human) break;
         completion = await openai.chat.completions.create({
-          model: "gpt-5.2",
+          model: getOpenAIModel(),
           messages: chatMessages,
           tools: allTools,
           max_completion_tokens: 1000,
@@ -1609,6 +3089,108 @@ export async function registerRoutes(
         return;
       }
 
+      // 共用安全確認分流：非本店／他平台／詐騙／待確認來源 → 私訊走安全模板，不進標準售後承諾
+      const safeConfirmDm = classifyMessageForSafeAfterSale(userMessage);
+      if (safeConfirmDm.matched) {
+        const categoryByType: Record<string, string> = {
+          fraud_impersonation: "fraud_impersonation",
+          external_platform: "external_platform_order",
+          safe_confirm_order: "safe_confirm_order",
+        };
+        const tplCategory = categoryByType[safeConfirmDm.type];
+        const tpl = metaCommentsStorage.getMetaCommentTemplateByCategory(contact.brand_id ?? undefined, tplCategory);
+        const pageList = metaCommentsStorage.getMetaPageSettingsList(contact.brand_id ?? undefined);
+        const rawLine = (pageList[0]?.line_after_sale ?? "").trim();
+        const lineUrl = rawLine || FALLBACK_AFTER_SALE_LINE_LABEL;
+        if (!rawLine) {
+          console.warn("[SafeAfterSale] 售後 LINE 未設定（待補資料）", { contact_id: contact.id, brand_id: contact.brand_id });
+        }
+        const replyTextRaw = (tpl as any)?.reply_private || tpl?.reply_first || "";
+        const replyText = replyTextRaw.replace(/\{after_sale_line_url\}/g, lineUrl).trim();
+        if (replyText) {
+          const contactPlatform = platform || contact.platform || "line";
+          const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", replyText);
+          broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: contact.brand_id });
+          broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+          if (contactPlatform === "messenger" && channelToken) {
+            await sendFBMessage(channelToken, contact.platform_user_id, replyText);
+          } else if (channelToken) {
+            await pushLineMessage(contact.platform_user_id, [{ type: "text", text: replyText }], channelToken);
+          }
+          if (safeConfirmDm.suggest_human) {
+            storage.updateContactStatus(contact.id, "awaiting_human");
+            storage.updateContactHumanFlag(contact.id, 1);
+            storage.createCaseNotification(contact.id, "in_app");
+            broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+          }
+          const recentForCaption = storage.getMessages(contact.id).slice(-6);
+          const hadRecentImage = recentForCaption.some(
+            (m: { sender_type: string; message_type?: string; content?: string }) =>
+              m.sender_type === "user" && (m.message_type === "image" || m.content === "[圖片訊息]" || (m.content && m.content.startsWith("[圖片")))
+          );
+          const resultSummary = hadRecentImage
+            ? `safe_confirm_template: ${tplCategory} | image_clear_caption`
+            : `safe_confirm_template: ${tplCategory}`;
+          storage.createAiLog({
+            contact_id: contact.id,
+            message_id: aiMsg.id,
+            brand_id: effectiveBrandId || undefined,
+            prompt_summary: userMessage.slice(0, 150),
+            knowledge_hits: [],
+            tools_called: ["safe_confirm_template"],
+            transfer_triggered: safeConfirmDm.suggest_human,
+            transfer_reason: safeConfirmDm.suggest_human ? `安全確認分流(${safeConfirmDm.type})` : undefined,
+            result_summary: resultSummary,
+            token_usage: 0,
+            model: "safe-after-sale-classifier",
+            response_time_ms: Date.now() - startTime,
+          });
+        }
+        return;
+      }
+
+      // 圖片＋極短／模糊文字：不當成已確認情境，先回補充模板（不進一般 AI 售後承諾）
+      const recentMsgs = storage.getMessages(contact.id).slice(-8);
+      const hasRecentImageFromUser = recentMsgs.some(
+        (m: { sender_type: string; message_type?: string; content?: string }) =>
+          m.sender_type === "user" && (m.message_type === "image" || m.content === "[圖片訊息]" || (m.content && m.content.startsWith("[圖片")))
+      );
+      if (hasRecentImageFromUser && isShortOrAmbiguousImageCaption(userMessage)) {
+        const escalate = shouldEscalateImageSupplement(recentMsgs);
+        const replyText = escalate ? IMAGE_SUPPLEMENT_ESCALATE_MESSAGE : getImageDmReplyForShortCaption(userMessage);
+        const templateName = getImageDmTemplateNameForShortCaption(userMessage);
+        const contactPlatform = platform || contact.platform || "line";
+        const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", replyText);
+        broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: contact.brand_id });
+        broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+        if (contactPlatform === "messenger" && channelToken) {
+          await sendFBMessage(channelToken, contact.platform_user_id, replyText);
+        } else if (channelToken) {
+          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: replyText }], channelToken);
+        }
+        if (escalate) {
+          storage.updateContactStatus(contact.id, "awaiting_human");
+          storage.updateContactHumanFlag(contact.id, 1);
+          storage.createCaseNotification(contact.id, "in_app");
+          broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+        }
+        storage.createAiLog({
+          contact_id: contact.id,
+          message_id: aiMsg.id,
+          brand_id: effectiveBrandId || undefined,
+          prompt_summary: userMessage.slice(0, 150),
+          knowledge_hits: [],
+          tools_called: ["image_dm_short_caption"],
+          transfer_triggered: escalate,
+          transfer_reason: escalate ? "連續無效圖片補充升級人工" : undefined,
+          result_summary: escalate ? `image_short_caption | escalated_awaiting_human` : `image_short_caption | ${templateName}`,
+          token_usage: 0,
+          model: "safe-after-sale-classifier",
+          response_time_ms: Date.now() - startTime,
+        });
+        return;
+      }
+
       if (detectReturnRefund(userMessage)) {
         if (!contact.issue_type || contact.issue_type !== "return_refund") {
           storage.updateContactIssueType(contact.id, "return_refund");
@@ -1622,6 +3204,22 @@ export async function registerRoutes(
       if (detectedIssue && !contact.issue_type) {
         storage.updateContactIssueType(contact.id, detectedIssue);
       }
+
+      const intentLevel = detectIntentLevel(userMessage, recentUserMsgs);
+      storage.updateContactIntentLevel(contact.id, intentLevel);
+      const trimmed = userMessage.trim();
+      if (/^[\w\-]{5,}$/.test(trimmed) || (/\d{5,}/.test(trimmed) && trimmed.length <= 25)) {
+        const orderType = classifyOrderNumber(trimmed);
+        storage.updateContactOrderNumberType(contact.id, orderType);
+      }
+      const currentTags: string[] = JSON.parse(contact.tags || "[]");
+      const suggested = suggestTagsFromContent(userMessage, currentTags);
+      if (suggested.length > 0) {
+        const merged = [...new Set([...currentTags, ...suggested])];
+        storage.updateContactTags(contact.id, merged);
+      }
+      const priority = computeCasePriority(intentLevel, [...currentTags, ...suggested]);
+      storage.updateContactCasePriority(contact.id, priority);
 
       const systemPrompt = await getEnrichedSystemPrompt(contact.brand_id || brandId || undefined);
       const openai = new OpenAI({ apiKey });
@@ -1685,7 +3283,7 @@ export async function registerRoutes(
       let completion;
       try {
         completion = await callOpenAIWithTimeout({
-          model: "gpt-5.2",
+          model: getOpenAIModel(),
           messages: chatMessages,
           tools: allTools,
           max_completion_tokens: 1000,
@@ -1766,6 +3364,19 @@ export async function registerRoutes(
             transferTriggered = true;
             transferReason = fnArgs.reason || "AI 判斷需要人工處理";
             storage.updateContactStatus(contact.id, "awaiting_human");
+            storage.updateContactHumanFlag(contact.id, 1);
+            storage.updateContactAssignmentStatus(contact.id, "waiting_human");
+            storage.createCaseNotification(contact.id, "in_app");
+            const assignedId = assignment.assignCase(contact.id);
+            if (assignedId == null && assignment.isAllAgentsUnavailable()) {
+              storage.updateContactNeedsAssignment(contact.id, 1);
+              const tags = JSON.parse(contact.tags || "[]");
+              if (!tags.includes("午休待處理")) {
+                storage.updateContactTags(contact.id, [...tags, "午休待處理"]);
+              }
+              const reason = assignment.getUnavailableReason();
+              storage.createMessage(contact.id, contact.platform, "system", getTransferUnavailableSystemMessage(reason));
+            }
             storage.createSystemAlert({ alert_type: "transfer", details: transferReason, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
             const freshContact = storage.getContact(contact.id);
             if (freshContact?.needs_human) {
@@ -1792,6 +3403,16 @@ export async function registerRoutes(
           console.log(`[AI Risk] 多次查單失敗(${orderLookupFailed}次)，自動升級為待人工`);
           storage.updateContactStatus(contact.id, "awaiting_human");
           storage.updateContactHumanFlag(contact.id, 1);
+          storage.createCaseNotification(contact.id, "in_app");
+          storage.updateContactAssignmentStatus(contact.id, "waiting_human");
+          const assignedOrder = assignment.assignCase(contact.id);
+          if (assignedOrder == null && assignment.isAllAgentsUnavailable()) {
+            storage.updateContactNeedsAssignment(contact.id, 1);
+            const tags = JSON.parse(contact.tags || "[]");
+            if (!tags.includes("午休待處理")) storage.updateContactTags(contact.id, [...tags, "午休待處理"]);
+            const reason = assignment.getUnavailableReason();
+            storage.createMessage(contact.id, contact.platform, "system", getTransferUnavailableSystemMessage(reason));
+          }
           transferTriggered = true;
           transferReason = `多次查單失敗(${orderLookupFailed}次)`;
           storage.createSystemAlert({ alert_type: "transfer", details: transferReason, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
@@ -1800,6 +3421,17 @@ export async function registerRoutes(
         if (loopCount >= maxToolLoops && !transferTriggered) {
           console.log(`[AI Risk] 達到最大工具呼叫次數(${maxToolLoops})，標記待人工`);
           storage.updateContactStatus(contact.id, "awaiting_human");
+          storage.updateContactHumanFlag(contact.id, 1);
+          storage.createCaseNotification(contact.id, "in_app");
+          storage.updateContactAssignmentStatus(contact.id, "waiting_human");
+          const assignedLoop = assignment.assignCase(contact.id);
+          if (assignedLoop == null && assignment.isAllAgentsUnavailable()) {
+            storage.updateContactNeedsAssignment(contact.id, 1);
+            const tags = JSON.parse(contact.tags || "[]");
+            if (!tags.includes("午休待處理")) storage.updateContactTags(contact.id, [...tags, "午休待處理"]);
+            const reason = assignment.getUnavailableReason();
+            storage.createMessage(contact.id, contact.platform, "system", getTransferUnavailableSystemMessage(reason));
+          }
           transferTriggered = true;
           transferReason = `AI 多輪工具呼叫未能解決(${loopCount}輪)`;
           storage.createSystemAlert({ alert_type: "transfer", details: transferReason, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
@@ -1810,7 +3442,7 @@ export async function registerRoutes(
 
         try {
           completion = await callOpenAIWithTimeout({
-            model: "gpt-5.2",
+            model: getOpenAIModel(),
             messages: chatMessages,
             tools: allTools,
             max_completion_tokens: 1000,
@@ -1856,7 +3488,7 @@ export async function registerRoutes(
           transfer_reason: transferReason,
           result_summary: "轉接真人客服",
           token_usage: totalTokens,
-          model: "gpt-5.2",
+          model: getOpenAIModel(),
           response_time_ms: Date.now() - startTime,
         });
         return;
@@ -1885,7 +3517,7 @@ export async function registerRoutes(
           transfer_reason: transferReason,
           result_summary: reply.slice(0, 300),
           token_usage: totalTokens,
-          model: "gpt-5.2",
+          model: getOpenAIModel(),
           response_time_ms: Date.now() - startTime,
         });
       }
@@ -1900,7 +3532,7 @@ export async function registerRoutes(
         transfer_triggered: false,
         result_summary: `錯誤: ${(err as Error).message}`,
         token_usage: totalTokens,
-        model: "gpt-5.2",
+        model: getOpenAIModel(),
         response_time_ms: Date.now() - startTime,
       });
     }
@@ -2106,11 +3738,33 @@ export async function registerRoutes(
             broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
             const aiEnabledImg = matchedChannel ? matchedChannel.is_ai_enabled : 1;
             if (!contact.needs_human && aiEnabledImg) {
-              withContactLock(contact.id, () =>
-                analyzeImageWithAI(imageUrl, contact.id, channelToken)
-              ).catch((err) =>
-                console.error("AI image analysis background error:", err)
-              );
+              const recentMsgsForEscalate = storage.getMessages(contact.id).slice(-8);
+              const escalate = shouldEscalateImageSupplement(recentMsgsForEscalate);
+              const replyText = escalate ? IMAGE_SUPPLEMENT_ESCALATE_MESSAGE : SAFE_IMAGE_ONLY_REPLY;
+              const aiMsg = storage.createMessage(contact.id, "line", "ai", replyText);
+              broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: matchedBrandId || contact.brand_id });
+              broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
+              await pushLineMessage(contact.platform_user_id, [{ type: "text", text: replyText }], channelToken);
+              if (escalate) {
+                storage.updateContactStatus(contact.id, "awaiting_human");
+                storage.updateContactHumanFlag(contact.id, 1);
+                storage.createCaseNotification(contact.id, "in_app");
+                broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
+              }
+              storage.createAiLog({
+                contact_id: contact.id,
+                message_id: aiMsg.id,
+                brand_id: matchedBrandId || contact.brand_id || undefined,
+                prompt_summary: "[圖片訊息]",
+                knowledge_hits: [],
+                tools_called: ["image_dm_only"],
+                transfer_triggered: escalate,
+                transfer_reason: escalate ? "連續無效圖片補充升級人工" : undefined,
+                result_summary: escalate ? "image_only | escalated_awaiting_human" : "image_only | IMAGE_DM_GENERIC",
+                token_usage: 0,
+                model: "safe-after-sale-classifier",
+                response_time_ms: 0,
+              });
             }
           } else {
             storage.createMessage(contact.id, "line", "user", "[圖片訊息] (下載失敗)");
@@ -2246,12 +3900,36 @@ export async function registerRoutes(
                   const imgMsg = storage.createMessage(contact.id, "messenger", "user", "[圖片訊息]", "image", finalUrl);
                   broadcastSSE("new_message", { contact_id: contact.id, message: imgMsg, brand_id: matchedBrandId || contact.brand_id });
                   const fbAiEnabledImg = matchedChannel ? matchedChannel.is_ai_enabled : 1;
-                  if (localImageUrl && !contact.needs_human && fbAiEnabledImg) {
-                    withContactLock(contact.id, () =>
-                      analyzeImageWithAI(localImageUrl, contact.id, null, "messenger")
-                    ).catch(err =>
-                      console.error("[FB Webhook] AI image analysis error:", err)
+                  if (!contact.needs_human && fbAiEnabledImg && matchedChannel?.access_token) {
+                    const recentMsgsForEscalate = storage.getMessages(contact.id).slice(-8);
+                    const escalate = shouldEscalateImageSupplement(recentMsgsForEscalate);
+                    const replyText = escalate ? IMAGE_SUPPLEMENT_ESCALATE_MESSAGE : SAFE_IMAGE_ONLY_REPLY;
+                    const aiMsg = storage.createMessage(contact.id, "messenger", "ai", replyText);
+                    broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: matchedBrandId || contact.brand_id });
+                    broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
+                    sendFBMessage(matchedChannel.access_token, senderId, replyText).catch(err =>
+                      console.error("[FB Webhook] 圖片安全回覆失敗:", err)
                     );
+                    if (escalate) {
+                      storage.updateContactStatus(contact.id, "awaiting_human");
+                      storage.updateContactHumanFlag(contact.id, 1);
+                      storage.createCaseNotification(contact.id, "in_app");
+                      broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
+                    }
+                    storage.createAiLog({
+                      contact_id: contact.id,
+                      message_id: aiMsg.id,
+                      brand_id: matchedBrandId || contact.brand_id || undefined,
+                      prompt_summary: "[圖片訊息]",
+                      knowledge_hits: [],
+                      tools_called: ["image_dm_only"],
+                      transfer_triggered: escalate,
+                      transfer_reason: escalate ? "連續無效圖片補充升級人工" : undefined,
+                      result_summary: escalate ? "image_only | escalated_awaiting_human" : "image_only | IMAGE_DM_GENERIC",
+                      token_usage: 0,
+                      model: "safe-after-sale-classifier",
+                      response_time_ms: 0,
+                    });
                   }
                 } else {
                   storage.createMessage(contact.id, "messenger", "user", `[${att.type || "附件"}]`);
@@ -2304,6 +3982,62 @@ export async function registerRoutes(
           }
         } catch (err) {
           console.error("[FB Webhook] 事件處理錯誤:", err);
+        }
+      }
+
+      for (const change of entry.changes || []) {
+        if (change.field !== "feed") continue;
+        const value = change.value;
+        if (!value || value.verb !== "add") continue;
+        const commentId = value.comment_id || value.id;
+        if (!commentId) continue;
+        const eventId = `fb_comment_${pageId}_${commentId}_${value.created_time || Date.now()}`;
+        if (storage.isEventProcessed(eventId)) {
+          console.log("[FB Webhook] 重複留言事件已略過:", commentId);
+          continue;
+        }
+        storage.markEventProcessed(eventId);
+        try {
+          const from = value.from || {};
+          const recipient = value.recipient || {};
+          const message = value.message || "";
+          const postId = value.post_id || "";
+          const parentId = value.parent_id || null;
+          const createdTime = value.created_time != null ? new Date(value.created_time * 1000).toISOString() : new Date().toISOString();
+          const commenterName = typeof from.name === "string" ? from.name : (from.id ? `用戶_${String(from.id).slice(0, 8)}` : "未知");
+          const commenterId = from.id != null ? String(from.id) : null;
+          const pageName = typeof recipient.name === "string" ? recipient.name : (pageId || "粉專");
+          const rawPayload = JSON.stringify(value);
+          const resolved = resolveCommentMetadata({
+            brand_id: matchedBrandId ?? null,
+            page_id: pageId,
+            post_id: postId,
+            post_name: null,
+            message,
+            is_sensitive_or_complaint: false,
+          });
+          const row = metaCommentsStorage.createMetaComment({
+            brand_id: matchedBrandId ?? null,
+            page_id: pageId,
+            page_name: pageName,
+            post_id: postId,
+            post_name: null,
+            comment_id: String(commentId),
+            commenter_id: commenterId,
+            commenter_name: commenterName,
+            message: message || "(空)",
+            is_simulated: 0,
+            raw_webhook_payload: rawPayload,
+            ...resolved,
+          });
+          metaCommentsStorage.updateMetaComment(row.id, { created_at: createdTime });
+          console.log("[FB Webhook] 公開留言已寫入 meta_comments id=%s comment_id=%s", row.id, commentId);
+          // Phase 3：規則命中後自動執行（非同步，不阻塞 webhook 回覆）
+          setImmediate(() => {
+            runAutoExecution(row.id).catch((e: any) => console.error("[FB Webhook] runAutoExecution error:", e?.message));
+          });
+        } catch (err: any) {
+          console.error("[FB Webhook] 公開留言寫入失敗:", err?.message, value?.comment_id);
         }
       }
     }
@@ -2499,7 +4233,7 @@ export async function registerRoutes(
     const config = getSuperLandingConfig(context?.brandId);
     const hasAnyCreds = (config.merchantNo && config.accessKey) || (() => {
       const shopBrand = context?.brandId ? storage.getBrand(context.brandId) : null;
-      return shopBrand?.shopline_store_domain && shopBrand?.shopline_api_token;
+      return !!shopBrand?.shopline_api_token?.trim();
     })();
     if (!hasAnyCreds) {
       return JSON.stringify({ success: false, error: "系統尚未設定訂單查詢 API 金鑰（一頁商店或 SHOPLINE），無法查詢訂單。請至系統設定 → 品牌管理中設定 API 金鑰。" });
@@ -2507,11 +4241,35 @@ export async function registerRoutes(
 
     try {
       if (toolName === "lookup_order_by_id") {
-        const orderId = (args.order_id || "").trim().toUpperCase();
+        const orderIdRaw = (args.order_id || "").trim();
+        const orderId = orderIdRaw.toUpperCase();
         console.log(`[AI Tool Call] lookup_order_by_id，單號: ${orderId} (已自動大寫)，品牌ID: ${context?.brandId || "無"}`);
 
         if (!orderId) {
           return JSON.stringify({ success: false, error: "訂單編號為空" });
+        }
+
+        const numberType = classifyOrderNumber(orderIdRaw);
+        if (context?.contactId) {
+          storage.updateContactOrderNumberType(context.contactId, numberType);
+        }
+        if (numberType === "payment_id") {
+          return JSON.stringify({
+            success: true,
+            found: false,
+            not_order_number: true,
+            number_type: "payment_id",
+            message: "這組看起來比較像付款／金流資訊，不是訂單編號。正確的訂單編號通常會出現在：訂單成立通知信、簡訊、會員訂單頁。若方便也可以直接提供收件人姓名、手機後三碼，我們幫您協助確認。請用以上說法溫和回覆客戶，不要直接說「您填錯了」。",
+          });
+        }
+        if (numberType === "logistics_id") {
+          return JSON.stringify({
+            success: true,
+            found: false,
+            not_order_number: true,
+            number_type: "logistics_id",
+            message: "這組看起來比較像物流單號，不是訂單編號。訂單編號通常會出現在訂單成立通知信、簡訊或會員訂單頁。若方便也可以提供收件人姓名、手機後三碼，我們幫您協助確認。請用以上說法溫和回覆客戶。",
+          });
         }
 
         const result = await unifiedLookupById(config, orderId, context?.brandId);
@@ -2883,7 +4641,7 @@ export async function registerRoutes(
       const allTools = [...orderLookupTools, ...humanHandoffTools, ...(hasImageAssets ? imageTools : [])];
 
       let completion = await openai.chat.completions.create({
-        model: "gpt-5.2",
+        model: getOpenAIModel(),
         messages: chatMessages,
         tools: allTools,
         max_completion_tokens: 1000,
@@ -2945,7 +4703,7 @@ export async function registerRoutes(
         }
 
         completion = await openai.chat.completions.create({
-          model: "gpt-5.2",
+          model: getOpenAIModel(),
           messages: chatMessages,
           tools: allTools,
           max_completion_tokens: 1000,
@@ -3039,7 +4797,7 @@ export async function registerRoutes(
         });
 
         const completion = await openai.chat.completions.create({
-          model: "gpt-5.2",
+          model: getOpenAIModel(),
           messages: chatMessages,
           max_completion_tokens: 1000,
           temperature: 0.7,
@@ -3087,7 +4845,8 @@ export async function registerRoutes(
   });
 
   app.delete("/api/knowledge-files/:id", authMiddleware, managerOrAbove, (req, res) => {
-    const id = parseInt(req.params.id);
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const files = storage.getKnowledgeFiles();
     const file = files.find((f) => f.id === id);
     if (file) {
@@ -3116,7 +4875,8 @@ export async function registerRoutes(
   });
 
   app.put("/api/image-assets/:id", authMiddleware, managerOrAbove, (req, res) => {
-    const id = parseInt(req.params.id);
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const { display_name, description, keywords } = req.body;
     const data: Record<string, string> = {};
     if (display_name !== undefined) data.display_name = display_name;
@@ -3127,7 +4887,8 @@ export async function registerRoutes(
   });
 
   app.delete("/api/image-assets/:id", authMiddleware, managerOrAbove, (req, res) => {
-    const id = parseInt(req.params.id);
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const asset = storage.getImageAsset(id);
     if (asset) {
       const filePath = path.join(imageAssetsDir, asset.filename);
@@ -3168,7 +4929,8 @@ export async function registerRoutes(
   });
 
   app.put("/api/team/:id", authMiddleware, superAdminOnly, (req, res) => {
-    const id = parseInt(req.params.id);
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const { display_name, role, password } = req.body;
     if (!display_name) return res.status(400).json({ message: "姓名為必填" });
     if (!["super_admin", "marketing_manager", "cs_agent"].includes(role)) return res.status(400).json({ message: "角色無效" });
@@ -3179,13 +4941,526 @@ export async function registerRoutes(
   });
 
   app.delete("/api/team/:id", authMiddleware, superAdminOnly, (req, res) => {
-    const id = parseInt(req.params.id);
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const s = (req as any).session;
     if (id === s.userId) {
       return res.status(400).json({ message: "無法刪除目前登入的帳號" });
     }
     if (!storage.deleteUser(id)) return res.status(404).json({ message: "成員不存在" });
     return res.json({ success: true });
+  });
+
+  app.get("/api/team/available-agents", authMiddleware, (req, res) => {
+    const members = storage.getTeamMembers().filter((m) => m.role === "cs_agent");
+    const eligible = assignment.getEligibleAgents();
+    const eligibleSet = new Set(eligible.map((e) => e.agentId));
+    const list = members.map((m) => {
+      const u = storage.getUserById(m.id);
+      const status = storage.getAgentStatus(m.id);
+      const openCases = m.open_cases_count ?? storage.getOpenCasesCountForAgent(m.id);
+      return {
+        id: m.id,
+        display_name: m.display_name,
+        avatar_url: m.avatar_url ?? u?.avatar_url ?? null,
+        is_online: m.is_online ?? 0,
+        is_available: m.is_available ?? 1,
+        last_active_at: m.last_active_at ?? null,
+        open_cases_count: openCases,
+        max_active_conversations: m.max_active_conversations ?? 10,
+        auto_assign_enabled: m.auto_assign_enabled ?? 1,
+        can_assign: eligibleSet.has(m.id),
+        on_duty: status?.on_duty ?? 1,
+        work_start_time: status?.work_start_time ?? "09:00",
+        work_end_time: status?.work_end_time ?? "18:00",
+        is_in_work: assignment.isAgentInWork(m.id),
+      };
+    });
+    return res.json(list);
+  });
+
+  app.put("/api/team/:id/agent-status", authMiddleware, superAdminOnly, (req: any, res) => {
+    const userId = parseIdParam(req.params.id);
+    if (userId === null) return res.status(400).json({ message: "無效的 ID" });
+    const { auto_assign_enabled, max_active_conversations } = req.body || {};
+    const status = storage.getAgentStatus(userId);
+    storage.upsertAgentStatus({
+      user_id: userId,
+      auto_assign_enabled: auto_assign_enabled !== undefined ? (auto_assign_enabled ? 1 : 0) : status?.auto_assign_enabled ?? 1,
+      max_active_conversations: max_active_conversations !== undefined ? Math.max(1, Math.min(50, parseInt(String(max_active_conversations), 10) || 10)) : status?.max_active_conversations ?? 10,
+    });
+    return res.json({ success: true });
+  });
+
+  app.post("/api/team/:id/avatar", authMiddleware, avatarUpload.single("file"), (req: any, res) => {
+    const userId = parseIdParam(req.params.id);
+    if (userId === null) return res.status(400).json({ message: "無效的 ID" });
+    const me = req.session?.userId;
+    const role = req.session?.userRole ?? req.session?.role;
+    const isSelf = me === userId;
+    const isAdmin = role === "super_admin";
+    if (!isSelf && !isAdmin) return res.status(403).json({ message: "僅能上傳自己的頭像或由管理員上傳" });
+    if (!req.file) return res.status(400).json({ message: "請上傳圖片 (file)" });
+    const avatarUrl = `/uploads/avatars/${req.file.filename}`;
+    storage.updateUserAvatar(userId, avatarUrl);
+    return res.json({ success: true, avatar_url: avatarUrl });
+  });
+
+  const isSupervisor = (req: any) => ["super_admin", "marketing_manager"].includes(req.session?.userRole);
+
+  app.get("/api/agent-status", authMiddleware, (req: any, res) => {
+    const members = storage.getTeamMembers().filter((m) => m.role === "cs_agent");
+    if (isSupervisor(req)) {
+      const list = members.map((m) => {
+        const status = storage.getAgentStatus(m.id);
+        const openCases = m.open_cases_count ?? storage.getOpenCasesCountForAgent(m.id);
+        const maxActive = status?.max_active_conversations ?? m.max_active_conversations ?? 10;
+        return {
+          user_id: m.id,
+          display_name: m.display_name,
+          is_online: m.is_online ?? 0,
+          is_available: m.is_available ?? 1,
+          last_active_at: m.last_active_at ?? null,
+          priority: status?.priority ?? 1,
+          on_duty: status?.on_duty ?? 1,
+          lunch_break: status?.lunch_break ?? 0,
+          pause_new_cases: status?.pause_new_cases ?? 0,
+          today_assigned_count: status?.today_assigned_count ?? 0,
+          open_cases_count: openCases,
+          max_active_conversations: maxActive,
+          work_start_time: status?.work_start_time ?? "09:00",
+          work_end_time: status?.work_end_time ?? "18:00",
+          lunch_start_time: status?.lunch_start_time ?? "12:00",
+          lunch_end_time: status?.lunch_end_time ?? "13:00",
+          updated_at: status?.updated_at,
+        };
+      });
+      return res.json(list);
+    }
+    const userId = req.session?.userId;
+    if (!userId) return res.status(401).json({ message: "未登入" });
+    const status = storage.getAgentStatus(userId);
+    const openCases = storage.getOpenCasesCountForAgent(userId);
+    const me = members.find((m) => m.id === userId);
+    if (!me) return res.json({ user_id: userId, priority: 1, on_duty: 1, lunch_break: 0, pause_new_cases: 0, today_assigned_count: 0, open_cases_count: openCases, max_active_conversations: 10, is_online: 0, is_available: 1, work_start_time: "09:00", work_end_time: "18:00", lunch_start_time: "12:00", lunch_end_time: "13:00", updated_at: null });
+    const maxActive = status?.max_active_conversations ?? (me as any).max_active_conversations ?? 10;
+    return res.json({ ...status, user_id: me.id, display_name: me.display_name, open_cases_count: openCases, max_active_conversations: maxActive, is_online: (me as any).is_online ?? 0, is_available: (me as any).is_available ?? 1 });
+  });
+
+  app.get("/api/agent-stats/me", authMiddleware, (req: any, res) => {
+    const userId = req.session?.userId;
+    const role = req.session?.userRole;
+    if (!userId || role !== "cs_agent") {
+      return res.json({ my_cases: 0, pending_reply: 0, urgent: 0, overdue: 0, tracking: 0, closed_today: 0, open_cases_count: 0, max_active_conversations: 10, is_online: 0, is_available: 1 });
+    }
+    const status = storage.getAgentStatus(userId);
+    const openCases = storage.getOpenCasesCountForAgent(userId);
+    const maxActive = status?.max_active_conversations ?? 10;
+    const members = storage.getTeamMembers().filter((m) => m.role === "cs_agent");
+    const me = members.find((m) => m.id === userId);
+    const isOnline = (me as any)?.is_online ?? 0;
+    const isAvailable = (me as any)?.is_available ?? 1;
+    const contacts = storage.getContacts(undefined, userId, userId) as any[];
+    const today = new Date().toISOString().slice(0, 10);
+    let pendingReply = 0;
+    let urgent = 0;
+    let overdue = 0;
+    let tracking = 0;
+    let closedToday = 0;
+    for (const c of contacts) {
+      if (["closed", "resolved"].includes(c.status)) {
+        if (c.closed_at && String(c.closed_at).slice(0, 10) === today && c.closed_by_agent_id === userId) closedToday++;
+        continue;
+      }
+      if (String(c.last_message_sender_type || "").toLowerCase() === "user") pendingReply++;
+      if (isUrgentContact(c)) urgent++;
+      if (isOverdueContact(c)) overdue++;
+      if (c.my_flag === "tracking") tracking++;
+    }
+    return res.json({ my_cases: openCases, pending_reply: pendingReply, urgent, overdue, tracking, closed_today: closedToday, open_cases_count: openCases, max_active_conversations: maxActive, is_online: isOnline, is_available: isAvailable });
+  });
+
+  app.get("/api/manager-stats", authMiddleware, (req: any, res) => {
+    if (!isSupervisor(req)) return res.json({ today_new: 0, unassigned: 0, urgent: 0, overdue: 0, closed_today: 0, vip_unhandled: 0, team: [] });
+    const brandId = req.query.brand_id ? parseInt(String(req.query.brand_id)) : undefined;
+    const allContacts = storage.getContacts(brandId) as any[];
+    const today = new Date().toISOString().slice(0, 10);
+    let todayNew = 0;
+    let unassigned = 0;
+    let urgent = 0;
+    let overdue = 0;
+    let closedToday = 0;
+    let vipUnhandled = 0;
+    for (const c of allContacts) {
+      if (c.created_at && String(c.created_at).slice(0, 10) === today) todayNew++;
+      if (!c.assigned_agent_id && c.needs_human === 1) unassigned++;
+      if (!["closed", "resolved"].includes(c.status)) {
+        if (isUrgentContact(c)) urgent++;
+        if (isOverdueContact(c)) overdue++;
+        if (c.vip_level > 0 && String(c.last_message_sender_type || "").toLowerCase() === "user") vipUnhandled++;
+      }
+      if (["closed", "resolved"].includes(c.status) && c.closed_at && String(c.closed_at).slice(0, 10) === today) closedToday++;
+    }
+    const agents = storage.getTeamMembers().filter((m) => m.role === "cs_agent");
+    const team = agents.map((m) => {
+      const st = storage.getAgentStatus(m.id);
+      const openCases = storage.getOpenCasesCountForAgent(m.id);
+      const agentContacts = storage.getContacts(brandId, m.id) as any[];
+      let pendingReply = 0;
+      for (const c of agentContacts) {
+        if (["closed", "resolved"].includes(c.status)) continue;
+        if (String(c.last_message_sender_type || "").toLowerCase() === "user") pendingReply++;
+      }
+      return {
+        id: m.id,
+        display_name: m.display_name,
+        is_online: (m as any).is_online ?? 0,
+        is_available: (m as any).is_available ?? 1,
+        open_cases_count: openCases,
+        max_active_conversations: st?.max_active_conversations ?? 10,
+        pending_reply: pendingReply,
+      };
+    });
+    return res.json({ today_new: todayNew, unassigned, urgent, overdue, closed_today: closedToday, vip_unhandled: vipUnhandled, team });
+  });
+
+  app.put("/api/agent-status/me", authMiddleware, (req: any, res) => {
+    const userId = req.session?.userId;
+    if (!userId) return res.status(401).json({ message: "未登入" });
+    const body = req.body || {};
+    if (body.is_online !== undefined || body.is_available !== undefined) {
+      storage.updateUserOnline(userId, body.is_online !== undefined ? (body.is_online ? 1 : 0) : 1, body.is_available !== undefined ? (body.is_available ? 1 : 0) : undefined);
+    }
+    storage.upsertAgentStatus({
+      user_id: userId,
+      priority: body.priority,
+      on_duty: body.on_duty,
+      lunch_break: body.lunch_break,
+      pause_new_cases: body.pause_new_cases,
+      work_start_time: body.work_start_time,
+      work_end_time: body.work_end_time,
+      lunch_start_time: body.lunch_start_time,
+      lunch_end_time: body.lunch_end_time,
+      max_active_conversations: body.max_active_conversations,
+      auto_assign_enabled: body.auto_assign_enabled,
+    });
+    return res.json({ success: true });
+  });
+
+  app.post("/api/contacts/:id/assign", authMiddleware, (req: any, res) => {
+    const contactId = parseIdParam(req.params.id);
+    if (contactId === null) return res.status(400).json({ message: "無效的 ID" });
+    const contact = storage.getContact(contactId);
+    if (!contact) return res.status(404).json({ message: "聯絡人不存在" });
+    const byUserId = req.session?.userId;
+    if (!byUserId) return res.status(401).json({ message: "未登入" });
+    const rawAgentId = req.body?.agent_id ?? req.get("x-assign-agent-id");
+    const bodyAgentId = rawAgentId !== undefined && rawAgentId !== null && rawAgentId !== "" ? Number(rawAgentId) : null;
+    const role = req.session?.userRole ?? req.session?.role;
+    const isManager = role === "super_admin" || role === "marketing_manager";
+    const wantsManualAssign = bodyAgentId != null && !Number.isNaN(bodyAgentId) && Number.isInteger(bodyAgentId);
+    if (process.env.NODE_ENV !== "production") {
+      const fromHeader = req.body?.agent_id === undefined && req.get("x-assign-agent-id");
+      console.log("[assign]", { contactId, "body.agent_id": req.body?.agent_id, "x-assign-agent-id": req.get("x-assign-agent-id"), bodyAgentId, wantsManualAssign, role, isManager, usedHeaderFallback: !!fromHeader });
+    }
+
+    try {
+      let agentId: number | null = null;
+      if (wantsManualAssign) {
+        if (!isManager) return res.status(403).json({ message: "僅主管可手動指定客服，請使用主管帳號操作" });
+        const ok = assignment.assignCaseManual(contactId, bodyAgentId!, byUserId, req.body?.reason ?? null);
+        if (!ok) {
+          const members = storage.getTeamMembers().filter((m: { role: string }) => m.role === "cs_agent");
+          const target = members.find((m: { id: number }) => m.id === bodyAgentId);
+          if (!target) return res.status(400).json({ message: "指定客服不存在或非客服角色" });
+          const openCases = target.open_cases_count ?? storage.getOpenCasesCountForAgent(bodyAgentId!);
+          const maxActive = target.max_active_conversations ?? 10;
+          return res.status(400).json({ message: `該客服目前負載已滿 (${openCases}/${maxActive})` });
+        }
+        agentId = bodyAgentId;
+      } else {
+        agentId = assignment.assignCase(contactId);
+        if (agentId == null) return res.status(503).json({ message: "目前無可接案客服（請確認：1) 有客服在即時客服頁上線 2) 目前時間在您設定的上班時段內且非午休）" });
+      }
+      broadcastSSE("contacts_updated", { contact_id: contactId });
+      const updated = storage.getContact(contactId);
+      const assignedTo = agentId ? storage.getUserById(agentId) : null;
+      return res.json({
+        success: true,
+        assigned_agent_id: agentId,
+        assigned_to_user_id: updated?.assigned_agent_id ?? agentId,
+        assigned_at: updated?.assigned_at ?? updated?.first_assigned_at ?? null,
+        assignment_status: updated?.assignment_status ?? "assigned",
+        assignment_method: updated?.assignment_method ?? (wantsManualAssign ? "manual" : "auto"),
+        assigned_agent_name: assignedTo?.display_name ?? null,
+        assigned_agent_avatar_url: assignedTo?.avatar_url ?? null,
+        last_human_reply_at: updated?.last_human_reply_at ?? null,
+        reassign_count: updated?.reassign_count ?? 0,
+        needs_assignment: updated?.needs_assignment ?? 0,
+        response_sla_deadline_at: updated?.response_sla_deadline_at ?? null,
+      });
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      const isConstraint = /CHECK constraint failed|constraint failed|SQLITE_CONSTRAINT/i.test(msg);
+      console.error("[assign] 指派失敗", contactId, err);
+      if (isConstraint) {
+        return res.status(500).json({ message: "指派時更新狀態失敗，請重新整理頁面後再試。若持續發生請聯絡管理員。" });
+      }
+      return res.status(500).json({ message: msg && msg.length < 200 ? msg : "指派時發生錯誤，請稍後再試。" });
+    }
+  });
+
+  app.post("/api/contacts/:id/unassign", authMiddleware, (req: any, res) => {
+    const contactId = parseIdParam(req.params.id);
+    if (contactId === null) return res.status(400).json({ message: "無效的 ID" });
+    const contact = storage.getContact(contactId);
+    if (!contact) return res.status(404).json({ message: "聯絡人不存在" });
+    const byUserId = req.session?.userId;
+    if (!byUserId) return res.status(401).json({ message: "未登入" });
+    const isManager = (req.session?.userRole ?? req.session?.role) === "super_admin" || (req.session?.userRole ?? req.session?.role) === "marketing_manager";
+    if (!isManager) return res.status(403).json({ message: "僅主管可移回待分配" });
+    const ok = assignment.unassignCase(contactId, byUserId);
+    if (!ok) return res.status(404).json({ message: "案件不存在" });
+    broadcastSSE("contacts_updated", { contact_id: contactId });
+    const updated = storage.getContact(contactId);
+    return res.json({
+      success: true,
+      assigned_to_user_id: null,
+      assigned_at: null,
+      assignment_status: updated?.assignment_status ?? "waiting_human",
+      assignment_method: null,
+      assigned_agent_name: null,
+      assigned_agent_avatar_url: null,
+      last_human_reply_at: updated?.last_human_reply_at ?? null,
+      reassign_count: updated?.reassign_count ?? 0,
+      needs_assignment: updated?.needs_assignment ?? 1,
+      response_sla_deadline_at: null,
+    });
+  });
+
+  app.get("/api/contacts/:id/assignment", authMiddleware, (req, res) => {
+    const contactId = parseIdParam(req.params.id);
+    if (contactId === null) return res.status(400).json({ message: "無效的 ID" });
+    const contact = storage.getContact(contactId);
+    if (!contact) return res.status(404).json({ message: "聯絡人不存在" });
+    const assignedTo = contact.assigned_agent_id ? storage.getUserById(contact.assigned_agent_id) : null;
+    return res.json({
+      assigned_to_user_id: contact.assigned_agent_id,
+      assigned_at: contact.assigned_at ?? contact.first_assigned_at,
+      assignment_status: contact.assignment_status,
+      assignment_method: contact.assignment_method,
+      assignment_reason: (contact as any).assignment_reason ?? null,
+      last_human_reply_at: contact.last_human_reply_at,
+      reassign_count: contact.reassign_count ?? 0,
+      needs_assignment: contact.needs_assignment ?? 0,
+      response_sla_deadline_at: contact.response_sla_deadline_at,
+      assigned_agent_name: assignedTo?.display_name ?? null,
+      assigned_agent_avatar_url: assignedTo?.avatar_url ?? null,
+    });
+  });
+
+  app.post("/api/contacts/:id/reassign", authMiddleware, (req: any, res) => {
+    const contactId = parseIdParam(req.params.id);
+    if (contactId === null) return res.status(400).json({ message: "無效的 ID" });
+    const { new_agent_id, note } = req.body || {};
+    const newAgentId = new_agent_id != null ? Number(new_agent_id) : null;
+    if (newAgentId == null || !Number.isInteger(newAgentId)) return res.status(400).json({ message: "請提供 new_agent_id" });
+    const byAgentId = req.session?.userId;
+    if (!byAgentId) return res.status(401).json({ message: "未登入" });
+    try {
+      const ok = assignment.reassignCase(contactId, newAgentId, byAgentId, note || null);
+      if (!ok) return res.status(404).json({ message: "案件不存在" });
+      broadcastSSE("contacts_updated", { contact_id: contactId });
+      const updated = storage.getContact(contactId);
+      const assignedTo = updated?.assigned_agent_id ? storage.getUserById(updated.assigned_agent_id) : null;
+      return res.json({
+        success: true,
+        assigned_to_user_id: updated?.assigned_agent_id ?? null,
+        assigned_at: updated?.assigned_at ?? updated?.first_assigned_at ?? null,
+        assignment_status: updated?.assignment_status ?? "assigned",
+        assignment_method: updated?.assignment_method ?? "reassign",
+        assigned_agent_name: assignedTo?.display_name ?? null,
+        assigned_agent_avatar_url: assignedTo?.avatar_url ?? null,
+        last_human_reply_at: updated?.last_human_reply_at ?? null,
+        reassign_count: updated?.reassign_count ?? 0,
+        needs_assignment: updated?.needs_assignment ?? 0,
+        response_sla_deadline_at: updated?.response_sla_deadline_at ?? null,
+      });
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (/CHECK constraint failed|constraint failed|SQLITE_CONSTRAINT/i.test(msg)) {
+        console.error("[reassign] 改派失敗", contactId, err);
+        return res.status(500).json({ message: "改派時更新狀態失敗，請重新整理頁面後再試。若持續發生請聯絡管理員。" });
+      }
+      throw err;
+    }
+  });
+
+  app.get("/api/contacts/:id/assignment-history", authMiddleware, (req, res) => {
+    const contactId = parseIdParam(req.params.id);
+    if (contactId === null) return res.status(400).json({ message: "無效的 ID" });
+    const history = storage.getAssignmentHistory(contactId);
+    const withNames = history.map((h) => {
+      const toUser = storage.getUserById(h.assigned_to_agent_id);
+      const byUser = h.assigned_by_agent_id ? storage.getUserById(h.assigned_by_agent_id) : null;
+      return { ...h, assigned_to_name: toUser?.display_name, assigned_by_name: byUser?.display_name };
+    });
+    return res.json(withNames);
+  });
+
+  app.get("/api/performance/me", authMiddleware, (req: any, res) => {
+    const userId = req.session?.userId;
+    if (!userId) return res.status(401).json({ message: "未登入" });
+    const stats = storage.getAgentPerformanceStats(userId);
+    return res.json(stats);
+  });
+
+  app.get("/api/performance", authMiddleware, managerOrAbove, (_req: any, res) => {
+    const members = storage.getTeamMembers().filter((m) => m.role === "cs_agent");
+    const list = members.map((m) => ({ agent_id: m.id, display_name: m.display_name, ...storage.getAgentPerformanceStats(m.id) }));
+    return res.json(list);
+  });
+
+  app.get("/api/supervisor/report", authMiddleware, managerOrAbove, (req: any, res) => {
+    const report = storage.getSupervisorReport();
+    return res.json(report);
+  });
+
+  app.get("/api/manager-dashboard", authMiddleware, (req: any, res) => {
+    if (!isSupervisor(req)) return res.json({ cards: {}, status_distribution: [], agent_workload: [], alerts: [], issue_type_rank: [], tag_rank: [] });
+    const brandId = req.query.brand_id ? parseInt(String(req.query.brand_id)) : undefined;
+    const allContacts = storage.getContacts(brandId) as any[];
+    const report = storage.getSupervisorReport();
+    const today = new Date().toISOString().slice(0, 10);
+    let todayPending = 0;
+    let urgent = 0;
+    let unassigned = 0;
+    let overdue = 0;
+    let vipUnhandled = 0;
+    let closedToday = 0;
+    const statusCount: Record<string, number> = {};
+    for (const c of allContacts) {
+      if (!["closed", "resolved"].includes(c.status)) {
+        todayPending++;
+        if (isUrgentContact(c)) urgent++;
+        if (isOverdueContact(c)) overdue++;
+        if (c.vip_level > 0 && String(c.last_message_sender_type || "").toLowerCase() === "user") vipUnhandled++;
+        statusCount[c.status || "pending"] = (statusCount[c.status || "pending"] || 0) + 1;
+      }
+      if (!c.assigned_agent_id && c.needs_human === 1) unassigned++;
+      if (["closed", "resolved"].includes(c.status) && c.closed_at && String(c.closed_at).slice(0, 10) === today) closedToday++;
+    }
+    const totalToday = allContacts.filter((c) => c.created_at && String(c.created_at).slice(0, 10) === today).length;
+    const todayCloseRate = totalToday > 0 ? Math.round((closedToday / totalToday) * 100) : 0;
+    const agents = storage.getTeamMembers().filter((m) => m.role === "cs_agent");
+    const agentWorkload = agents.map((m) => {
+      const st = storage.getAgentStatus(m.id);
+      const openCases = storage.getOpenCasesCountForAgent(m.id);
+      const maxActive = st?.max_active_conversations ?? 10;
+      const agentContacts = storage.getContacts(brandId, m.id) as any[];
+      let pendingReply = 0;
+      for (const c of agentContacts) {
+        if (["closed", "resolved"].includes(c.status)) continue;
+        if (String(c.last_message_sender_type || "").toLowerCase() === "user") pendingReply++;
+      }
+      return { id: m.id, name: m.display_name, open: openCases, max: maxActive, pending: pendingReply };
+    });
+    const statusLabels: Record<string, string> = { pending: "待處理", processing: "處理中", awaiting_human: "待人工", assigned: "已分配", waiting_customer: "等客戶回覆", high_risk: "緊急", new_case: "新案件", closed: "已結案", resolved: "已解決" };
+    const statusDistribution = Object.entries(statusCount).map(([status, count]) => ({ label: statusLabels[status] || status, count }));
+    const unassignedThreshold = 5;
+    const alerts: { type: string; count: number; threshold?: number }[] = [];
+    if (overdue > 0) alerts.push({ type: "逾時未回", count: overdue });
+    if (urgent > 0) alerts.push({ type: "緊急案件", count: urgent });
+    if (vipUnhandled > 0) alerts.push({ type: "VIP 未處理", count: vipUnhandled });
+    if (unassigned >= unassignedThreshold) alerts.push({ type: "待分配過多", count: unassigned, threshold: unassignedThreshold });
+    const issueTypeRank = (report.category_ratio || []).map((c: { label: string; count: number }) => ({ name: c.label, count: c.count }));
+    const tagRank = (report.tag_rank || []).map((t: { tag: string; count: number }) => ({ name: t.tag, count: t.count }));
+    return res.json({
+      cards: { today_pending: todayPending, urgent, unassigned, today_close_rate: todayCloseRate, closed_today: closedToday, today_new: totalToday },
+      status_distribution: statusDistribution,
+      agent_workload: agentWorkload,
+      alerts,
+      issue_type_rank: issueTypeRank,
+      tag_rank: tagRank,
+    });
+  });
+
+  app.get("/api/settings/tag-shortcuts", authMiddleware, (req, res) => {
+    const list = storage.getTagShortcuts();
+    return res.json(list);
+  });
+
+  app.put("/api/settings/tag-shortcuts", authMiddleware, managerOrAbove, (req: any, res) => {
+    const body = req.body;
+    const list = Array.isArray(body) ? body : (body?.tags ?? body?.list ?? []);
+    const tags = list.map((t: any, i: number) => ({ name: String(t?.name ?? t).trim(), order: typeof t?.order === "number" ? t.order : i })).filter((t) => t.name);
+    storage.setTagShortcuts(tags);
+    return res.json(storage.getTagShortcuts());
+  });
+
+  app.get("/api/notifications/unread-count", authMiddleware, (req, res) => {
+    const count = storage.getUnreadHumanCaseCount();
+    return res.json({ count });
+  });
+
+  app.post("/api/notifications/mark-read", authMiddleware, (req: any, res) => {
+    const contactId = req.body?.contact_id != null ? parseInt(String(req.body.contact_id), 10) : undefined;
+    if (contactId !== undefined && Number.isNaN(contactId)) return res.status(400).json({ message: "無效的 contact_id" });
+    storage.markCaseNotificationsRead(contactId);
+    return res.json({ success: true });
+  });
+
+  app.get("/api/assignment/eligible", authMiddleware, (req, res) => {
+    const eligible = assignment.getEligibleAgents();
+    const withNames = eligible.map((e) => ({ ...e, display_name: storage.getUserById(e.agentId)?.display_name }));
+    return res.json(withNames);
+  });
+
+  app.get("/api/assignment/unavailable-reason", authMiddleware, (req, res) => {
+    const reason = assignment.getUnavailableReason();
+    return res.json({ reason });
+  });
+
+  app.post("/api/assignment/run-overdue-reassign", authMiddleware, managerOrAbove, (req, res) => {
+    const results = assignment.runOverdueReassign();
+    return res.json({ results });
+  });
+
+  app.get("/api/settings/schedule", authMiddleware, (req, res) => {
+    const schedule = storage.getGlobalSchedule();
+    return res.json(schedule);
+  });
+
+  app.put("/api/settings/schedule", authMiddleware, superAdminOnly, (req: any, res) => {
+    const { work_start_time, work_end_time, lunch_start_time, lunch_end_time } = req.body || {};
+    if (work_start_time != null) storage.setSetting("work_start_time", String(work_start_time));
+    if (work_end_time != null) storage.setSetting("work_end_time", String(work_end_time));
+    if (lunch_start_time != null) storage.setSetting("lunch_start_time", String(lunch_start_time));
+    if (lunch_end_time != null) storage.setSetting("lunch_end_time", String(lunch_end_time));
+    return res.json(storage.getGlobalSchedule());
+  });
+
+  app.get("/api/settings/assignment-rules", authMiddleware, (req, res) => {
+    return res.json({
+      human_first_reply_sla_minutes: storage.getSlaMinutes(),
+      assignment_auto_enabled: storage.getAssignmentAutoEnabled(),
+      assignment_timeout_reassign_enabled: storage.getAssignmentTimeoutReassignEnabled(),
+    });
+  });
+
+  app.put("/api/settings/assignment-rules", authMiddleware, superAdminOnly, (req: any, res) => {
+    const { human_first_reply_sla_minutes, assignment_auto_enabled, assignment_timeout_reassign_enabled } = req.body || {};
+    if (human_first_reply_sla_minutes != null) {
+      const n = Math.min(120, Math.max(1, parseInt(String(human_first_reply_sla_minutes), 10) || 10));
+      storage.setSetting("human_first_reply_sla_minutes", String(n));
+    }
+    if (assignment_auto_enabled !== undefined) storage.setSetting("assignment_auto_enabled", assignment_auto_enabled ? "1" : "0");
+    if (assignment_timeout_reassign_enabled !== undefined) storage.setSetting("assignment_timeout_reassign_enabled", assignment_timeout_reassign_enabled ? "1" : "0");
+    return res.json({
+      human_first_reply_sla_minutes: storage.getSlaMinutes(),
+      assignment_auto_enabled: storage.getAssignmentAutoEnabled(),
+      assignment_timeout_reassign_enabled: storage.getAssignmentTimeoutReassignEnabled(),
+    });
   });
 
   app.get("/api/analytics", authMiddleware, managerOrAbove, (req: any, res) => {
@@ -3548,7 +5823,8 @@ export async function registerRoutes(
   });
 
   app.put("/api/marketing-rules/:id", authMiddleware, managerOrAbove, (req, res) => {
-    const id = parseInt(req.params.id);
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const { keyword, pitch, url } = req.body;
     if (!keyword) return res.status(400).json({ message: "關鍵字為必填" });
     if (!storage.updateMarketingRule(id, keyword, pitch || "", url || "")) {
@@ -3558,7 +5834,8 @@ export async function registerRoutes(
   });
 
   app.delete("/api/marketing-rules/:id", authMiddleware, managerOrAbove, (req, res) => {
-    const id = parseInt(req.params.id);
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
     if (!storage.deleteMarketingRule(id)) return res.status(404).json({ message: "規則不存在" });
     return res.json({ success: true });
   });

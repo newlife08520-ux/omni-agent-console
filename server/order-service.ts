@@ -16,8 +16,11 @@ export interface UnifiedOrderResult {
 function getShoplineConfig(brandId?: number): ShoplineConfig | null {
   if (brandId) {
     const brand = storage.getBrand(brandId);
-    if (brand?.shopline_store_domain && brand?.shopline_api_token) {
-      return { storeDomain: brand.shopline_store_domain, apiToken: brand.shopline_api_token };
+    if (brand?.shopline_api_token?.trim()) {
+      return {
+        storeDomain: brand.shopline_store_domain?.trim() || "",
+        apiToken: brand.shopline_api_token.trim(),
+      };
     }
   }
   return null;

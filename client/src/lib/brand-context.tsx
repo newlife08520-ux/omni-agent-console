@@ -26,21 +26,24 @@ const BrandContext = createContext<BrandContextType>({
 export function BrandProvider({ children }: { children: React.ReactNode }) {
   const [selectedBrandId, setSelectedBrandId] = useState<number | null>(null);
 
-  const { data: brands = [], isLoading: brandsLoading } = useQuery<Brand[]>({
+  const { data: brandsRaw, isLoading: brandsLoading } = useQuery<Brand[] | null>({
     queryKey: ["/api/brands"],
     queryFn: getQueryFn({ on401: "returnNull" }),
   });
+  const brands = Array.isArray(brandsRaw) ? brandsRaw : [];
 
-  const { data: channels = [], isLoading: channelsLoading } = useQuery<Channel[]>({
+  const { data: channelsRaw, isLoading: channelsLoading } = useQuery<Channel[]>({
     queryKey: ["/api/brands", selectedBrandId, "channels"],
     queryFn: async () => {
       if (!selectedBrandId) return [];
       const res = await fetch(`/api/brands/${selectedBrandId}/channels`, { credentials: "include" });
       if (!res.ok) return [];
-      return res.json();
+      const data = await res.json();
+      return Array.isArray(data) ? data : [];
     },
     enabled: !!selectedBrandId,
   });
+  const channels = Array.isArray(channelsRaw) ? channelsRaw : [];
 
   const handleSetBrand = useCallback((id: number | null) => {
     setSelectedBrandId(id);
