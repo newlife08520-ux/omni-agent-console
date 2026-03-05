@@ -4,7 +4,7 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import session from "express-session";
 import { createClient } from "redis";
-import { RedisStore } from "connect-redis";
+import RedisStore from "connect-redis";
 import path from "path";
 import * as assignment from "./assignment";
 import { getUploadsDir } from "./data-dir";
