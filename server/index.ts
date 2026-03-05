@@ -136,7 +136,7 @@ app.use((req, res, next) => {
       await setupVite(httpServer, app);
     }
 
-    const port = parseInt(process.env.PORT || "5001", 10);
+    const port = parseInt(process.env.PORT || "8080", 10);
 
     httpServer.on("error", (err: NodeJS.ErrnoException) => {
       console.error("[server] Listen error:", err.message);
