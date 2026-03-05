@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Lock, Eye, EyeOff, UserCircle } from "lucide-react";
@@ -10,6 +11,7 @@ interface LoginPageProps {
 }
 
 export default function LoginPage({ onLogin }: LoginPageProps) {
+  const [, setLocation] = useLocation();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -26,8 +28,11 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
       if (data?.success) {
         const name = data?.user?.display_name ?? data?.user?.username ?? "您";
         toast({ title: "登入成功", description: `歡迎回來，${name}！` });
-        // 稍延再檢查登入狀態，確保瀏覽器已寫入 session cookie
-        setTimeout(() => onLogin(), 150);
+        // 稍延再檢查登入狀態，確保瀏覽器已寫入 session cookie，再觸發 refetch 並導向首頁
+        setTimeout(() => {
+          onLogin();
+          setLocation("/");
+        }, 300);
       } else {
         toast({ title: "登入失敗", description: data?.message ?? "帳號或密碼錯誤，請重試", variant: "destructive" });
       }

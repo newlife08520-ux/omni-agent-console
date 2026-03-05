@@ -12,6 +12,9 @@ import { getUploadsDir } from "./data-dir";
 const app = express();
 const httpServer = createServer(app);
 
+// 雲端反向代理 (Railway 等) 下必須設定，讓 req.secure 正確，session cookie 的 Secure 才會生效
+app.set("trust proxy", 1);
+
 declare module "http" {
   interface IncomingMessage {
     rawBody: unknown;
@@ -108,7 +111,7 @@ app.use((req, res, next) => {
           maxAge: 24 * 60 * 60 * 1000,
           httpOnly: true,
           sameSite: "lax",
-          secure: process.env.NODE_ENV === "production",
+          secure: process.env.NODE_ENV === "production", // production (Railway HTTPS) 必須 true，需配合 trust proxy
         },
       }),
     );
