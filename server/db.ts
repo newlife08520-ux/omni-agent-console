@@ -734,8 +734,6 @@ function migrateContactStatusExpansion() {
     console.log("[DB Migration] 擴充 contacts.status CHECK 約束...");
     const cols = db.prepare("PRAGMA table_info(contacts)").all() as { name: string }[];
     const colNames = cols.map(c => c.name);
-    const hasIssueType = colNames.includes("issue_type");
-    const hasOrderSource = colNames.includes("order_source");
 
     db.pragma("foreign_keys = OFF");
 
@@ -765,19 +763,16 @@ function migrateContactStatusExpansion() {
       );
     `);
 
-    const selectCols = ["id","platform","platform_user_id","display_name","avatar_url","needs_human","is_pinned","status","tags","vip_level","order_count","total_spent","cs_rating","ai_rating","last_message_at","created_at","brand_id","channel_id"];
-    if (hasIssueType) selectCols.push("issue_type");
-    if (hasOrderSource) selectCols.push("order_source");
-
-    const insertCols = [...selectCols];
-    if (!hasIssueType) insertCols.push("issue_type");
-    if (!hasOrderSource) insertCols.push("order_source");
-
-    let selectStr = selectCols.join(",");
-    if (!hasIssueType) selectStr += ",NULL";
-    if (!hasOrderSource) selectStr += ",NULL";
-
-    db.exec(`INSERT INTO contacts_new (${insertCols.join(",")}) SELECT ${selectStr} FROM contacts;`);
+    const insertCols = ["id","platform","platform_user_id","display_name","avatar_url","needs_human","is_pinned","status","tags","vip_level","order_count","total_spent","cs_rating","ai_rating","last_message_at","created_at","brand_id","channel_id","issue_type","order_source"];
+    const selectParts: string[] = [];
+    for (const col of insertCols) {
+      if (colNames.includes(col)) {
+        selectParts.push(col);
+      } else {
+        selectParts.push("NULL");
+      }
+    }
+    db.exec(`INSERT INTO contacts_new (${insertCols.join(",")}) SELECT ${selectParts.join(",")} FROM contacts;`);
     db.exec(`DROP TABLE contacts;`);
     db.exec(`ALTER TABLE contacts_new RENAME TO contacts;`);
 
