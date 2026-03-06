@@ -508,15 +508,15 @@ export default function CommentCenterPage() {
   });
 
   const [riskRuleSearchQ, setRiskRuleSearchQ] = useState("");
-  const [riskRuleFilterBucket, setRiskRuleFilterBucket] = useState<string>("");
-  const [riskRuleFilterEnabled, setRiskRuleFilterEnabled] = useState<string>("");
+  const [riskRuleFilterBucket, setRiskRuleFilterBucket] = useState<string>("all");
+  const [riskRuleFilterEnabled, setRiskRuleFilterEnabled] = useState<string>("all");
   const { data: riskRulesList = [], refetch: refetchRiskRules } = useQuery<MetaCommentRiskRule[]>({
     queryKey: ["/api/meta-comment-risk-rules", selectedBrandId, riskRuleSearchQ, riskRuleFilterBucket, riskRuleFilterEnabled],
     queryFn: async () => {
       const params = new URLSearchParams();
       if (selectedBrandId != null) params.set("brand_id", String(selectedBrandId));
       if (riskRuleSearchQ.trim()) params.set("q", riskRuleSearchQ.trim());
-      if (riskRuleFilterBucket) params.set("bucket", riskRuleFilterBucket);
+      if (riskRuleFilterBucket && riskRuleFilterBucket !== "all") params.set("bucket", riskRuleFilterBucket);
       if (riskRuleFilterEnabled === "1") params.set("enabled", "1");
       if (riskRuleFilterEnabled === "0") params.set("enabled", "0");
       const url = `/api/meta-comment-risk-rules?${params.toString()}`;
@@ -1119,28 +1119,28 @@ export default function CommentCenterPage() {
       )}
 
       <Tabs value={activeMainTab} onValueChange={(v) => { setActiveMainTab(v); const u = new URL(window.location.href); u.hash = v; window.history.replaceState(null, "", u.pathname + u.search + "#" + v); }} className="space-y-4">
-        <TabsList className="bg-stone-100 p-1">
-          <TabsTrigger value="inbox" className="data-[state=active]:bg-white data-[state=active]:shadow-sm">
+        <TabsList className="bg-stone-100 p-1 flex flex-wrap h-auto gap-1 overflow-x-auto max-w-full">
+          <TabsTrigger value="inbox" className="data-[state=active]:bg-white data-[state=active]:shadow-sm shrink-0">
             <Inbox className="w-4 h-4 mr-2" />
             留言收件匣
           </TabsTrigger>
-          <TabsTrigger value="rules" className="data-[state=active]:bg-white data-[state=active]:shadow-sm">
+          <TabsTrigger value="rules" className="data-[state=active]:bg-white data-[state=active]:shadow-sm shrink-0">
             <FileText className="w-4 h-4 mr-2" />
             自動規則
           </TabsTrigger>
-          <TabsTrigger value="mapping" className="data-[state=active]:bg-white data-[state=active]:shadow-sm">
+          <TabsTrigger value="mapping" className="data-[state=active]:bg-white data-[state=active]:shadow-sm shrink-0">
             <Link2 className="w-4 h-4 mr-2" />
             模板與商品對應
           </TabsTrigger>
-          <TabsTrigger value="page-settings" className="data-[state=active]:bg-white data-[state=active]:shadow-sm">
+          <TabsTrigger value="page-settings" className="data-[state=active]:bg-white data-[state=active]:shadow-sm shrink-0">
             <MessageCircle className="w-4 h-4 mr-2" />
             粉專與 LINE 導向設定
           </TabsTrigger>
-          <TabsTrigger value="risk-rules" className="data-[state=active]:bg-white data-[state=active]:shadow-sm">
+          <TabsTrigger value="risk-rules" className="data-[state=active]:bg-white data-[state=active]:shadow-sm shrink-0">
             <Shield className="w-4 h-4 mr-2" />
             留言風險與導流規則
           </TabsTrigger>
-          <TabsTrigger value="simulate" className="data-[state=active]:bg-white data-[state=active]:shadow-sm">
+          <TabsTrigger value="simulate" className="data-[state=active]:bg-white data-[state=active]:shadow-sm shrink-0">
             <FlaskConical className="w-4 h-4 mr-2" />
             內測模擬
           </TabsTrigger>
@@ -1671,9 +1671,10 @@ export default function CommentCenterPage() {
               {ruleType === "use_template" && templates.length > 0 && (
                 <div className="flex gap-2 items-center">
                   <Label className="text-xs shrink-0">套用模板</Label>
-                  <Select value={ruleTemplateId} onValueChange={setRuleTemplateId}>
+                  <Select value={ruleTemplateId || "_none"} onValueChange={(v) => setRuleTemplateId(v === "_none" ? "" : v)}>
                     <SelectTrigger className="w-[200px] h-8"><SelectValue placeholder="選模板" /></SelectTrigger>
                     <SelectContent>
+                      <SelectItem value="_none">— 請選擇 —</SelectItem>
                       {templates.map((t) => (
                         <SelectItem key={t.id} value={String(t.id)}>{t.name}</SelectItem>
                       ))}
@@ -2128,7 +2129,7 @@ export default function CommentCenterPage() {
                     <div><Label className="text-xs">規則名稱</Label><Input value={riskRuleForm?.rule_name ?? ""} onChange={(e) => setRiskRuleForm(prev => prev ? { ...prev, rule_name: e.target.value } : null)} className="h-8" /></div>
                     <div><Label className="text-xs">關鍵字／pattern</Label><Input value={riskRuleForm?.keyword_pattern ?? ""} onChange={(e) => setRiskRuleForm(prev => prev ? { ...prev, keyword_pattern: e.target.value } : null)} className="h-8" /></div>
                     <div><Label className="text-xs">比對方式</Label><Select value={riskRuleForm?.match_type ?? "contains"} onValueChange={(v) => setRiskRuleForm(prev => prev ? { ...prev, match_type: v as "contains" | "exact" | "regex" } : null)}><SelectTrigger className="h-8"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="contains">包含</SelectItem><SelectItem value="exact">完全</SelectItem><SelectItem value="regex">正則</SelectItem></SelectContent></Select></div>
-                    <div><Label className="text-xs">規則桶</Label><Select value={riskRuleForm?.rule_bucket ?? ""} onValueChange={(v) => setRiskRuleForm(prev => prev ? { ...prev, rule_bucket: v as MetaCommentRiskRule["rule_bucket"] } : null)}><SelectTrigger className="h-8"><SelectValue /></SelectTrigger><SelectContent>{(["whitelist", "direct_hide", "hide_and_route", "route_only", "gray_area"] as const).map((b) => <SelectItem key={b} value={b}>{RISK_BUCKET_LABELS[b]}</SelectItem>)}</SelectContent></Select></div>
+                    <div><Label className="text-xs">規則桶</Label><Select value={riskRuleForm?.rule_bucket || "whitelist"} onValueChange={(v) => setRiskRuleForm(prev => prev ? { ...prev, rule_bucket: v as MetaCommentRiskRule["rule_bucket"] } : null)}><SelectTrigger className="h-8"><SelectValue /></SelectTrigger><SelectContent>{(["whitelist", "direct_hide", "hide_and_route", "route_only", "gray_area"] as const).map((b) => <SelectItem key={b} value={b}>{RISK_BUCKET_LABELS[b]}</SelectItem>)}</SelectContent></Select></div>
                     <div><Label className="text-xs">優先級</Label><Input type="number" value={riskRuleForm?.priority ?? 0} onChange={(e) => setRiskRuleForm(prev => prev ? { ...prev, priority: parseInt(e.target.value, 10) || 0 } : null)} className="h-8" /></div>
                     <div className="flex items-center gap-2"><Label className="text-xs">啟用</Label><Switch checked={(riskRuleForm?.enabled ?? 1) !== 0} onCheckedChange={(v) => setRiskRuleForm(prev => prev ? { ...prev, enabled: v ? 1 : 0 } : null)} /></div>
                     <div><Label className="text-xs">品牌 ID（選填）</Label><Input type="number" value={riskRuleForm?.brand_id ?? ""} onChange={(e) => setRiskRuleForm(prev => prev ? { ...prev, brand_id: e.target.value ? parseInt(e.target.value, 10) : null } : null)} placeholder="空=全品牌" className="h-8" /></div>
@@ -2150,14 +2151,14 @@ export default function CommentCenterPage() {
             <Select value={riskRuleFilterBucket} onValueChange={setRiskRuleFilterBucket}>
               <SelectTrigger className="h-8 w-36"><SelectValue placeholder="桶別" /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="">全部桶別</SelectItem>
+                <SelectItem value="all">全部桶別</SelectItem>
                 {(["whitelist", "direct_hide", "hide_and_route", "route_only", "gray_area"] as const).map((b) => <SelectItem key={b} value={b}>{RISK_BUCKET_LABELS[b]}</SelectItem>)}
               </SelectContent>
             </Select>
             <Select value={riskRuleFilterEnabled} onValueChange={setRiskRuleFilterEnabled}>
               <SelectTrigger className="h-8 w-28"><SelectValue placeholder="啟用" /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="">全部</SelectItem>
+                <SelectItem value="all">全部</SelectItem>
                 <SelectItem value="1">啟用</SelectItem>
                 <SelectItem value="0">停用</SelectItem>
               </SelectContent>
