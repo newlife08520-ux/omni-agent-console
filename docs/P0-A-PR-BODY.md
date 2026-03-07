@@ -37,7 +37,7 @@
 
 ## 路徑與命名統一（正式名稱）
 
-- 粉專與 LINE 設定頁：**`/comment-center/channel-binding`**（文件、sidebar、頁面標題、回報皆以此為準；不使用 `routing` 作為此頁 path）。
+- 粉專與 LINE 設定頁：**`/comment-center/channel-binding`**（文件、sidebar、頁面標題、回報皆以此為準）。
 
 ---
 

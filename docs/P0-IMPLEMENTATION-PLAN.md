@@ -19,7 +19,7 @@
 **路由策略**：P0 **不強制全面替換為 `/workspace/*`**。以「保留舊路由相容 + 新頁結構清楚」為主；必要時用 **redirect / alias**，避免書籤或內部連結失效。
 
 **P0-A 決策（已確認）**：  
-- **粉專 / LINE 基礎綁定、一般件／售後件／敏感件預設導向**：統一放在 **`/brands/channels`**（或 `/brands` 下的 channels／routing 區）；P0-B 實作。P0-A 暫保留在 comment-center 子頁 **`/comment-center/channel-binding`**，不在此輪搬進 brands。  
+- **粉專 / LINE 基礎綁定、一般件／售後件／敏感件預設導向**：統一放在 **`/brands/channels`**（或 `/brands` 下的 channels 區）；P0-B 實作。P0-A 暫保留在 comment-center 子頁 **`/comment-center/channel-binding`**，不在此輪搬進 brands。  
 - **留言規則命中後的流程處理**（自動回覆、隱藏、標記、導流類型、灰區／風險件規則）：放在 **`/comment-center/rules`**。  
 - **留言規則頁不維護粉專對 LINE 的基礎綁定**，避免雙重設定來源；該綁定僅在 **channel-binding**（未來 brands/channels）維護。
 
@@ -314,7 +314,7 @@
 
 1. **P0-A**  
    - Sidebar：導航項改為新 path；必要時摘要區可收合。  
-   - Comment-center：新增 route（或 path/query）對應 inbox / rules / routing / simulate；舊 hash 導轉；內容可先從原 TabsContent 搬過去，不大改內部邏輯。  
+   - Comment-center：新增 route（或 path/query）對應 inbox / rules / channel-binding / simulate；舊 hash 導轉；內容可先從原 TabsContent 搬過去，不大改內部邏輯。  
    - Chat：僅交付 layout/元件邊界方案（可選），或延後實作。
 
 2. **P0-B**  
