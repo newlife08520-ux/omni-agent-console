@@ -7,10 +7,12 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppSidebar } from "@/components/app-sidebar";
 import { BrandProvider } from "@/lib/brand-context";
 import { ChatViewProvider } from "@/lib/chat-view-context";
+import { ShellStatsProvider, useShellStats } from "@/lib/shell-stats-context";
 import LoginPage from "@/pages/login";
 import ChatPage from "@/pages/chat";
 import CommentCenterPage from "./pages/comment-center";
 import SettingsPage from "@/pages/settings";
+import BrandsChannelsPage from "@/pages/brands-channels";
 import KnowledgePage from "@/pages/knowledge";
 import TeamPage from "@/pages/team";
 import AnalyticsPage from "@/pages/analytics";
@@ -81,27 +83,11 @@ function AppHeader({
   onLogout: () => void;
   userRole: string;
 }) {
-  const { selectedBrand, selectedBrandId } = useBrand();
+  const { selectedBrand } = useBrand();
+  const { unreadCount, managerStats } = useShellStats();
   const title = selectedBrand?.name || systemName;
   const canSettings = userRole === "super_admin" || userRole === "marketing_manager";
   const isManager = userRole === "super_admin" || userRole === "marketing_manager";
-  const { data: unreadData } = useQuery<{ count: number }>({
-    queryKey: ["/api/notifications/unread-count"],
-    queryFn: getQueryFn({ on401: "returnNull" }),
-    refetchInterval: 30000,
-  });
-  const unreadCount = unreadData?.count ?? 0;
-  const { data: managerStats } = useQuery<{ urgent: number; unassigned: number }>({
-    queryKey: ["/api/manager-stats", selectedBrandId ?? "all"],
-    queryFn: async () => {
-      const url = selectedBrandId ? `/api/manager-stats?brand_id=${selectedBrandId}` : "/api/manager-stats";
-      const res = await fetch(url, { credentials: "include" });
-      if (!res.ok) throw new Error(String(res.status));
-      return res.json();
-    },
-    enabled: isManager,
-    refetchInterval: 15000,
-  });
   return (
     <header className="flex items-center justify-between gap-4 px-5 py-3 border-b border-stone-200 bg-white/95 backdrop-blur-sm shrink-0">
       <div className="flex items-center gap-3 min-w-0">
@@ -170,6 +156,7 @@ const ROUTE_ACCESS: Record<string, string[]> = {
   "/comment-center/channel-binding": ["super_admin", "marketing_manager", "cs_agent"],
   "/comment-center/simulate": ["super_admin", "marketing_manager", "cs_agent"],
   "/settings": ["super_admin", "marketing_manager"],
+  "/settings/brands-channels": ["super_admin", "marketing_manager"],
   "/knowledge": ["super_admin", "marketing_manager"],
   "/team": ["super_admin"],
   "/analytics": ["super_admin", "marketing_manager"],
@@ -242,37 +229,40 @@ function AuthenticatedApp({ user }: { user: AuthUser }) {
     <BrandProvider>
       <ChatViewProvider>
         <div className="flex h-screen w-full bg-[#faf9f5]">
-          <AppSidebar
-          user={user}
-          userRole={user.role}
-          systemName={settingsMap.system_name || "AI 客服中控台"}
-          logoUrl={settingsMap.logo_url || ""}
-        />
-        <div className="flex flex-col flex-1 min-w-0">
-          <AppHeader
-            systemName={settingsMap.system_name || "AI 客服中控台"}
-            logoUrl={settingsMap.logo_url || ""}
-            onLogout={handleLogout}
-            userRole={user.role}
-          />
-          <main className="flex-1 overflow-auto">
-            <Switch>
-              <GuardedRoute path="/" component={ChatPage} userRole={user.role} />
-              <GuardedRoute path="/comment-center/inbox" component={CommentCenterPage} userRole={user.role} />
-              <GuardedRoute path="/comment-center/rules" component={CommentCenterPage} userRole={user.role} />
-              <GuardedRoute path="/comment-center/channel-binding" component={CommentCenterPage} userRole={user.role} />
-              <GuardedRoute path="/comment-center/simulate" component={CommentCenterPage} userRole={user.role} />
-              <GuardedRoute path="/comment-center" component={CommentCenterRedirect} userRole={user.role} />
-              <GuardedRoute path="/settings" component={SettingsPage} userRole={user.role} />
-              <GuardedRoute path="/knowledge" component={KnowledgePage} userRole={user.role} />
-              <GuardedRoute path="/team" component={TeamPage} userRole={user.role} />
-              <GuardedRoute path="/analytics" component={AnalyticsPage} userRole={user.role} />
-              <GuardedRoute path="/performance" component={PerformancePage} userRole={user.role} />
-              <Route component={NotFound} />
-            </Switch>
-          </main>
+          <ShellStatsProvider userRole={user.role}>
+            <AppSidebar
+              user={user}
+              userRole={user.role}
+              systemName={settingsMap.system_name || "AI 客服中控台"}
+              logoUrl={settingsMap.logo_url || ""}
+            />
+            <div className="flex flex-col flex-1 min-w-0">
+              <AppHeader
+                systemName={settingsMap.system_name || "AI 客服中控台"}
+                logoUrl={settingsMap.logo_url || ""}
+                onLogout={handleLogout}
+                userRole={user.role}
+              />
+              <main className="flex-1 overflow-auto">
+                <Switch>
+                  <GuardedRoute path="/" component={ChatPage} userRole={user.role} />
+                  <GuardedRoute path="/comment-center/inbox" component={CommentCenterPage} userRole={user.role} />
+                  <GuardedRoute path="/comment-center/rules" component={CommentCenterPage} userRole={user.role} />
+                  <GuardedRoute path="/comment-center/channel-binding" component={CommentCenterPage} userRole={user.role} />
+                  <GuardedRoute path="/comment-center/simulate" component={CommentCenterPage} userRole={user.role} />
+                  <GuardedRoute path="/comment-center" component={CommentCenterRedirect} userRole={user.role} />
+                  <GuardedRoute path="/settings/brands-channels" component={BrandsChannelsPage} userRole={user.role} />
+                  <GuardedRoute path="/settings" component={SettingsPage} userRole={user.role} />
+                  <GuardedRoute path="/knowledge" component={KnowledgePage} userRole={user.role} />
+                  <GuardedRoute path="/team" component={TeamPage} userRole={user.role} />
+                  <GuardedRoute path="/analytics" component={AnalyticsPage} userRole={user.role} />
+                  <GuardedRoute path="/performance" component={PerformancePage} userRole={user.role} />
+                  <Route component={NotFound} />
+                </Switch>
+              </main>
+            </div>
+          </ShellStatsProvider>
         </div>
-      </div>
       </ChatViewProvider>
     </BrandProvider>
   );

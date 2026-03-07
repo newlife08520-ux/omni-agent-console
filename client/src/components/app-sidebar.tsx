@@ -1,10 +1,9 @@
 import { Link, useLocation } from "wouter";
-import { useQuery } from "@tanstack/react-query";
 import { MessageSquare, Settings, Brain, Users, ChevronRight, BarChart3, Building2, ChevronDown, Target, Inbox, MessageCircle, AlertTriangle, UserPlus, ClipboardList, Clock, MessagesSquare, FlaskConical } from "lucide-react";
 import { useBrand } from "@/lib/brand-context";
 import { useChatView, type ViewMode } from "@/lib/chat-view-context";
+import { useShellStats } from "@/lib/shell-stats-context";
 import { useState } from "react";
-import { getQueryFn } from "@/lib/queryClient";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 
 /** P0-A: 導航改為獨立 path，不再用 hash 假模組 */
@@ -17,7 +16,8 @@ const allMenuItems = [
   { title: "客服績效", url: "/performance", icon: Target, roles: ["super_admin", "marketing_manager", "cs_agent"], desc: "個人與團隊表現" },
   { title: "AI 與知識庫", url: "/knowledge", icon: Brain, roles: ["super_admin", "marketing_manager"], desc: "AI 設定與知識管理" },
   { title: "數據戰情室", url: "/analytics", icon: BarChart3, roles: ["super_admin", "marketing_manager"], desc: "數據與報表" },
-  { title: "團隊管理", url: "/team", icon: Users, roles: ["super_admin"], desc: "成員與排班" },
+  { title: "團隊管理", url: "/team", icon: Users, roles: ["super_admin"], desc: "成員、排班與派案規則" },
+  { title: "品牌與渠道", url: "/settings/brands-channels", icon: Building2, roles: ["super_admin", "marketing_manager"], desc: "品牌、渠道、粉專與 LINE 綁定" },
   { title: "系統設定", url: "/settings", icon: Settings, roles: ["super_admin", "marketing_manager"], desc: "全域設定" },
 ];
 
@@ -47,49 +47,16 @@ export function AppSidebar({ user, userRole, systemName, logoUrl }: AppSidebarPr
     setLocation("/");
   };
 
-  const { data: unreadData } = useQuery<{ count: number }>({
-    queryKey: ["/api/notifications/unread-count"],
-    queryFn: getQueryFn({ on401: "throw" }),
-    refetchInterval: 30000,
-  });
-  const unreadCount = unreadData?.count ?? 0;
-
+  const { unreadCount, agentStats, managerStats } = useShellStats();
   const channelsList = Array.isArray(channels) ? channels : [];
   const activeChannelCount = channelsList.filter((c) => c.is_active).length;
   const displayName = user?.display_name ?? user?.username ?? "—";
   const isEmployee = userRole === "cs_agent";
-
-  const { data: agentStats } = useQuery<{ my_cases: number; pending_reply: number; urgent: number; overdue?: number; tracking?: number; closed_today?: number; open_cases_count: number; max_active_conversations: number; is_online?: number; is_available?: number }>({
-    queryKey: ["/api/agent-stats/me"],
-    queryFn: getQueryFn({ on401: "throw" }),
-    enabled: isEmployee,
-    refetchInterval: 15000,
-  });
+  const isManager = userRole === "super_admin" || userRole === "marketing_manager";
 
   const loadText = agentStats != null && agentStats.max_active_conversations > 0
     ? `${agentStats.open_cases_count}/${agentStats.max_active_conversations}`
     : null;
-
-  const isManager = userRole === "super_admin" || userRole === "marketing_manager";
-  const { data: managerStats } = useQuery<{
-    today_new: number;
-    unassigned: number;
-    urgent: number;
-    overdue: number;
-    closed_today: number;
-    vip_unhandled: number;
-    team: { id: number; display_name: string; is_online: number; is_available: number; open_cases_count: number; max_active_conversations: number; pending_reply: number }[];
-  }>({
-    queryKey: ["/api/manager-stats", selectedBrandId ?? "all"],
-    queryFn: async () => {
-      const url = selectedBrandId ? `/api/manager-stats?brand_id=${selectedBrandId}` : "/api/manager-stats";
-      const res = await fetch(url, { credentials: "include" });
-      if (!res.ok) throw new Error(`${res.status}: ${res.statusText}`);
-      return res.json();
-    },
-    enabled: isManager,
-    refetchInterval: 15000,
-  });
 
   return (
     <aside className="w-[260px] min-w-[260px] bg-stone-800 text-white flex flex-col h-screen" data-testid="sidebar">
