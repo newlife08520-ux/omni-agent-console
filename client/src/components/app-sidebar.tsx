@@ -1,16 +1,19 @@
 import { Link, useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
-import { MessageSquare, Settings, Brain, Users, ChevronRight, BarChart3, Building2, ChevronDown, Target, Inbox, MessageCircle, AlertTriangle, UserPlus, ClipboardList, Clock, MessagesSquare } from "lucide-react";
+import { MessageSquare, Settings, Brain, Users, ChevronRight, BarChart3, Building2, ChevronDown, Target, Inbox, MessageCircle, AlertTriangle, UserPlus, ClipboardList, Clock, MessagesSquare, FlaskConical } from "lucide-react";
 import { useBrand } from "@/lib/brand-context";
 import { useChatView, type ViewMode } from "@/lib/chat-view-context";
 import { useState } from "react";
 import { getQueryFn } from "@/lib/queryClient";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 
+/** P0-A: 導航改為獨立 path，不再用 hash 假模組 */
 const allMenuItems = [
   { title: "即時客服", url: "/", icon: MessageSquare, roles: ["super_admin", "marketing_manager", "cs_agent"], desc: "對話與案件處理" },
-  { title: "AI 自動處理監控台", url: "/comment-center", icon: MessagesSquare, roles: ["super_admin", "marketing_manager", "cs_agent"], desc: "預設只看例外，監控 AI 處理狀態" },
-  { title: "粉專與 LINE 設定", url: "/comment-center#page-settings", icon: MessageCircle, roles: ["super_admin", "marketing_manager", "cs_agent"], desc: "粉專導向哪個 LINE 一眼看清" },
+  { title: "留言收件匣", url: "/comment-center/inbox", icon: MessagesSquare, roles: ["super_admin", "marketing_manager", "cs_agent"], desc: "預設只看例外，監控 AI 處理狀態" },
+  { title: "留言規則與導向", url: "/comment-center/rules", icon: ClipboardList, roles: ["super_admin", "marketing_manager", "cs_agent"], desc: "自動規則、模板對應、風險與導流" },
+  { title: "粉專與 LINE 設定", url: "/comment-center/channel-binding", icon: MessageCircle, roles: ["super_admin", "marketing_manager", "cs_agent"], desc: "粉專導向哪個 LINE 一眼看清" },
+  { title: "內測模擬", url: "/comment-center/simulate", icon: FlaskConical, roles: ["super_admin", "marketing_manager", "cs_agent"], desc: "模擬留言與 webhook 測試" },
   { title: "客服績效", url: "/performance", icon: Target, roles: ["super_admin", "marketing_manager", "cs_agent"], desc: "個人與團隊表現" },
   { title: "AI 與知識庫", url: "/knowledge", icon: Brain, roles: ["super_admin", "marketing_manager"], desc: "AI 設定與知識管理" },
   { title: "數據戰情室", url: "/analytics", icon: BarChart3, roles: ["super_admin", "marketing_manager"], desc: "數據與報表" },

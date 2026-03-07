@@ -1,5 +1,5 @@
 import React from "react";
-import { Switch, Route, Link } from "wouter";
+import { Switch, Route, Link, useLocation } from "wouter";
 import { queryClient, getQueryFn } from "./lib/queryClient";
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -165,6 +165,10 @@ function AppHeader({
 const ROUTE_ACCESS: Record<string, string[]> = {
   "/": ["super_admin", "marketing_manager", "cs_agent"],
   "/comment-center": ["super_admin", "marketing_manager", "cs_agent"],
+  "/comment-center/inbox": ["super_admin", "marketing_manager", "cs_agent"],
+  "/comment-center/rules": ["super_admin", "marketing_manager", "cs_agent"],
+  "/comment-center/channel-binding": ["super_admin", "marketing_manager", "cs_agent"],
+  "/comment-center/simulate": ["super_admin", "marketing_manager", "cs_agent"],
   "/settings": ["super_admin", "marketing_manager"],
   "/knowledge": ["super_admin", "marketing_manager"],
   "/team": ["super_admin"],
@@ -184,6 +188,25 @@ function AccessDenied() {
       </div>
     </div>
   );
+}
+
+/** P0-A: /comment-center 無 segment 或帶舊 hash 時導向新 path（client 端） */
+function CommentCenterRedirect() {
+  const [, setLocation] = useLocation();
+  React.useEffect(() => {
+    const h = (typeof window !== "undefined" ? window.location.hash.slice(1) : "") || "";
+    const map: Record<string, string> = {
+      "page-settings": "/comment-center/channel-binding",
+      "risk-rules": "/comment-center/rules",
+      "rules": "/comment-center/rules",
+      "mapping": "/comment-center/rules",
+      "simulate": "/comment-center/simulate",
+      "inbox": "/comment-center/inbox",
+    };
+    const target = map[h] || "/comment-center/inbox";
+    setLocation(target);
+  }, [setLocation]);
+  return null;
 }
 
 function GuardedRoute({ path, component: Component, userRole }: { path: string; component: React.ComponentType; userRole: string }) {
@@ -235,7 +258,11 @@ function AuthenticatedApp({ user }: { user: AuthUser }) {
           <main className="flex-1 overflow-auto">
             <Switch>
               <GuardedRoute path="/" component={ChatPage} userRole={user.role} />
-              <GuardedRoute path="/comment-center" component={CommentCenterPage} userRole={user.role} />
+              <GuardedRoute path="/comment-center/inbox" component={CommentCenterPage} userRole={user.role} />
+              <GuardedRoute path="/comment-center/rules" component={CommentCenterPage} userRole={user.role} />
+              <GuardedRoute path="/comment-center/channel-binding" component={CommentCenterPage} userRole={user.role} />
+              <GuardedRoute path="/comment-center/simulate" component={CommentCenterPage} userRole={user.role} />
+              <GuardedRoute path="/comment-center" component={CommentCenterRedirect} userRole={user.role} />
               <GuardedRoute path="/settings" component={SettingsPage} userRole={user.role} />
               <GuardedRoute path="/knowledge" component={KnowledgePage} userRole={user.role} />
               <GuardedRoute path="/team" component={TeamPage} userRole={user.role} />
