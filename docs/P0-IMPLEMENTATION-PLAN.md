@@ -35,7 +35,7 @@
 | `/comment-center` | 留言收件匣（預設） | **相容**：可 redirect 到 `/comment-center/inbox` 或維持現頁並以 hash 對應 inbox |
 | `/comment-center/inbox` | 留言收件匣 | **新增**（或保留 `/comment-center` 僅顯示 inbox，其餘改子路徑見下） |
 | `/comment-center/rules` | 自動規則 + 模板與對應 | **新增**（可合併 rules + mapping 一頁兩區） |
-| `/comment-center/routing` | 粉專與 LINE 導向 / 風險與導流規則 | **新增**（原 page-settings + risk-rules 合併或分兩 tab） |
+| `/comment-center/channel-binding` | 粉專與 LINE 設定（基礎綁定與預設導向） | **新增**（原 page-settings；risk-rules 在 rules 頁） |
 | `/comment-center/simulate` | 內測模擬 | **新增**（獨立頁，低頻） |
 | `/brands` | 渠道與品牌管理 | **新增**（從 settings 移出；舊用書籤 `/settings` 仍可進「系統設定」） |
 | `/settings` | 系統設定（僅全域、金鑰、迎賓、轉人工、排班等） | **保留**；移除品牌/渠道區塊 |
@@ -46,8 +46,8 @@
 
 **說明**：  
 - 不引入 `/workspace` 前綴，一級路徑維持簡短。  
-- 「粉專與 LINE 設定」不再用 `/comment-center#page-settings`，改為 **`/comment-center/routing`** 或 **`/brands`**（粉專導向若歸在 brands 則用 `/brands`）。  
-- 舊連結 `/comment-center#page-settings` → 用 **client 端 redirect** 導向新路徑（或 301/302 若用 server 導向）。
+- 「粉專與 LINE 設定」不再用 `/comment-center#page-settings`，改為 **`/comment-center/channel-binding`**（P0-B 再移 `/brands/channels`）。  
+- 舊連結 `/comment-center#page-settings` → 用 **client 端 redirect** 導向 `/comment-center/channel-binding`。
 
 ### 2.2 二級 Route（Comment-center 拆頁後）
 
@@ -55,12 +55,12 @@
 |------|------------|------|
 | `/comment-center` 或 `/comment-center/inbox` | inbox | 留言收件匣、戰情摘要、例外監控、灰區抽查 |
 | `/comment-center/rules` | rules + mapping | 自動規則、模板與商品對應 |
-| `/comment-center/routing` | page-settings + risk-rules | 粉專與 LINE 導向、留言風險與導流規則 |
+| `/comment-center/channel-binding` | page-settings | 粉專與 LINE 設定（基礎綁定與預設導向）；留言風險與導流在 rules 頁 |
 | `/comment-center/simulate` | simulate | 內測模擬、種子、測試 mapping |
 
 **Route 實作方式（二選一，建議 A）**：  
 - **A**：wouter 支援巢狀，例如 `<Route path="/comment-center"><Route path="/inbox" /><Route path="/rules" />...</Route>`，或同一層 `/comment-center/inbox`、`/comment-center/rules`…，由 CommentCenterLayout 包子 route。  
-- **B**：仍單一 route `/comment-center`，用 **query** 如 `?view=inbox|rules|routing|simulate` 取代 hash，以便深連結且不破壞現有 hash 邏輯過渡期可並存。
+- **B**：仍單一 route `/comment-center`，用 **query** 如 `?view=inbox|rules|channel-binding|simulate` 取代 hash，以便深連結且過渡期可並存。
 
 ---
 
@@ -73,8 +73,8 @@
 | `/comment-center#inbox` | 對應 `/comment-center` 或 `/comment-center/inbox` |
 | `/comment-center#rules` | 對應 `/comment-center/rules` |
 | `/comment-center#mapping` | 對應 `/comment-center/rules`（同頁另一區或同一 tab） |
-| `/comment-center#page-settings` | **Redirect** → `/comment-center/routing` 或 `/brands`（見 2.1 決策） |
-| `/comment-center#risk-rules` | 對應 `/comment-center/routing` |
+| `/comment-center#page-settings` | **Redirect** → `/comment-center/channel-binding` |
+| `/comment-center#risk-rules` | 對應 `/comment-center/rules`（同頁風險導流子區） |
 | `/comment-center#simulate` | 對應 `/comment-center/simulate` |
 | `/settings` | 不變；進入後僅見「系統設定」區塊（品牌/渠道已移出） |
 | 從 settings 點「品牌/渠道」 | 導向 **`/brands`**（新頁） |
@@ -82,9 +82,9 @@
 | `/knowledge`, `/analytics`, `/performance` | 不變 |
 
 **Redirect 實作要點**：  
-- **Sidebar**：「粉專與 LINE 設定」連結改為 `/comment-center/routing` 或 `/brands`，不再用 `#page-settings`。  
-- **Client 端**：若偵測到 `hash=page-settings` 或 `hash=risk-rules`，可 `replaceState` 到新 path，避免舊書籤斷掉。  
-- **Server 端**：必要時可對 `/comment-center` 帶 `?view=page-settings` 做 302 到 `/comment-center/routing`（可選）。
+- **Sidebar**：「粉專與 LINE 設定」連結改為 `/comment-center/channel-binding`，不再用 `#page-settings`。  
+- **Client 端**：若偵測到 `hash=page-settings` 或 `hash=risk-rules`，以 redirect 導向新 path（page-settings→channel-binding，risk-rules→rules），避免舊書籤斷掉。  
+- **Server 端**：必要時可對 `/comment-center` 帶 `?view=page-settings` 做 302 到 `/comment-center/channel-binding`（可選）。
 
 ---
 
@@ -125,7 +125,7 @@
 | 即時客服 | `/` | 不變 |
 | 留言收件匣 | `/comment-center` 或 `/comment-center/inbox` | 原「AI 自動處理監控台」改為「留言收件匣」或保留副標「監控 AI 處理狀態」 |
 | 留言規則與導向 | `/comment-center/rules` | 自動規則 + 模板對應 |
-| 粉專與 LINE 導向 | `/comment-center/routing` | 原「粉專與 LINE 設定」；同一頁或與 risk-rules 同區 |
+| 粉專與 LINE 設定 | `/comment-center/channel-binding` | 原「粉專與 LINE 設定」；僅基礎綁定與預設導向 |
 | 內測模擬 | `/comment-center/simulate` | 獨立項，低頻 |
 | 渠道與品牌 | `/brands` | **新增**（P0-B 實作後顯示；P0-A 可先保留在 settings 連結或暫不顯示） |
 | 客服績效 | `/performance` | 不變 |
@@ -135,7 +135,7 @@
 | 系統設定 | `/settings` | 不變 |
 
 - **P0-A 可先做的 sidebar 改動**  
-  - 將「AI 自動處理監控台」與「粉專與 LINE 設定」改為上述新路徑（`/comment-center`、`/comment-center/routing`），並新增「留言規則與導向」「內測模擬」兩項，指向 `/comment-center/rules`、`/comment-center/simulate`。  
+  - 將「AI 自動處理監控台」與「粉專與 LINE 設定」改為上述新路徑（`/comment-center/inbox`、`/comment-center/channel-binding`），並新增「留言規則與導向」「內測模擬」兩項，指向 `/comment-center/rules`、`/comment-center/simulate`。  
   - 「渠道與品牌」可等 P0-B 再出現，或 P0-A 就加一項指到 `/brands`（若 P0-A 已先做 `/brands` 占位頁則可連）。
 
 ---
@@ -148,14 +148,14 @@
 |--------|----------|------------|
 | `/comment-center` 或 `/comment-center/inbox` | 留言收件匣：戰情摘要、狀態篩選、列表、詳情、回覆/隱藏/導 LINE、已完成區、抽查/灰區 | inbox |
 | `/comment-center/rules` | 自動規則 + 模板與商品對應：規則類型、模板、標籤、規則 CRUD；貼文 mapping、商品、導向流程 | rules, mapping |
-| `/comment-center/routing` | 粉專與 LINE 導向 + 留言風險與導流：page-settings 表、risk-rules 五桶與測試器 | page-settings, risk-rules |
+| `/comment-center/channel-binding` | 粉專與 LINE 設定：page-settings 表（基礎綁定與預設導向） | page-settings |
 | `/comment-center/simulate` | 內測模擬：模擬 webhook、種子、測試 mapping | simulate |
 
 ### 5.2 元件拆分（保守策略，先拆 route 與頁面邊界）
 
 - **不要求 P0-A 立刻把 comment-center.tsx 拆成多個小檔**；可先：
-  - **方案 1**：一個 **CommentCenterLayout** 包 wouter 子 route（`/comment-center`, `/comment-center/inbox`, `/comment-center/rules`, `/comment-center/routing`, `/comment-center/simulate`），每個子 route 對應一個 **Page 元件**（如 `CommentInboxPage`, `CommentRulesPage`, `CommentRoutingPage`, `CommentSimulatePage`），**內容先從現有 TabsContent 複製/搬過去**，邏輯仍可暫時集中在單一檔或按頁拆檔。
-  - **方案 2**：維持單一 `CommentCenterPage`，依 **path 或 query** 決定要 render 哪一塊（inbox / rules / routing / simulate），等於用 route 取代 tab 切換，**內部 state 與 API 呼叫可先不重構**，以「能獨立開到各子頁、舊 hash 可導轉」為目標。
+  - **方案 1**：一個 **CommentCenterLayout** 包 wouter 子 route（`/comment-center`, `/comment-center/inbox`, `/comment-center/rules`, `/comment-center/channel-binding`, `/comment-center/simulate`），每個子 route 對應一個 **Page 元件**，**內容先從現有 TabsContent 複製/搬過去**，邏輯仍可暫時集中在單一檔或按頁拆檔。
+  - **方案 2**：維持單一 `CommentCenterPage`，依 **path** 決定要 render 哪一塊（inbox / rules / channel-binding / simulate），等於用 route 取代 tab 切換，**內部 state 與 API 呼叫先不重構**，以「能獨立開到各子頁、舊 hash 可導轉」為目標。（P0-A 採此方案）
 
 - **共用部分**  
   - 若有多頁共用（例如 brand 篩選、權限），可抽成 **CommentCenterLayout** 的 context 或 props。  
@@ -164,8 +164,8 @@
 ### 5.3 舊 hash 相容
 
 - 進入 `/comment-center` 時若帶 `#page-settings`、`#risk-rules`、`#rules`、`#mapping`、`#simulate`，**client 端**做一次 redirect（`replaceState`）到對應新 path，例如：
-  - `#page-settings` → `/comment-center/routing`
-  - `#risk-rules` → `/comment-center/routing`
+  - `#page-settings` → `/comment-center/channel-binding`
+  - `#risk-rules` → `/comment-center/rules`（同頁風險導流子區）
   - `#rules` → `/comment-center/rules`
   - `#mapping` → `/comment-center/rules`
   - `#simulate` → `/comment-center/simulate`
@@ -179,7 +179,7 @@
 |------|----------|------------|------------|
 | 品牌工作區管理（品牌 CRUD、選取） | settings 區塊 | **`/brands`** 頁 | 現有 `/api/brands` 不變 |
 | 渠道管理（渠道 CRUD、測試、連結 Facebook） | settings 區塊（BrandChannelManager） | **`/brands`** 頁（同頁或「渠道」子區） | 現有 `/api/brands/:id/channels`, `/api/channels`, `/api/integrations/meta/*` 不變 |
-| 粉專與 LINE 導向設定（page-settings 表） | comment-center#page-settings | 已於 P0-A 歸 **`/comment-center/routing`** 或可選放在 `/brands` 子區 | 現有 `/api/meta-page-settings` 不變 |
+| 粉專與 LINE 導向設定（page-settings 表） | comment-center#page-settings | 已於 P0-A 歸 **`/comment-center/channel-binding`**；P0-B 可移 `/brands/channels` | 現有 `/api/meta-page-settings` 不變 |
 | 客服排班（ScheduleForm） | settings 區塊 | **保留在 settings** 或 **`/team`**（P0-B 決策：若 team 要「團隊營運」則移 team） | `/api/settings/schedule` |
 | 派案規則（AssignmentRulesForm） | settings 區塊 | **`/team`**（與成員同模組） | `/api/settings/assignment-rules` 等，不變 |
 
@@ -262,8 +262,8 @@
 
 ### P0-A（Sidebar + Comment-center 拆頁）
 
-- [ ] Sidebar「功能選單」連結改為新 path（無 hash）；「粉專與 LINE 設定」點擊進入 `/comment-center/routing`（或 `/brands` 若已上）。
-- [ ] 直接造訪 `/comment-center`、`/comment-center/inbox`、`/comment-center/rules`、`/comment-center/routing`、`/comment-center/simulate` 皆可進入對應內容，且權限與現有一致。
+- [ ] Sidebar「功能選單」連結改為新 path（無 hash）；「粉專與 LINE 設定」點擊進入 `/comment-center/channel-binding`。
+- [ ] 直接造訪 `/comment-center`、`/comment-center/inbox`、`/comment-center/rules`、`/comment-center/channel-binding`、`/comment-center/simulate` 皆可進入對應內容，且權限與現有一致。
 - [ ] 造訪 `/comment-center#page-settings`、`#risk-rules`、`#rules`、`#simulate` 會自動導到對應新 path（replaceState 或 redirect）。
 - [ ] 留言收件匣、規則、導向、內測模擬四類功能行為與改版前一致（列表、篩選、回覆、規則 CRUD、模擬等）。
 - [ ] 未登入 / cs_agent / marketing_manager / super_admin 權限與現有一致；無 403/404 異常。
@@ -418,12 +418,12 @@
 - **內容要點**：  
   - P0 拆成 P0-A（sidebar + comment-center 拆頁）、P0-B（settings / brands-channels / team 職責切分）、P0-C（routes.ts 模組拆分 + API 驗證 + 文件同步）。  
   - 不強制 `/workspace/*`，以舊路由相容與 redirect/alias 為主。  
-  - 新 route 僅新增必要獨立頁（如 `/comment-center/rules`、`/comment-center/routing`、`/comment-center/simulate`、`/brands`）；舊路徑與 hash 均有對照與導轉方式。  
+  - 新 route 僅新增必要獨立頁（如 `/comment-center/rules`、`/comment-center/channel-binding`、`/comment-center/simulate`）；舊路徑與 hash 均有對照與導轉方式。  
   - Sidebar、comment-center 拆頁、settings 移出、team 整合、routes 拆分順序、驗收與回滾皆已寫入，Chat 為 layout/元件邊界方案先行、實作時機另定。
 
 ### 3. 風險與未完成項
 
-- **風險**：計畫中部分選項（如「粉專與 LINE 導向」究竟放在 `/comment-center/routing` 或 `/brands`）需您拍板；routes 拆分時若共用 middleware 抽得不完整，可能出現重複或漏權限。  
+- **風險**：P0-B 將把粉專/LINE 設定自 comment-center 移往 `/brands/channels`；routes 拆分時若共用 middleware 抽得不完整，可能出現重複或漏權限。  
 - **未完成項**：實際 code 改動、單元/整合測試、E2E 路徑測試均未執行；Chat 僅方案，尚未實作 layout 拆分。
 
 ### 4. 驗收方式
