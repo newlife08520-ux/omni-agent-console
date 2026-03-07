@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useLocation, Link } from "wouter";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
@@ -245,6 +246,14 @@ function replyFlowLabel(c: MetaComment): string {
 
 const VALID_TABS = ["inbox", "rules", "mapping", "page-settings", "risk-rules", "simulate"] as const;
 
+/** P0-A: path segment -> 顯示用名稱、document.title 用 */
+const COMMENT_CENTER_PAGE_TITLES: Record<string, string> = {
+  inbox: "留言收件匣",
+  rules: "留言規則與導向",
+  "channel-binding": "粉專與 LINE 設定",
+  simulate: "內測模擬",
+};
+
 const RISK_BUCKET_LABELS: Record<string, string> = {
   whitelist: "白名單",
   direct_hide: "直接隱藏",
@@ -269,19 +278,31 @@ function ruleActionSummary(r: MetaCommentRiskRule): string {
   return parts.join(" + ") || "—";
 }
 
+/** P0-A: 從 pathname 解析目前子頁（inbox | rules | channel-binding | simulate） */
+function useCommentCenterPage(): string {
+  const [location] = useLocation();
+  const pathname = typeof location === "string" ? location : (location as { pathname?: string })?.pathname ?? "";
+  const segment = (pathname.replace(/^\/comment-center\/?/, "").split("/")[0] || "").toLowerCase();
+  const valid = ["inbox", "rules", "channel-binding", "simulate"];
+  return valid.includes(segment) ? segment : "inbox";
+}
+
 export default function CommentCenterPage() {
-  const [activeMainTab, setActiveMainTab] = useState<string>(() => {
-    const h = typeof window !== "undefined" ? window.location.hash.slice(1) : "";
-    return h && VALID_TABS.includes(h as any) ? h : "inbox";
-  });
+  const currentPage = useCommentCenterPage();
+  /** P0-A: 僅在 rules 頁使用，用於規則／模板對應／風險導流三區切換 */
+  const [rulesSubTab, setRulesSubTab] = useState<"rules" | "mapping" | "risk-rules">("rules");
+  const activeMainTab = currentPage === "rules" ? rulesSubTab : currentPage === "channel-binding" ? "page-settings" : currentPage === "inbox" ? "inbox" : currentPage === "simulate" ? "simulate" : "inbox";
+
   useEffect(() => {
-    const onHash = () => {
-      const h = window.location.hash.slice(1);
-      if (h && VALID_TABS.includes(h as any)) setActiveMainTab(h);
-    };
-    window.addEventListener("hashchange", onHash);
-    return () => window.removeEventListener("hashchange", onHash);
-  }, []);
+    if (typeof window === "undefined") return;
+    if (window.location.hash) window.history.replaceState(null, "", window.location.pathname + window.location.search);
+  }, [currentPage]);
+
+  useEffect(() => {
+    const title = COMMENT_CENTER_PAGE_TITLES[currentPage] || "留言中心";
+    document.title = `${title} | AI 客服中控台`;
+    return () => { document.title = "AI 客服中控台"; };
+  }, [currentPage]);
 
   const [inboxStatus, setInboxStatus] = useState<string>("exceptions");
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -1118,33 +1139,43 @@ export default function CommentCenterPage() {
         </div>
       )}
 
-      <Tabs value={activeMainTab} onValueChange={(v) => { setActiveMainTab(v); const u = new URL(window.location.href); u.hash = v; window.history.replaceState(null, "", u.pathname + u.search + "#" + v); }} className="space-y-4">
-        <TabsList className="bg-stone-100 p-1 flex flex-wrap h-auto gap-1 overflow-x-auto max-w-full">
-          <TabsTrigger value="inbox" className="data-[state=active]:bg-white data-[state=active]:shadow-sm shrink-0">
-            <Inbox className="w-4 h-4 mr-2" />
-            留言收件匣
-          </TabsTrigger>
-          <TabsTrigger value="rules" className="data-[state=active]:bg-white data-[state=active]:shadow-sm shrink-0">
-            <FileText className="w-4 h-4 mr-2" />
-            自動規則
-          </TabsTrigger>
-          <TabsTrigger value="mapping" className="data-[state=active]:bg-white data-[state=active]:shadow-sm shrink-0">
-            <Link2 className="w-4 h-4 mr-2" />
-            模板與商品對應
-          </TabsTrigger>
-          <TabsTrigger value="page-settings" className="data-[state=active]:bg-white data-[state=active]:shadow-sm shrink-0">
-            <MessageCircle className="w-4 h-4 mr-2" />
-            粉專與 LINE 導向設定
-          </TabsTrigger>
-          <TabsTrigger value="risk-rules" className="data-[state=active]:bg-white data-[state=active]:shadow-sm shrink-0">
-            <Shield className="w-4 h-4 mr-2" />
-            留言風險與導流規則
-          </TabsTrigger>
-          <TabsTrigger value="simulate" className="data-[state=active]:bg-white data-[state=active]:shadow-sm shrink-0">
-            <FlaskConical className="w-4 h-4 mr-2" />
-            內測模擬
-          </TabsTrigger>
-        </TabsList>
+      {/* P0-A: 依 path 的頁內導航（與 sidebar 一致，每頁一個主任務） */}
+      <nav className="flex flex-wrap items-center gap-1 p-1 bg-stone-100 rounded-lg mb-4" aria-label="留言中心頁面">
+        <Link href="/comment-center/inbox" className={`inline-flex items-center gap-2 px-3 py-2 rounded-md text-sm font-medium transition-colors ${currentPage === "inbox" ? "bg-white shadow-sm text-stone-900" : "text-stone-600 hover:bg-stone-200"}`}>
+          <Inbox className="w-4 h-4" />
+          留言收件匣
+        </Link>
+        <Link href="/comment-center/rules" className={`inline-flex items-center gap-2 px-3 py-2 rounded-md text-sm font-medium transition-colors ${currentPage === "rules" ? "bg-white shadow-sm text-stone-900" : "text-stone-600 hover:bg-stone-200"}`}>
+          <FileText className="w-4 h-4" />
+          留言規則與導向
+        </Link>
+        <Link href="/comment-center/channel-binding" className={`inline-flex items-center gap-2 px-3 py-2 rounded-md text-sm font-medium transition-colors ${currentPage === "channel-binding" ? "bg-white shadow-sm text-stone-900" : "text-stone-600 hover:bg-stone-200"}`}>
+          <MessageCircle className="w-4 h-4" />
+          粉專與 LINE 設定
+        </Link>
+        <Link href="/comment-center/simulate" className={`inline-flex items-center gap-2 px-3 py-2 rounded-md text-sm font-medium transition-colors ${currentPage === "simulate" ? "bg-white shadow-sm text-stone-900" : "text-stone-600 hover:bg-stone-200"}`}>
+          <FlaskConical className="w-4 h-4" />
+          內測模擬
+        </Link>
+      </nav>
+
+      <Tabs value={activeMainTab} onValueChange={(v) => { if (currentPage === "rules") setRulesSubTab(v as "rules" | "mapping" | "risk-rules"); }} className="space-y-4">
+        {currentPage === "rules" && (
+          <TabsList className="bg-stone-100 p-1 flex flex-wrap h-auto gap-1 mb-4">
+            <TabsTrigger value="rules" className="data-[state=active]:bg-white data-[state=active]:shadow-sm shrink-0">
+              <FileText className="w-4 h-4 mr-2" />
+              自動規則
+            </TabsTrigger>
+            <TabsTrigger value="mapping" className="data-[state=active]:bg-white data-[state=active]:shadow-sm shrink-0">
+              <Link2 className="w-4 h-4 mr-2" />
+              模板與商品對應
+            </TabsTrigger>
+            <TabsTrigger value="risk-rules" className="data-[state=active]:bg-white data-[state=active]:shadow-sm shrink-0">
+              <Shield className="w-4 h-4 mr-2" />
+              留言風險與導流規則
+            </TabsTrigger>
+          </TabsList>
+        )}
 
         <TabsContent value="inbox" className="space-y-4 mt-4">
           {health != null && (
