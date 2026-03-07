@@ -114,16 +114,5 @@
 ## Git / branch
 
 - **Branch**：`p0b-settings-brands-team-split`
-- **建議納入 P0-B commit 的檔案**
-  - client/src/App.tsx  
-  - client/src/components/app-sidebar.tsx  
-  - client/src/components/brand-channel-manager.tsx  
-  - client/src/components/schedule-form.tsx  
-  - client/src/components/assignment-rules-form.tsx  
-  - client/src/pages/settings.tsx  
-  - client/src/pages/team.tsx  
-  - client/src/pages/brands-channels.tsx  
-  - docs/P0-B-REVIEW-SPEC.md  
-  - docs/P0-B-IMPLEMENTATION-PLAN-V2.md  
-  - docs/P0-B-DELIVERY-REPORT.md（本文件）
-- **最新 commit hash / push 狀態**：目前變更尚未 commit；自我驗收完成後請依上列清單 add/commit，再 push 並回報 hash 與 push 狀態。
+- **最新 commit**：`a6b99ac` P0-B: Settings/Brands-Channels/Team-Assignment 職責切分
+- **Push 狀態**：已 push 至 origin，可開 PR。
