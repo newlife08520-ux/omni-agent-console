@@ -49,4 +49,18 @@
 
 ---
 
-## 可直接貼進 PR comment 的驗收段落（見下方）
+## 可直接貼進 PR comment 的驗收段落
+
+（以下整段複製貼到 PR 的 comment 即可。）
+
+---
+
+**P0-A 人工驗收結果**
+
+- **四條新 path**：已依序點選 sidebar「留言收件匣」「留言規則與導向」「粉專與 LINE 設定」「內測模擬」，皆進入對應 path（`/comment-center/inbox`、`/rules`、`/channel-binding`、`/simulate`），畫面內容與改版前一致。
+- **根 path 導向**：造訪 `/comment-center`（無 hash）會自動導向 `/comment-center/inbox`。
+- **舊 hash 導轉**：造訪 `/comment-center#page-settings`、`#risk-rules`、`#simulate` 皆會導向對應新 path，且網址列不再保留 hash。
+- **頁面標題**：四頁 document.title 皆為「留言收件匣／留言規則與導向／粉專與 LINE 設定／內測模擬」+ 「 | AI 客服中控台」。
+- **權限**：未登入無法進入；登入後（cs_agent／marketing_manager／super_admin）四頁皆可進入，無 403／404／白屏。
+
+**驗收證據**：已附四頁路徑截圖（見下方／見附件）。（若有短片或 hash 導轉截圖可一併註明。）
