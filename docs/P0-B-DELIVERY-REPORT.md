@@ -111,8 +111,9 @@
 
 ---
 
-## Git / branch
+## Git / branch（P0-B final cleanup 後）
 
 - **Branch**：`p0b-settings-brands-team-split`
-- **最新 commit**：`a6b99ac` P0-B: Settings/Brands-Channels/Team-Assignment 職責切分
-- **Push 狀態**：已 push 至 origin，可開 PR。
+- **最新 commit**：`824b05d` P0-B docs: 更新交付報告 Git 狀態（前一筆 `a6b99ac` 為 P0-B 程式與文件主體）
+- **Push 狀態**：已與 origin 同步，可開 PR。
+- **工作區**：已還原非 P0-B 之修改（brand-context、comment-center）；未追蹤檔案（shell-stats-context、P0-A/SHELL 相關 docs）未納入本 PR。
