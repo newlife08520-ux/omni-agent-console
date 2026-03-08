@@ -1,6 +1,7 @@
 import { build as esbuild } from "esbuild";
 import { build as viteBuild } from "vite";
-import { rm, readFile } from "fs/promises";
+import { rm, readFile, writeFile } from "fs/promises";
+import path from "path";
 
 // server deps to bundle to reduce openat(2) syscalls
 // which helps cold start times
@@ -57,6 +58,23 @@ async function buildAll() {
     external: externals,
     logLevel: "info",
   });
+
+  const commit =
+    process.env.RAILWAY_GIT_COMMIT_SHA ||
+    process.env.VERCEL_GIT_COMMIT_SHA ||
+    process.env.GIT_COMMIT ||
+    process.env.COMMIT_SHA ||
+    "";
+  const versionPath = path.join(process.cwd(), "dist", "public", "version.json");
+  await writeFile(
+    versionPath,
+    JSON.stringify({
+      buildTime: new Date().toISOString(),
+      commit: commit.slice(0, 12),
+    }),
+    "utf-8"
+  );
+  console.log("[build] version.json written:", commit || "(no commit env)");
 }
 
 buildAll().catch((err) => {
