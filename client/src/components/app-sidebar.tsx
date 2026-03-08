@@ -17,7 +17,8 @@ const allMenuItems = [
   { title: "客服績效", url: "/performance", icon: Target, roles: ["super_admin", "marketing_manager", "cs_agent"], desc: "個人與團隊表現" },
   { title: "AI 與知識庫", url: "/knowledge", icon: Brain, roles: ["super_admin", "marketing_manager"], desc: "AI 設定與知識管理" },
   { title: "數據戰情室", url: "/analytics", icon: BarChart3, roles: ["super_admin", "marketing_manager"], desc: "數據與報表" },
-  { title: "團隊管理", url: "/team", icon: Users, roles: ["super_admin"], desc: "成員與排班" },
+  { title: "團隊管理", url: "/team", icon: Users, roles: ["super_admin"], desc: "成員、排班與派案規則" },
+  { title: "品牌與渠道", url: "/settings/brands-channels", icon: Building2, roles: ["super_admin", "marketing_manager"], desc: "品牌、渠道、粉專與 LINE 綁定" },
   { title: "系統設定", url: "/settings", icon: Settings, roles: ["super_admin", "marketing_manager"], desc: "全域設定" },
 ];
 

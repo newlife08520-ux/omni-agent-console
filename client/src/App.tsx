@@ -11,6 +11,7 @@ import LoginPage from "@/pages/login";
 import ChatPage from "@/pages/chat";
 import CommentCenterPage from "./pages/comment-center";
 import SettingsPage from "@/pages/settings";
+import BrandsChannelsPage from "@/pages/brands-channels";
 import KnowledgePage from "@/pages/knowledge";
 import TeamPage from "@/pages/team";
 import AnalyticsPage from "@/pages/analytics";
@@ -170,6 +171,7 @@ const ROUTE_ACCESS: Record<string, string[]> = {
   "/comment-center/channel-binding": ["super_admin", "marketing_manager", "cs_agent"],
   "/comment-center/simulate": ["super_admin", "marketing_manager", "cs_agent"],
   "/settings": ["super_admin", "marketing_manager"],
+  "/settings/brands-channels": ["super_admin", "marketing_manager"],
   "/knowledge": ["super_admin", "marketing_manager"],
   "/team": ["super_admin"],
   "/analytics": ["super_admin", "marketing_manager"],
@@ -263,6 +265,7 @@ function AuthenticatedApp({ user }: { user: AuthUser }) {
               <GuardedRoute path="/comment-center/channel-binding" component={CommentCenterPage} userRole={user.role} />
               <GuardedRoute path="/comment-center/simulate" component={CommentCenterPage} userRole={user.role} />
               <GuardedRoute path="/comment-center" component={CommentCenterRedirect} userRole={user.role} />
+              <GuardedRoute path="/settings/brands-channels" component={BrandsChannelsPage} userRole={user.role} />
               <GuardedRoute path="/settings" component={SettingsPage} userRole={user.role} />
               <GuardedRoute path="/knowledge" component={KnowledgePage} userRole={user.role} />
               <GuardedRoute path="/team" component={TeamPage} userRole={user.role} />

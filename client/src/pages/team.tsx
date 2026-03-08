@@ -6,9 +6,11 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
-import { Users, Shield, Headphones, TrendingUp, Mail, Plus, Trash2, UserPlus, Pencil, Upload, Circle, Loader2 } from "lucide-react";
+import { Users, Shield, Headphones, TrendingUp, Mail, Plus, Trash2, UserPlus, Pencil, Upload, Circle, Loader2, CircleDot } from "lucide-react";
 import { apiRequest, getQueryFn } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { ScheduleForm } from "@/components/schedule-form";
+import { AssignmentRulesForm } from "@/components/assignment-rules-form";
 import type { TeamMember } from "@shared/schema";
 
 const ROLE_MAP: Record<string, { label: string; color: string; icon: typeof Shield }> = {
@@ -253,6 +255,28 @@ export default function TeamPage() {
             );
           })}
         </div>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="section-schedule">
+        <div className="flex items-center gap-2 mb-4">
+          <div className="w-8 h-8 rounded-xl bg-violet-100 flex items-center justify-center"><CircleDot className="w-4 h-4 text-violet-600" /></div>
+          <div>
+            <span className="text-sm font-semibold text-stone-800">人工客服服務時段</span>
+            <p className="text-xs text-stone-500">AI 回覆為 24 小時；此設定僅影響「真人回覆」是否有人接案。轉人工時若在午休或下班時段，AI 會主動提醒客人稍後由專人回覆。</p>
+          </div>
+        </div>
+        <ScheduleForm />
+      </div>
+
+      <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="section-assignment-rules">
+        <div className="flex items-center gap-2 mb-4">
+          <div className="w-8 h-8 rounded-xl bg-sky-100 flex items-center justify-center"><Users className="w-4 h-4 text-sky-600" /></div>
+          <div>
+            <span className="text-sm font-semibold text-stone-800">客服分配規則</span>
+            <p className="text-xs text-stone-500">SLA 逾時分鐘數、是否自動分配、逾時是否自動改派</p>
+          </div>
+        </div>
+        <AssignmentRulesForm />
       </div>
 
       <Dialog open={showAddDialog} onOpenChange={setShowAddDialog}>
