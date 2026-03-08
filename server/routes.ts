@@ -428,8 +428,11 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
 
+  // 延後開機同步，避免一啟動就 133 次請求拖慢登入/首頁（造成「幾乎打不開」）
   const config = getSuperLandingConfig();
-  refreshPagesCache(config).catch(() => {});
+  setTimeout(() => {
+    refreshPagesCache(getSuperLandingConfig()).catch(() => {});
+  }, 30 * 1000);
   setInterval(() => {
     const freshConfig = getSuperLandingConfig();
     refreshPagesCache(freshConfig).catch(() => {});
@@ -531,6 +534,18 @@ export async function registerRoutes(
       });
     }
     return res.status(401).json({ success: false, message: "帳號或密碼錯誤" });
+  });
+
+  app.get("/api/version", (_req, res) => {
+    try {
+      const versionPath = path.join(__dirname, "public", "version.json");
+      if (fs.existsSync(versionPath)) {
+        const raw = fs.readFileSync(versionPath, "utf-8");
+        const data = JSON.parse(raw) as { buildTime?: string; commit?: string };
+        return res.json({ buildTime: data.buildTime, commit: data.commit });
+      }
+    } catch (_e) {}
+    return res.json({ buildTime: null, commit: null });
   });
 
   app.get("/api/auth/check", (req, res) => {
@@ -1948,6 +1963,15 @@ export async function registerRoutes(
     if (brandId === null) return res.status(400).json({ message: "無效的 ID" });
     const channels = storage.getChannelsByBrand(brandId);
     return res.json(channels);
+  });
+
+  app.get("/api/brands/:id/assigned-agents", authMiddleware, (req, res) => {
+    const brandId = parseIdParam(req.params.id);
+    if (brandId === null) return res.status(400).json({ message: "無效的 ID" });
+    const brand = storage.getBrand(brandId);
+    if (!brand) return res.status(404).json({ message: "品牌不存在" });
+    const agents = storage.getBrandAssignedAgents(brandId);
+    return res.json(agents);
   });
 
   app.get("/api/channels", authMiddleware, (_req, res) => {
@@ -3567,18 +3591,11 @@ export async function registerRoutes(
         const botIds = allChannels.map(c => `${c.channel_name}(bot_id=${c.bot_id || "EMPTY"})`).join(", ");
         console.log("[WEBHOOK] NO MATCH for bot_id:", destination);
         console.log("[WEBHOOK] DB channels:", botIds || "NONE");
-        const firstChannel = allChannels.find(c => c.platform === "line" && c.access_token);
-        if (firstChannel) {
-          console.log("[WEBHOOK] FALLBACK to first LINE channel:", firstChannel.channel_name);
-          channelToken = firstChannel.access_token || null;
-          channelSecretVal = firstChannel.channel_secret || null;
-          matchedBrandId = firstChannel.brand_id;
-          await storage.updateChannel(firstChannel.id, { bot_id: destination });
-          console.log("[WEBHOOK] AUTO-FIXED: Updated channel bot_id to", destination);
-        }
+        console.log("[WEBHOOK] 不 fallback，無法確認渠道時不進行自動回覆（fail-closed）");
       }
     } else {
       console.log("[WEBHOOK] No destination field in webhook body");
+      console.log("[WEBHOOK] 無 destination，視為未匹配 channel，不自動回覆（fail-closed）");
     }
 
     if (!channelSecretVal) {
@@ -3686,9 +3703,10 @@ export async function registerRoutes(
             broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: matchedBrandId || contact.brand_id });
             broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
           } else if (!contact.needs_human) {
-            const aiEnabled = matchedChannel ? matchedChannel.is_ai_enabled : 1;
+            const aiEnabled = matchedChannel ? matchedChannel.is_ai_enabled : 0;
             if (!aiEnabled) {
-              console.log("[WEBHOOK] AI 已關閉 (channel:", matchedChannel?.channel_name, ") - 跳過自動回覆");
+              if (!matchedChannel) console.log("[WEBHOOK] 無匹配 channel，跳過文字自動回覆（fail-closed）");
+              else console.log("[WEBHOOK] AI 已關閉 (channel:", matchedChannel.channel_name, ") - 跳過自動回覆");
             } else {
               const testMode = storage.getSetting("test_mode");
               if (testMode === "true") {
@@ -3738,7 +3756,8 @@ export async function registerRoutes(
             const imgMsg = storage.createMessage(contact.id, "line", "user", "[圖片訊息]", "image", imageUrl);
             broadcastSSE("new_message", { contact_id: contact.id, message: imgMsg, brand_id: matchedBrandId || contact.brand_id });
             broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
-            const aiEnabledImg = matchedChannel ? matchedChannel.is_ai_enabled : 1;
+            const aiEnabledImg = matchedChannel ? matchedChannel.is_ai_enabled : 0;
+            if (!matchedChannel && !contact.needs_human) console.log("[WEBHOOK] 無匹配 channel，跳過圖片自動回覆（fail-closed）");
             if (!contact.needs_human && aiEnabledImg) {
               const recentMsgsForEscalate = storage.getMessages(contact.id).slice(-8);
               const escalate = shouldEscalateImageSupplement(recentMsgsForEscalate);
@@ -3788,8 +3807,13 @@ export async function registerRoutes(
             console.log("[影片處理失敗]: messageId:", messageId);
             storage.createMessage(contact.id, "line", "user", "[影片訊息] (下載失敗)");
           }
-          const aiEnabledVid = matchedChannel ? matchedChannel.is_ai_enabled : 1;
-          if (aiEnabledVid) {
+          const aiEnabledVid = matchedChannel ? matchedChannel.is_ai_enabled : 0;
+          if (contact.needs_human) {
+            console.log("[WEBHOOK] 案件已轉人工(needs_human=1)，跳過影片固定回覆 contact_id=", contact.id);
+          } else if (!aiEnabledVid) {
+            if (!matchedChannel) console.log("[WEBHOOK] 無匹配 channel，跳過影片固定回覆（fail-closed）");
+            else console.log("[WEBHOOK] AI 已關閉 (channel:", matchedChannel.channel_name, ") - 跳過影片回覆");
+          } else {
             storage.createMessage(contact.id, "line", "ai", "(AI 系統提示) 已收到您的影片，將為您轉交專人檢視。");
             storage.updateContactHumanFlag(contact.id, 1);
             await pushLineMessage(contact.platform_user_id, [{ type: "text", text: "已收到您的影片，將為您轉交專人檢視。" }], channelToken);
@@ -4951,6 +4975,35 @@ export async function registerRoutes(
     }
     if (!storage.deleteUser(id)) return res.status(404).json({ message: "成員不存在" });
     return res.json({ success: true });
+  });
+
+  app.get("/api/team/:id/brand-assignments", authMiddleware, (req: any, res) => {
+    const userId = parseIdParam(req.params.id);
+    if (userId === null) return res.status(400).json({ message: "無效的 ID" });
+    const me = req.session?.userId;
+    const role = req.session?.userRole ?? req.session?.role;
+    const isSupervisor = role === "super_admin" || role === "marketing_manager";
+    if (userId !== me && !isSupervisor) return res.status(403).json({ message: "僅能查看本人或由主管查看" });
+    const user = storage.getUserById(userId);
+    if (!user) return res.status(404).json({ message: "成員不存在" });
+    const assignments = storage.getAgentBrandAssignments(userId);
+    return res.json(assignments);
+  });
+
+  app.put("/api/team/:id/brand-assignments", authMiddleware, superAdminOnly, (req, res) => {
+    const userId = parseIdParam(req.params.id);
+    if (userId === null) return res.status(400).json({ message: "無效的 ID" });
+    const { assignments } = req.body || {};
+    if (!Array.isArray(assignments)) return res.status(400).json({ message: "請提供 assignments 陣列" });
+    const user = storage.getUserById(userId);
+    if (!user) return res.status(404).json({ message: "成員不存在" });
+    const normalized = assignments.map((a: any) => {
+      const brand_id = typeof a.brand_id === "number" ? a.brand_id : parseInt(String(a.brand_id), 10);
+      const role = a.role === "backup" ? "backup" : "primary";
+      return { brand_id, role };
+    }).filter((a: { brand_id: number; role: string }) => !Number.isNaN(a.brand_id));
+    storage.setAgentBrandAssignments(userId, normalized);
+    return res.json({ success: true, assignments: storage.getAgentBrandAssignments(userId) });
   });
 
   app.get("/api/team/available-agents", authMiddleware, (req, res) => {

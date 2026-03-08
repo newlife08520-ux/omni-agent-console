@@ -1,0 +1,11 @@
+# 強制每次部署都執行完整 build（client + server），避免 production 只更新 server 未更新 dist/public
+# 見 docs/DEPLOY-FRONTEND-SYNC.md
+
+[phases.install]
+cmds = ["npm ci"]
+
+[phases.build]
+cmds = ["npm run build"]
+
+[start]
+cmd = "npm run start"
