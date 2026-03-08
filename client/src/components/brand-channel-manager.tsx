@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState, useEffect, useMemo } from "react";
+import { useQuery, useQueries, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -9,10 +9,22 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import {
   Building2, Plus, Pencil, Trash2, Hash, CheckCircle, Plug, RefreshCw, Eye, EyeOff, Save, Loader2,
 } from "lucide-react";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, getQueryFn } from "@/lib/queryClient";
 import { useBrand } from "@/lib/brand-context";
 import { useToast } from "@/hooks/use-toast";
 import type { Brand, Channel, ChannelPlatform } from "@shared/schema";
+
+type AssignedAgent = { user_id: number; display_name: string; role: string };
+
+function formatBrandAssignedSummary(agents: AssignedAgent[]): string {
+  if (!agents.length) return "尚無負責人";
+  const primary = agents.filter((a) => a.role === "primary").map((a) => a.display_name).join("、");
+  const backup = agents.filter((a) => a.role === "backup").map((a) => a.display_name).join("、");
+  const parts: string[] = [];
+  if (primary) parts.push(`主責：${primary}`);
+  if (backup) parts.push(`備援：${backup}`);
+  return parts.join("；") || "尚無負責人";
+}
 
 export type HealthStatus = "ok" | "error" | "unconfigured" | "loading" | "unknown";
 
@@ -160,6 +172,21 @@ export function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean })
     },
     enabled: !!selectedBrandId,
   });
+
+  const assignedAgentsQueries = useQueries({
+    queries: brands.map((b) => ({
+      queryKey: ["/api/brands", b.id, "assigned-agents"] as const,
+      queryFn: getQueryFn<AssignedAgent[]>({ on401: "throw" }),
+      enabled: true,
+    })),
+  });
+  const assignedAgentsByBrand = useMemo(() => {
+    const map: Record<number, AssignedAgent[]> = {};
+    brands.forEach((b, i) => {
+      map[b.id] = Array.isArray(assignedAgentsQueries[i]?.data) ? assignedAgentsQueries[i].data! : [];
+    });
+    return map;
+  }, [brands, assignedAgentsQueries]);
 
   const openAddBrand = () => {
     setEditingBrand(null);
@@ -328,6 +355,8 @@ export function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean })
           {brands.map((brand) => {
             const slStatus = healthStatus[`superlanding_brand_${brand.id}`];
             const shoplineStatus = healthStatus[`shopline_brand_${brand.id}`];
+            const agents = assignedAgentsByBrand[brand.id] ?? [];
+            const assignedSummary = formatBrandAssignedSummary(agents);
             return (
               <div key={brand.id} className={`rounded-xl border p-4 transition-all ${selectedBrandId === brand.id ? "border-emerald-300 bg-emerald-50/30" : "border-stone-200 bg-stone-50/50"}`} data-testid={`brand-card-${brand.id}`}>
                 <div className="flex items-center justify-between">
@@ -344,6 +373,7 @@ export function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean })
                         {shoplineStatus && <StatusBadge status={shoplineStatus.status} message={shoplineStatus.message} />}
                       </div>
                       <p className="text-[10px] text-stone-400">{brand.slug} · {brand.description || "尚無描述"}</p>
+                      <p className="text-[10px] text-stone-500 mt-0.5" data-testid={`brand-assigned-${brand.id}`}>{assignedSummary}</p>
                     </div>
                   </div>
                   <div className="flex items-center gap-1">

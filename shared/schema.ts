@@ -56,7 +56,6 @@ export interface ChannelWithBrand extends Channel {
   brand_slug?: string;
 }
 
-/** 客服 ↔ 品牌分配：主責 / 備援 */
 export type AgentBrandRole = "primary" | "backup";
 
 export interface AgentBrandAssignment {

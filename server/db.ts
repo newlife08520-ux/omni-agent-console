@@ -148,10 +148,9 @@ export function initDatabase() {
   seedMockData();
 }
 
-/** 品牌分配骨架：客服 ↔ 品牌主責/備援 */
 function migrateAgentBrandAssignments() {
-  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='agent_brand_assignments'").get();
-  if (tables) return;
+  const t = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='agent_brand_assignments'").get();
+  if (t) return;
   db.exec(`
     CREATE TABLE agent_brand_assignments (
       user_id INTEGER NOT NULL,
@@ -164,7 +163,6 @@ function migrateAgentBrandAssignments() {
     );
   `);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_brand_assignments_brand ON agent_brand_assignments(brand_id);`);
-  console.log("[DB Migration] agent_brand_assignments 已建立");
 }
 
 /** Phase 1：粉專→品牌→LINE 設定表、留言表擴欄、貼文/商品判定來源、商品關鍵字表 */
