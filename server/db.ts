@@ -144,7 +144,27 @@ export function initDatabase() {
   migrateMetaCommentPhase1();
   migrateMetaCommentPhase2();
   migrateMetaCommentPhase3();
+  migrateAgentBrandAssignments();
   seedMockData();
+}
+
+/** 品牌分配骨架：客服 ↔ 品牌主責/備援 */
+function migrateAgentBrandAssignments() {
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='agent_brand_assignments'").get();
+  if (tables) return;
+  db.exec(`
+    CREATE TABLE agent_brand_assignments (
+      user_id INTEGER NOT NULL,
+      brand_id INTEGER NOT NULL,
+      role TEXT NOT NULL CHECK(role IN ('primary','backup')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (user_id, brand_id),
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (brand_id) REFERENCES brands(id)
+    );
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_brand_assignments_brand ON agent_brand_assignments(brand_id);`);
+  console.log("[DB Migration] agent_brand_assignments 已建立");
 }
 
 /** Phase 1：粉專→品牌→LINE 設定表、留言表擴欄、貼文/商品判定來源、商品關鍵字表 */

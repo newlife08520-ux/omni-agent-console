@@ -1,5 +1,5 @@
 import db, { initDatabase, hashPassword } from "./db";
-import type { User, Contact, ContactWithPreview, Message, Setting, KnowledgeFile, TeamMember, MarketingRule, Brand, Channel, ChannelWithBrand, ImageAsset, AiLog, AgentStatus, AssignmentRecord } from "@shared/schema";
+import type { User, Contact, ContactWithPreview, Message, Setting, KnowledgeFile, TeamMember, MarketingRule, Brand, Channel, ChannelWithBrand, ImageAsset, AiLog, AgentStatus, AssignmentRecord, AgentBrandAssignment, AgentBrandRole } from "@shared/schema";
 import { CONTACT_STATUS_ALLOWED } from "@shared/schema";
 import { getRedisClient } from "./redis-client";
 import * as redisBC from "./redis-brands-channels";
@@ -25,6 +25,9 @@ export interface IStorage {
   getChannelsByBrand(brandId: number): Channel[];
   getChannel(id: number): Channel | undefined;
   getChannelByBotId(botId: string): ChannelWithBrand | undefined;
+  getAgentBrandAssignments(userId: number): AgentBrandAssignment[];
+  setAgentBrandAssignments(userId: number, assignments: { brand_id: number; role: AgentBrandRole }[]): void;
+  getBrandAssignedAgents(brandId: number): { user_id: number; display_name: string; role: AgentBrandRole }[];
   createChannel(brandId: number, platform: string, channelName: string, botId?: string, accessToken?: string, channelSecret?: string): Promise<Channel>;
   updateChannel(id: number, data: Partial<Omit<Channel, "id" | "created_at">>): Promise<boolean>;
   deleteChannel(id: number): Promise<boolean>;
@@ -321,6 +324,35 @@ export class SQLiteStorage implements IStorage {
       LEFT JOIN brands b ON c.brand_id = b.id
       WHERE c.bot_id = ? AND c.is_active = 1
     `).get(botId) as ChannelWithBrand | undefined;
+  }
+
+  getAgentBrandAssignments(userId: number): AgentBrandAssignment[] {
+    return db.prepare(`
+      SELECT user_id, brand_id, role, created_at
+      FROM agent_brand_assignments
+      WHERE user_id = ?
+      ORDER BY brand_id
+    `).all(userId) as AgentBrandAssignment[];
+  }
+
+  setAgentBrandAssignments(userId: number, assignments: { brand_id: number; role: AgentBrandRole }[]): void {
+    db.prepare("DELETE FROM agent_brand_assignments WHERE user_id = ?").run(userId);
+    const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+    const stmt = db.prepare("INSERT INTO agent_brand_assignments (user_id, brand_id, role, created_at) VALUES (?, ?, ?, ?)");
+    for (const a of assignments) {
+      stmt.run(userId, a.brand_id, a.role, now);
+    }
+  }
+
+  getBrandAssignedAgents(brandId: number): { user_id: number; display_name: string; role: AgentBrandRole }[] {
+    const rows = db.prepare(`
+      SELECT a.user_id, u.display_name, a.role
+      FROM agent_brand_assignments a
+      JOIN users u ON u.id = a.user_id
+      WHERE a.brand_id = ?
+      ORDER BY a.role, u.display_name
+    `).all(brandId) as { user_id: number; display_name: string; role: AgentBrandRole }[];
+    return rows;
   }
 
   async createChannel(brandId: number, platform: string, channelName: string, botId?: string, accessToken?: string, channelSecret?: string): Promise<Channel> {
