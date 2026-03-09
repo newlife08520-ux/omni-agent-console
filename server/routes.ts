@@ -1547,6 +1547,77 @@ export async function registerRoutes(
     const list = metaCommentsStorage.getMetaPostsByPage(pageId, brand_id ?? undefined);
     return res.json(list);
   });
+
+  /** Meta 粉專批次串接：拉出目前 Meta 帳號可管理的粉專列表（需傳入 User Access Token） */
+  app.post("/api/meta/batch/available-pages", authMiddleware, superAdminOnly, async (req: any, res) => {
+    const { user_access_token } = req.body || {};
+    if (!user_access_token || typeof user_access_token !== "string") {
+      return res.status(400).json({ message: "請提供 user_access_token" });
+    }
+    try {
+      const url = `https://graph.facebook.com/v19.0/me/accounts?fields=id,name,access_token&access_token=${encodeURIComponent(user_access_token)}`;
+      const fbRes = await fetch(url);
+      if (!fbRes.ok) {
+        const errBody = await fbRes.text();
+        return res.status(400).json({ message: "Meta API 失敗", detail: errBody.slice(0, 200) });
+      }
+      const data = (await fbRes.json()) as { data?: { id: string; name: string; access_token: string }[] };
+      const pages = (data.data || []).map((p) => ({
+        page_id: p.id,
+        page_name: p.name || p.id,
+        access_token: p.access_token,
+      }));
+      return res.json({ pages });
+    } catch (e: any) {
+      return res.status(500).json({ message: "無法取得粉專列表", detail: e?.message });
+    }
+  });
+
+  /** Meta 粉專批次串接：依選取粉專與品牌一鍵建立 channel + meta_page_settings（預設 AI 關、自動留言關、只收訊） */
+  app.post("/api/meta/batch/import", authMiddleware, superAdminOnly, async (req: any, res) => {
+    const { brand_id: brandId, pages: pagesInput } = req.body || {};
+    const bid = brandId != null ? parseInt(String(brandId), 10) : NaN;
+    if (!Number.isInteger(bid) || bid <= 0) {
+      return res.status(400).json({ message: "請提供有效的 brand_id" });
+    }
+    const brand = storage.getBrand(bid);
+    if (!brand) return res.status(404).json({ message: "品牌不存在" });
+    if (!Array.isArray(pagesInput) || pagesInput.length === 0) {
+      return res.status(400).json({ message: "請提供 pages 陣列（至少一筆）" });
+    }
+    const results: { page_id: string; page_name: string; channel_id?: number; settings_id?: number; error?: string }[] = [];
+    for (const p of pagesInput) {
+      const page_id = p?.page_id != null ? String(p.page_id) : "";
+      const page_name = p?.page_name != null ? String(p.page_name) : page_id || "未命名";
+      const access_token = p?.access_token != null ? String(p.access_token) : "";
+      if (!page_id || !access_token) {
+        results.push({ page_id: page_id || "?", page_name, error: "缺少 page_id 或 access_token" });
+        continue;
+      }
+      const existing = metaCommentsStorage.getMetaPageSettingsByPageId(page_id);
+      if (existing) {
+        results.push({ page_id, page_name, error: "該粉專已存在" });
+        continue;
+      }
+      try {
+        const channel = await storage.createChannel(bid, "messenger", page_name, page_id, access_token, "");
+        if (channel.is_ai_enabled !== 0) await storage.updateChannel(channel.id, { is_ai_enabled: 0 });
+        const settings = metaCommentsStorage.createMetaPageSettings({
+          page_id,
+          page_name,
+          brand_id: bid,
+          auto_reply_enabled: 0,
+          auto_hide_sensitive: 0,
+          auto_route_line_enabled: 0,
+        });
+        results.push({ page_id, page_name, channel_id: channel.id, settings_id: settings.id });
+      } catch (err: any) {
+        results.push({ page_id, page_name, error: err?.message || "建立失敗" });
+      }
+    }
+    return res.json({ results });
+  });
+
   app.get("/api/meta-products", authMiddleware, (req: any, res) => {
     const q = req.query.q ? String(req.query.q) : undefined;
     const brand_id = req.query.brand_id ? parseInt(String(req.query.brand_id)) : undefined;
@@ -4931,7 +5002,7 @@ export async function registerRoutes(
     res.sendFile(filePath);
   });
 
-  app.get("/api/team", authMiddleware, superAdminOnly, (_req, res) => {
+  app.get("/api/team", authMiddleware, managerOrAbove, (_req, res) => {
     return res.json(storage.getTeamMembers());
   });
 
@@ -4990,7 +5061,7 @@ export async function registerRoutes(
     return res.json(assignments);
   });
 
-  app.put("/api/team/:id/brand-assignments", authMiddleware, superAdminOnly, (req, res) => {
+  app.put("/api/team/:id/brand-assignments", authMiddleware, managerOrAbove, (req, res) => {
     const userId = parseIdParam(req.params.id);
     if (userId === null) return res.status(400).json({ message: "無效的 ID" });
     const { assignments } = req.body || {};

@@ -10,6 +10,8 @@ export default function BrandsChannelsPage() {
 
   const user = authData?.user;
   const isSuperAdmin = user?.role === "super_admin";
+  const isMarketingManager = user?.role === "marketing_manager";
+  const canViewBrands = isSuperAdmin || isMarketingManager;
 
   return (
     <div className="p-6 max-w-4xl mx-auto space-y-6" data-testid="brands-channels-page">
@@ -18,8 +20,8 @@ export default function BrandsChannelsPage() {
         <p className="text-sm text-stone-500 mt-1">管理品牌與渠道（LINE / Facebook）的連線設定</p>
       </div>
 
-      {isSuperAdmin ? (
-        <BrandChannelManager isSuperAdmin={isSuperAdmin} />
+      {canViewBrands ? (
+        <BrandChannelManager isSuperAdmin={isSuperAdmin} readOnly={isMarketingManager} />
       ) : (
         <p className="text-sm text-stone-500">僅管理員可管理品牌與渠道</p>
       )}

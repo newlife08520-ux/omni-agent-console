@@ -252,6 +252,7 @@ const COMMENT_CENTER_PAGE_TITLES: Record<string, string> = {
   rules: "留言規則與導向",
   "channel-binding": "粉專與 LINE 設定",
   simulate: "內測模擬",
+  "batch-pages": "粉專批次串接",
 };
 
 const RISK_BUCKET_LABELS: Record<string, string> = {
@@ -283,7 +284,7 @@ function useCommentCenterPage(): string {
   const [location] = useLocation();
   const pathname = typeof location === "string" ? location : (location as { pathname?: string })?.pathname ?? "";
   const segment = (pathname.replace(/^\/comment-center\/?/, "").split("/")[0] || "").toLowerCase();
-  const valid = ["inbox", "rules", "channel-binding", "simulate"];
+  const valid = ["inbox", "rules", "channel-binding", "simulate", "batch-pages"];
   return valid.includes(segment) ? segment : "inbox";
 }
 
@@ -291,7 +292,13 @@ export default function CommentCenterPage() {
   const currentPage = useCommentCenterPage();
   /** P0-A: 僅在 rules 頁使用，用於規則／模板對應／風險導流三區切換 */
   const [rulesSubTab, setRulesSubTab] = useState<"rules" | "mapping" | "risk-rules">("rules");
-  const activeMainTab = currentPage === "rules" ? rulesSubTab : currentPage === "channel-binding" ? "page-settings" : currentPage === "inbox" ? "inbox" : currentPage === "simulate" ? "simulate" : "inbox";
+  const activeMainTab = currentPage === "rules" ? rulesSubTab : currentPage === "channel-binding" ? "page-settings" : currentPage === "inbox" ? "inbox" : currentPage === "simulate" ? "simulate" : currentPage === "batch-pages" ? "batch-pages" : "inbox";
+
+  const { data: authData } = useQuery<{ user?: { role: string } } | null>({
+    queryKey: ["/api/auth/check"],
+    queryFn: getQueryFn({ on401: "returnNull" }),
+  });
+  const isSuperAdmin = authData?.user?.role === "super_admin";
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -344,6 +351,12 @@ export default function CommentCenterPage() {
   const [simWebhookJson, setSimWebhookJson] = useState("");
   const [seedLoading, setSeedLoading] = useState(false);
   const [inboxSource, setInboxSource] = useState<"all" | "real" | "simulated">("all");
+  const [metaBatchToken, setMetaBatchToken] = useState("");
+  const [metaBatchPages, setMetaBatchPages] = useState<{ page_id: string; page_name: string; access_token: string }[]>([]);
+  const [metaBatchSelected, setMetaBatchSelected] = useState<Set<string>>(new Set());
+  const [metaBatchBrandId, setMetaBatchBrandId] = useState<string>("");
+  const [metaBatchLoading, setMetaBatchLoading] = useState(false);
+  const [metaBatchImporting, setMetaBatchImporting] = useState(false);
   const [replying, setReplying] = useState(false);
   const { selectedBrandId } = useBrand();
   const queryClient = useQueryClient();
@@ -1157,6 +1170,12 @@ export default function CommentCenterPage() {
           <FlaskConical className="w-4 h-4" />
           內測模擬
         </Link>
+        {isSuperAdmin && (
+          <Link href="/comment-center/batch-pages" className={`inline-flex items-center gap-2 px-3 py-2 rounded-md text-sm font-medium transition-colors ${currentPage === "batch-pages" ? "bg-white shadow-sm text-stone-900" : "text-stone-600 hover:bg-stone-200"}`}>
+            <Plus className="w-4 h-4" />
+            粉專批次串接
+          </Link>
+        )}
       </nav>
 
       <Tabs value={activeMainTab} onValueChange={(v) => { if (currentPage === "rules") setRulesSubTab(v as "rules" | "mapping" | "risk-rules"); }} className="space-y-4">

@@ -66,6 +66,7 @@ export default function TeamPage() {
     queryFn: getQueryFn({ on401: "returnNull" }),
   });
   const isSuperAdmin = authData?.user?.role === "super_admin";
+  const canEditBrandAssignments = authData?.user?.role === "super_admin" || authData?.user?.role === "marketing_manager";
 
   const assignmentQueries = useQueries({
     queries: members.map((m) => ({
@@ -309,7 +310,7 @@ export default function TeamPage() {
                   </div>
                 </div>
                 <div className="flex items-center gap-1">
-                  {isSuperAdmin && (
+                  {canEditBrandAssignments && (
                     <Button size="icon" variant="ghost" onClick={() => {
                       const current = assignmentsByMember[member.id] ?? [];
                       const initial: Record<number, AgentBrandRole | "none"> = {};
@@ -334,13 +335,13 @@ export default function TeamPage() {
         </div>
       </div>
 
-      {isSuperAdmin && (
+      {canEditBrandAssignments && (
         <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="section-brand-assignments">
           <div className="flex items-center gap-2 mb-4">
             <div className="w-8 h-8 rounded-xl bg-amber-100 flex items-center justify-center"><Building2 className="w-4 h-4 text-amber-600" /></div>
             <div>
               <span className="text-sm font-semibold text-stone-800">品牌負責</span>
-              <p className="text-xs text-stone-500">設定各成員負責的品牌（主責／備援），僅超級管理員可編輯</p>
+              <p className="text-xs text-stone-500">設定各成員負責的品牌（主責／備援），超級管理員與行銷經理可編輯</p>
             </div>
           </div>
           <div className="flex flex-wrap gap-2">

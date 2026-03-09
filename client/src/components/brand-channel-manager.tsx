@@ -62,7 +62,7 @@ export function StatusBadge({ status, message }: { status: HealthStatus; message
   );
 }
 
-export function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean }) {
+export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSuperAdmin: boolean; readOnly?: boolean }) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const { brands, selectedBrandId, setSelectedBrandId } = useBrand();
@@ -323,7 +323,7 @@ export function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean })
 
   const selectedBrand = brands.find(b => b.id === selectedBrandId);
 
-  if (!isSuperAdmin) return null;
+  if (!isSuperAdmin && !readOnly) return null;
 
   return (
     <>
@@ -336,6 +336,7 @@ export function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean })
               <p className="text-xs text-stone-500">管理品牌與渠道（LINE / Facebook）的連線設定</p>
             </div>
           </div>
+          {!readOnly && (
           <div className="flex items-center gap-2">
             <Button size="sm" variant="ghost" onClick={handleRefreshProfiles} disabled={refreshingProfiles} className="text-xs text-stone-500 hover:text-emerald-600" data-testid="button-refresh-profiles">
               <RefreshCw className={`w-3.5 h-3.5 mr-1 ${refreshingProfiles ? "animate-spin" : ""}`} />
@@ -349,6 +350,7 @@ export function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean })
               <Plus className="w-3.5 h-3.5 mr-1.5" />新增品牌
             </Button>
           </div>
+          )}
         </div>
 
         <div className="space-y-3">
@@ -376,6 +378,7 @@ export function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean })
                       <p className="text-[10px] text-stone-500 mt-0.5" data-testid={`brand-assigned-${brand.id}`}>{assignedSummary}</p>
                     </div>
                   </div>
+                  {!readOnly && (
                   <div className="flex items-center gap-1">
                     <Button size="sm" variant="ghost" onClick={() => handleTestBrandSL(brand.id)} disabled={testingBrandSL === brand.id} className="text-xs text-stone-500 hover:text-emerald-600" data-testid={`button-test-brand-sl-${brand.id}`}>
                       {testingBrandSL === brand.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <><Plug className="w-3 h-3 mr-1" />商店</>}
@@ -393,6 +396,7 @@ export function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean })
                       <Trash2 className="w-3.5 h-3.5" />
                     </Button>
                   </div>
+                  )}
                 </div>
               </div>
             );
@@ -400,7 +404,7 @@ export function BrandChannelManager({ isSuperAdmin }: { isSuperAdmin: boolean })
         </div>
       </div>
 
-      {selectedBrand && (
+      {!readOnly && selectedBrand && (
         <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="section-channel-management">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
