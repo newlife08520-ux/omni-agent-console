@@ -279,26 +279,42 @@ function ruleActionSummary(r: MetaCommentRiskRule): string {
   return parts.join(" + ") || "—";
 }
 
+const COMMENT_CENTER_VALID_TABS = ["inbox", "rules", "channel-binding", "simulate", "batch-pages"] as const;
+
 /** P0-A: 從 pathname 解析目前子頁（inbox | rules | channel-binding | simulate） */
 function useCommentCenterPage(): string {
   const [location] = useLocation();
   const pathname = typeof location === "string" ? location : (location as { pathname?: string })?.pathname ?? "";
   const segment = (pathname.replace(/^\/comment-center\/?/, "").split("/")[0] || "").toLowerCase();
-  const valid = ["inbox", "rules", "channel-binding", "simulate", "batch-pages"];
-  return valid.includes(segment) ? segment : "inbox";
+  return COMMENT_CENTER_VALID_TABS.includes(segment as any) ? segment : "inbox";
 }
 
 export default function CommentCenterPage() {
+  const [location, setLocation] = useLocation();
   const currentPage = useCommentCenterPage();
   /** P0-A: 僅在 rules 頁使用，用於規則／模板對應／風險導流三區切換 */
   const [rulesSubTab, setRulesSubTab] = useState<"rules" | "mapping" | "risk-rules">("rules");
   const activeMainTab = currentPage === "rules" ? rulesSubTab : currentPage === "channel-binding" ? "page-settings" : currentPage === "inbox" ? "inbox" : currentPage === "simulate" ? "simulate" : currentPage === "batch-pages" ? "batch-pages" : "inbox";
+
+  useEffect(() => {
+    const pathname = typeof location === "string" ? location : (location as { pathname?: string })?.pathname ?? "";
+    const segment = (pathname.replace(/^\/comment-center\/?/, "").split("/")[0] || "").toLowerCase();
+    if (segment && !COMMENT_CENTER_VALID_TABS.includes(segment as any)) {
+      setLocation("/comment-center/inbox");
+    }
+  }, [location, setLocation]);
 
   const { data: authData } = useQuery<{ user?: { role: string } } | null>({
     queryKey: ["/api/auth/check"],
     queryFn: getQueryFn({ on401: "returnNull" }),
   });
   const isSuperAdmin = authData?.user?.role === "super_admin";
+
+  const { data: brandsList = [] } = useQuery<{ id: number; name: string }[]>({
+    queryKey: ["/api/brands"],
+    queryFn: getQueryFn({ on401: "throw" }),
+    enabled: currentPage === "batch-pages",
+  });
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -374,6 +390,7 @@ export default function CommentCenterPage() {
       if (!res.ok) throw new Error("Failed");
       return res.json();
     },
+    enabled: currentPage === "inbox",
   });
 
   const { data: assignableAgents = [] } = useQuery<{ id: number; display_name: string; avatar_url: string | null }[]>({
@@ -383,6 +400,7 @@ export default function CommentCenterPage() {
       if (!res.ok) return [];
       return res.json();
     },
+    enabled: currentPage === "inbox",
   });
 
   const { data: selectedComment } = useQuery<MetaCommentWithBrand | null>({
@@ -393,7 +411,7 @@ export default function CommentCenterPage() {
       if (!res.ok) return null;
       return res.json();
     },
-    enabled: !!selectedId,
+    enabled: currentPage === "inbox" && !!selectedId,
   });
 
   const { data: templates = [] } = useQuery<MetaCommentTemplate[]>({
@@ -404,6 +422,7 @@ export default function CommentCenterPage() {
       if (!res.ok) throw new Error("Failed");
       return res.json();
     },
+    enabled: currentPage === "rules",
   });
 
   const [mappingSearch, setMappingSearch] = useState("");
@@ -417,6 +436,7 @@ export default function CommentCenterPage() {
       if (!res.ok) return [];
       return res.json();
     },
+    enabled: currentPage === "rules" || currentPage === "channel-binding",
   });
   const { data: metaPostsByPage = [] } = useQuery<{ post_id: string; post_name: string }[]>({
     queryKey: ["/api/meta-pages", mapPageId || "none", "posts"],
@@ -426,7 +446,7 @@ export default function CommentCenterPage() {
       if (!res.ok) return [];
       return res.json();
     },
-    enabled: !!mapPageId,
+    enabled: currentPage === "rules" && !!mapPageId,
   });
   const { data: metaProducts = [] } = useQuery<{ product_name: string }[]>({
     queryKey: ["/api/meta-products", selectedBrandId, mapProductSearch],
@@ -438,6 +458,7 @@ export default function CommentCenterPage() {
       if (!res.ok) return [];
       return res.json();
     },
+    enabled: currentPage === "rules",
   });
 
   const { data: mappings = [] } = useQuery<MetaPostMapping[]>({
@@ -450,6 +471,7 @@ export default function CommentCenterPage() {
       if (!res.ok) throw new Error("Failed");
       return res.json();
     },
+    enabled: currentPage === "rules",
   });
 
   const { data: rules = [] } = useQuery<MetaCommentRule[]>({
@@ -460,6 +482,7 @@ export default function CommentCenterPage() {
       if (!res.ok) throw new Error("Failed");
       return res.json();
     },
+    enabled: currentPage === "rules",
   });
 
   type PageSettingsRow = MetaPageSettings & { brand_name?: string };
@@ -471,6 +494,7 @@ export default function CommentCenterPage() {
       if (!res.ok) return [];
       return res.json();
     },
+    enabled: currentPage === "channel-binding",
   });
 
   const { data: commentSummary } = useQuery<{ unhandled: number; sensitive: number; to_human: number; failed: number; completed: number; overdue: number; exceptions: number; default_reply_minutes: number }>({
@@ -482,6 +506,7 @@ export default function CommentCenterPage() {
       return res.json();
     },
     refetchInterval: 60000,
+    enabled: currentPage === "inbox",
   });
 
   const { data: health } = useQuery<{
@@ -501,6 +526,7 @@ export default function CommentCenterPage() {
       return res.json();
     },
     refetchInterval: 30000,
+    enabled: currentPage === "inbox",
   });
 
   const [showCompletedSection, setShowCompletedSection] = useState(false);
@@ -514,7 +540,7 @@ export default function CommentCenterPage() {
       if (!res.ok) return [];
       return res.json();
     },
-    enabled: showSpotCheck,
+    enabled: currentPage === "inbox" && showSpotCheck,
   });
   const { data: graySpotCheckComments = [], isLoading: graySpotCheckLoading } = useQuery<MetaCommentWithBrand[]>({
     queryKey: ["/api/meta-comments/gray-spot-check", selectedBrandId, showGraySpotCheck],
@@ -524,7 +550,7 @@ export default function CommentCenterPage() {
       if (!res.ok) return [];
       return res.json();
     },
-    enabled: showGraySpotCheck,
+    enabled: currentPage === "inbox" && showGraySpotCheck,
   });
 
   const { data: completedComments = [], isLoading: completedLoading } = useQuery<MetaCommentWithBrand[]>({
@@ -538,7 +564,7 @@ export default function CommentCenterPage() {
       const list = await res.json();
       return (list as MetaCommentWithBrand[]).slice(0, 50);
     },
-    enabled: showCompletedSection,
+    enabled: currentPage === "inbox" && showCompletedSection,
   });
 
   const [riskRuleSearchQ, setRiskRuleSearchQ] = useState("");
@@ -558,6 +584,7 @@ export default function CommentCenterPage() {
       if (!res.ok) return [];
       return res.json();
     },
+    enabled: currentPage === "rules",
   });
   const [ruleTestMessage, setRuleTestMessage] = useState("");
   const [ruleTestPageId, setRuleTestPageId] = useState("");
@@ -581,7 +608,7 @@ export default function CommentCenterPage() {
       if (!res.ok) return null;
       return res.json();
     },
-    enabled: editingRiskRuleId != null && editingRiskRuleId > 0,
+    enabled: currentPage === "rules" && editingRiskRuleId != null && editingRiskRuleId > 0,
   });
   useEffect(() => {
     if (editingRiskRuleId != null && editingRiskRuleId > 0 && editingRiskRule) setRiskRuleForm({ ...editingRiskRule });
@@ -1104,6 +1131,72 @@ export default function CommentCenterPage() {
       toast({ title: "建立失敗", description: e?.message, variant: "destructive" });
     } finally {
       setSeedLoading(false);
+    }
+  };
+
+  const fetchMetaBatchPages = async () => {
+    if (!metaBatchToken.trim()) {
+      toast({ title: "請貼上 Meta User Access Token", variant: "destructive" });
+      return;
+    }
+    setMetaBatchLoading(true);
+    try {
+      const res = await fetch("/api/meta/batch/available-pages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ user_access_token: metaBatchToken.trim() }),
+      });
+      const data = await parseJsonResponse<{ pages?: { page_id: string; page_name: string; access_token: string }[]; message?: string }>(res);
+      if (!res.ok) throw new Error(data?.message || res.statusText);
+      setMetaBatchPages(data.pages || []);
+      setMetaBatchSelected(new Set());
+      toast({ title: `已取得 ${data.pages?.length ?? 0} 個粉專` });
+    } catch (e: any) {
+      toast({ title: "取得粉專列表失敗", description: e?.message, variant: "destructive" });
+    } finally {
+      setMetaBatchLoading(false);
+    }
+  };
+
+  const doMetaBatchImport = async () => {
+    const bid = metaBatchBrandId ? parseInt(metaBatchBrandId, 10) : 0;
+    if (!bid || !brandsList.some((b) => b.id === bid)) {
+      toast({ title: "請選擇品牌", variant: "destructive" });
+      return;
+    }
+    const selected = metaBatchPages.filter((p) => metaBatchSelected.has(p.page_id));
+    if (selected.length === 0) {
+      toast({ title: "請至少勾選一個粉專", variant: "destructive" });
+      return;
+    }
+    setMetaBatchImporting(true);
+    try {
+      const res = await fetch("/api/meta/batch/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          brand_id: bid,
+          pages: selected.map((p) => ({ page_id: p.page_id, page_name: p.page_name, access_token: p.access_token })),
+        }),
+      });
+      const data = await parseJsonResponse<{ results?: { page_id: string; page_name: string; error?: string }[] }>(res);
+      if (!res.ok) throw new Error((data as any)?.message || res.statusText);
+      const results = (data.results || []) as { page_id: string; page_name: string; error?: string }[];
+      const ok = results.filter((r) => !r.error).length;
+      const fail = results.filter((r) => r.error).length;
+      queryClient.invalidateQueries({ queryKey: ["/api/meta-page-settings"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/brands"] });
+      toast({ title: `匯入完成：成功 ${ok}，略過/失敗 ${fail}` });
+      if (ok > 0) {
+        setMetaBatchPages((prev) => prev.filter((p) => results.some((r) => r.page_id === p.page_id && r.error)));
+        setMetaBatchSelected(new Set());
+      }
+    } catch (e: any) {
+      toast({ title: "匯入失敗", description: e?.message, variant: "destructive" });
+    } finally {
+      setMetaBatchImporting(false);
     }
   };
 
@@ -2398,6 +2491,76 @@ export default function CommentCenterPage() {
               </Button>
             </CardContent>
           </Card>
+        </TabsContent>
+
+        <TabsContent value="batch-pages" className="mt-4 space-y-4">
+          <p className="text-sm text-stone-500">貼上 Meta User Access Token（具 pages_show_list 權限）取得可管理粉專，多選後指定品牌一鍵建立 Messenger 渠道與留言中心設定。新匯入預設：AI 關、自動留言關、只收訊。</p>
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">取得粉專列表</CardTitle>
+              <p className="text-xs text-stone-500">從 Meta 開發者後台或 Graph API Explorer 取得 User Access Token</p>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              <Label className="text-xs">User Access Token</Label>
+              <Input
+                type="password"
+                value={metaBatchToken}
+                onChange={(e) => setMetaBatchToken(e.target.value)}
+                placeholder="EAAx..."
+                className="font-mono text-sm"
+              />
+              <Button onClick={fetchMetaBatchPages} disabled={metaBatchLoading}>
+                {metaBatchLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : null}
+                取得粉專列表
+              </Button>
+            </CardContent>
+          </Card>
+          {metaBatchPages.length > 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">選擇粉專並指定品牌</CardTitle>
+                <p className="text-xs text-stone-500">勾選要匯入的粉專，選擇歸屬品牌後按「一鍵建立」</p>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="flex flex-wrap gap-2 max-h-[200px] overflow-y-auto border border-stone-200 rounded p-2">
+                  {metaBatchPages.map((p) => (
+                    <label key={p.page_id} className="flex items-center gap-1.5 cursor-pointer text-sm">
+                      <input
+                        type="checkbox"
+                        checked={metaBatchSelected.has(p.page_id)}
+                        onChange={(e) => {
+                          setMetaBatchSelected((prev) => {
+                            const next = new Set(prev);
+                            if (e.target.checked) next.add(p.page_id);
+                            else next.delete(p.page_id);
+                            return next;
+                          });
+                        }}
+                      />
+                      <span className="truncate max-w-[180px]" title={p.page_name}>{p.page_name}</span>
+                    </label>
+                  ))}
+                </div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Label className="text-xs shrink-0">歸屬品牌</Label>
+                  <Select value={metaBatchBrandId} onValueChange={setMetaBatchBrandId}>
+                    <SelectTrigger className="w-[200px]">
+                      <SelectValue placeholder="選擇品牌" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {brandsList.map((b) => (
+                        <SelectItem key={b.id} value={String(b.id)}>{b.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button onClick={doMetaBatchImport} disabled={metaBatchImporting || metaBatchSelected.size === 0}>
+                    {metaBatchImporting ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Plus className="w-3.5 h-3.5 mr-1" />}
+                    一鍵建立（{metaBatchSelected.size} 個粉專）
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
         </TabsContent>
       </Tabs>
     </div>

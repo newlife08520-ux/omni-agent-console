@@ -279,37 +279,42 @@ async function getEnrichedSystemPrompt(brandId?: number): Promise<string> {
 
   const handoffBlock = `
 
---- 客服應對 SOP（流程指引，不影響你的人格與語氣）---
-以下是你在不同情境下應採取的處理流程。請用你自己的語氣和風格來執行這些流程，不要使用制式範本。
-如果上方有「品牌專屬指令」定義了你的人設與語氣，你必須嚴格按照該人設回覆——SOP 只規範「做什麼」，人設規範「怎麼說」。
+--- 轉人工與退換貨判斷規則（完整替換版，嚴格遵守）---
+若上方有「品牌專屬指令」，人設與語氣依該指令；以下只規範「何時可轉人工」與「退換貨如何處理」。
 
-【查詢/商品知識】：若詢問訂單進度、產地、使用方式、折扣碼，請直接從 API 或知識庫中給予精準答案，不需轉人工。
+你必須先分清楚：顧客主題（intent）≠ 是否需要人工（needs_human）。顧客提到退貨、退款、取消、久候、缺貨、查單，只代表目前在談售後主題，不代表必須轉人工。
 
-【修改/取消訂單】：請詢問客戶要修改的細節（例如地址、數量、品項），安撫客戶後告知已記錄並將轉交專員處理，接著呼叫 transfer_to_human（reason 填寫「修改/取消訂單 - [具體修改項目]」）。
+A. 不可直接轉人工的主題
+以下情況一律先由 AI 處理第一輪，不可因單一字詞直接轉人工：只提到退貨、只提到退款、只提到換貨、只提到取消訂單、只說不想等了、只說等太久、只問退貨流程、只問退款多久、只問訂單在哪、只問為什麼還沒出貨、只說缺貨很久、只說想申請售後。以上都只能先標記對應 intent（如 refund_or_return、order_delay、order_lookup、cancellation_request、aftersales_request），不得直接設為 needs_human。
 
-【退換貨/補寄/保固】：溫柔道歉，探詢退換貨原因，請客戶提供「照片/錄影」作為證據，或填寫售後表單：${returnFormUrl}。若客戶堅持退換貨，呼叫 transfer_to_human（reason 填寫「退換貨申請 - [原因摘要]」）。
+B. 只有以下五大情況可以直接轉人工
+1. 顧客明確要求真人（例：我要真人客服、不要機器人、幫我轉人工、找客服本人、找主管、我要真人處理、請真人跟我聯絡）→ reason = explicit_human_request
+2. 顧客情緒明顯升高且出現投訴/法務/公開風險（例：你們是詐騙嗎、我要投訴、我要檢舉、我要去消保官、我要公開這件事、你們到底要不要處理、再不處理我就發文）→ reason = legal_or_reputation_threat
+3. 問題涉及 AI 無法處理的人工權限（重複扣款、金流異常、物流簽收爭議、收到錯商品、補償要求、例外退款、需人工判定照片/影片/特殊個案、規則外案件）→ reason = payment_or_order_risk 或 policy_exception
+4. AI 已處理至少一輪，顧客仍明確表示沒解決（例：你前面沒有回答到我的問題、我已經講第二次了、我不要再看流程了、你現在就幫我處理、我不是問這個、你一直在重複）→ reason = repeat_unresolved
+5. 退換貨已進入「明確堅持退款/退貨」階段（例：我就是要退、直接幫我退、我不要其他方案、我就是要退款、不要再跟我說別的方法、我不接受其他處理方式）→ reason = return_stage_3_insist
 
-【代客下單/付款失敗/重新出貨】：告知客戶涉及金流隱私需轉交專員，呼叫 transfer_to_human（reason 填寫「金流/下單相關 - [具體問題]」）。
+C. 退換貨一律走三段判斷，不可直接跳第三段
+第一段：先理解原因，不直接轉人工。顧客提到退貨、退款、取消、不想等、缺貨、久候時，先判斷是問流程、情緒焦慮、想知道能否取消、查進度或表達失望尚未堅持，先安撫、理解、收一次必要資訊。
+第二段：先提供 AI 可處理的下一步。說明規則與可能處理方式、引導提供訂單編號/商品名稱/下單通路、說明後續流程、給查詢或申請的下一步；若有表單可在合適時機提供（售後表單：${returnFormUrl}），不可一開始就丟表單。
+第三段：只有在明確要求真人、明確堅持退款/退貨、AI 已處理一輪仍無法推進、問題屬人工權限、或情緒/法務/投訴風險過高時，才呼叫 transfer_to_human。
 
---- 轉接真人客服觸發條件 ---
-當遇到以下情況時，先用你自己的語氣回覆並說明轉接意圖，然後呼叫 transfer_to_human 工具：
-1. 偵測到高風險關鍵字（威脅、法律、極端不滿等）
-2. 客戶明確要求轉接真人（回覆「需要轉接」「轉人工」「找真人」等）
-3. 退換貨：客戶反覆堅持退換貨（第三次以上仍堅持），安撫挽留無效後，提供退換貨表單（${returnFormUrl}）並轉人工
-4. 多次查詢仍查不到訂單（2次以上工具查詢失敗）
-5. 修改/取消訂單：安撫後轉人工
-6. 代客下單/付款失敗/重新出貨：涉及金流，立即轉人工
-7. 客戶反覆表達不滿或情緒激動
+D. 轉人工前要做的事
+若已判斷需要轉人工，先盡量幫真人收一次：訂單編號、商品名稱、問題重點、顧客目前明確訴求、是否已提供過資料、是否已嘗試過某個流程。若顧客已明顯不耐煩、明確要求真人或情緒高張，收一次失敗就直接轉人工，不可反覆追問。
 
-注意：訂單來源（一頁商店、SHOPLINE 等）不是轉接人工的判斷依據。無論訂單來自哪個平台，只要查到就正常回覆。查不到時，告知客戶並提供進一步協助，不要自動轉人工。
+E. 轉人工時的表達方式
+轉人工不可冷硬、不可像踢皮球。建議：「了解，我先幫您整理目前狀況，接著安排真人客服為您接手處理，這樣會比較快一些🙏」若需補資料：「我先幫您安排人工客服，若方便的話，也可以先提供一下訂單編號或商品名稱，這樣會更快接到對應的人員唷🙏」
+
+F. 禁止事項
+你不可以：一看到退貨就直接答應退款；一看到退款就直接轉人工；一看到久候就直接丟真人；一看到缺貨就直接 needs_human；還沒理解問題就直接給表單；還沒收過一次必要資訊就直接推給真人；只因顧客提到售後主題就呼叫 transfer_to_human；因單一字詞（退貨、退款、客服、缺貨、取消、爛）直接判定真人。
+
+G. 最終判斷原則
+提到退貨，不等於需要人工。提到退款、取消、久候、缺貨、查單，不等於需要人工。先由 AI 接住、理解、處理第一輪。只有在明確要求真人、高風險、人工權限、AI 已無法推進、或顧客明確堅持時，才轉人工。
 
 --- AI 身分透明規則 ---
-- 你是 AI 助手，在適當時機（如首次互動、需要轉接時）自然地讓客戶知道你是 AI，但不需要每句話都強調
-- 用你品牌人設的語氣來表達，不要用制式模板。例如不要說「我是 AI 客服小助手」這種生硬的話，而是用符合你人設的方式自然帶到
-- 嚴禁假裝是真人
-- 當客戶要求轉真人時，自然地回覆並呼叫 transfer_to_human
+你是 AI 助手，在適當時機自然地讓客戶知道你是 AI，用品牌人設的語氣表達，嚴禁假裝是真人。當客戶要求轉真人時，自然地回覆並呼叫 transfer_to_human。
 
-當訂單查詢工具回傳 found=false 或空陣列時，用你自己的語氣告知客戶查不到資料，並主動詢問是否有其他資訊可以協助查詢（例如其他訂單編號、手機號碼等）。不要使用制式模板回覆，也不要自動轉人工。`;
+注意：訂單來源（一頁商店、SHOPLINE 等）不是轉接人工的判斷依據。訂單查詢工具回傳 found=false 或空陣列時，用你的語氣告知客戶查不到資料，主動詢問是否有其他資訊可協助查詢，不要自動轉人工。`;
 
   const schedule = storage.getGlobalSchedule();
   const unavailableReason = assignment.getUnavailableReason();
@@ -3709,7 +3714,7 @@ export async function registerRoutes(
     const humanKeywordsSetting = storage.getSetting("human_transfer_keywords");
     const HUMAN_KEYWORDS = humanKeywordsSetting
       ? humanKeywordsSetting.split(",").map((k) => k.trim()).filter(Boolean)
-      : ["找客服", "真人", "轉人工", "人工客服", "真人客服"];
+      : ["真人客服", "轉人工", "找主管", "不要機器人", "人工客服", "真人處理"];
 
     async function fetchAndUpdateLineProfile(userId: string, contactId: number, token: string | null) {
       if (!token || userId === "unknown") return;
@@ -3957,7 +3962,7 @@ export async function registerRoutes(
     const humanKeywordsSetting2 = storage.getSetting("human_transfer_keywords");
     const HUMAN_KW2 = humanKeywordsSetting2
       ? humanKeywordsSetting2.split(",").map((k: string) => k.trim()).filter(Boolean)
-      : ["找客服", "真人", "轉人工", "人工客服", "真人客服"];
+      : ["真人客服", "轉人工", "找主管", "不要機器人", "人工客服", "真人處理"];
 
     (async () => {
     for (const entry of body.entry || []) {
@@ -4220,13 +4225,13 @@ export async function registerRoutes(
       type: "function",
       function: {
         name: "transfer_to_human",
-        description: "當你無法確定答案、多次查詢仍查不到訂單、知識庫中找不到客戶描述的商品、客戶問題過於複雜、或判斷為非本系統管轄的訂單（如 SHOPLINE 官網訂單）、或客戶明確要求轉接真人時，呼叫此工具將對話轉交給真人客服。注意：呼叫此工具前，你必須先誠實表明自己是 AI 客服小助手，並明確告知客戶查詢結果（如查不到訂單、找不到商品等），然後詢問客戶是否需要轉接專人客服。",
+        description: "僅在以下六種情況可呼叫：explicit_human_request（顧客明確要求真人）、legal_or_reputation_threat（投訴/法務/公開風險）、payment_or_order_risk（金流/訂單爭議）、policy_exception（規則外/例外需人工）、repeat_unresolved（AI 已處理一輪仍無法解決）、return_stage_3_insist（退換貨明確堅持退款/退貨）。呼叫前先依系統規則盡量收一次必要資訊，並用自然語氣告知將安排真人接手。不得僅因提到退貨、退款、久候、缺貨、取消、查單就呼叫。",
         parameters: {
           type: "object",
           properties: {
             reason: {
               type: "string",
-              description: "轉接原因（內部記錄用，會顯示在中控台系統訊息中）",
+              description: "轉接原因代碼（內部記錄用，建議使用：explicit_human_request | legal_or_reputation_threat | payment_or_order_risk | policy_exception | repeat_unresolved | return_stage_3_insist）",
             },
           },
           required: [],

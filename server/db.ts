@@ -146,6 +146,33 @@ export function initDatabase() {
   migrateMetaCommentPhase3();
   migrateAgentBrandAssignments();
   seedMockData();
+  migrateRemoveOldHandoffAndReturnRules();
+  migrateTightenHumanTransferKeywords();
+}
+
+const HUMAN_TRANSFER_KEYWORDS_NEW = "真人客服,轉人工,找主管,不要機器人,人工客服,真人處理";
+const HUMAN_TRANSFER_FORBIDDEN = ["退貨", "爛", "投訴", "退款", "缺貨", "取消", "久候"];
+
+/** 收緊快轉關鍵字：若現有設定含過寬字詞則改為新短語清單，避免單字觸發轉人工 */
+function migrateTightenHumanTransferKeywords() {
+  const row = db.prepare("SELECT value FROM settings WHERE key = 'human_transfer_keywords'").get() as { value: string } | undefined;
+  if (!row?.value) return;
+  const val = row.value;
+  const keywords = val.split(",").map((k) => k.trim()).filter(Boolean);
+  const hasForbidden = HUMAN_TRANSFER_FORBIDDEN.some((w) => val.includes(w)) || keywords.includes("客服");
+  if (!hasForbidden) return;
+  db.prepare("UPDATE settings SET value = ? WHERE key = 'human_transfer_keywords'").run(HUMAN_TRANSFER_KEYWORDS_NEW);
+  console.log("[DB] 已將 human_transfer_keywords 收緊為新短語清單（移除過寬字詞）");
+}
+
+/** 移除 system_prompt 中舊版「售後服務 SOP 與退換貨防守機制」整段，改由 runtime 注入新版轉人工規則 */
+function migrateRemoveOldHandoffAndReturnRules() {
+  const row = db.prepare("SELECT value FROM settings WHERE key = 'system_prompt'").get() as { value: string } | undefined;
+  if (!row?.value || !row.value.includes("## 售後服務 SOP 與退換貨防守機制")) return;
+  const newValue = row.value.replace(/\n\n## 售後服務 SOP 與退換貨防守機制[\s\S]*$/, "");
+  if (newValue === row.value) return;
+  db.prepare("UPDATE settings SET value = ? WHERE key = 'system_prompt'").run(newValue);
+  console.log("[DB] 已移除 system_prompt 內舊版售後服務 SOP／退換貨防守機制，改由系統注入新版轉人工規則");
 }
 
 function migrateAgentBrandAssignments() {
@@ -1019,7 +1046,7 @@ function seedMockData() {
     ["logo_url", ""],
     ["welcome_message", "哈囉！歡迎來到我們的官方帳號\n有任何問題都可以直接詢問我，我會盡快為您服務！"],
     ["quick_buttons", "最新優惠,查詢訂單,專人服務"],
-    ["human_transfer_keywords", "真人,客服,投訴,生氣,退貨,爛"],
+    ["human_transfer_keywords", "真人客服,轉人工,找主管,不要機器人,人工客服,真人處理"],
     ["superlanding_merchant_no", ""],
     ["superlanding_access_key", ""],
   ];

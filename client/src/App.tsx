@@ -166,6 +166,7 @@ function AppHeader({
 const ROUTE_ACCESS: Record<string, string[]> = {
   "/": ["super_admin", "marketing_manager", "cs_agent"],
   "/comment-center": ["super_admin", "marketing_manager", "cs_agent"],
+  "/comment-center/:tab": ["super_admin", "marketing_manager", "cs_agent"],
   "/comment-center/inbox": ["super_admin", "marketing_manager", "cs_agent"],
   "/comment-center/rules": ["super_admin", "marketing_manager", "cs_agent"],
   "/comment-center/channel-binding": ["super_admin", "marketing_manager", "cs_agent"],
@@ -261,12 +262,8 @@ function AuthenticatedApp({ user }: { user: AuthUser }) {
           <main className="flex-1 overflow-auto">
             <Switch>
               <GuardedRoute path="/" component={ChatPage} userRole={user.role} />
-              <GuardedRoute path="/comment-center/inbox" component={CommentCenterPage} userRole={user.role} />
-              <GuardedRoute path="/comment-center/rules" component={CommentCenterPage} userRole={user.role} />
-              <GuardedRoute path="/comment-center/channel-binding" component={CommentCenterPage} userRole={user.role} />
-              <GuardedRoute path="/comment-center/simulate" component={CommentCenterPage} userRole={user.role} />
-              <GuardedRoute path="/comment-center/batch-pages" component={CommentCenterPage} userRole={user.role} />
               <GuardedRoute path="/comment-center" component={CommentCenterRedirect} userRole={user.role} />
+              <GuardedRoute path="/comment-center/:tab" component={CommentCenterPage} userRole={user.role} />
               <GuardedRoute path="/settings/brands-channels" component={BrandsChannelsPage} userRole={user.role} />
               <GuardedRoute path="/settings" component={SettingsPage} userRole={user.role} />
               <GuardedRoute path="/knowledge" component={KnowledgePage} userRole={user.role} />

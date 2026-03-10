@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -311,7 +311,7 @@ export default function ChatPage() {
     };
   }, [queryClient, invalidateContactsAndStats]);
 
-  const { data: contactsRaw, isLoading: contactsLoading } = useQuery<(ContactWithPreview & { is_urgent?: boolean; is_overdue?: boolean })[]>({
+  const { data: contactsRaw, isLoading: contactsLoading, isError: contactsError } = useQuery<(ContactWithPreview & { is_urgent?: boolean; is_overdue?: boolean })[]>({
     queryKey: ["/api/contacts", selectedBrandId, viewMode],
     queryFn: async () => {
       const params = new URLSearchParams();
@@ -329,7 +329,8 @@ export default function ChatPage() {
     },
     refetchInterval: 3000,
     refetchIntervalInBackground: true,
-    staleTime: 0,
+    staleTime: 15000,
+    placeholderData: keepPreviousData,
   });
   const contacts = Array.isArray(contactsRaw) ? contactsRaw : [];
 
@@ -513,15 +514,50 @@ export default function ChatPage() {
 
   const handleSendMessage = useCallback(async () => {
     if (!messageInput.trim() || !selectedId || sending) return;
+    const contactId = selectedId;
+    const content = messageInput.trim();
+    const platform = contacts.find((c) => c.id === contactId)?.platform ?? "line";
+
+    setMessageInput("");
+
+    const tempId = -Date.now();
+    const optimisticMessage: Message = {
+      id: tempId,
+      contact_id: contactId,
+      platform,
+      sender_type: "admin",
+      content,
+      message_type: "text",
+      image_url: null,
+      created_at: new Date().toISOString(),
+    };
+
+    queryClient.setQueryData<Message[]>(["/api/contacts", contactId, "messages"], (prev) => {
+      const list = Array.isArray(prev) ? prev : [];
+      return [...list, optimisticMessage];
+    });
+
     setSending(true);
     try {
-      await apiRequest("POST", `/api/contacts/${selectedId}/messages`, { content: messageInput.trim() });
-      setMessageInput("");
-      queryClient.invalidateQueries({ queryKey: ["/api/contacts", selectedId, "messages"] });
+      const res = await apiRequest("POST", `/api/contacts/${contactId}/messages`, { content });
+      const message = (await res.json()) as Message;
+
+      queryClient.setQueryData<Message[]>(["/api/contacts", contactId, "messages"], (prev) => {
+        const list = Array.isArray(prev) ? prev : [];
+        return list.map((m) => (m.id === tempId ? message : m));
+      });
+
       invalidateContactsAndStats();
-    } catch (_e) { toast({ title: "傳送失敗", variant: "destructive" }); }
-    finally { setSending(false); }
-  }, [messageInput, selectedId, sending, queryClient, toast, invalidateContactsAndStats]);
+    } catch (_e) {
+      queryClient.setQueryData<Message[]>(["/api/contacts", contactId, "messages"], (prev) => {
+        const list = Array.isArray(prev) ? prev : [];
+        return list.filter((m) => m.id !== tempId);
+      });
+      toast({ title: "傳送失敗", variant: "destructive" });
+    } finally {
+      setSending(false);
+    }
+  }, [messageInput, selectedId, sending, queryClient, toast, invalidateContactsAndStats, contacts]);
 
   const [transferReason, setTransferReason] = useState("");
 
@@ -1151,7 +1187,9 @@ export default function ChatPage() {
           )}
         </div>
         <ScrollArea className="flex-1">
-          {contactsLoading ? (
+          {contactsError ? (
+            <div className="p-6 text-center text-sm text-red-600">無法載入聯絡人列表，請稍後再試</div>
+          ) : contactsLoading && contacts.length === 0 ? (
             <div className="p-6 text-center text-sm text-stone-400">載入中...</div>
           ) : searchQuery.trim().length >= 2 && (messageSearchResults.length > 0 || messageSearching) ? (
             <div className="p-2">
