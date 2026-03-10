@@ -2,6 +2,32 @@ import type { OrderInfo } from "@shared/schema";
 
 const SUPERLANDING_API_BASE = "https://api.super-landing.com";
 
+/** 延遲 ms 毫秒，用於分頁請求間隔，避免 Rate Limit */
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/** 單次 fetch 失敗時重試（如 ECONNRESET），最多 retries 次，每次間隔 3 秒 */
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit,
+  retries = 3
+): Promise<Response> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await fetch(url, options);
+    } catch (err: any) {
+      if (attempt < retries) {
+        console.warn(`[一頁商店] 請求失敗 (${attempt}/${retries})，3 秒後重試:`, err?.message || err);
+        await sleep(3000);
+      } else {
+        throw err;
+      }
+    }
+  }
+  throw new Error("fetchWithRetry exhausted");
+}
+
 const ORDER_STATUS_MAP: Record<string, string> = {
   new_order: "新訂單",
   confirming: "確認中",
@@ -229,6 +255,7 @@ export async function fetchPages(config: SuperLandingConfig): Promise<ProductPag
     let allPages: any[] = [];
     let pageNum = 1;
     const maxApiPages = 200;
+    const delayBetweenPagesMs = 800;
 
     while (true) {
       const queryParams = new URLSearchParams({
@@ -239,10 +266,16 @@ export async function fetchPages(config: SuperLandingConfig): Promise<ProductPag
       });
 
       const url = `${SUPERLANDING_API_BASE}/pages.json?${queryParams.toString()}`;
-      const res = await fetch(url, {
-        method: "GET",
-        headers: { "Accept": "application/json" },
-      });
+      let res: Response;
+      try {
+        res = await fetchWithRetry(url, {
+          method: "GET",
+          headers: { "Accept": "application/json" },
+        });
+      } catch (fetchErr: any) {
+        console.error(`[一頁商店] 銷售頁第 ${pageNum} 頁在重試後仍失敗:`, fetchErr?.message || fetchErr);
+        break;
+      }
 
       if (!res.ok) {
         if (res.status === 401) throw new Error("invalid_credentials");
@@ -254,13 +287,15 @@ export async function fetchPages(config: SuperLandingConfig): Promise<ProductPag
       allPages = allPages.concat(pages);
 
       if (pageNum === 1) {
-        console.log(`[一頁商店] 銷售頁 API: total_entries=${data.total_entries || '?'} total_pages=${data.total_pages || '?'}`);
+        console.log(`[一頁商店] 銷售頁 API: total_entries=${data.total_entries || "?"} total_pages=${data.total_pages || "?"}`);
       }
 
       const totalPages = data.total_pages || 1;
       if (pageNum >= totalPages || pages.length === 0) break;
       pageNum++;
       if (pageNum > maxApiPages) break;
+
+      await sleep(delayBetweenPagesMs);
     }
 
     console.log(`[一頁商店] 取得 ${allPages.length} 個銷售頁（${pageNum} 頁 API 請求）`);
