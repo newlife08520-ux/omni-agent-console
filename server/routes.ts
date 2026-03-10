@@ -496,6 +496,11 @@ export async function registerRoutes(
     refreshPagesCache(freshConfig).catch(() => {});
   }, 60 * 60 * 1000);
 
+  // 輕量健康檢查：不需登入，供 Railway / 負載平衡器確認服務已就緒
+  app.get("/api/health", (_req, res) => {
+    res.json({ ok: true });
+  });
+
   app.get("/api/debug/status", (_req, res) => {
     try {
       const allChannels = storage.getChannels();
@@ -2346,7 +2351,7 @@ export async function registerRoutes(
 
   /** AI 建議：依最近訊息關鍵字建議 issue_type / status / priority（最小可行，人工可覆寫） */
   function suggestAiFromMessages(contactId: number): { issue_type?: string; status?: string; priority?: string; tags?: string[] } {
-    const messages = storage.getMessages(contactId).slice(-20);
+    const messages = storage.getMessages(contactId, { limit: 20 });
     const text = messages.filter((m) => m.sender_type === "user").map((m) => m.content || "").join(" ");
     const lower = text.toLowerCase();
     const suggestions: { issue_type?: string; status?: string; priority?: string; tags?: string[] } = {};
@@ -2401,14 +2406,17 @@ export async function registerRoutes(
     if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const contact = storage.getContact(id) as any;
     if (!contact) return res.status(404).json({ message: "聯絡人不存在" });
+    // 先立即回傳聯絡人，AI 建議改到背景計算，避免「點開訊息」卡 1～2 秒
     if (!["closed", "resolved"].includes(contact.status)) {
-      try {
-        const suggested = suggestAiFromMessages(id);
-        if (Object.keys(suggested).length > 0) {
-          storage.updateContactAiSuggestions(id, suggested);
-          contact.ai_suggestions = JSON.stringify(suggested);
-        }
-      } catch (_) {}
+      setImmediate(() => {
+        try {
+          const suggested = suggestAiFromMessages(id);
+          if (Object.keys(suggested).length > 0) {
+            storage.updateContactAiSuggestions(id, suggested);
+            broadcastSSE("contacts_updated", { contact_id: id, brand_id: contact.brand_id });
+          }
+        } catch (_) {}
+      });
     }
     if (!contact.ai_suggestions && (contact as any).ai_suggestions === undefined) contact.ai_suggestions = null;
     return res.json(contact);
@@ -2691,7 +2699,7 @@ export async function registerRoutes(
     if (contactId === null) return res.status(400).json({ message: "無效的 ID" });
     const sinceId = parseInt(req.query.since_id as string) || 0;
     if (sinceId > 0) return res.json(storage.getMessagesSince(contactId, sinceId));
-    const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 200, 1), 500);
+    const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 80, 1), 500);
     const beforeId = parseInt(req.query.before_id as string) || undefined;
     return res.json(storage.getMessages(contactId, { limit, beforeId: beforeId && beforeId > 0 ? beforeId : undefined }));
   });

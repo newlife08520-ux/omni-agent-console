@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "react";
 import { useQuery, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -363,6 +363,12 @@ export default function ChatPage() {
   const [assigning, setAssigning] = useState(false);
   /** AI 串流中尚未寫入 DB 的內容，key = contact_id，收到 new_message 時清掉 */
   const [streamingContent, setStreamingContent] = useState<Record<number, string>>({});
+  /** 往上捲動時已載入的較舊訊息（prepend 到主列表上方），切換聯絡人時清空 */
+  const [olderMessagesLoaded, setOlderMessagesLoaded] = useState<Message[]>([]);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [hasMoreOlder, setHasMoreOlder] = useState(true);
+  const scrollRestorePrevHeightRef = useRef<number>(0);
+  const loadOlderTriggeredRef = useRef(false);
   const { viewMode, setViewMode } = useChatView();
   const OVERDUE_MS = 60 * 60 * 1000;
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -560,6 +566,9 @@ export default function ChatPage() {
 
   useEffect(() => {
     lastMessageIdRef.current = 0;
+    setOlderMessagesLoaded([]);
+    setHasMoreOlder(true);
+    loadOlderTriggeredRef.current = false;
     scrollToBottom("auto");
   }, [selectedId, scrollToBottom]);
 
@@ -568,6 +577,57 @@ export default function ChatPage() {
       scrollToBottom("smooth");
     }
   }, [selectedId, streamingContent, scrollToBottom]);
+
+  const displayMessages = useMemo(() => [...olderMessagesLoaded, ...messages], [olderMessagesLoaded, messages]);
+
+  const loadOlderMessages = useCallback(async () => {
+    if (!selectedId || loadingOlder || !hasMoreOlder) return;
+    const oldest = olderMessagesLoaded.length > 0 ? olderMessagesLoaded[0] : messages[0];
+    const oldestId = oldest?.id;
+    if (oldestId == null || oldestId <= 0) return;
+    setLoadingOlder(true);
+    loadOlderTriggeredRef.current = true;
+    try {
+      const res = await fetch(
+        `/api/contacts/${selectedId}/messages?before_id=${oldestId}&limit=100`,
+        { credentials: "include", headers: { "Cache-Control": "no-cache" } }
+      );
+      if (!res.ok) throw new Error("Failed");
+      const older: Message[] = await res.json();
+      const viewport = chatViewportRef.current;
+      if (viewport) scrollRestorePrevHeightRef.current = viewport.scrollHeight;
+      setOlderMessagesLoaded((prev) => [...older, ...prev]);
+      setHasMoreOlder(older.length >= 100);
+    } catch (_e) {
+      setHasMoreOlder(false);
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [selectedId, loadingOlder, hasMoreOlder, olderMessagesLoaded, messages]);
+
+  useLayoutEffect(() => {
+    if (!loadOlderTriggeredRef.current || !chatViewportRef.current) return;
+    loadOlderTriggeredRef.current = false;
+    const el = chatViewportRef.current;
+    const prev = scrollRestorePrevHeightRef.current;
+    if (prev <= 0) return;
+    const added = el.scrollHeight - prev;
+    if (added > 0) el.scrollTop += added;
+    scrollRestorePrevHeightRef.current = 0;
+  }, [olderMessagesLoaded]);
+
+  const SCROLL_LOAD_THRESHOLD = 80;
+  useEffect(() => {
+    const viewport = chatViewportRef.current;
+    if (!viewport) return;
+    const onScroll = () => {
+      if (viewport.scrollTop <= SCROLL_LOAD_THRESHOLD && displayMessages.length > 0 && !loadingOlder && hasMoreOlder) {
+        loadOlderMessages();
+      }
+    };
+    viewport.addEventListener("scroll", onScroll, { passive: true });
+    return () => viewport.removeEventListener("scroll", onScroll);
+  }, [displayMessages.length, loadingOlder, hasMoreOlder, loadOlderMessages]);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -1779,14 +1839,22 @@ export default function ChatPage() {
                     <div className="text-center text-sm text-stone-400 py-8">尚無對話紀錄</div>
                   ) : (
                     <div className="space-y-4 max-w-2xl mx-auto">
-                      {messagesFetching ? (
+                      {loadingOlder ? (
+                        <div className="text-center text-xs text-stone-400 py-3 flex items-center justify-center gap-2" data-testid="loading-older">
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          <span>載入更早的訊息...</span>
+                        </div>
+                      ) : !hasMoreOlder && displayMessages.length > 0 ? (
+                        <div className="text-center text-xs text-stone-400 py-2">已無更早的訊息</div>
+                      ) : null}
+                      {messagesFetching && !loadingOlder ? (
                         <div className="text-center text-xs text-stone-400 py-1">更新中...</div>
                       ) : null}
-                      {messages.map((msg, index) => (
+                      {displayMessages.map((msg, index) => (
                         <MessageBubble
                           key={msg.id}
                           msg={msg}
-                          showDate={index === 0 || formatDate(msg.created_at) !== formatDate(messages[index - 1].created_at)}
+                          showDate={index === 0 || formatDate(msg.created_at) !== formatDate(displayMessages[index - 1].created_at)}
                           onPreviewImage={setPreviewImage}
                         />
                       ))}

@@ -7,6 +7,11 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/** 讓出 Event Loop 給其他請求（如客服 API），避免 TTFB 飆高、網頁載入被卡住 */
+function yieldEventLoop(ms = 300): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 /** 單次 fetch 失敗時重試（如 ECONNRESET），最多 retries 次，每次間隔 3 秒 */
 async function fetchWithRetry(
   url: string,
@@ -290,6 +295,8 @@ export async function fetchPages(config: SuperLandingConfig): Promise<ProductPag
         console.log(`[一頁商店] 銷售頁 API: total_entries=${data.total_entries || "?"} total_pages=${data.total_pages || "?"}`);
       }
 
+      await yieldEventLoop(300);
+
       const totalPages = data.total_pages || 1;
       if (pageNum >= totalPages || pages.length === 0) break;
       pageNum++;
@@ -381,6 +388,7 @@ export async function lookupOrdersByPageAndPhone(
           page: String(p),
         });
         allOrders = allOrders.concat(orders);
+        await yieldEventLoop(300);
         if (orders.length < perPage) break;
         p++;
         if (p > maxPages) break;
@@ -413,6 +421,7 @@ export async function lookupOrdersByPageAndPhone(
       page: String(page),
     });
     allOrders = allOrders.concat(orders);
+    await yieldEventLoop(300);
     if (orders.length < perPage) break;
     page++;
     if (page > maxPages) {
@@ -527,6 +536,7 @@ export async function lookupOrdersByPhone(
         }
       }
 
+      await yieldEventLoop(300);
       if (windowMatched.length > 0) break;
     }
 
