@@ -498,7 +498,7 @@ export default function ChatPage() {
       const data = await res.json();
       return Array.isArray(data) ? data : [];
     },
-    refetchInterval: 3000,
+    refetchInterval: 5000,
     refetchIntervalInBackground: true,
     staleTime: 15000,
     placeholderData: keepPreviousData,
@@ -517,8 +517,28 @@ export default function ChatPage() {
       return res.json();
     },
     enabled: !!selectedId,
-    refetchInterval: 5000,
+    refetchInterval: 10000,
   });
+
+  /** 滑過聯絡人時預先拉取訊息，點開時常已就緒，體感更快 */
+  const prefetchMessagesForContact = useCallback(
+    (contactId: number) => {
+      if (contactId === selectedId) return;
+      queryClient.prefetchQuery({
+        queryKey: ["/api/contacts", contactId, "messages"],
+        queryFn: async () => {
+          const res = await fetch(`/api/contacts/${contactId}/messages`, {
+            credentials: "include",
+            headers: { "Cache-Control": "no-cache", "Pragma": "no-cache" },
+          });
+          if (!res.ok) throw new Error("Failed");
+          return res.json();
+        },
+        staleTime: 60 * 1000,
+      });
+    },
+    [queryClient, selectedId]
+  );
 
   const { data: linkedOrderIds = [] } = useQuery<string[]>({
     queryKey: ["/api/contacts", selectedId, "linked-orders"],
@@ -1486,6 +1506,7 @@ export default function ChatPage() {
                   <div
                     key={contact.id}
                     onClick={() => { setSelectedId(contact.id); lastMessageIdRef.current = 0; }}
+                    onMouseEnter={() => prefetchMessagesForContact(contact.id)}
                     className={`w-full flex items-start gap-2.5 p-3 rounded-xl text-left transition-all cursor-pointer border-l-[3px] ${
                         selectedId === contact.id
                         ? "bg-blue-50/90 border-blue-300 border-l-blue-500"
