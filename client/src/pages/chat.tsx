@@ -334,7 +334,7 @@ export default function ChatPage() {
   });
   const contacts = Array.isArray(contactsRaw) ? contactsRaw : [];
 
-  const { data: messages = [], isLoading: messagesLoading } = useQuery<Message[]>({
+  const { data: messages = [], isLoading: messagesLoading, isFetching: messagesFetching } = useQuery<Message[]>({
     queryKey: ["/api/contacts", selectedId, "messages"],
     queryFn: async () => {
       if (!selectedId) return [];
@@ -1604,12 +1604,15 @@ export default function ChatPage() {
               )}
               <div ref={chatViewportRef} className="flex-1 bg-[#faf9f5] overflow-y-auto">
                 <div className="p-5">
-                  {messagesLoading ? (
+                  {messages.length === 0 && messagesLoading ? (
                     <div className="text-center text-sm text-stone-400 py-8">載入訊息中...</div>
                   ) : messages.length === 0 ? (
                     <div className="text-center text-sm text-stone-400 py-8">尚無對話紀錄</div>
                   ) : (
                     <div className="space-y-4 max-w-2xl mx-auto">
+                      {messagesFetching ? (
+                        <div className="text-center text-xs text-stone-400 py-1">更新中...</div>
+                      ) : null}
                       {messages.map((msg, index) => {
                         const showDate = index === 0 || formatDate(msg.created_at) !== formatDate(messages[index - 1].created_at);
 
