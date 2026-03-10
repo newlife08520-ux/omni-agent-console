@@ -266,7 +266,7 @@ export default function TeamPage() {
                 <button type="button" onClick={() => handleAvatarClick(member.id)} className="relative shrink-0 rounded-full focus:outline-none focus:ring-2 focus:ring-emerald-400">
                   <Avatar className="w-12 h-12">
                     {member.avatar_url && <AvatarImage src={member.avatar_url} alt={member.display_name} />}
-                    <AvatarFallback className={`${getAvatarColor(member.id)} text-white font-semibold text-base`}>{(member.display_name != null && String(member.display_name).trim() ? String(member.display_name).trim().charAt(0) : "?")}</AvatarFallback>
+                    <AvatarFallback className={`${getAvatarColor(member.id)} text-white font-semibold text-base`}>{member.display_name ? String(member.display_name).trim().slice(0, 1).toUpperCase() || "?" : "?"}</AvatarFallback>
                   </Avatar>
                   {uploadingAvatar === member.id && (
                     <span className="absolute inset-0 rounded-full bg-black/40 flex items-center justify-center">

@@ -2375,13 +2375,17 @@ export async function registerRoutes(
   }
 
   app.get("/api/contacts", authMiddleware, (req: any, res) => {
+    const routeStart = Date.now();
     const brandId = req.query.brand_id ? parseInt(req.query.brand_id as string) : undefined;
     const assignedToMe = req.query.assigned_to_me === "1" || req.query.assigned_to_me === "true";
     const needReplyFirst = req.query.need_reply_first === "1" || req.query.need_reply_first === "true";
     const userId = req.session?.userId;
     const assignedToUserId = assignedToMe && userId ? userId : undefined;
     const agentIdForFlags = userId ?? undefined;
-    let contacts = storage.getContacts(brandId, assignedToUserId, agentIdForFlags);
+    const limitParam = req.query.limit != null ? parseInt(String(req.query.limit), 10) : undefined;
+    const limit = (limitParam > 0 && limitParam <= 2000) ? limitParam : 500;
+    let contacts = storage.getContacts(brandId, assignedToUserId, agentIdForFlags, limit);
+    const afterGet = Date.now();
     if (needReplyFirst) {
       contacts = [...contacts].sort((a, b) => {
         const aNeeds = (a as any).last_message_sender_type === "user" ? 0 : 1;
@@ -2404,6 +2408,10 @@ export async function registerRoutes(
         return { ...c, is_urgent: false, is_overdue: false };
       }
     });
+    const totalMs = Date.now() - routeStart;
+    if (totalMs > 2000) {
+      console.warn(`[api/contacts] slow: total=${totalMs}ms getContacts=${afterGet - routeStart}ms serialize=${Date.now() - afterGet}ms n=${withFlags.length}`);
+    }
     return res.json(withFlags);
   });
 

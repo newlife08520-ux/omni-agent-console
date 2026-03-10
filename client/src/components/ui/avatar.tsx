@@ -21,6 +21,7 @@ const Avatar = React.forwardRef<
 ))
 Avatar.displayName = AvatarPrimitive.Root.displayName
 
+/** 勿加 onError：圖片載入失敗時 Radix 會自動顯示 AvatarFallback，手動 onError 會破壞內部結構導致白屏。 */
 const AvatarImage = React.forwardRef<
   React.ElementRef<typeof AvatarPrimitive.Image>,
   React.ComponentPropsWithoutRef<typeof AvatarPrimitive.Image>
@@ -33,21 +34,26 @@ const AvatarImage = React.forwardRef<
 ))
 AvatarImage.displayName = AvatarPrimitive.Image.displayName
 
+/** children 絕對不可為 undefined/null/空字串，否則 Radix 會崩潰白屏。內部已做安全回退為 "?"。 */
 const AvatarFallback = React.forwardRef<
   React.ElementRef<typeof AvatarPrimitive.Fallback>,
   React.ComponentPropsWithoutRef<typeof AvatarPrimitive.Fallback>
->(({ className, children, ...props }, ref) => (
-  <AvatarPrimitive.Fallback
-    ref={ref}
-    className={cn(
-      "flex h-full w-full items-center justify-center rounded-full bg-muted",
-      className
-    )}
-    {...props}
-  >
-    {children != null ? children : "?"}
-  </AvatarPrimitive.Fallback>
-))
+>(({ className, children, ...props }, ref) => {
+  const safeChildren =
+    children != null && children !== "" ? children : "?";
+  return (
+    <AvatarPrimitive.Fallback
+      ref={ref}
+      className={cn(
+        "flex h-full w-full items-center justify-center rounded-full bg-muted",
+        className
+      )}
+      {...props}
+    >
+      {safeChildren}
+    </AvatarPrimitive.Fallback>
+  );
+})
 AvatarFallback.displayName = AvatarPrimitive.Fallback.displayName
 
 export { Avatar, AvatarImage, AvatarFallback }

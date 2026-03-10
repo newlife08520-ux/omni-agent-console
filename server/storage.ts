@@ -31,7 +31,7 @@ export interface IStorage {
   createChannel(brandId: number, platform: string, channelName: string, botId?: string, accessToken?: string, channelSecret?: string): Promise<Channel>;
   updateChannel(id: number, data: Partial<Omit<Channel, "id" | "created_at">>): Promise<boolean>;
   deleteChannel(id: number): Promise<boolean>;
-  getContacts(brandId?: number, assignedToUserId?: number, agentIdForFlags?: number): ContactWithPreview[];
+  getContacts(brandId?: number, assignedToUserId?: number, agentIdForFlags?: number, limit?: number): ContactWithPreview[];
   getContact(id: number): Contact | undefined;
   updateContactHumanFlag(id: number, needsHuman: number): void;
   updateContactStatus(id: number, status: string): void;
@@ -417,7 +417,8 @@ export class SQLiteStorage implements IStorage {
     return result.changes > 0;
   }
 
-  getContacts(brandId?: number, assignedToUserId?: number, agentIdForFlags?: number): ContactWithPreview[] {
+  getContacts(brandId?: number, assignedToUserId?: number, agentIdForFlags?: number, limit?: number): ContactWithPreview[] {
+    const t0 = Date.now();
     let query = "SELECT c.*, b.name as brand_name, ch.channel_name, u.display_name as assigned_agent_name, u.avatar_url as assigned_agent_avatar_url FROM contacts c LEFT JOIN brands b ON c.brand_id = b.id LEFT JOIN channels ch ON c.channel_id = ch.id LEFT JOIN users u ON c.assigned_agent_id = u.id";
     const params: any[] = [];
     const conditions: string[] = [];
@@ -431,7 +432,11 @@ export class SQLiteStorage implements IStorage {
     }
     if (conditions.length) query += " WHERE " + conditions.join(" AND ");
     query += " ORDER BY c.is_pinned DESC, (CASE WHEN c.case_priority IS NULL THEN 999 ELSE c.case_priority END) ASC, c.last_message_at DESC";
+    if (limit != null && limit > 0) {
+      query += " LIMIT " + Math.min(Math.floor(limit), 2000);
+    }
     const contacts = db.prepare(query).all(...params) as (Contact & { brand_name?: string; channel_name?: string; assigned_agent_name?: string; assigned_agent_avatar_url?: string | null })[];
+    const t1 = Date.now();
     const contactIds = contacts.map((c) => c.id);
     const lastMessageByContact = new Map<number, { content: string; sender_type: string }>();
     if (contactIds.length > 0) {
@@ -444,6 +449,7 @@ export class SQLiteStorage implements IStorage {
       `).all(...contactIds) as { contact_id: number; content: string; sender_type: string }[];
       for (const row of lastRows) lastMessageByContact.set(row.contact_id, { content: row.content, sender_type: row.sender_type });
     }
+    const t2 = Date.now();
     const withPreview = contacts.map((c) => {
       const lastRow = lastMessageByContact.get(c.id);
       const rawType = lastRow?.sender_type;
@@ -455,7 +461,16 @@ export class SQLiteStorage implements IStorage {
     const agentId = assignedToUserId ?? agentIdForFlags;
     if (agentId != null && withPreview.length > 0) {
       const flags = this.getAgentContactFlags(agentId, withPreview.map((c) => c.id));
+      const t3 = Date.now();
+      const total = Date.now() - t0;
+      if (total > 2000) {
+        console.warn(`[contacts] getContacts slow: total=${total}ms db=${t1 - t0}ms lastMsg=${t2 - t1}ms flags=${t3 - t2}ms n=${contacts.length}`);
+      }
       return withPreview.map((c) => ({ ...c, my_flag: flags[c.id] ?? null }));
+    }
+    const total = Date.now() - t0;
+    if (total > 2000) {
+      console.warn(`[contacts] getContacts slow: total=${total}ms db=${t1 - t0}ms lastMsg=${t2 - t1}ms n=${contacts.length}`);
     }
     return withPreview;
   }

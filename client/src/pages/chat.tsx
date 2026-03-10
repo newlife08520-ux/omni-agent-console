@@ -1361,7 +1361,7 @@ export default function ChatPage() {
     if (messageInput.trim()) await handleSendMessage();
   }, [pendingFiles, messageInput, sending, uploading, uploadAndSendFiles, handleSendMessage]);
 
-  const getInitials = (name: string | undefined | null): string => (name != null && String(name).trim() ? String(name).trim().charAt(0) : "?");
+  const getInitials = (name: string | undefined | null): string => (name != null && String(name).trim() ? String(name).trim().slice(0, 1).toUpperCase() : "?");
   const avatarColors = ["bg-emerald-500", "bg-amber-500", "bg-violet-500", "bg-sky-500", "bg-rose-400", "bg-teal-500", "bg-orange-400"];
   const getAvatarColor = (id: number) => avatarColors[id % avatarColors.length];
   const contactTags = selectedContact ? JSON.parse(selectedContact.tags || "[]") as string[] : [];
@@ -1570,7 +1570,7 @@ export default function ChatPage() {
                           <span className="inline-flex items-center gap-1.5 text-[10px] text-stone-700 font-medium truncate max-w-[140px]" title={`負責：${c.assigned_agent_name}`}>
                             <Avatar className="w-4 h-4 shrink-0 border border-white shadow-sm">
                               {c.assigned_agent_avatar_url && <AvatarImage src={c.assigned_agent_avatar_url} alt={c.assigned_agent_name} />}
-                              <AvatarFallback className="bg-blue-100 text-blue-700 text-[9px] font-semibold">{c.assigned_agent_name?.slice(0, 1) || "?"}</AvatarFallback>
+                              <AvatarFallback className="bg-blue-100 text-blue-700 text-[9px] font-semibold">{c.assigned_agent_name ? String(c.assigned_agent_name).trim().slice(0, 1).toUpperCase() || "?" : "?"}</AvatarFallback>
                             </Avatar>
                             <span className="truncate">{c.assigned_agent_name}</span>
                           </span>
@@ -1964,7 +1964,7 @@ export default function ChatPage() {
                             const avatarUrl = selectedContact?.assigned_agent_avatar_url ?? assignmentData?.assigned_agent_avatar_url;
                             return (
                               <div className="flex items-center gap-2">
-                                <Avatar className="w-10 h-10 shrink-0 ring-2 ring-white shadow-sm"><AvatarImage src={avatarUrl} alt={name} /><AvatarFallback className="bg-blue-100 text-blue-700 text-sm font-semibold">{name?.slice(0, 1) || "?"}</AvatarFallback></Avatar>
+                                <Avatar className="w-10 h-10 shrink-0 ring-2 ring-white shadow-sm"><AvatarImage src={avatarUrl} alt={name} /><AvatarFallback className="bg-blue-100 text-blue-700 text-sm font-semibold">{name ? String(name).trim().slice(0, 1).toUpperCase() || "?" : "?"}</AvatarFallback></Avatar>
                                 <div className="min-w-0 flex-1">
                                   <p className="text-sm font-semibold text-stone-800 truncate">{name}</p>
                                   <div className="flex items-center gap-1.5 flex-wrap text-[10px]">
@@ -2392,7 +2392,7 @@ export default function ChatPage() {
                           <span className="flex items-center gap-2">
                             <Avatar className="w-5 h-5 shrink-0">
                               {a.avatar_url && <AvatarImage src={a.avatar_url} alt={a.display_name} />}
-                              <AvatarFallback className="bg-stone-300 text-white text-[10px]">{a.display_name?.slice(0, 1) || "?"}</AvatarFallback>
+                              <AvatarFallback className="bg-stone-300 text-white text-[10px]">{a.display_name ? String(a.display_name).trim().slice(0, 1).toUpperCase() || "?" : "?"}</AvatarFallback>
                             </Avatar>
                             {a.display_name}
                             {isCurrent && <span className="text-[10px] text-amber-600">（目前負責）</span>}
@@ -2457,7 +2457,7 @@ export default function ChatPage() {
                         <span className="flex items-center gap-2">
                           <Avatar className="w-5 h-5 shrink-0">
                             {a.avatar_url && <AvatarImage src={a.avatar_url} alt={a.display_name} />}
-                            <AvatarFallback className="bg-stone-300 text-white text-[10px]">{a.display_name?.slice(0, 1) || "?"}</AvatarFallback>
+                            <AvatarFallback className="bg-stone-300 text-white text-[10px]">{a.display_name ? String(a.display_name).trim().slice(0, 1).toUpperCase() || "?" : "?"}</AvatarFallback>
                           </Avatar>
                           {a.display_name}
                           {a.is_online === 1 ? <span className="text-[10px] text-emerald-600">在線</span> : <span className="text-[10px] text-stone-400">離線</span>}

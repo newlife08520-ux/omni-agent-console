@@ -157,6 +157,7 @@ export function initDatabase() {
 function ensurePerformanceIndexes() {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_contact_id ON messages(contact_id);`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_contact_created ON messages(contact_id, created_at DESC);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_contact_id_desc ON messages(contact_id, id DESC);`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_brand_id ON contacts(brand_id);`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_assigned_agent_id ON contacts(assigned_agent_id);`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_last_message_at ON contacts(last_message_at DESC);`);

@@ -1,5 +1,26 @@
 # Railway 打不開／很慢 — 原因與排查
 
+## 快速診斷三步驟（先做這個）
+
+1. **後端有沒有起來？**  
+   在瀏覽器開：`https://你的網域/api/health`  
+   - 若看到 `{"ok":true}` → 後端已啟動，問題多半是**前端**（白屏、JS 錯誤）或登入/API 路徑。  
+   - 若打不開、逾時、或 5xx → 後端沒起來或崩潰，看下面「Deploy Log」。
+
+2. **前端有沒有報錯？**  
+   開你的**線上網址**，按 F12 → **Console**，看有沒有紅色錯誤。  
+   - 若有 `[WHITE_SCREEN_ROOT]` 或 `Cannot set properties of undefined` 等 → 前端渲染錯誤（例如之前 Avatar 的修正已處理部分情況）。  
+   - 若有 CORS、401、404 → 可能是 API 網址或 session 設定。
+
+3. **Deploy Log 最後幾行是什麼？**  
+   Railway 專案 → 該服務 → **Deployments** → 點最新一次 → **View Logs**。  
+   - 有 `serving on port xxxx` → 有 listen，若網頁仍打不開，回到步驟 1、2。  
+   - 有 `FATAL: SESSION_SECRET must be set` 或 `REDIS_URL must be set` → **環境變數未設**，到 Settings → Variables 補上。  
+   - 有 `Could not find the build directory` → 建置沒產出 `dist/public`，確認 build 指令為 `npm run build` 且成功。  
+   - 卡在 Redis 或沒有 `serving on port` → 見下方「啟動順序」。
+
+---
+
 ## 可能原因簡表
 
 | 現象 | 可能原因 | 建議動作 |
