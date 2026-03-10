@@ -9,6 +9,8 @@ const db = new Database(dbPath);
 
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
+/** 併發時若 DB 被鎖定，最多等待 5 秒再重試，避免 "database is locked" 直接當機（商業級必備） */
+db.pragma("busy_timeout = 5000");
 
 function hashPassword(password: string): string {
   return crypto.createHash("sha256").update(password).digest("hex");

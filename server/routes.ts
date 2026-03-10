@@ -567,11 +567,13 @@ export async function registerRoutes(
     const keepAlive = setInterval(() => {
       try { res.write(":ping\n\n"); } catch (_e) { clearInterval(keepAlive); sseClients.delete(res); }
     }, 25000);
-    req.on("close", () => {
+    const removeClient = () => {
       clearInterval(keepAlive);
       sseClients.delete(res);
       console.log("[SSE] Client disconnected, remaining:", sseClients.size);
-    });
+    };
+    req.on("close", removeClient);
+    res.on("error", () => { removeClient(); });
   });
 
   app.post("/api/auth/login", (req, res) => {
@@ -2415,7 +2417,9 @@ export async function registerRoutes(
             storage.updateContactAiSuggestions(id, suggested);
             broadcastSSE("contacts_updated", { contact_id: id, brand_id: contact.brand_id });
           }
-        } catch (_) {}
+        } catch (e: any) {
+          console.error("[contacts/:id] background AI suggestion error:", e?.message ?? e);
+        }
       });
     }
     if (!contact.ai_suggestions && (contact as any).ai_suggestions === undefined) contact.ai_suggestions = null;
