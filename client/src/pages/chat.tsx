@@ -80,7 +80,8 @@ function parseProductList(raw: string): string {
 function formatDateTime(raw?: string): string {
   if (!raw) return "";
   try {
-    const d = new Date(raw);
+    const normalized = raw.replace(" ", "T") + (raw.includes("+") || raw.includes("Z") ? "" : "Z");
+    const d = new Date(normalized);
     if (isNaN(d.getTime())) return raw;
     return d.toLocaleString("zh-TW", { timeZone: "Asia/Taipei", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
   } catch (_e) { return raw; }
@@ -388,6 +389,7 @@ export default function ChatPage() {
   const { selectedBrandId } = useBrand();
 
   const sseConnectedRef = useRef(false);
+  const [sseConnected, setSseConnected] = useState(true);
 
   useEffect(() => {
     apiRequest("POST", "/api/notifications/mark-read").catch(() => {});
@@ -428,6 +430,7 @@ export default function ChatPage() {
         es = new EventSource("/api/events", { withCredentials: true });
         es.addEventListener("connected", () => {
           sseConnectedRef.current = true;
+          setSseConnected(true);
           retryCount = 0;
           console.log("[SSE] Connected successfully");
         });
@@ -463,6 +466,7 @@ export default function ChatPage() {
         es.onerror = (err) => {
           console.error("[SSE] Connection error, retry #" + retryCount, err);
           sseConnectedRef.current = false;
+          setSseConnected(false);
           es?.close();
           retryCount++;
           const delay = Math.min(3000 * retryCount, 15000);
@@ -479,6 +483,7 @@ export default function ChatPage() {
       es?.close();
       clearTimeout(reconnectTimer);
       sseConnectedRef.current = false;
+      setSseConnected(false);
     };
   }, [queryClient, invalidateContactsAndStats]);
 
@@ -1385,7 +1390,13 @@ export default function ChatPage() {
   };
 
   return (
-    <div className="flex h-full bg-[#faf9f5]" data-testid="chat-page">
+    <div className="flex h-full bg-[#faf9f5] relative" data-testid="chat-page">
+      {!sseConnected && (
+        <div className="absolute top-0 left-0 right-0 z-50 bg-amber-500 text-white text-center text-sm py-2 px-4 flex items-center justify-center gap-3">
+          <span>即時更新已中斷，新訊息可能不會自動出現</span>
+          <button type="button" onClick={() => window.location.reload()} className="underline font-medium hover:no-underline">重新整理頁面</button>
+        </div>
+      )}
       <div className="w-[300px] min-w-[300px] border-r border-stone-200 flex flex-col bg-white">
         <div className="p-3 border-b border-stone-200">
           <div className="relative">
