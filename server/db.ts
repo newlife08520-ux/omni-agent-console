@@ -145,9 +145,23 @@ export function initDatabase() {
   migrateMetaCommentPhase2();
   migrateMetaCommentPhase3();
   migrateAgentBrandAssignments();
+  ensurePerformanceIndexes();
   seedMockData();
   migrateRemoveOldHandoffAndReturnRules();
   migrateTightenHumanTransferKeywords();
+}
+
+/** 常用查詢欄位索引，避免資料量成長後掃全表 */
+function ensurePerformanceIndexes() {
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_contact_id ON messages(contact_id);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_contact_created ON messages(contact_id, created_at DESC);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_brand_id ON contacts(brand_id);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_assigned_agent_id ON contacts(assigned_agent_id);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_last_message_at ON contacts(last_message_at DESC);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_platform_user ON contacts(platform, platform_user_id);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_status ON contacts(status);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_ai_logs_contact_id ON ai_logs(contact_id);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_ai_logs_created_at ON ai_logs(created_at DESC);`);
 }
 
 const HUMAN_TRANSFER_KEYWORDS_NEW = "真人客服,轉人工,找主管,不要機器人,人工客服,真人處理";

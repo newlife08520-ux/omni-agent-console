@@ -47,7 +47,7 @@ export interface IStorage {
   getContactByPlatformUser(platform: string, platformUserId: string): Contact | undefined;
   isEventProcessed(eventId: string): boolean;
   markEventProcessed(eventId: string): void;
-  getMessages(contactId: number): Message[];
+  getMessages(contactId: number, options?: { limit?: number; beforeId?: number }): Message[];
   getMessagesSince(contactId: number, sinceId: number): Message[];
   searchMessages(query: string): { contact_id: number; contact_name: string; message_id: number; content: string; sender_type: string; created_at: string }[];
   createMessage(contactId: number, platform: string, senderType: string, content: string, messageType?: string, imageUrl?: string | null): Message;
@@ -432,8 +432,20 @@ export class SQLiteStorage implements IStorage {
     if (conditions.length) query += " WHERE " + conditions.join(" AND ");
     query += " ORDER BY c.is_pinned DESC, (CASE WHEN c.case_priority IS NULL THEN 999 ELSE c.case_priority END) ASC, c.last_message_at DESC";
     const contacts = db.prepare(query).all(...params) as (Contact & { brand_name?: string; channel_name?: string; assigned_agent_name?: string; assigned_agent_avatar_url?: string | null })[];
+    const contactIds = contacts.map((c) => c.id);
+    const lastMessageByContact = new Map<number, { content: string; sender_type: string }>();
+    if (contactIds.length > 0) {
+      const placeholders = contactIds.map(() => "?").join(",");
+      const lastRows = db.prepare(`
+        SELECT m.contact_id, m.content, m.sender_type
+        FROM messages m
+        INNER JOIN (SELECT contact_id, MAX(id) AS max_id FROM messages WHERE contact_id IN (${placeholders}) GROUP BY contact_id) t
+        ON m.contact_id = t.contact_id AND m.id = t.max_id
+      `).all(...contactIds) as { contact_id: number; content: string; sender_type: string }[];
+      for (const row of lastRows) lastMessageByContact.set(row.contact_id, { content: row.content, sender_type: row.sender_type });
+    }
     const withPreview = contacts.map((c) => {
-      const lastRow = db.prepare("SELECT content, sender_type FROM messages WHERE contact_id = ? ORDER BY created_at DESC LIMIT 1").get(c.id) as { content: string; sender_type: string } | undefined;
+      const lastRow = lastMessageByContact.get(c.id);
       const rawType = lastRow?.sender_type;
       const senderType = (rawType != null && ["user", "ai", "admin", "system"].includes(String(rawType).toLowerCase()))
         ? (String(rawType).toLowerCase() as ContactWithPreview["last_message_sender_type"])
@@ -522,12 +534,19 @@ export class SQLiteStorage implements IStorage {
     db.prepare("INSERT OR IGNORE INTO processed_events (event_id) VALUES (?)").run(eventId);
   }
 
-  getMessages(contactId: number): Message[] {
-    return db.prepare("SELECT * FROM messages WHERE contact_id = ? ORDER BY id ASC").all(contactId) as Message[];
+  /** 取得對話紀錄，支援分頁。預設回傳最近 500 筆（避免一次載入過多）。 */
+  getMessages(contactId: number, options?: { limit?: number; beforeId?: number }): Message[] {
+    const limit = Math.min(Math.max(options?.limit ?? 500, 1), 2000);
+    if (options?.beforeId != null) {
+      const rows = db.prepare("SELECT * FROM messages WHERE contact_id = ? AND id < ? ORDER BY id DESC LIMIT ?").all(contactId, options.beforeId, limit) as Message[];
+      return rows.reverse();
+    }
+    const rows = db.prepare("SELECT * FROM messages WHERE contact_id = ? ORDER BY id DESC LIMIT ?").all(contactId, limit) as Message[];
+    return rows.reverse();
   }
 
   getMessagesSince(contactId: number, sinceId: number): Message[] {
-    return db.prepare("SELECT * FROM messages WHERE contact_id = ? AND id > ? ORDER BY id ASC").all(contactId, sinceId) as Message[];
+    return db.prepare("SELECT * FROM messages WHERE contact_id = ? AND id > ? ORDER BY id ASC LIMIT 500").all(contactId, sinceId) as Message[];
   }
 
   searchMessages(query: string): { contact_id: number; contact_name: string; message_id: number; content: string; sender_type: string; created_at: string }[] {

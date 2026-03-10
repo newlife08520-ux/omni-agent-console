@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useQuery, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -85,6 +85,154 @@ function formatDateTime(raw?: string): string {
     return d.toLocaleString("zh-TW", { timeZone: "Asia/Taipei", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
   } catch (_e) { return raw; }
 }
+
+function formatTime(dateStr: string): string {
+  try {
+    const normalized = dateStr.replace(" ", "T") + (dateStr.includes("+") || dateStr.includes("Z") ? "" : "Z");
+    return new Date(normalized).toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Taipei" });
+  } catch (_e) { return dateStr; }
+}
+
+function formatDate(dateStr: string): string {
+  try {
+    const normalized = dateStr.replace(" ", "T") + (dateStr.includes("+") || dateStr.includes("Z") ? "" : "Z");
+    return new Date(normalized).toLocaleDateString("zh-TW", { month: "short", day: "numeric", timeZone: "Asia/Taipei" });
+  } catch (_e) { return dateStr; }
+}
+
+/** 節流顯示文字內容，避免串流打字時每字都觸發 DOM 更新造成卡頓（約 80ms 更新一次） */
+function ThrottledContent({ content, throttleMs = 80 }: { content: string; throttleMs?: number }) {
+  const [displayed, setDisplayed] = useState(content);
+  const latestRef = useRef(content);
+  const lastTimeRef = useRef(0);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    latestRef.current = content;
+    if (content === displayed) return;
+    const now = Date.now();
+    const elapsed = now - lastTimeRef.current;
+
+    const flush = () => {
+      lastTimeRef.current = Date.now();
+      setDisplayed(latestRef.current);
+      timerRef.current = null;
+    };
+
+    if (elapsed >= throttleMs || lastTimeRef.current === 0) {
+      flush();
+    } else {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(flush, throttleMs - elapsed);
+    }
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, [content, throttleMs]); // eslint-disable-line react-hooks/exhaustive-deps -- displayed intentionally omitted to throttle
+
+  return <>{displayed}</>;
+}
+
+/** 單一訊息氣泡：用 memo + 自訂 areEqual，只有 content/資料變動時才 re-render，避免整串歷史一起重繪 */
+function areEqualMessageBubble(
+  prev: { msg: Message; showDate: boolean; onPreviewImage: (url: string) => void },
+  next: { msg: Message; showDate: boolean; onPreviewImage: (url: string) => void },
+): boolean {
+  if (prev.msg.id !== next.msg.id || prev.showDate !== next.showDate) return false;
+  const p = prev.msg;
+  const n = next.msg;
+  return (
+    p.content === n.content &&
+    p.created_at === n.created_at &&
+    p.sender_type === n.sender_type &&
+    p.message_type === n.message_type &&
+    (p.image_url ?? "") === (n.image_url ?? "")
+  );
+}
+
+const MessageBubble = React.memo(function MessageBubble({
+  msg,
+  showDate,
+  onPreviewImage,
+}: {
+  msg: Message;
+  showDate: boolean;
+  onPreviewImage: (url: string) => void;
+}) {
+  if (msg.sender_type === "system") {
+    return (
+      <div>
+        {showDate && (
+          <div className="flex justify-center my-5">
+            <span className="text-[11px] text-stone-400 bg-white px-3 py-1 rounded-full shadow-sm border border-stone-100">{formatDate(msg.created_at)}</span>
+          </div>
+        )}
+        <div className="flex justify-center" data-testid={`message-${msg.id}`}>
+          <div className="flex items-center gap-1.5 bg-stone-100 text-stone-500 text-xs px-4 py-2 rounded-full">
+            <Info className="w-3 h-3" />
+            {msg.content}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      {showDate && (
+        <div className="flex justify-center my-5">
+          <span className="text-[11px] text-stone-400 bg-white px-3 py-1 rounded-full shadow-sm border border-stone-100">{formatDate(msg.created_at)}</span>
+        </div>
+      )}
+      <div className={`flex ${msg.sender_type === "user" ? "justify-start" : "justify-end"}`} data-testid={`message-${msg.id}`}>
+        <div className={`flex items-end gap-2 max-w-[70%] ${msg.sender_type === "user" ? "flex-row" : "flex-row-reverse"}`}>
+          <div className="shrink-0 mb-1">
+            {msg.sender_type === "user" ? (
+              <Avatar className="w-7 h-7"><AvatarFallback className="bg-stone-200 text-stone-500 text-xs"><User className="w-3.5 h-3.5" /></AvatarFallback></Avatar>
+            ) : msg.sender_type === "ai" ? (
+              <Avatar className="w-7 h-7"><AvatarFallback className="bg-emerald-100 text-emerald-600 text-xs"><Bot className="w-3.5 h-3.5" /></AvatarFallback></Avatar>
+            ) : (
+              <Avatar className="w-7 h-7"><AvatarFallback className="bg-amber-600 text-white text-xs"><Headphones className="w-3.5 h-3.5" /></AvatarFallback></Avatar>
+            )}
+          </div>
+          <div>
+            {msg.message_type === "image" && msg.image_url ? (
+              <div className={`rounded-2xl overflow-hidden shadow-sm ${
+                msg.sender_type === "user" ? "rounded-bl-md border border-stone-100"
+                  : msg.sender_type === "ai" ? "rounded-br-md border border-emerald-100"
+                  : "rounded-br-md"
+              }`}>
+                <img src={msg.image_url} alt="附件圖片" className="max-w-full max-h-[280px] object-contain cursor-pointer rounded-2xl hover:opacity-90 transition-opacity" onClick={() => onPreviewImage(msg.image_url!)} data-testid={`image-message-${msg.id}`} />
+              </div>
+            ) : msg.message_type === "video" && msg.image_url ? (
+              <div className={`rounded-2xl overflow-hidden shadow-sm ${
+                msg.sender_type === "user" ? "rounded-bl-md border border-stone-100"
+                  : msg.sender_type === "ai" ? "rounded-br-md border border-emerald-100"
+                  : "rounded-br-md"
+              }`}>
+                <video controls preload="metadata" className="max-w-full max-h-[280px] rounded-2xl bg-black" data-testid={`video-message-${msg.id}`}>
+                  <source src={msg.image_url} type="video/mp4" />
+                  您的瀏覽器不支援影片播放
+                </video>
+              </div>
+            ) : (
+              <div className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow-sm ${
+                msg.sender_type === "user" ? "bg-white text-stone-700 rounded-bl-md border border-stone-100"
+                  : msg.sender_type === "ai" ? "bg-emerald-50 text-emerald-900 rounded-br-md border border-emerald-100"
+                  : "bg-amber-600 text-white rounded-br-md"
+              }`}>
+                <ThrottledContent content={msg.content} throttleMs={80} />
+              </div>
+            )}
+            <div className={`text-[10px] text-stone-400 mt-1 ${msg.sender_type === "user" ? "text-left" : "text-right"}`}>
+              {msg.sender_type === "ai" ? "AI 助理 " : msg.sender_type === "admin" ? "真人客服 " : ""}{formatTime(msg.created_at)}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}, areEqualMessageBubble);
 
 /** 對話代碼：CV-YYYYMMDD-五位數 contact id，供備註貼上 */
 function getConversationCode(contactId: number): string {
@@ -213,6 +361,8 @@ export default function ChatPage() {
   const [showAssignDialog, setShowAssignDialog] = useState(false);
   const [assignAgentId, setAssignAgentId] = useState<number | null>(null);
   const [assigning, setAssigning] = useState(false);
+  /** AI 串流中尚未寫入 DB 的內容，key = contact_id，收到 new_message 時清掉 */
+  const [streamingContent, setStreamingContent] = useState<Record<number, string>>({});
   const { viewMode, setViewMode } = useChatView();
   const OVERDUE_MS = 60 * 60 * 1000;
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -275,10 +425,25 @@ export default function ChatPage() {
           retryCount = 0;
           console.log("[SSE] Connected successfully");
         });
+        es.addEventListener("message_chunk", (e) => {
+          try {
+            const data = JSON.parse(e.data) as { contact_id?: number; chunk?: string };
+            if (data.contact_id != null && typeof data.chunk === "string") {
+              setStreamingContent((prev) => ({ ...prev, [data.contact_id!]: (prev[data.contact_id!] ?? "") + data.chunk }));
+            }
+          } catch (err) {
+            console.error("[SSE] Error parsing message_chunk:", err);
+          }
+        });
         es.addEventListener("new_message", (e) => {
           try {
             const data = JSON.parse(e.data);
             console.log("[SSE] new_message received, contact:", data.contact_id);
+            setStreamingContent((prev) => {
+              const next = { ...prev };
+              delete next[data.contact_id];
+              return next;
+            });
             queryClient.invalidateQueries({ queryKey: ["/api/contacts", data.contact_id, "messages"] });
             invalidateContactsAndStats();
           } catch (err) {
@@ -397,6 +562,12 @@ export default function ChatPage() {
     lastMessageIdRef.current = 0;
     scrollToBottom("auto");
   }, [selectedId, scrollToBottom]);
+
+  useEffect(() => {
+    if (selectedId != null && streamingContent[selectedId]) {
+      scrollToBottom("smooth");
+    }
+  }, [selectedId, streamingContent, scrollToBottom]);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -1096,8 +1267,6 @@ export default function ChatPage() {
     if (messageInput.trim()) await handleSendMessage();
   }, [pendingFiles, messageInput, sending, uploading, uploadAndSendFiles, handleSendMessage]);
 
-  const formatTime = (dateStr: string) => new Date(dateStr.replace(" ", "T") + (dateStr.includes("+") || dateStr.includes("Z") ? "" : "Z")).toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Taipei" });
-  const formatDate = (dateStr: string) => new Date(dateStr.replace(" ", "T") + (dateStr.includes("+") || dateStr.includes("Z") ? "" : "Z")).toLocaleDateString("zh-TW", { month: "short", day: "numeric", timeZone: "Asia/Taipei" });
   const getInitials = (name: string) => name.charAt(0);
   const avatarColors = ["bg-emerald-500", "bg-amber-500", "bg-violet-500", "bg-sky-500", "bg-rose-400", "bg-teal-500", "bg-orange-400"];
   const getAvatarColor = (id: number) => avatarColors[id % avatarColors.length];
@@ -1613,81 +1782,31 @@ export default function ChatPage() {
                       {messagesFetching ? (
                         <div className="text-center text-xs text-stone-400 py-1">更新中...</div>
                       ) : null}
-                      {messages.map((msg, index) => {
-                        const showDate = index === 0 || formatDate(msg.created_at) !== formatDate(messages[index - 1].created_at);
-
-                        if (msg.sender_type === "system") {
-                          return (
-                            <div key={msg.id}>
-                              {showDate && (
-                                <div className="flex justify-center my-5">
-                                  <span className="text-[11px] text-stone-400 bg-white px-3 py-1 rounded-full shadow-sm border border-stone-100">{formatDate(msg.created_at)}</span>
-                                </div>
-                              )}
-                              <div className="flex justify-center" data-testid={`message-${msg.id}`}>
-                                <div className="flex items-center gap-1.5 bg-stone-100 text-stone-500 text-xs px-4 py-2 rounded-full">
-                                  <Info className="w-3 h-3" />
-                                  {msg.content}
-                                </div>
-                              </div>
-                            </div>
-                          );
-                        }
-
-                        return (
-                          <div key={msg.id}>
-                            {showDate && (
-                              <div className="flex justify-center my-5">
-                                <span className="text-[11px] text-stone-400 bg-white px-3 py-1 rounded-full shadow-sm border border-stone-100">{formatDate(msg.created_at)}</span>
-                              </div>
-                            )}
-                            <div className={`flex ${msg.sender_type === "user" ? "justify-start" : "justify-end"}`} data-testid={`message-${msg.id}`}>
-                              <div className={`flex items-end gap-2 max-w-[70%] ${msg.sender_type === "user" ? "flex-row" : "flex-row-reverse"}`}>
-                                <div className="shrink-0 mb-1">
-                                  {msg.sender_type === "user" ? (
-                                    <Avatar className="w-7 h-7"><AvatarFallback className="bg-stone-200 text-stone-500 text-xs"><User className="w-3.5 h-3.5" /></AvatarFallback></Avatar>
-                                  ) : msg.sender_type === "ai" ? (
-                                    <Avatar className="w-7 h-7"><AvatarFallback className="bg-emerald-100 text-emerald-600 text-xs"><Bot className="w-3.5 h-3.5" /></AvatarFallback></Avatar>
-                                  ) : (
-                                    <Avatar className="w-7 h-7"><AvatarFallback className="bg-amber-600 text-white text-xs"><Headphones className="w-3.5 h-3.5" /></AvatarFallback></Avatar>
-                                  )}
-                                </div>
-                                <div>
-                                  {msg.message_type === "image" && msg.image_url ? (
-                                    <div className={`rounded-2xl overflow-hidden shadow-sm ${
-                                      msg.sender_type === "user" ? "rounded-bl-md border border-stone-100"
-                                        : msg.sender_type === "ai" ? "rounded-br-md border border-emerald-100"
-                                        : "rounded-br-md"
-                                    }`}>
-                                      <img src={msg.image_url} alt="附件圖片" className="max-w-full max-h-[280px] object-contain cursor-pointer rounded-2xl hover:opacity-90 transition-opacity" onClick={() => setPreviewImage(msg.image_url!)} data-testid={`image-message-${msg.id}`} />
-                                    </div>
-                                  ) : msg.message_type === "video" && msg.image_url ? (
-                                    <div className={`rounded-2xl overflow-hidden shadow-sm ${
-                                      msg.sender_type === "user" ? "rounded-bl-md border border-stone-100"
-                                        : msg.sender_type === "ai" ? "rounded-br-md border border-emerald-100"
-                                        : "rounded-br-md"
-                                    }`}>
-                                      <video controls preload="metadata" className="max-w-full max-h-[280px] rounded-2xl bg-black" data-testid={`video-message-${msg.id}`}>
-                                        <source src={msg.image_url} type="video/mp4" />
-                                        您的瀏覽器不支援影片播放
-                                      </video>
-                                    </div>
-                                  ) : (
-                                    <div className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow-sm ${
-                                      msg.sender_type === "user" ? "bg-white text-stone-700 rounded-bl-md border border-stone-100"
-                                        : msg.sender_type === "ai" ? "bg-emerald-50 text-emerald-900 rounded-br-md border border-emerald-100"
-                                        : "bg-amber-600 text-white rounded-br-md"
-                                    }`}>{msg.content}</div>
-                                  )}
-                                  <div className={`text-[10px] text-stone-400 mt-1 ${msg.sender_type === "user" ? "text-left" : "text-right"}`}>
-                                    {msg.sender_type === "ai" ? "AI 助理 " : msg.sender_type === "admin" ? "真人客服 " : ""}{formatTime(msg.created_at)}
-                                  </div>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })}
+                      {messages.map((msg, index) => (
+                        <MessageBubble
+                          key={msg.id}
+                          msg={msg}
+                          showDate={index === 0 || formatDate(msg.created_at) !== formatDate(messages[index - 1].created_at)}
+                          onPreviewImage={setPreviewImage}
+                        />
+                      ))}
+                      {selectedId != null && streamingContent[selectedId] ? (
+                        <MessageBubble
+                          key="streaming"
+                          msg={{
+                            id: -1,
+                            contact_id: selectedId,
+                            platform: "line",
+                            sender_type: "ai",
+                            content: streamingContent[selectedId],
+                            message_type: "text",
+                            image_url: null,
+                            created_at: new Date().toISOString(),
+                          }}
+                          showDate={false}
+                          onPreviewImage={setPreviewImage}
+                        />
+                      ) : null}
                       <div ref={messagesEndRef} />
                     </div>
                   )}

@@ -414,6 +414,59 @@ function broadcastSSE(eventType: string, data: any) {
   }
 }
 
+/** 將 stream chunk 的 delta 合併成完整 message（用於 content + tool_calls 累積） */
+function mergeStreamDelta(
+  prev: OpenAI.Chat.Completions.ChatCompletionMessage,
+  delta: OpenAI.Chat.Completions.ChatCompletionChunk.Choice.Delta
+): OpenAI.Chat.Completions.ChatCompletionMessage {
+  const out: OpenAI.Chat.Completions.ChatCompletionMessage = { ...prev, role: prev.role || (delta.role as any) || "assistant" };
+  if (delta.content != null && delta.content !== "") {
+    out.content = (out.content || "") + delta.content;
+  }
+  if (delta.tool_calls != null && delta.tool_calls.length > 0) {
+    const arr = (out.tool_calls || []) as OpenAI.Chat.Completions.ChatCompletionMessageToolCall[];
+    for (const d of delta.tool_calls) {
+      const i = d.index ?? arr.length;
+      while (arr.length <= i) arr.push({ id: "", type: "function", function: { name: "", arguments: "" } });
+      const t = arr[i];
+      if (d.id != null) (t as any).id = d.id;
+      if (d.function != null) {
+        if (d.function.name != null) t.function.name = (t.function.name || "") + d.function.name;
+        if (d.function.arguments != null) t.function.arguments = (t.function.arguments || "") + d.function.arguments;
+      }
+    }
+    out.tool_calls = arr;
+  }
+  return out;
+}
+
+/**
+ * 呼叫 OpenAI 並以串流回傳：每收到 content delta 就 broadcast message_chunk，
+ * 前端可即時顯示打字效果。回傳完整 message（content 或 tool_calls）。
+ */
+async function runOpenAIStream(
+  openai: OpenAI,
+  params: Omit<OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming, "stream">,
+  contactId: number,
+  brandId: number | undefined,
+  signal?: AbortSignal
+): Promise<OpenAI.Chat.Completions.ChatCompletionMessage> {
+  const stream = await openai.chat.completions.create(
+    { ...params, stream: true },
+    { signal: signal as any }
+  );
+  let message: OpenAI.Chat.Completions.ChatCompletionMessage = { role: "assistant", content: "" };
+  for await (const chunk of stream) {
+    const choice = chunk.choices?.[0];
+    if (!choice?.delta) continue;
+    message = mergeStreamDelta(message, choice.delta);
+    if (choice.delta.content) {
+      broadcastSSE("message_chunk", { contact_id: contactId, brand_id: brandId, chunk: choice.delta.content });
+    }
+  }
+  return message;
+}
+
 const FB_VERIFY_TOKEN = process.env.FB_VERIFY_TOKEN || "omnichannel_fb_verify_2024";
 
 /** 解析路由 :id 參數為正整數，無效時回傳 null（用於統一回傳 400 避免靜默失敗） */
@@ -2638,7 +2691,9 @@ export async function registerRoutes(
     if (contactId === null) return res.status(400).json({ message: "無效的 ID" });
     const sinceId = parseInt(req.query.since_id as string) || 0;
     if (sinceId > 0) return res.json(storage.getMessagesSince(contactId, sinceId));
-    return res.json(storage.getMessages(contactId));
+    const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 200, 1), 500);
+    const beforeId = parseInt(req.query.before_id as string) || undefined;
+    return res.json(storage.getMessages(contactId, { limit, beforeId: beforeId && beforeId > 0 ? beforeId : undefined }));
   });
 
   app.post("/api/contacts/:id/messages", authMiddleware, (req, res) => {
@@ -3358,6 +3413,9 @@ export async function registerRoutes(
       const AI_TIMEOUT_MS = 15000;
       const TOOL_TIMEOUT_MS = 12000;
 
+      const streamAbortController = new AbortController();
+      const streamTimeout = setTimeout(() => streamAbortController.abort(), AI_TIMEOUT_MS);
+
       async function callOpenAIWithTimeout(params: Parameters<typeof openai.chat.completions.create>[0]) {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
@@ -3382,16 +3440,23 @@ export async function registerRoutes(
         });
       }
 
-      let completion;
+      let responseMessage: OpenAI.Chat.Completions.ChatCompletionMessage | undefined;
       try {
-        completion = await callOpenAIWithTimeout({
-          model: getOpenAIModel(),
-          messages: chatMessages,
-          tools: allTools,
-          max_completion_tokens: 1000,
-          temperature: 0.7,
-        });
+        responseMessage = await runOpenAIStream(
+          openai,
+          {
+            model: getOpenAIModel(),
+            messages: chatMessages,
+            tools: allTools,
+            max_completion_tokens: 1000,
+            temperature: 0.7,
+          },
+          contact.id,
+          contact.brand_id ?? undefined,
+          streamAbortController.signal
+        );
       } catch (timeoutErr: any) {
+        clearTimeout(streamTimeout);
         if (timeoutErr?.name === "AbortError" || timeoutErr?.message?.includes("abort")) {
           console.log(`[AI Timeout] OpenAI 推理超時 (>${AI_TIMEOUT_MS}ms) - contact ${contact.id}`);
           const timeoutCount = storage.incrementConsecutiveTimeouts(contact.id);
@@ -3421,10 +3486,7 @@ export async function registerRoutes(
         }
         throw timeoutErr;
       }
-
-      totalTokens += completion.usage?.total_tokens || 0;
-
-      let responseMessage = completion.choices[0]?.message;
+      clearTimeout(streamTimeout);
       let loopCount = 0;
       const maxToolLoops = 3;
 
@@ -3433,34 +3495,40 @@ export async function registerRoutes(
         console.log(`[Webhook AI] 觸發 ${responseMessage.tool_calls.length} 個 Tool Call（第 ${loopCount} 輪）`);
         chatMessages.push(responseMessage as OpenAI.Chat.Completions.ChatCompletionMessageParam);
 
-        for (const toolCall of responseMessage.tool_calls) {
+        const toolCtx = {
+          contactId: contact.id,
+          brandId: effectiveBrandId || undefined,
+          channelToken: channelToken || undefined,
+          platform: contact.platform,
+          platformUserId: contact.platform_user_id,
+        };
+
+        const toolResults = await Promise.all(
+          responseMessage.tool_calls.map(async (toolCall) => {
+            const fnName = toolCall.function.name;
+            let fnArgs: Record<string, string> = {};
+            try { fnArgs = JSON.parse(toolCall.function.arguments); } catch (_e) {}
+            toolsCalled.push(fnName);
+            console.log(`[Webhook AI] 執行 Tool: ${fnName}，參數:`, fnArgs);
+            try {
+              const toolResult = await callToolWithTimeout(fnName, fnArgs, toolCtx);
+              return { toolCall, toolResult };
+            } catch (toolErr: any) {
+              if (toolErr?.message === "TOOL_TIMEOUT") {
+                console.log(`[AI Timeout] 工具 ${fnName} 超時 (>${TOOL_TIMEOUT_MS}ms)`);
+                storage.createSystemAlert({ alert_type: "timeout_escalation", details: `工具 ${fnName} 超時`, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
+                return { toolCall, toolResult: JSON.stringify({ error: true, message: "工具查詢超時，請稍後再試" }) };
+              }
+              throw toolErr;
+            }
+          })
+        );
+
+        for (const { toolCall, toolResult } of toolResults) {
+          chatMessages.push({ role: "tool", tool_call_id: toolCall.id, content: toolResult });
           const fnName = toolCall.function.name;
           let fnArgs: Record<string, string> = {};
           try { fnArgs = JSON.parse(toolCall.function.arguments); } catch (_e) {}
-
-          toolsCalled.push(fnName);
-          console.log(`[Webhook AI] 執行 Tool: ${fnName}，參數:`, fnArgs);
-
-          let toolResult: string;
-          try {
-            toolResult = await callToolWithTimeout(fnName, fnArgs, {
-              contactId: contact.id,
-              brandId: effectiveBrandId || undefined,
-              channelToken: channelToken || undefined,
-              platform: contact.platform,
-              platformUserId: contact.platform_user_id,
-            });
-          } catch (toolErr: any) {
-            if (toolErr?.message === "TOOL_TIMEOUT") {
-              console.log(`[AI Timeout] 工具 ${fnName} 超時 (>${TOOL_TIMEOUT_MS}ms)`);
-              storage.createSystemAlert({ alert_type: "timeout_escalation", details: `工具 ${fnName} 超時`, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
-              toolResult = JSON.stringify({ error: true, message: "工具查詢超時，請稍後再試" });
-            } else {
-              throw toolErr;
-            }
-          }
-
-          chatMessages.push({ role: "tool", tool_call_id: toolCall.id, content: toolResult });
 
           if (fnName === "transfer_to_human") {
             transferTriggered = true;
@@ -3542,15 +3610,24 @@ export async function registerRoutes(
         const freshContact = storage.getContact(contact.id);
         if (freshContact?.needs_human) break;
 
+        const loopAbort = new AbortController();
+        const loopTimer = setTimeout(() => loopAbort.abort(), AI_TIMEOUT_MS);
         try {
-          completion = await callOpenAIWithTimeout({
-            model: getOpenAIModel(),
-            messages: chatMessages,
-            tools: allTools,
-            max_completion_tokens: 1000,
-            temperature: 0.7,
-          });
+          responseMessage = await runOpenAIStream(
+            openai,
+            {
+              model: getOpenAIModel(),
+              messages: chatMessages,
+              tools: allTools,
+              max_completion_tokens: 1000,
+              temperature: 0.7,
+            },
+            contact.id,
+            contact.brand_id ?? undefined,
+            loopAbort.signal
+          );
         } catch (loopTimeoutErr: any) {
+          clearTimeout(loopTimer);
           if (loopTimeoutErr?.name === "AbortError" || loopTimeoutErr?.message?.includes("abort")) {
             console.log(`[AI Timeout] OpenAI 工具迴圈推理超時 - contact ${contact.id}`);
             const loopTimeoutCount = storage.incrementConsecutiveTimeouts(contact.id);
@@ -3571,8 +3648,7 @@ export async function registerRoutes(
           }
           throw loopTimeoutErr;
         }
-        totalTokens += completion.usage?.total_tokens || 0;
-        responseMessage = completion.choices[0]?.message;
+        clearTimeout(loopTimer);
       }
 
       storage.resetConsecutiveTimeouts(contact.id);
