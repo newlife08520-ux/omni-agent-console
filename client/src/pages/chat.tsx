@@ -329,11 +329,12 @@ export default function ChatPage() {
   const [sending, setSending] = useState(false);
   const [newTag, setNewTag] = useState("");
   const [customTags, setCustomTags] = useState<string[]>(() => getCustomTags());
-  const { data: apiTagShortcuts = [] } = useQuery<{ name: string; order: number }[]>({
+  const { data: apiTagShortcutsRaw } = useQuery<{ name: string; order: number }[] | null>({
     queryKey: ["/api/settings/tag-shortcuts"],
     queryFn: getQueryFn({ on401: "returnNull" }),
   });
-  const shortcutTagNames = apiTagShortcuts.length > 0 ? apiTagShortcuts.sort((a, b) => a.order - b.order).map((t) => t.name) : [...DEFAULT_TAGS, ...customTags];
+  const apiTagShortcuts = Array.isArray(apiTagShortcutsRaw) ? apiTagShortcutsRaw : [];
+  const shortcutTagNames = apiTagShortcuts.length > 0 ? apiTagShortcuts.sort((a, b) => (a?.order ?? 0) - (b?.order ?? 0)).map((t) => t?.name ?? "").filter(Boolean) : [...DEFAULT_TAGS, ...customTags];
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [showQuickReplies, setShowQuickReplies] = useState(false);
   const [rightTab, setRightTab] = useState("info");
@@ -603,7 +604,15 @@ export default function ChatPage() {
     }
   }, [selectedId, streamingContent, scrollToBottom]);
 
-  const displayMessages = useMemo(() => [...olderMessagesLoaded, ...messages], [olderMessagesLoaded, messages]);
+  const displayMessages = useMemo(() => {
+    const older = Array.isArray(olderMessagesLoaded) ? olderMessagesLoaded : [];
+    const msgs = Array.isArray(messages) ? messages : [];
+    return [...older, ...msgs];
+  }, [olderMessagesLoaded, messages]);
+
+  if (typeof import.meta !== "undefined" && import.meta.env?.PROD) {
+    console.log("[ChatPage] render", { contactsLen: contacts.length, displayMessagesLen: displayMessages.length, selectedId, hasMessagesArray: Array.isArray(messages) });
+  }
 
   const loadOlderMessages = useCallback(async () => {
     if (!selectedId || loadingOlder || !hasMoreOlder) return;
@@ -1352,7 +1361,7 @@ export default function ChatPage() {
     if (messageInput.trim()) await handleSendMessage();
   }, [pendingFiles, messageInput, sending, uploading, uploadAndSendFiles, handleSendMessage]);
 
-  const getInitials = (name: string) => name.charAt(0);
+  const getInitials = (name: string | undefined | null): string => (name != null && String(name).trim() ? String(name).trim().charAt(0) : "?");
   const avatarColors = ["bg-emerald-500", "bg-amber-500", "bg-violet-500", "bg-sky-500", "bg-rose-400", "bg-teal-500", "bg-orange-400"];
   const getAvatarColor = (id: number) => avatarColors[id % avatarColors.length];
   const contactTags = selectedContact ? JSON.parse(selectedContact.tags || "[]") as string[] : [];
@@ -1463,7 +1472,7 @@ export default function ChatPage() {
                     >
                       <Avatar className="w-8 h-8 shrink-0">
                         {contact.avatar_url && <AvatarImage src={contact.avatar_url} alt={contact.display_name} />}
-                        <AvatarFallback className={`${getAvatarColor(contact.id)} text-white text-xs font-semibold`}>{getInitials(contact.display_name ?? "")}</AvatarFallback>
+                        <AvatarFallback className={`${getAvatarColor(contact.id)} text-white text-xs font-semibold`}>{getInitials(contact.display_name)}</AvatarFallback>
                       </Avatar>
                       <span className="text-sm font-medium text-stone-700 truncate">{contact.display_name ?? ""}</span>
                     </button>
@@ -1534,7 +1543,7 @@ export default function ChatPage() {
                     <div className="relative shrink-0">
                       <Avatar className="w-10 h-10">
                         {contact.avatar_url && <AvatarImage src={contact.avatar_url} alt={contact.display_name} />}
-                        <AvatarFallback className={`${getAvatarColor(contact.id)} text-white text-xs font-semibold`}>{getInitials(contact.display_name ?? "")}</AvatarFallback>
+                        <AvatarFallback className={`${getAvatarColor(contact.id)} text-white text-xs font-semibold`}>{getInitials(contact.display_name)}</AvatarFallback>
                       </Avatar>
                       {unassigned && (
                         <div className="absolute -bottom-0.5 -right-0.5 w-4 h-4 bg-orange-500 rounded-full border-2 border-white" title="待分配" />
@@ -1614,7 +1623,7 @@ export default function ChatPage() {
               <div className="flex items-center gap-3 min-w-0">
                 <Avatar className="w-9 h-9 shrink-0">
                   {selectedContact?.avatar_url && <AvatarImage src={selectedContact.avatar_url} alt={selectedContact.display_name} />}
-                  <AvatarFallback className={`${getAvatarColor(selectedContact?.id || 0)} text-white text-sm`}>{selectedContact ? getInitials(selectedContact.display_name) : "?"}</AvatarFallback>
+                  <AvatarFallback className={`${getAvatarColor(selectedContact?.id || 0)} text-white text-sm`}>{getInitials(selectedContact?.display_name)}</AvatarFallback>
                 </Avatar>
                 <div className="min-w-0">
                   <div className="flex items-center gap-1.5">
@@ -1679,7 +1688,7 @@ export default function ChatPage() {
                   <span className="text-[11px] font-medium text-stone-700 flex items-center gap-1.5">
                     <Avatar className="w-4 h-4 shrink-0">
                       {(selectedContact as ContactWithPreview).assigned_agent_avatar_url && <AvatarImage src={(selectedContact as ContactWithPreview).assigned_agent_avatar_url} alt={selectedContact.assigned_agent_name} />}
-                      <AvatarFallback className="bg-violet-100 text-violet-700 text-[10px]">{selectedContact.assigned_agent_name.slice(0, 1)}</AvatarFallback>
+                      <AvatarFallback className="bg-violet-100 text-violet-700 text-[10px]">{getInitials(selectedContact?.assigned_agent_name)}</AvatarFallback>
                     </Avatar>
                     已分配：{selectedContact.assigned_agent_name}
                   </span>
@@ -1882,14 +1891,19 @@ export default function ChatPage() {
                       {messagesFetching && !loadingOlder ? (
                         <div className="text-center text-xs text-stone-400 py-1">更新中...</div>
                       ) : null}
-                      {displayMessages.map((msg, index) => (
-                        <MessageBubble
-                          key={msg.id}
-                          msg={msg}
-                          showDate={index === 0 || formatDate(msg.created_at) !== formatDate(displayMessages[index - 1].created_at)}
-                          onPreviewImage={setPreviewImage}
-                        />
-                      ))}
+                      {displayMessages.map((msg, index) => {
+                        if (msg == null || typeof msg !== "object" || msg.id == null) return <React.Fragment key={`msg-${index}`} />;
+                        const prev = displayMessages[index - 1];
+                        const showDate = index === 0 || !prev || formatDate(msg.created_at) !== formatDate(prev.created_at);
+                        return (
+                          <MessageBubble
+                            key={msg.id}
+                            msg={msg}
+                            showDate={showDate}
+                            onPreviewImage={setPreviewImage}
+                          />
+                        );
+                      })}
                       {selectedId != null && streamingContent[selectedId] ? (
                         <MessageBubble
                           key="streaming"

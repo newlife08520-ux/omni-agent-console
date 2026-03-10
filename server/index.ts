@@ -164,16 +164,19 @@ app.use((req, res, next) => {
     httpServer.listen(port, "0.0.0.0", () => {
       log(`serving on port ${port}`);
 
-      setInterval(() => {
-        try {
-          const results = assignment.runOverdueReassign();
-          if (results.some((r) => r.reassigned)) {
-            console.log("[assignment] 逾時重分配:", results.filter((r) => r.reassigned).map((r) => r.contactId));
+      // 逾時重分配定時器：僅在 ENABLE_SYNC=true 時執行，避免低 RAM 環境下與其他背景任務疊加負載（預設關閉）。
+      if (process.env.ENABLE_SYNC === "true") {
+        setInterval(() => {
+          try {
+            const results = assignment.runOverdueReassign();
+            if (results.some((r) => r.reassigned)) {
+              console.log("[assignment] 逾時重分配:", results.filter((r) => r.reassigned).map((r) => r.contactId));
+            }
+          } catch (e) {
+            console.error("[assignment] runOverdueReassign error:", e);
           }
-        } catch (e) {
-          console.error("[assignment] runOverdueReassign error:", e);
-        }
-      }, 60 * 1000);
+        }, 60 * 1000);
+      }
 
       const domain = process.env.APP_DOMAIN
         ? `https://${process.env.APP_DOMAIN}`

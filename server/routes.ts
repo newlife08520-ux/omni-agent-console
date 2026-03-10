@@ -486,15 +486,19 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
 
-  // 延後開機同步，避免一啟動就 133 次請求拖慢登入/首頁（造成「幾乎打不開」）
-  const config = getSuperLandingConfig();
-  setTimeout(() => {
-    refreshPagesCache(getSuperLandingConfig()).catch(() => {});
-  }, 30 * 1000);
-  setInterval(() => {
-    const freshConfig = getSuperLandingConfig();
-    refreshPagesCache(freshConfig).catch(() => {});
-  }, 60 * 60 * 1000);
+  // 一頁商店全量同步（fetchPages/refreshPagesCache）會拉取大量資料，在 500MB RAM 環境易導致假死。
+  // 僅在明確設定 ENABLE_SYNC=true 時才啟用開機延後同步與每小時定時同步（預設關閉，保證客服主系統存活）。
+  if (process.env.ENABLE_SYNC === "true") {
+    setTimeout(() => {
+      refreshPagesCache(getSuperLandingConfig()).catch(() => {});
+    }, 30 * 1000);
+    setInterval(() => {
+      const freshConfig = getSuperLandingConfig();
+      refreshPagesCache(freshConfig).catch(() => {});
+    }, 60 * 60 * 1000);
+  } else {
+    console.log("[server] ENABLE_SYNC 未設為 true，已略過一頁商店開機/定時全量同步（可設 ENABLE_SYNC=true 啟用）");
+  }
 
   // 輕量健康檢查：不需登入，供 Railway / 負載平衡器確認服務已就緒
   app.get("/api/health", (_req, res) => {

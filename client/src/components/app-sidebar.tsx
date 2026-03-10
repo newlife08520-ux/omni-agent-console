@@ -100,7 +100,7 @@ export function AppSidebar({ user, userRole, systemName, logoUrl }: AppSidebarPr
         <div className="flex items-center gap-3">
           <Avatar className="w-11 h-11 shrink-0 border-2 border-stone-600 ring-2 ring-emerald-500/30">
             <AvatarFallback className="bg-emerald-600 text-white text-sm font-bold">
-              {displayName.slice(0, 1)}
+              {(displayName && String(displayName).charAt(0)) || "?"}
             </AvatarFallback>
           </Avatar>
           <div className="min-w-0 flex-1">

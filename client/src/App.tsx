@@ -34,9 +34,10 @@ class AppErrorBoundary extends React.Component<
     return { hasError: true, error };
   }
 
-  componentDidCatch(error: unknown) {
-    console.error("App error:", error);
-    if (error instanceof Error) console.error("App error stack:", error.stack);
+  componentDidCatch(error: unknown, info: React.ErrorInfo) {
+    console.error("[AppErrorBoundary] 錯誤發生在 AppContent 子樹:", error);
+    if (error instanceof Error) console.error("[AppErrorBoundary] stack:", error.stack);
+    if (info?.componentStack) console.error("[AppErrorBoundary] componentStack:", info.componentStack);
   }
 
   render() {
@@ -218,6 +219,10 @@ function GuardedRoute({ path, component: Component, userRole }: { path: string; 
   if (allowedRoles && !allowedRoles.includes(userRole)) {
     return <Route path={path} component={AccessDenied} />;
   }
+  if (Component == null) {
+    console.error("[GuardedRoute] component is null/undefined for path:", path);
+    return <Route path={path} component={NotFound} />;
+  }
   return <Route path={path} component={Component} />;
 }
 
@@ -240,11 +245,12 @@ function AuthenticatedApp({ user }: { user: AuthUser }) {
   });
   const settings = Array.isArray(settingsData) ? settingsData : [];
   const settingsMap: Record<string, string> = {};
-  settings.forEach((s) => { settingsMap[s.key] = s.value; });
+  settings.filter((s): s is { key: string; value: string } => s != null && typeof s === "object" && "key" in s && "value" in s).forEach((s) => { settingsMap[s.key] = s.value; });
 
   return (
     <BrandProvider>
       <ChatViewProvider>
+        <AuthenticatedAppErrorBoundary>
         <div className="flex h-screen w-full bg-[#faf9f5]">
           <AppSidebar
           user={user}
@@ -275,9 +281,45 @@ function AuthenticatedApp({ user }: { user: AuthUser }) {
           </main>
         </div>
       </div>
+        </AuthenticatedAppErrorBoundary>
       </ChatViewProvider>
     </BrandProvider>
   );
+}
+
+/** 包住登入後主畫面，用於定位白屏是否發生在此子樹（sidebar / main / Route） */
+class AuthenticatedAppErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean; error: unknown }
+> {
+  state = { hasError: false, error: undefined as unknown };
+
+  static getDerivedStateFromError(error: unknown) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: unknown, info: React.ErrorInfo) {
+    console.error("[AuthenticatedAppErrorBoundary] 錯誤發生在登入後主畫面（sidebar/main/Route）:", error);
+    if (info?.componentStack) console.error("[AuthenticatedAppErrorBoundary] componentStack:", info.componentStack);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      const msg = this.state.error instanceof Error ? this.state.error.message : String(this.state.error);
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-[#faf9f5] p-4">
+          <div className="text-center max-w-md">
+            <h2 className="text-lg font-semibold text-red-600">主畫面載入錯誤</h2>
+            <p className="text-sm text-stone-500 mt-2">{msg}</p>
+            <Button className="mt-4" onClick={() => window.location.reload()} data-testid="button-reload-auth">
+              重新整理
+            </Button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 function AppContent() {
@@ -307,7 +349,12 @@ function AppContent() {
     return <LoginPage onLogin={() => queryClient.invalidateQueries({ queryKey: ["/api/auth/check"] })} />;
   }
 
-  return <AuthenticatedApp user={data.user} />;
+  const user = data.user;
+  if (user == null || typeof user !== "object" || !user.role) {
+    console.error("[AppContent] data.user 異常，無法渲染 AuthenticatedApp:", user);
+    return <LoginPage onLogin={() => queryClient.invalidateQueries({ queryKey: ["/api/auth/check"] })} />;
+  }
+  return <AuthenticatedApp user={user} />;
 }
 
 function App() {
