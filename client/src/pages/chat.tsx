@@ -335,6 +335,9 @@ const QUICK_REPLIES = [
   "好的，馬上為您處理，請稍候片刻。",
 ];
 
+/** 聯絡人列表 useQuery 的 viewMode 值，用於 SSE 時只 refetch 列表、不 refetch 每個聯絡人的 messages */
+const CONTACT_LIST_VIEW_MODES = ["all", "my", "pending", "high_risk", "tracking", "overdue", "unassigned"];
+
 function VipBadge({ level }: { level: number }) {
   if (level <= 0) return null;
   const labels = ["", "VIP", "VIP Gold", "VIP Platinum"];
@@ -405,13 +408,24 @@ export default function ChatPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const queryClient = useQueryClient();
   const { toast } = useToast();
+  /** 只 refetch 聯絡人「列表」查詢，不 refetch messages/linked-orders/assignment/detail（避免 ERR_INSUFFICIENT_RESOURCES） */
+  const refetchContactListOnly = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
+    queryClient.refetchQueries({
+      predicate: (query) =>
+        query.queryKey[0] === "/api/contacts" &&
+        query.queryKey.length === 3 &&
+        CONTACT_LIST_VIEW_MODES.includes(String(query.queryKey[2])),
+    });
+  }, [queryClient]);
+
   /** 聯絡人或案件相關操作後一併刷新左側戰情摘要（單一資料來源，數字連動） */
   const invalidateContactsAndStats = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
-    queryClient.refetchQueries({ queryKey: ["/api/contacts"], exact: false });
+    refetchContactListOnly();
     queryClient.invalidateQueries({ queryKey: ["/api/manager-stats"], exact: false });
     queryClient.invalidateQueries({ queryKey: ["/api/agent-stats/me"] });
-  }, [queryClient]);
+  }, [queryClient, refetchContactListOnly]);
   const lastMessageIdRef = useRef<number>(0);
   const { selectedBrandId } = useBrand();
 
@@ -482,7 +496,7 @@ export default function ChatPage() {
               return next;
             });
             queryClient.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
-            queryClient.refetchQueries({ queryKey: ["/api/contacts"], exact: false });
+            refetchContactListOnly();
             if (contactId != null) {
               queryClient.invalidateQueries({ queryKey: ["/api/contacts", contactId, "messages"] });
               queryClient.refetchQueries({ queryKey: ["/api/contacts", contactId, "messages"] });
@@ -519,7 +533,7 @@ export default function ChatPage() {
       sseConnectedRef.current = false;
       setSseConnected(false);
     };
-  }, [queryClient, invalidateContactsAndStats]);
+  }, [queryClient, invalidateContactsAndStats, refetchContactListOnly]);
 
   const { data: contactsRaw, isLoading: contactsLoading, isError: contactsError } = useQuery<(ContactWithPreview & { is_urgent?: boolean; is_overdue?: boolean })[]>({
     queryKey: ["/api/contacts", selectedBrandId, viewMode],
