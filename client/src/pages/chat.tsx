@@ -388,13 +388,15 @@ function listGetAvatarColor(id: number) {
 function listGetInitials(name: string | undefined | null) {
   return name != null && String(name).trim() ? String(name).trim().slice(0, 1).toUpperCase() : "?";
 }
+/** 與 formatTime 一致：後端時間當 UTC 再轉台北，左側列表時間才與對話框／最後互動一致 */
 function listFormatTime(s: string | undefined | null) {
   if (!s) return "";
-  const d = new Date(s.replace(" ", "T"));
-  const h = d.getHours();
-  const m = d.getMinutes();
-  const am = h < 12;
-  return `${am ? "上午" : "下午"}${am ? h : h - 12}:${String(m).padStart(2, "0")}`;
+  try {
+    const normalized = s.replace(" ", "T") + (s.includes("+") || s.includes("Z") ? "" : "Z");
+    return new Date(normalized).toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Taipei" });
+  } catch (_e) {
+    return s;
+  }
 }
 
 type ContactListItemProps = {
