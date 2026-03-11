@@ -2140,7 +2140,7 @@ export async function registerRoutes(
     if (access_token !== undefined) data.access_token = access_token;
     if (channel_secret !== undefined) data.channel_secret = channel_secret;
     if (is_active !== undefined) data.is_active = is_active;
-    if (is_ai_enabled !== undefined) data.is_ai_enabled = is_ai_enabled;
+    if (is_ai_enabled !== undefined) data.is_ai_enabled = (is_ai_enabled === true || is_ai_enabled === 1) ? 1 : 0;
     if (brand_id !== undefined) data.brand_id = brand_id;
     if (!(await storage.updateChannel(id, data))) return res.status(404).json({ message: "頻道不存在" });
     return res.json({ success: true });
@@ -3193,7 +3193,7 @@ export async function registerRoutes(
   }
 
   async function sendFBMessage(pageAccessToken: string, recipientId: string, text: string) {
-    await fetch(`https://graph.facebook.com/v19.0/me/messages?access_token=${pageAccessToken}`, {
+    const res = await fetch(`https://graph.facebook.com/v19.0/me/messages?access_token=${encodeURIComponent(pageAccessToken)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -3201,6 +3201,11 @@ export async function registerRoutes(
         message: { text },
       }),
     });
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error("[FB] send message failed:", res.status, errText);
+      throw new Error(`FB API ${res.status}: ${errText.slice(0, 200)}`);
+    }
   }
 
   async function autoReplyWithAI(
@@ -4029,6 +4034,34 @@ export async function registerRoutes(
     }
   });
 
+  /** 使用 Page Access Token 向 Graph API 取得 FB 用戶姓名與頭像，並更新聯絡人 */
+  async function fetchAndUpdateFBProfile(psid: string, contactId: number, pageAccessToken: string | null) {
+    if (!pageAccessToken || !psid) return;
+    try {
+      const url = `https://graph.facebook.com/v19.0/${encodeURIComponent(psid)}?fields=first_name,last_name,profile_pic&access_token=${encodeURIComponent(pageAccessToken)}`;
+      const res = await fetch(url);
+      if (!res.ok) {
+        console.log("[FB Webhook] Graph API profile 失敗:", res.status);
+        return;
+      }
+      const profile = await res.json() as { first_name?: string; last_name?: string; profile_pic?: string | { data?: { url?: string } } };
+      const firstName = profile.first_name || "";
+      const lastName = profile.last_name || "";
+      const fullName = [firstName, lastName].filter(Boolean).join(" ").trim() || null;
+      let picUrl: string | null = null;
+      if (typeof profile.profile_pic === "string") picUrl = profile.profile_pic;
+      else if (profile.profile_pic?.data?.url) picUrl = profile.profile_pic.data.url;
+      if (fullName || picUrl) {
+        const contact = storage.getContact(contactId);
+        const displayName = fullName || (contact?.display_name ?? "FB用戶");
+        storage.updateContactProfile(contactId, displayName, picUrl);
+        console.log("[FB Webhook] Profile 已更新:", displayName, picUrl ? "(有頭像)" : "");
+      }
+    } catch (err: any) {
+      console.log("[FB Webhook] Profile 取得錯誤:", err?.message);
+    }
+  }
+
   app.get("/api/webhook/facebook", (req, res) => {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
@@ -4077,6 +4110,26 @@ export async function registerRoutes(
       ? humanKeywordsSetting2.split(",").map((k: string) => k.trim()).filter(Boolean)
       : ["真人客服", "轉人工", "找主管", "不要機器人", "人工客服", "真人處理"];
 
+    async function fetchAndUpdateFBProfile(psid: string, contactId: number, pageAccessToken: string | null) {
+      if (!pageAccessToken || !psid) return;
+      try {
+        const url = `https://graph.facebook.com/v19.0/${encodeURIComponent(psid)}?fields=first_name,last_name,profile_pic&access_token=${encodeURIComponent(pageAccessToken)}`;
+        const profileRes = await fetch(url);
+        if (profileRes.ok) {
+          const profile = await profileRes.json() as { first_name?: string; last_name?: string; profile_pic?: string };
+          const fullName = [profile.first_name, profile.last_name].filter(Boolean).join(" ").trim() || undefined;
+          if (fullName || profile.profile_pic) {
+            storage.updateContactProfile(contactId, fullName || "FB用戶", profile.profile_pic || null);
+            console.log("[FB Webhook] Profile updated:", fullName || "(name unchanged)", profile.profile_pic ? "(has avatar)" : "(no avatar)");
+          }
+        } else {
+          console.log("[FB Webhook] Profile fetch failed:", profileRes.status);
+        }
+      } catch (err: any) {
+        console.log("[FB Webhook] Profile fetch error:", err?.message);
+      }
+    }
+
     (async () => {
     for (const entry of body.entry || []) {
       const pageId = entry.id;
@@ -4106,6 +4159,9 @@ export async function registerRoutes(
             const text = messagingEvent.message.text || "";
             const displayName = `FB用戶_${senderId.substring(0, 6)}`;
             const contact = storage.getOrCreateContact("messenger", senderId, displayName, matchedBrandId, matchedChannel?.id);
+            if (matchedChannel?.access_token && (contact.display_name === displayName || (contact.display_name || "").startsWith("FB用戶_"))) {
+              fetchAndUpdateFBProfile(senderId, contact.id, matchedChannel.access_token).catch(() => {});
+            }
 
             if (messagingEvent.message.attachments) {
               for (const att of messagingEvent.message.attachments) {
@@ -4114,7 +4170,7 @@ export async function registerRoutes(
                   const finalUrl = localImageUrl || att.payload.url;
                   const imgMsg = storage.createMessage(contact.id, "messenger", "user", "[圖片訊息]", "image", finalUrl);
                   broadcastSSE("new_message", { contact_id: contact.id, message: imgMsg, brand_id: matchedBrandId || contact.brand_id });
-                  const fbAiEnabledImg = matchedChannel ? matchedChannel.is_ai_enabled : 1;
+                  const fbAiEnabledImg = matchedChannel ? (matchedChannel.is_ai_enabled === 1) : false;
                   if (!contact.needs_human && fbAiEnabledImg && matchedChannel?.access_token) {
                     const recentMsgsForEscalate = storage.getMessages(contact.id).slice(-8);
                     const escalate = shouldEscalateImageSupplement(recentMsgsForEscalate);
@@ -4170,7 +4226,7 @@ export async function registerRoutes(
                   );
                 }
               } else if (!contact.needs_human) {
-                const fbAiEnabled = matchedChannel ? matchedChannel.is_ai_enabled : 1;
+                const fbAiEnabled = matchedChannel ? (matchedChannel.is_ai_enabled === 1) : false;
                 if (!fbAiEnabled) {
                   console.log("[FB WEBHOOK] AI 已關閉 (channel:", matchedChannel?.channel_name, ") - 跳過自動回覆");
                 } else {
@@ -4178,7 +4234,7 @@ export async function registerRoutes(
                   if (testMode !== "true" && matchedChannel?.access_token) {
                     debounceTextMessage(contact.id, text, (mergedText) =>
                       withContactLock(contact.id, () =>
-                        autoReplyWithAI(contact, mergedText, matchedChannel.access_token, matchedBrandId, "messenger")
+                        autoReplyWithAI(contact, mergedText, matchedChannel!.access_token, matchedBrandId, "messenger")
                       )
                     );
                   }
@@ -4191,6 +4247,9 @@ export async function registerRoutes(
             const text = messagingEvent.postback.title || messagingEvent.postback.payload || "[Postback]";
             const displayName = `FB用戶_${senderId.substring(0, 6)}`;
             const contact = storage.getOrCreateContact("messenger", senderId, displayName, matchedBrandId, matchedChannel?.id);
+            if (contact.display_name === displayName || !contact.avatar_url) {
+              fetchAndUpdateFBProfile(senderId, contact.id, matchedChannel?.access_token ?? null).catch(() => {});
+            }
             const pbMsg = storage.createMessage(contact.id, "messenger", "user", text);
             broadcastSSE("new_message", { contact_id: contact.id, message: pbMsg, brand_id: matchedBrandId || contact.brand_id });
             broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
@@ -4204,6 +4263,7 @@ export async function registerRoutes(
         if (change.field !== "feed") continue;
         const value = change.value;
         if (!value || value.verb !== "add") continue;
+        if (value.item != null && value.item !== "comment") continue;
         const commentId = value.comment_id || value.id;
         if (!commentId) continue;
         const eventId = `fb_comment_${pageId}_${commentId}_${value.created_time || Date.now()}`;
@@ -4215,8 +4275,8 @@ export async function registerRoutes(
         try {
           const from = value.from || {};
           const recipient = value.recipient || {};
-          const message = value.message || "";
-          const postId = value.post_id || "";
+          const message = (value.message != null && value.message !== "") ? String(value.message) : "";
+          const postId = value.post_id != null ? String(value.post_id) : "";
           const parentId = value.parent_id || null;
           const createdTime = value.created_time != null ? new Date(value.created_time * 1000).toISOString() : new Date().toISOString();
           const commenterName = typeof from.name === "string" ? from.name : (from.id ? `用戶_${String(from.id).slice(0, 8)}` : "未知");
@@ -4247,7 +4307,7 @@ export async function registerRoutes(
           });
           metaCommentsStorage.updateMetaComment(row.id, { created_at: createdTime });
           console.log("[FB Webhook] 公開留言已寫入 meta_comments id=%s comment_id=%s", row.id, commentId);
-          // Phase 3：規則命中後自動執行（非同步，不阻塞 webhook 回覆）
+          broadcastSSE("meta_comments_updated", { brand_id: matchedBrandId ?? undefined });
           setImmediate(() => {
             runAutoExecution(row.id).catch((e: any) => console.error("[FB Webhook] runAutoExecution error:", e?.message));
           });

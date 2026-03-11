@@ -529,6 +529,17 @@ export default function CommentCenterPage() {
     enabled: currentPage === "inbox",
   });
 
+  useEffect(() => {
+    if (currentPage !== "inbox") return;
+    const es = new EventSource("/api/events", { withCredentials: true });
+    es.addEventListener("meta_comments_updated", () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/meta-comments"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/meta-comments/summary"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/meta-comments/health"] });
+    });
+    return () => { es.close(); };
+  }, [currentPage, queryClient]);
+
   const [showCompletedSection, setShowCompletedSection] = useState(false);
   const [showSpotCheck, setShowSpotCheck] = useState(false);
   const [showGraySpotCheck, setShowGraySpotCheck] = useState(false);
