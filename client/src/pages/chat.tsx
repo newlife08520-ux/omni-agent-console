@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "react";
 import { useQuery, useQueryClient, keepPreviousData } from "@tanstack/react-query";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -335,6 +336,161 @@ const QUICK_REPLIES = [
   "好的，馬上為您處理，請稍候片刻。",
 ];
 
+const LIST_OVERDUE_MS = 60 * 60 * 1000;
+function listGetStatusLabel(c: ContactWithPreview, currentUserId?: number): string {
+  if (["closed", "resolved"].includes(c.status)) return "已結案";
+  if (!c.assigned_agent_name && c.needs_human) return "待分配";
+  if (c.assigned_agent_name && c.last_message_sender_type === "user") {
+    return currentUserId != null && c.assigned_agent_id === currentUserId ? "待我回覆" : "待回覆";
+  }
+  if (c.assigned_agent_name && (c.last_message_sender_type === "admin" || c.last_message_sender_type === "ai")) return "等客戶回覆";
+  if (c.assigned_agent_name) return "處理中";
+  return "待分配";
+}
+function listGetPriorityLabel(c: ContactWithPreview): "高" | "中" | "低" | null {
+  const p = c.case_priority;
+  if (p == null) return null;
+  if (p <= 2) return "高";
+  if (p <= 3) return "中";
+  return "低";
+}
+function listGetStatusSemantic(c: ContactWithPreview): keyof typeof STATUS_SEMANTIC {
+  if (["closed", "resolved"].includes(c.status)) return "muted";
+  if (listIsUrgent(c) || (c as ContactWithPreview).reassign_count > 0) return "danger";
+  if (!(c as ContactWithPreview).assigned_agent_name && c.needs_human) return "muted";
+  if ((c as ContactWithPreview).assigned_agent_name) {
+    if ((c as ContactWithPreview).last_message_sender_type === "user") return "warning";
+    return "normal";
+  }
+  if (["awaiting_human", "pending", "new_case"].includes(c.status)) return "warning";
+  return "assigned";
+}
+function listIsUrgent(c: ContactWithPreview & { is_urgent?: boolean }) {
+  return (c as any).is_urgent === true || c.status === "high_risk" || (c.case_priority != null && c.case_priority <= 2);
+}
+function listIsOverdue(c: ContactWithPreview) {
+  if (c.last_message_sender_type !== "user" || !c.last_message_at) return false;
+  return Date.now() - new Date(c.last_message_at.replace(" ", "T")).getTime() > LIST_OVERDUE_MS;
+}
+function listIsUnassigned(c: ContactWithPreview) {
+  return !c.assigned_agent_id && c.needs_human === 1;
+}
+function listIsMine(c: ContactWithPreview, currentUserId?: number) {
+  return currentUserId != null && c.assigned_agent_id === currentUserId;
+}
+function listNeedMyReply(c: ContactWithPreview, currentUserId?: number) {
+  return listIsMine(c, currentUserId) && (c.last_message_sender_type === "user" && !["closed", "resolved"].includes(c.status ?? ""));
+}
+const avatarColorsList = ["bg-emerald-500", "bg-amber-500", "bg-violet-500", "bg-sky-500", "bg-rose-400", "bg-teal-500", "bg-orange-400"];
+function listGetAvatarColor(id: number) {
+  return avatarColorsList[id % avatarColorsList.length];
+}
+function listGetInitials(name: string | undefined | null) {
+  return name != null && String(name).trim() ? String(name).trim().slice(0, 1).toUpperCase() : "?";
+}
+function listFormatTime(s: string | undefined | null) {
+  if (!s) return "";
+  const d = new Date(s.replace(" ", "T"));
+  const h = d.getHours();
+  const m = d.getMinutes();
+  const am = h < 12;
+  return `${am ? "上午" : "下午"}${am ? h : h - 12}:${String(m).padStart(2, "0")}`;
+}
+
+type ContactListItemProps = {
+  contact: ContactWithPreview & { is_urgent?: boolean; is_overdue?: boolean };
+  isSelected: boolean;
+  currentUserId?: number;
+  onSelect: (id: number) => void;
+  onPin: (id: number, isPinned: boolean) => void;
+  onMouseEnter: (id: number) => void;
+};
+const ContactListItem = React.memo(function ContactListItem({ contact, isSelected, currentUserId, onSelect, onPin, onMouseEnter }: ContactListItemProps) {
+  const c = contact;
+  const semantic = listGetStatusSemantic(c);
+  const colors = STATUS_SEMANTIC[semantic];
+  const overdue = listNeedMyReply(c, currentUserId) && listIsOverdue(c);
+  const urgent = listIsUrgent(c);
+  const mine = listIsMine(c, currentUserId);
+  const listStatus = listGetStatusLabel(c, currentUserId);
+  const unassigned = !c.assigned_agent_name && c.needs_human === 1;
+  const pendingMyReply = listStatus === "待我回覆";
+  return (
+    <div
+      onClick={() => { onSelect(contact.id); }}
+      onMouseEnter={() => onMouseEnter(contact.id)}
+      className={`w-full flex items-start gap-2.5 p-3 rounded-xl text-left transition-all cursor-pointer border-l-[3px] ${
+        isSelected
+          ? "bg-blue-50/90 border-blue-300 border-l-blue-500"
+          : overdue
+            ? "border-orange-300 bg-orange-50/50 hover:bg-orange-50/70 border-l-orange-500"
+            : urgent
+              ? "border-red-200 bg-red-50/40 hover:bg-red-50/60 border-l-red-500"
+              : unassigned
+                ? "border-amber-200 bg-amber-50/40 hover:bg-amber-50/60 border-l-amber-500"
+                : "border-transparent border-l-stone-200 hover:bg-stone-50 hover:border-stone-100"
+      }`}
+      data-testid={`contact-item-${contact.id}`}
+    >
+      <div className="relative shrink-0">
+        <Avatar className="w-10 h-10">
+          {contact.avatar_url && <AvatarImage src={contact.avatar_url} alt={contact.display_name} />}
+          <AvatarFallback className={`${listGetAvatarColor(contact.id)} text-white text-xs font-semibold`}>{listGetInitials(contact.display_name)}</AvatarFallback>
+        </Avatar>
+        {unassigned && (
+          <div className="absolute -bottom-0.5 -right-0.5 w-4 h-4 bg-orange-500 rounded-full border-2 border-white" title="待分配" />
+        )}
+      </div>
+      <div className="min-w-0 flex-1 space-y-1.5">
+        <div className="flex items-center justify-between gap-1.5 flex-wrap">
+          <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
+            <button onClick={(e) => { e.stopPropagation(); onPin(contact.id, !!contact.is_pinned); }} className="shrink-0" data-testid={`button-pin-${contact.id}`}>
+              <Star className={`w-3 h-3 ${contact.is_pinned ? "fill-amber-400 text-amber-400" : "text-stone-300 hover:text-amber-400"}`} />
+            </button>
+            <span className="text-sm font-semibold text-stone-800 truncate">{contact.display_name ?? ""}</span>
+            <span className={`shrink-0 text-[9px] font-medium px-1 py-0.5 rounded ${contact.platform === "messenger" ? "bg-blue-100 text-blue-600" : "bg-green-100 text-green-600"}`}>{contact.platform === "messenger" ? "FB" : "LINE"}</span>
+            {mine && <span className="shrink-0 text-[9px] font-bold px-1.5 py-0.5 rounded bg-blue-600 text-white" data-testid={`badge-mine-${contact.id}`}>我的</span>}
+          </div>
+          {contact.last_message_at && <span className="text-[10px] text-stone-500 shrink-0 font-medium">{listFormatTime(contact.last_message_at)}</span>}
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          {unassigned ? (
+            <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md bg-orange-100 text-orange-800 border border-orange-200" title="需人工且尚未分配">待分配</span>
+          ) : c.assigned_agent_name ? (
+            <span className="inline-flex items-center gap-1.5 text-[10px] text-stone-700 font-medium truncate max-w-[140px]" title={`負責：${c.assigned_agent_name}`}>
+              <Avatar className="w-4 h-4 shrink-0 border border-white shadow-sm">
+                {c.assigned_agent_avatar_url && <AvatarImage src={c.assigned_agent_avatar_url} alt={c.assigned_agent_name} />}
+                <AvatarFallback className="bg-blue-100 text-blue-700 text-[9px] font-semibold">{c.assigned_agent_name ? String(c.assigned_agent_name).trim().slice(0, 1).toUpperCase() || "?" : "?"}</AvatarFallback>
+              </Avatar>
+              <span className="truncate">{c.assigned_agent_name}</span>
+            </span>
+          ) : null}
+          <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${pendingMyReply ? "bg-amber-100 text-amber-800 border-amber-300" : colors.bg}`} data-testid={`badge-status-${contact.id}`}>
+            <span className={`w-1.5 h-1.5 rounded-full ${pendingMyReply ? "bg-amber-500" : colors.dot}`} />
+            {overdue ? "超時未回" : listStatus}
+          </span>
+        </div>
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {overdue && <span className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded bg-orange-100 text-orange-700" title="超過回覆時限">逾時</span>}
+          {urgent && !overdue && <span className="text-[10px] font-medium text-red-600 shrink-0" title="緊急案件">緊急</span>}
+          {(contact.vip_level ?? 0) > 0 && <VipBadge level={contact.vip_level ?? 0} />}
+          {!urgent && !overdue && (c.my_flag === "later" || c.my_flag === "tracking") && <span className="text-[10px] text-stone-500">{c.my_flag === "tracking" ? "追蹤" : "稍後"}</span>}
+        </div>
+        {contact.last_message && (
+          <p className="text-[11px] text-stone-600 truncate leading-tight max-h-8 flex items-center gap-1" title={contact.last_message}>
+            {c.last_message_sender_type && (
+              <span className="shrink-0 text-[9px] text-stone-400 font-medium">
+                {c.last_message_sender_type === "user" ? "客戶" : c.last_message_sender_type === "admin" ? "客服" : c.last_message_sender_type === "ai" ? "AI" : "系統"}：
+              </span>
+            )}
+            <span className="truncate">{contact.last_message}</span>
+          </p>
+        )}
+      </div>
+    </div>
+  );
+});
+
 function VipBadge({ level }: { level: number }) {
   if (level <= 0) return null;
   const labels = ["", "VIP", "VIP Gold", "VIP Platinum"];
@@ -561,9 +717,11 @@ export default function ChatPage() {
     },
     enabled: !!selectedId,
     refetchInterval: 10000,
+    staleTime: 5 * 60 * 1000,
+    placeholderData: keepPreviousData,
   });
 
-  /** 滑過聯絡人時預先拉取訊息，點開時常已就緒，體感更快 */
+  /** 滑過聯絡人時預先拉取訊息，點開時常已就緒（秒開） */
   const prefetchMessagesForContact = useCallback(
     (contactId: number) => {
       if (contactId === selectedId) return;
@@ -577,11 +735,17 @@ export default function ChatPage() {
           if (!res.ok) throw new Error("Failed");
           return res.json();
         },
-        staleTime: 60 * 1000,
+        staleTime: 5 * 60 * 1000,
       });
     },
     [queryClient, selectedId]
   );
+
+  /** 穩定 callback：點選聯絡人，僅兩筆 item（取消選取/新選取）會 re-render */
+  const handleSelectContact = useCallback((id: number) => {
+    setSelectedId(id);
+    lastMessageIdRef.current = 0;
+  }, []);
 
   const { data: linkedOrderIds = [] } = useQuery<string[]>({
     queryKey: ["/api/contacts", selectedId, "linked-orders"],
@@ -783,6 +947,15 @@ export default function ChatPage() {
       const bAt = b.last_message_at || "";
       return bAt.localeCompare(aAt);
     });
+
+  /** 虛擬滾動：只渲染可見約十幾筆，破千聯絡人也不卡 */
+  const listScrollRef = useRef<HTMLDivElement>(null);
+  const rowVirtualizer = useVirtualizer({
+    count: filteredContacts.length,
+    getScrollElement: () => listScrollRef.current,
+    estimateSize: 96,
+    overscan: 8,
+  });
 
   /** 切換篩選後若目前選中的聯絡人不在結果內：改選第一筆或清空，避免右側顯示失效或白屏 */
   const filteredIdsKey = filteredContacts.map((c) => c.id).join(",");
@@ -1500,7 +1673,7 @@ export default function ChatPage() {
             </div>
           )}
         </div>
-        <ScrollArea className="flex-1">
+        <div className="flex-1 flex flex-col min-h-0">
           {contactsError ? (
             <div className="p-6 text-center text-sm text-red-600">無法載入聯絡人列表，請稍後再試</div>
           ) : contactsLoading && contacts.length === 0 ? (
@@ -1555,100 +1728,36 @@ export default function ChatPage() {
               {searchQuery ? "查無結果" : viewMode === "my" ? "目前沒有分配給你的案件" : viewMode === "pending" ? "目前沒有需要你回覆的案件" : viewMode === "high_risk" ? "目前沒有緊急案件" : viewMode === "tracking" ? "目前沒有待追蹤案件" : viewMode === "overdue" ? "目前沒有逾時未回案件" : viewMode === "unassigned" ? "目前沒有待分配案件" : "無聯絡人"}
             </div>
           ) : (
-            <div className="p-2 space-y-2">
-              {filteredContacts.map((contact) => {
-                const c = contact as ContactWithPreview;
-                const semantic = getStatusSemantic(c);
-                const colors = STATUS_SEMANTIC[semantic];
-                const overdue = needMyReply(c) && isOverdue(contact);
-                const urgent = isUrgent(c);
-                const mine = isMine(c);
-                const listStatus = getListStatusLabel(c, authUser?.user?.id);
-                const priority = getPriorityLabel(c);
-                const unassigned = !c.assigned_agent_name && c.needs_human === 1;
-                const pendingMyReply = listStatus === "待我回覆";
-                return (
-                  <div
-                    key={contact.id}
-                    onClick={() => { setSelectedId(contact.id); lastMessageIdRef.current = 0; }}
-                    onMouseEnter={() => prefetchMessagesForContact(contact.id)}
-                    className={`w-full flex items-start gap-2.5 p-3 rounded-xl text-left transition-all cursor-pointer border-l-[3px] ${
-                        selectedId === contact.id
-                        ? "bg-blue-50/90 border-blue-300 border-l-blue-500"
-                        : overdue
-                          ? "border-orange-300 bg-orange-50/50 hover:bg-orange-50/70 border-l-orange-500"
-                          : urgent
-                            ? "border-red-200 bg-red-50/40 hover:bg-red-50/60 border-l-red-500"
-                            : unassigned
-                              ? "border-amber-200 bg-amber-50/40 hover:bg-amber-50/60 border-l-amber-500"
-                              : "border-transparent border-l-stone-200 hover:bg-stone-50 hover:border-stone-100"
-                    }`}
-                    data-testid={`contact-item-${contact.id}`}
-                  >
-                    <div className="relative shrink-0">
-                      <Avatar className="w-10 h-10">
-                        {contact.avatar_url && <AvatarImage src={contact.avatar_url} alt={contact.display_name} />}
-                        <AvatarFallback className={`${getAvatarColor(contact.id)} text-white text-xs font-semibold`}>{getInitials(contact.display_name)}</AvatarFallback>
-                      </Avatar>
-                      {unassigned && (
-                        <div className="absolute -bottom-0.5 -right-0.5 w-4 h-4 bg-orange-500 rounded-full border-2 border-white" title="待分配" />
-                      )}
+            <div ref={listScrollRef} className="flex-1 min-h-0 overflow-auto p-2">
+              <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, width: "100%", position: "relative" }}>
+                {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+                  const contact = filteredContacts[virtualRow.index];
+                  return (
+                    <div
+                      key={contact.id}
+                      style={{
+                        position: "absolute",
+                        top: 0,
+                        left: 0,
+                        width: "100%",
+                        transform: `translateY(${virtualRow.start}px)`,
+                      }}
+                    >
+                      <ContactListItem
+                        contact={contact}
+                        isSelected={selectedId === contact.id}
+                        currentUserId={authUser?.user?.id}
+                        onSelect={handleSelectContact}
+                        onPin={handleTogglePin}
+                        onMouseEnter={prefetchMessagesForContact}
+                      />
                     </div>
-                    <div className="min-w-0 flex-1 space-y-1.5">
-                      {/* 第一行：姓名、平台、我的、時間 */}
-                      <div className="flex items-center justify-between gap-1.5 flex-wrap">
-                        <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
-                          <button onClick={(e) => { e.stopPropagation(); handleTogglePin(contact.id, contact.is_pinned); }} className="shrink-0" data-testid={`button-pin-${contact.id}`}>
-                            <Star className={`w-3 h-3 ${contact.is_pinned ? "fill-amber-400 text-amber-400" : "text-stone-300 hover:text-amber-400"}`} />
-                          </button>
-                          <span className="text-sm font-semibold text-stone-800 truncate">{contact.display_name ?? ""}</span>
-                          <span className={`shrink-0 text-[9px] font-medium px-1 py-0.5 rounded ${contact.platform === "messenger" ? "bg-blue-100 text-blue-600" : "bg-green-100 text-green-600"}`}>{contact.platform === "messenger" ? "FB" : "LINE"}</span>
-                          {mine && <span className="shrink-0 text-[9px] font-bold px-1.5 py-0.5 rounded bg-blue-600 text-white" data-testid={`badge-mine-${contact.id}`}>我的</span>}
-                        </div>
-                        {contact.last_message_at && <span className="text-[10px] text-stone-500 shrink-0 font-medium">{formatTime(contact.last_message_at)}</span>}
-                      </div>
-                      {/* 第二行：負責人 或 待分配；狀態（待我回覆 / 等客戶回覆 等） */}
-                      <div className="flex items-center gap-2 flex-wrap">
-                        {unassigned ? (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md bg-orange-100 text-orange-800 border border-orange-200" title="需人工且尚未分配">待分配</span>
-                        ) : c.assigned_agent_name ? (
-                          <span className="inline-flex items-center gap-1.5 text-[10px] text-stone-700 font-medium truncate max-w-[140px]" title={`負責：${c.assigned_agent_name}`}>
-                            <Avatar className="w-4 h-4 shrink-0 border border-white shadow-sm">
-                              {c.assigned_agent_avatar_url && <AvatarImage src={c.assigned_agent_avatar_url} alt={c.assigned_agent_name} />}
-                              <AvatarFallback className="bg-blue-100 text-blue-700 text-[9px] font-semibold">{c.assigned_agent_name ? String(c.assigned_agent_name).trim().slice(0, 1).toUpperCase() || "?" : "?"}</AvatarFallback>
-                            </Avatar>
-                            <span className="truncate">{c.assigned_agent_name}</span>
-                          </span>
-                        ) : null}
-                        <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${pendingMyReply ? "bg-amber-100 text-amber-800 border-amber-300" : colors.bg}`} data-testid={`badge-status-${contact.id}`}>
-                          <span className={`w-1.5 h-1.5 rounded-full ${pendingMyReply ? "bg-amber-500" : colors.dot}`} />
-                          {overdue ? "超時未回" : listStatus}
-                        </span>
-                      </div>
-                      {/* 第三行：最多 3 個重點（逾時/緊急/VIP），其餘用次層文字 */}
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        {overdue && <span className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded bg-orange-100 text-orange-700" title="超過回覆時限">逾時</span>}
-                        {urgent && !overdue && <span className="text-[10px] font-medium text-red-600 shrink-0" title="緊急案件">緊急</span>}
-                        {(contact.vip_level ?? 0) > 0 && <VipBadge level={contact.vip_level ?? 0} />}
-                        {!urgent && !overdue && (c.my_flag === "later" || c.my_flag === "tracking") && <span className="text-[10px] text-stone-500">{c.my_flag === "tracking" ? "追蹤" : "稍後"}</span>}
-                      </div>
-                      {contact.last_message && (
-                        <p className="text-[11px] text-stone-600 truncate leading-tight max-h-8 flex items-center gap-1" title={contact.last_message}>
-                          {c.last_message_sender_type && (
-                            <span className="shrink-0 text-[9px] text-stone-400 font-medium">
-                              {c.last_message_sender_type === "user" ? "客戶" : c.last_message_sender_type === "admin" ? "客服" : c.last_message_sender_type === "ai" ? "AI" : "系統"}：
-                            </span>
-                          )}
-                          <span className="truncate">{contact.last_message}</span>
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
             </div>
           )}
-        </ScrollArea>
+        </div>
       </div>
 
       <div className="flex-1 flex flex-col min-w-0">
