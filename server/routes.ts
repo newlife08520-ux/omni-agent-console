@@ -3994,6 +3994,24 @@ export async function registerRoutes(
             storage.updateContactHumanFlag(contact.id, 1);
             await pushLineMessage(contact.platform_user_id, [{ type: "text", text: "已收到您的影片，將為您轉交專人檢視。" }], channelToken);
           }
+        } else if (event.type === "message" && event.message?.type === "sticker") {
+          const userId = event.source?.userId || "unknown";
+          const contact = storage.getOrCreateContact("line", userId, "LINE用戶", matchedBrandId, matchedChannel?.id);
+          if (contact.display_name === "LINE用戶" || !contact.avatar_url) {
+            fetchAndUpdateLineProfile(userId, contact.id, channelToken).catch(() => {});
+          }
+          const stickerId = (event.message as { stickerId?: string; sticker_id?: string }).stickerId
+            ?? (event.message as { stickerId?: string; sticker_id?: string }).sticker_id;
+          if (stickerId) {
+            const stickerImageUrl = `https://stickershop.line-scdn.net/stickershop/v1/sticker/${stickerId}/android/sticker.png`;
+            const stickerMsg = storage.createMessage(contact.id, "line", "user", "[貼圖]", "image", stickerImageUrl);
+            broadcastSSE("new_message", { contact_id: contact.id, message: stickerMsg, brand_id: matchedBrandId || contact.brand_id });
+            broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
+          } else {
+            const fallbackMsg = storage.createMessage(contact.id, "line", "user", "[貼圖訊息]");
+            broadcastSSE("new_message", { contact_id: contact.id, message: fallbackMsg, brand_id: matchedBrandId || contact.brand_id });
+            broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
+          }
         } else if (event.type === "message" && event.message?.type !== "text") {
           const userId = event.source?.userId || "unknown";
           const contact = storage.getOrCreateContact("line", userId, "LINE用戶", matchedBrandId, matchedChannel?.id);
@@ -4001,7 +4019,7 @@ export async function registerRoutes(
             fetchAndUpdateLineProfile(userId, contact.id, channelToken).catch(() => {});
           }
           const msgType = event.message?.type || "unknown";
-          storage.createMessage(contact.id, "line", "user", `[${msgType === "sticker" ? "貼圖" : msgType === "audio" ? "音訊" : msgType === "location" ? "位置" : msgType === "file" ? "檔案" : msgType}訊息]`);
+          storage.createMessage(contact.id, "line", "user", `[${msgType === "audio" ? "音訊" : msgType === "location" ? "位置" : msgType === "file" ? "檔案" : msgType}訊息]`);
         }
       } catch (err) {
         console.error("Webhook event processing error:", err);

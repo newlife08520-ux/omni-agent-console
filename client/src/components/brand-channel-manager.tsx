@@ -453,6 +453,9 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
                           AI {ch.is_ai_enabled ? "開啟" : "關閉"}
                         </span>
                       </div>
+                      {ch.platform === "line" && ch.bot_id && ch.bot_id.startsWith("U") && (
+                        <p className="text-[10px] text-amber-600 mt-1">Bot ID 為 U 開頭時多為 User ID，新訊息可能只出現在「全部」。請改為 Railway 日誌中的 destination 後儲存。</p>
+                      )}
                     </div>
                     <div className="flex items-center gap-1">
                       {ch.access_token && (
@@ -589,11 +592,13 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
             </div>
             <div>
               <label className="text-xs font-medium text-stone-600 mb-1 block">
-                Bot ID ({channelForm.platform === "line" ? "LINE Bot UserId" : "Facebook Page ID"})
+                Bot ID ({channelForm.platform === "line" ? "LINE Webhook 的 destination（Channel ID）" : "Facebook Page ID"})
               </label>
-              <Input data-testid="input-channel-bot-id" value={channelForm.bot_id} onChange={(e) => setChannelForm(f => ({ ...f, bot_id: e.target.value }))} placeholder={channelForm.platform === "line" ? "Uxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" : "Page ID"} className="bg-stone-50 border-stone-200" />
+              <Input data-testid="input-channel-bot-id" value={channelForm.bot_id} onChange={(e) => setChannelForm(f => ({ ...f, bot_id: e.target.value }))} placeholder={channelForm.platform === "line" ? "從 Railway 日誌 [WEBHOOK] destination: 取得，非 U 開頭" : "Page ID"} className="bg-stone-50 border-stone-200" />
               <p className="text-[10px] text-stone-400 mt-1">
-                {channelForm.platform === "line" ? "Webhook 會透過 destination 欄位比對此 ID 來路由訊息" : "用於識別 Facebook 頁面的唯一 ID"}
+                {channelForm.platform === "line"
+                  ? "須與 LINE 送來的 destination 完全一致，新訊息才會歸到本品牌；填錯時只會在「全部」看到。勿填 U 開頭的 User ID。"
+                  : "用於識別 Facebook 頁面的唯一 ID"}
               </p>
             </div>
             <div>

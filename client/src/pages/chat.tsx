@@ -11,7 +11,7 @@ import {
   Send, User, Bot, Headphones, UserCheck, Search, X, Plus, Tag,
   Circle, Zap, Star, Info, Package, Crown, ShoppingBag, Loader2,
   Paperclip, ImageIcon, Upload, CalendarDays, Filter, Phone, MessageSquare,
-  UserCog, Users, Pencil, MoreHorizontal, Copy, Link2,
+  UserCog, Users, Pencil, MoreHorizontal, Copy, Link2, Smile, Mic, MapPin, FileText,
 } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
@@ -216,15 +216,39 @@ const MessageBubble = React.memo(function MessageBubble({
                   您的瀏覽器不支援影片播放
                 </video>
               </div>
-            ) : (
-              <div className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow-sm ${
-                msg.sender_type === "user" ? "bg-white text-stone-700 rounded-bl-md border border-stone-100"
-                  : msg.sender_type === "ai" ? "bg-emerald-50 text-emerald-900 rounded-br-md border border-emerald-100"
-                  : "bg-amber-600 text-white rounded-br-md"
-              }`}>
-                <ThrottledContent content={msg.content} throttleMs={80} />
-              </div>
-            )}
+            ) : (() => {
+              const c = (msg.content ?? "").trim();
+              const placeholderMatch = c.match(/^\[(.+?)訊息\]$/);
+              if (placeholderMatch) {
+                const type = placeholderMatch[1];
+                const icons: Record<string, { Icon: React.ComponentType<{ className?: string }>; label: string }> = {
+                  貼圖: { Icon: Smile, label: "貼圖" },
+                  音訊: { Icon: Mic, label: "語音訊息" },
+                  位置: { Icon: MapPin, label: "位置" },
+                  檔案: { Icon: FileText, label: "檔案" },
+                };
+                const { Icon, label } = icons[type] || { Icon: FileText, label: `${type}訊息` };
+                return (
+                  <div className={`rounded-2xl px-4 py-2.5 text-sm shadow-sm inline-flex items-center gap-2 ${
+                    msg.sender_type === "user" ? "bg-white text-stone-700 rounded-bl-md border border-stone-100"
+                      : msg.sender_type === "ai" ? "bg-emerald-50 text-emerald-900 rounded-br-md border border-emerald-100"
+                      : "bg-amber-600 text-white rounded-br-md"
+                  }`}>
+                    <Icon className="w-5 h-5 shrink-0 opacity-80" />
+                    <span>{label}</span>
+                  </div>
+                );
+              }
+              return (
+                <div className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow-sm ${
+                  msg.sender_type === "user" ? "bg-white text-stone-700 rounded-bl-md border border-stone-100"
+                    : msg.sender_type === "ai" ? "bg-emerald-50 text-emerald-900 rounded-br-md border border-emerald-100"
+                    : "bg-amber-600 text-white rounded-br-md"
+                }`}>
+                  <ThrottledContent content={msg.content} throttleMs={80} />
+                </div>
+              );
+            })()}
             <div className={`text-[10px] text-stone-400 mt-1 ${msg.sender_type === "user" ? "text-left" : "text-right"}`}>
               {msg.sender_type === "ai" ? "AI 助理 " : msg.sender_type === "admin" ? "真人客服 " : ""}{formatTime(msg.created_at)}
             </div>
@@ -346,6 +370,7 @@ export default function ChatPage() {
   const [advSearchBegin, setAdvSearchBegin] = useState("");
   const [advSearchEnd, setAdvSearchEnd] = useState("");
   const [productPages, setProductPages] = useState<{ pageId: string; prefix: string; productName: string }[]>([]);
+  const [dismissedBotIdHint, setDismissedBotIdHint] = useState(false);
   const [selectedPageId, setSelectedPageId] = useState("");
   const [productPhone, setProductPhone] = useState("");
   const [pageSearchFilter, setPageSearchFilter] = useState("");
@@ -383,6 +408,7 @@ export default function ChatPage() {
   /** 聯絡人或案件相關操作後一併刷新左側戰情摘要（單一資料來源，數字連動） */
   const invalidateContactsAndStats = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
+    queryClient.refetchQueries({ queryKey: ["/api/contacts"], exact: false });
     queryClient.invalidateQueries({ queryKey: ["/api/manager-stats"], exact: false });
     queryClient.invalidateQueries({ queryKey: ["/api/agent-stats/me"] });
   }, [queryClient]);
@@ -447,15 +473,22 @@ export default function ChatPage() {
         });
         es.addEventListener("new_message", (e) => {
           try {
-            const data = JSON.parse(e.data);
-            console.log("[SSE] new_message received, contact:", data.contact_id);
+            const data = JSON.parse(e.data) as { contact_id?: number };
+            const contactId = data?.contact_id;
+            console.log("[SSE] new_message received, contact:", contactId);
             setStreamingContent((prev) => {
               const next = { ...prev };
-              delete next[data.contact_id];
+              if (contactId != null) delete next[contactId];
               return next;
             });
-            queryClient.invalidateQueries({ queryKey: ["/api/contacts", data.contact_id, "messages"] });
-            invalidateContactsAndStats();
+            queryClient.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
+            queryClient.refetchQueries({ queryKey: ["/api/contacts"], exact: false });
+            if (contactId != null) {
+              queryClient.invalidateQueries({ queryKey: ["/api/contacts", contactId, "messages"] });
+              queryClient.refetchQueries({ queryKey: ["/api/contacts", contactId, "messages"] });
+            }
+            queryClient.invalidateQueries({ queryKey: ["/api/manager-stats"], exact: false });
+            queryClient.invalidateQueries({ queryKey: ["/api/agent-stats/me"] });
           } catch (err) {
             console.error("[SSE] Error parsing new_message:", err);
           }
@@ -1453,6 +1486,14 @@ export default function ChatPage() {
           </div>
           {(isCsAgent || isManager) && (
             <p className="mt-2 text-[10px] text-stone-400 leading-tight">我的案件＝分配給我的；待我回覆＝輪到我回覆</p>
+          )}
+          {selectedBrandId != null && !dismissedBotIdHint && (
+            <div className="mt-2 p-2 rounded-lg bg-amber-50 border border-amber-200 flex items-start gap-2">
+              <p className="text-[10px] text-amber-800 leading-tight flex-1">
+                若 LINE 新訊息沒出現在此品牌：請先切到「全部」查看；若只在「全部」看到，請到 設定→品牌與渠道 將該 LINE 渠道的 Bot ID 改為 Railway 日誌中的 <code className="bg-amber-100 px-0.5 rounded">[WEBHOOK] destination</code> 值。
+              </p>
+              <button type="button" onClick={() => setDismissedBotIdHint(true)} className="text-amber-600 hover:text-amber-800 shrink-0 text-xs" aria-label="關閉提示">×</button>
+            </div>
           )}
         </div>
         <ScrollArea className="flex-1">
