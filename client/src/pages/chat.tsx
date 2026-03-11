@@ -948,17 +948,18 @@ export default function ChatPage() {
       return bAt.localeCompare(aAt);
     });
 
-  /** 虛擬滾動：只渲染可見約十幾筆，破千聯絡人也不卡 */
+  /** 虛擬滾動：只渲染可見約十幾筆，破千聯絡人也不卡。count 防禦避免 undefined.length 主畫面崩潰 */
   const listScrollRef = useRef<HTMLDivElement>(null);
+  const contactListSafe = Array.isArray(filteredContacts) ? filteredContacts : [];
   const rowVirtualizer = useVirtualizer({
-    count: filteredContacts.length,
+    count: contactListSafe.length,
     getScrollElement: () => listScrollRef.current,
     estimateSize: 96,
     overscan: 8,
   });
 
   /** 切換篩選後若目前選中的聯絡人不在結果內：改選第一筆或清空，避免右側顯示失效或白屏 */
-  const filteredIdsKey = filteredContacts.map((c) => c.id).join(",");
+  const filteredIdsKey = contactListSafe.map((c) => c.id).join(",");
   useEffect(() => {
     const ids = filteredIdsKey ? filteredIdsKey.split(",").map(Number) : [];
     const inList = selectedId != null && ids.includes(selectedId);
@@ -1680,10 +1681,10 @@ export default function ChatPage() {
             <div className="p-6 text-center text-sm text-stone-400">載入中...</div>
           ) : searchQuery.trim().length >= 2 && (messageSearchResults.length > 0 || messageSearching) ? (
             <div className="p-2">
-              {filteredContacts.length > 0 && (
+              {contactListSafe.length > 0 && (
                 <div className="mb-2">
                   <div className="px-3 py-1.5 text-[10px] font-semibold text-stone-400 uppercase tracking-wider">聯絡人</div>
-                  {filteredContacts.slice(0, 5).map((contact) => (
+                  {contactListSafe.slice(0, 5).map((contact) => (
                     <button key={contact.id} onClick={() => { setSelectedId(contact.id); lastMessageIdRef.current = 0; setSearchQuery(""); setMessageSearchResults([]); }}
                       className={`w-full flex items-center gap-2.5 p-2.5 rounded-xl text-left transition-all hover:bg-stone-50`}
                       data-testid={`search-contact-${contact.id}`}
@@ -1723,15 +1724,16 @@ export default function ChatPage() {
                 )}
               </div>
             </div>
-          ) : filteredContacts.length === 0 ? (
+          ) : contactListSafe.length === 0 ? (
             <div className="p-6 text-center text-sm text-stone-400">
               {searchQuery ? "查無結果" : viewMode === "my" ? "目前沒有分配給你的案件" : viewMode === "pending" ? "目前沒有需要你回覆的案件" : viewMode === "high_risk" ? "目前沒有緊急案件" : viewMode === "tracking" ? "目前沒有待追蹤案件" : viewMode === "overdue" ? "目前沒有逾時未回案件" : viewMode === "unassigned" ? "目前沒有待分配案件" : "無聯絡人"}
             </div>
           ) : (
             <div ref={listScrollRef} className="flex-1 min-h-0 overflow-auto p-2">
               <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, width: "100%", position: "relative" }}>
-                {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-                  const contact = filteredContacts[virtualRow.index];
+                {(rowVirtualizer.getVirtualItems() ?? []).map((virtualRow) => {
+                  const contact = contactListSafe[virtualRow.index];
+                  if (!contact) return null;
                   return (
                     <div
                       key={contact.id}
