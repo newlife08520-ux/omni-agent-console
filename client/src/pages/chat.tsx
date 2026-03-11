@@ -449,6 +449,8 @@ export default function ChatPage() {
     }
   }, [selectedId, rightTab]);
 
+  // SSE：僅在 mount 時綁定一次，deps=[] 避免點擊聯絡人重選時重複註冊造成「影分身」與死循環。
+  // 內部只用 queryClientRef.current，絕不把 selectedId 等會變動的狀態放入 deps。cleanup 必須 close source。
   useEffect(() => {
     let es: EventSource | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout>;

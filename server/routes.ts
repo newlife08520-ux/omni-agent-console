@@ -2420,20 +2420,8 @@ export async function registerRoutes(
     if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const contact = storage.getContact(id) as any;
     if (!contact) return res.status(404).json({ message: "聯絡人不存在" });
-    // 先立即回傳聯絡人，AI 建議改到背景計算，避免「點開訊息」卡 1～2 秒
-    if (!["closed", "resolved"].includes(contact.status)) {
-      setImmediate(() => {
-        try {
-          const suggested = suggestAiFromMessages(id);
-          if (Object.keys(suggested).length > 0) {
-            storage.updateContactAiSuggestions(id, suggested);
-            broadcastSSE("contacts_updated", { contact_id: id, brand_id: contact.brand_id });
-          }
-        } catch (e: any) {
-          console.error("[contacts/:id] background AI suggestion error:", e?.message ?? e);
-        }
-      });
-    }
+    // GET 必須冪等：禁止在讀取時寫入 DB 或廣播 SSE，避免「讀取→寫入→廣播→重新讀取」死循環。
+    // AI 建議僅在 Webhook 新訊息或客服手動觸發時更新，不在此處。
     if (!contact.ai_suggestions && (contact as any).ai_suggestions === undefined) contact.ai_suggestions = null;
     return res.json(contact);
   });
