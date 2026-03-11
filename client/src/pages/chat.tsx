@@ -975,7 +975,7 @@ export default function ChatPage() {
   const rowVirtualizer = useVirtualizer({
     count: contactListSafe.length,
     getScrollElement: () => listScrollRef.current,
-    estimateSize: 96,
+    estimateSize: () => 96,
     overscan: 8,
   });
 
