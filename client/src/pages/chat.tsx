@@ -405,6 +405,13 @@ type ContactListItemProps = {
   onPin: (id: number, isPinned: boolean) => void;
   onMouseEnter: (id: number) => void;
 };
+function contactListItemPropsAreEqual(prev: ContactListItemProps, next: ContactListItemProps): boolean {
+  if (prev.contact.id !== next.contact.id) return false;
+  if (prev.contact !== next.contact) return false;
+  if (prev.isSelected !== next.isSelected) return false;
+  if (prev.currentUserId !== next.currentUserId) return false;
+  return true;
+}
 const ContactListItem = React.memo(function ContactListItem({ contact, isSelected, currentUserId, onSelect, onPin, onMouseEnter }: ContactListItemProps) {
   const c = contact;
   const semantic = listGetStatusSemantic(c);
@@ -489,7 +496,7 @@ const ContactListItem = React.memo(function ContactListItem({ contact, isSelecte
       </div>
     </div>
   );
-});
+}, contactListItemPropsAreEqual);
 
 function VipBadge({ level }: { level: number }) {
   if (level <= 0) return null;
@@ -562,6 +569,8 @@ export default function ChatPage() {
   const queryClient = useQueryClient();
   const queryClientRef = useRef(queryClient);
   queryClientRef.current = queryClient;
+  const selectedIdRef = useRef<number | null>(null);
+  selectedIdRef.current = selectedId;
   const { toast } = useToast();
 
   /** 僅 invalidate，不 refetch，避免 SSE 觸發大量請求或 re-render 迴圈 */
@@ -681,7 +690,7 @@ export default function ChatPage() {
     };
   }, []);
 
-  const { data: contactsRaw, isLoading: contactsLoading, isError: contactsError } = useQuery<(ContactWithPreview & { is_urgent?: boolean; is_overdue?: boolean })[]>({
+  const { data: contactsRaw = [], isLoading: contactsLoading, isError: contactsError } = useQuery<(ContactWithPreview & { is_urgent?: boolean; is_overdue?: boolean })[]>({
     queryKey: ["/api/contacts", selectedBrandId, viewMode],
     queryFn: async () => {
       const params = new URLSearchParams();
@@ -704,7 +713,7 @@ export default function ChatPage() {
   });
   const contacts = Array.isArray(contactsRaw) ? contactsRaw : [];
 
-  const { data: messages = [], isLoading: messagesLoading, isFetching: messagesFetching } = useQuery<Message[]>({
+  const { data: messagesRaw, isLoading: messagesLoading, isFetching: messagesFetching } = useQuery<Message[]>({
     queryKey: ["/api/contacts", selectedId, "messages"],
     queryFn: async () => {
       if (!selectedId) return [];
@@ -713,18 +722,20 @@ export default function ChatPage() {
         headers: { "Cache-Control": "no-cache", "Pragma": "no-cache" },
       });
       if (!res.ok) throw new Error("Failed");
-      return res.json();
+      const data = await res.json();
+      return Array.isArray(data) ? data : [];
     },
     enabled: !!selectedId,
     refetchInterval: 10000,
     staleTime: 5 * 60 * 1000,
     placeholderData: keepPreviousData,
   });
+  const messages = Array.isArray(messagesRaw) ? messagesRaw : [];
 
-  /** 滑過聯絡人時預先拉取訊息，點開時常已就緒（秒開） */
+  /** 滑過聯絡人時預先拉取訊息，點開時常已就緒（秒開）。僅依賴 queryClient 以穩定引用，避免 3000+ 聯絡人一併 re-render */
   const prefetchMessagesForContact = useCallback(
     (contactId: number) => {
-      if (contactId === selectedId) return;
+      if (contactId === selectedIdRef.current) return;
       queryClient.prefetchQuery({
         queryKey: ["/api/contacts", contactId, "messages"],
         queryFn: async () => {
@@ -733,12 +744,13 @@ export default function ChatPage() {
             headers: { "Cache-Control": "no-cache", "Pragma": "no-cache" },
           });
           if (!res.ok) throw new Error("Failed");
-          return res.json();
+          const data = await res.json();
+          return Array.isArray(data) ? data : [];
         },
         staleTime: 5 * 60 * 1000,
       });
     },
-    [queryClient, selectedId]
+    [queryClient]
   );
 
   /** 穩定 callback：點選聯絡人，僅兩筆 item（取消選取/新選取）會 re-render */
@@ -759,7 +771,8 @@ export default function ChatPage() {
     enabled: !!selectedId,
   });
 
-  const orderIdsForLinked = orderSearchResults.map((o) => o.global_order_id);
+  const orderSearchResultsSafe = orderSearchResults ?? [];
+  const orderIdsForLinked = orderSearchResultsSafe.map((o) => o.global_order_id);
   const { data: linkedContactsMap = {} } = useQuery<Record<string, number | null>>({
     queryKey: ["/api/orders/linked-contacts", orderIdsForLinked.join(",")],
     queryFn: async () => {
@@ -781,9 +794,11 @@ export default function ChatPage() {
   }, []);
 
   useEffect(() => {
-    if (messages.length > 0) {
-      const latestId = messages[messages.length - 1].id;
-      if (latestId > lastMessageIdRef.current) {
+    const msgs = messages ?? [];
+    if (msgs.length > 0) {
+      const latest = msgs[msgs.length - 1];
+      const latestId = latest?.id;
+      if (latestId != null && latestId > lastMessageIdRef.current) {
         const isFirstLoad = lastMessageIdRef.current === 0;
         lastMessageIdRef.current = latestId;
         scrollToBottom(isFirstLoad ? "auto" : "smooth");
@@ -811,13 +826,17 @@ export default function ChatPage() {
     return [...older, ...msgs];
   }, [olderMessagesLoaded, messages]);
 
+  const displayMessagesLength = displayMessages?.length ?? 0;
+
   if (typeof import.meta !== "undefined" && import.meta.env?.PROD) {
-    console.log("[ChatPage] render", { contactsLen: contacts.length, displayMessagesLen: displayMessages.length, selectedId, hasMessagesArray: Array.isArray(messages) });
+    console.log("[ChatPage] render", { contactsLen: (contacts ?? []).length, displayMessagesLen: (displayMessages ?? []).length, selectedId, hasMessagesArray: Array.isArray(messages) });
   }
 
   const loadOlderMessages = useCallback(async () => {
     if (!selectedId || loadingOlder || !hasMoreOlder) return;
-    const oldest = olderMessagesLoaded.length > 0 ? olderMessagesLoaded[0] : messages[0];
+    const older = olderMessagesLoaded ?? [];
+    const msgs = messages ?? [];
+    const oldest = older.length > 0 ? older[0] : msgs[0];
     const oldestId = oldest?.id;
     if (oldestId == null || oldestId <= 0) return;
     setLoadingOlder(true);
@@ -856,13 +875,13 @@ export default function ChatPage() {
     const viewport = chatViewportRef.current;
     if (!viewport) return;
     const onScroll = () => {
-      if (viewport.scrollTop <= SCROLL_LOAD_THRESHOLD && displayMessages.length > 0 && !loadingOlder && hasMoreOlder) {
+      if (viewport.scrollTop <= SCROLL_LOAD_THRESHOLD && displayMessagesLength > 0 && !loadingOlder && hasMoreOlder) {
         loadOlderMessages();
       }
     };
     viewport.addEventListener("scroll", onScroll, { passive: true });
     return () => viewport.removeEventListener("scroll", onScroll);
-  }, [displayMessages.length, loadingOlder, hasMoreOlder, loadOlderMessages]);
+  }, [displayMessagesLength, loadingOlder, hasMoreOlder, loadOlderMessages]);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -874,7 +893,8 @@ export default function ChatPage() {
 
   const prevHumanCountRef = useRef<number>(0);
   useEffect(() => {
-    const humanCount = contacts.filter(c => c.needs_human).length;
+    const list = contacts ?? [];
+    const humanCount = list.filter(c => c.needs_human).length;
     if (humanCount > prevHumanCountRef.current && prevHumanCountRef.current >= 0) {
       try {
         const audio = new Audio("data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgiq2up3hOMjdkjK+smXBILTRlj7CsmG9HLDVmkLCsmG9HLDVmkLCsmG5HLTVmkLCsmG5HLTVmkbGtmXBILDVmkLCsmG5HLTVnkbGtmXBILDVmkLCsmG5HLTRlkLCsmXBILjVljq+smXBJLTRlkLCsmXBJLTRlj7CsmG9ILTRlj7CsmG9ILDVmkLCsmG9ILDVmkLCsmXBILDVmkLCsmXBILDVmkLCsmXBILDVmkLCsmXBILDVmkbGtmXBILTVmkbGtmXBILTVmkbGtmXBILTVnkbGtmXBJLTVnkbGtmXBJLjZnkbKumXBJLjZokrKumnFKLjZokrKumnFKLzZokrKumnFKLzZpk7OvmnJKLzZpk7OvmnJKLzZplLOwm3NLLzZqlLOwm3NLMDdqlLOwm3NMMDdqlLOwnHRMMDdrlbSxnHRNMTdrlbSxnHRNMThslrWynXVOMjhslrWynXVOMjhtl7WynXZPMjhtl7aznndPMzhtl7aznndPMzlumLaznndQMzlumLe0n3hQNDlvmbe0n3hRNDlvmbi1oHlRNTpvmbi1oHlRNTpwmrm2oXpSNjpwmrm2oXpSNjpwm7m2oXtTNztxm7q3ontTNztxm7q3o3xUODtxnLu4o3xUODtxnLu4pHxVOTxynby5pX1WOTxynby5pX1WOj1zn726pn5XOj1zn726pn5XOz10oL67p39YPD50oL+8qIBZPD50oL+8qIBZPT91ocC9qYFaPj91ocC9qYFaPj91oc==");
@@ -889,13 +909,14 @@ export default function ChatPage() {
     }
     prevHumanCountRef.current = humanCount;
   }, [contacts]);
+  const contactsSafe = contacts ?? [];
 
   const { data: authUser } = useQuery<{ user?: { id: number; role: string; username?: string; display_name?: string } }>({
     queryKey: ["/api/auth/check"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
 
-  const selectedContact = contacts.find((c) => c.id === selectedId);
+  const selectedContact = contactsSafe.find((c) => c.id === selectedId);
   const isOverdue = (c: ContactWithPreview) => {
     if ((c as ContactWithPreview).last_message_sender_type !== "user" || !c.last_message_at) return false;
     return Date.now() - new Date(c.last_message_at.replace(" ", "T")).getTime() > OVERDUE_MS;
@@ -918,7 +939,7 @@ export default function ChatPage() {
   /** 待我回覆：我的案件 + 輪到我回覆（分配給我 + 最後一則為客戶 + 未結案） */
   const needMyReply = (c: ContactWithPreview) => isMine(c) && needReply(c);
 
-  const filteredContacts = contacts
+  const filteredContacts = contactsSafe
     .filter((c) => (c.display_name ?? "").toLowerCase().includes(searchQuery.toLowerCase()))
     .filter((c) => platformFilter === "all" || c.platform === platformFilter)
     .filter((c) => {
@@ -977,7 +998,7 @@ export default function ChatPage() {
           const res = await fetch(`/api/messages/search?q=${encodeURIComponent(value.trim())}`, { credentials: "include" });
           if (res.ok) {
             const data = await res.json();
-            setMessageSearchResults(data);
+            setMessageSearchResults(Array.isArray(data) ? data : []);
           }
         } catch (_e) {}
         setMessageSearching(false);
@@ -992,7 +1013,7 @@ export default function ChatPage() {
     if (!messageInput.trim() || !selectedId || sending) return;
     const contactId = selectedId;
     const content = messageInput.trim();
-    const platform = contacts.find((c) => c.id === contactId)?.platform ?? "line";
+    const platform = contactsSafe.find((c) => c.id === contactId)?.platform ?? "line";
 
     setMessageInput("");
 
@@ -1033,7 +1054,7 @@ export default function ChatPage() {
     } finally {
       setSending(false);
     }
-  }, [messageInput, selectedId, sending, queryClient, toast, invalidateContactsAndStats, contacts]);
+  }, [messageInput, selectedId, sending, queryClient, toast, invalidateContactsAndStats, contactsSafe]);
 
   const [transferReason, setTransferReason] = useState("");
 
@@ -1276,12 +1297,12 @@ export default function ChatPage() {
     }
   };
 
-  const handleTogglePin = async (contactId: number, currentPinned: number) => {
+  const handleTogglePin = useCallback(async (contactId: number, currentPinned: number) => {
     try {
       await apiRequest("PUT", `/api/contacts/${contactId}/pinned`, { is_pinned: currentPinned ? 0 : 1 });
       invalidateContactsAndStats();
     } catch (_e) { toast({ title: "操作失敗", variant: "destructive" }); }
-  };
+  }, [invalidateContactsAndStats, toast]);
 
   const handleSetAgentFlag = async (contactId: number, flag: "later" | "tracking" | null) => {
     try {
@@ -1302,7 +1323,11 @@ export default function ChatPage() {
   const handleAddTag = async () => {
     if (!newTag.trim() || !selectedContact) return;
     const tag = newTag.trim();
-    const currentTags: string[] = JSON.parse(selectedContact.tags || "[]");
+    let currentTags: string[] = [];
+    try {
+      const v = JSON.parse(selectedContact.tags || "[]");
+      currentTags = Array.isArray(v) ? v : [];
+    } catch { /* ignore */ }
     if (currentTags.includes(tag)) { setNewTag(""); return; }
     try {
       await apiRequest("PUT", `/api/contacts/${selectedId}/tags`, { tags: [...currentTags, tag] });
@@ -1315,7 +1340,11 @@ export default function ChatPage() {
 
   const handleAddTagWithValue = async (tag: string) => {
     if (!selectedContact || !tag.trim()) return;
-    const currentTags: string[] = JSON.parse(selectedContact.tags || "[]");
+    let currentTags: string[] = [];
+    try {
+      const v = JSON.parse(selectedContact.tags || "[]");
+      currentTags = Array.isArray(v) ? v : [];
+    } catch { /* ignore */ }
     if (currentTags.includes(tag.trim())) return;
     try {
       await apiRequest("PUT", `/api/contacts/${selectedId}/tags`, { tags: [...currentTags, tag.trim()] });
@@ -1325,7 +1354,11 @@ export default function ChatPage() {
 
   const handleRemoveTag = async (tagToRemove: string) => {
     if (!selectedContact) return;
-    const currentTags: string[] = JSON.parse(selectedContact.tags || "[]");
+    let currentTags: string[] = [];
+    try {
+      const v = JSON.parse(selectedContact.tags || "[]");
+      currentTags = Array.isArray(v) ? v : [];
+    } catch { /* ignore */ }
     try {
       await apiRequest("PUT", `/api/contacts/${selectedId}/tags`, { tags: currentTags.filter((t) => t !== tagToRemove) });
       invalidateContactsAndStats();
@@ -1339,7 +1372,7 @@ export default function ChatPage() {
       const res = await fetch(`/api/orders/lookup?q=${encodeURIComponent(orderSearch.trim())}`, { credentials: "include" });
       if (!res.ok) throw new Error("Failed");
       const data = await res.json();
-      const orders = data.orders || [];
+      const orders = Array.isArray(data.orders) ? data.orders : [];
       setOrderSearchResults(orders);
       if (selectedId && orders.length > 0) {
         for (const o of orders) {
@@ -1354,8 +1387,8 @@ export default function ChatPage() {
         }
         queryClient.invalidateQueries({ queryKey: ["/api/contacts", selectedId, "linked-orders"] });
       }
-      if (data.error) {
-        toast({ title: data.message || "查詢失敗", variant: "destructive" });
+      if (data?.error) {
+        toast({ title: data?.message || "查詢失敗", variant: "destructive" });
       } else if (orders.length === 0) {
         toast({ title: "未找到相關訂單" });
       }
@@ -1375,11 +1408,11 @@ export default function ChatPage() {
       const res = await fetch(`/api/orders/search?${params}`, { credentials: "include" });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        toast({ title: errData.message || "查詢失敗", variant: "destructive" });
+        toast({ title: errData?.message || "查詢失敗", variant: "destructive" });
         return;
       }
       const data = await res.json();
-      const orders = data.orders || [];
+      const orders = Array.isArray(data?.orders) ? data.orders : [];
       setOrderSearchResults(orders);
       if (selectedId && orders.length > 0) {
         for (const o of orders) {
@@ -1394,10 +1427,10 @@ export default function ChatPage() {
         }
         queryClient.invalidateQueries({ queryKey: ["/api/contacts", selectedId, "linked-orders"] });
       }
-      if (data.error) {
-        toast({ title: data.message || "查詢失敗", variant: "destructive" });
+      if (data?.error) {
+        toast({ title: data?.message || "查詢失敗", variant: "destructive" });
       } else if (orders.length === 0) {
-        toast({ title: data.message || "未找到相關訂單" });
+        toast({ title: data?.message || "未找到相關訂單" });
       } else {
         toast({ title: `找到 ${orders.length} 筆訂單` });
       }
@@ -1413,7 +1446,7 @@ export default function ChatPage() {
         if (data.error) {
           toast({ title: data.message || "無法載入銷售頁", variant: "destructive" });
         }
-        setProductPages(data.pages || []);
+        setProductPages(Array.isArray(data?.pages) ? data.pages : []);
       }
     } catch (_e) {
       toast({ title: "無法載入銷售頁列表", variant: "destructive" });
@@ -1431,11 +1464,11 @@ export default function ChatPage() {
       const res = await fetch(`/api/orders/by-product?${params}`, { credentials: "include" });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        toast({ title: errData.message || "查詢失敗", variant: "destructive" });
+        toast({ title: errData?.message || "查詢失敗", variant: "destructive" });
         return;
       }
       const data = await res.json();
-      const orders = data.orders || [];
+      const orders = Array.isArray(data?.orders) ? data.orders : [];
       setOrderSearchResults(orders);
       if (selectedId && orders.length > 0) {
         for (const o of orders) {
@@ -1510,7 +1543,7 @@ export default function ChatPage() {
       }
       validFiles.push({ file, preview: URL.createObjectURL(file) });
     }
-    if (validFiles.length > 0) setPendingFiles((prev) => [...prev, ...validFiles]);
+    if ((validFiles ?? []).length > 0) setPendingFiles((prev) => [...(prev ?? []), ...validFiles]);
   }, [toast]);
 
   const removePendingFile = useCallback((index: number) => {
@@ -1539,7 +1572,7 @@ export default function ChatPage() {
   }, [addFiles]);
 
   const uploadAndSendFiles = useCallback(async () => {
-    if (pendingFiles.length === 0 || !selectedId || uploading) return;
+    if ((pendingFiles ?? []).length === 0 || !selectedId || uploading) return;
     setUploading(true);
     try {
       for (const pf of pendingFiles) {
@@ -1568,14 +1601,22 @@ export default function ChatPage() {
 
   const handleSendAll = useCallback(async () => {
     if (sending || uploading) return;
-    if (pendingFiles.length > 0) await uploadAndSendFiles();
+    if ((pendingFiles ?? []).length > 0) await uploadAndSendFiles();
     if (messageInput.trim()) await handleSendMessage();
   }, [pendingFiles, messageInput, sending, uploading, uploadAndSendFiles, handleSendMessage]);
 
   const getInitials = (name: string | undefined | null): string => (name != null && String(name).trim() ? String(name).trim().slice(0, 1).toUpperCase() : "?");
   const avatarColors = ["bg-emerald-500", "bg-amber-500", "bg-violet-500", "bg-sky-500", "bg-rose-400", "bg-teal-500", "bg-orange-400"];
   const getAvatarColor = (id: number) => avatarColors[id % avatarColors.length];
-  const contactTags = selectedContact ? JSON.parse(selectedContact.tags || "[]") as string[] : [];
+  const contactTags = (() => {
+    if (!selectedContact) return [];
+    try {
+      const v = JSON.parse(selectedContact.tags || "[]");
+      return Array.isArray(v) ? v : [];
+    } catch {
+      return [];
+    }
+  })();
   const getStatusSemantic = (c: ContactWithPreview): keyof typeof STATUS_SEMANTIC => {
     if (["closed", "resolved"].includes(c.status)) return "muted";
     if (isUrgent(c) || (c as ContactWithPreview).reassign_count > 0) return "danger";
@@ -1677,9 +1718,9 @@ export default function ChatPage() {
         <div className="flex-1 flex flex-col min-h-0">
           {contactsError ? (
             <div className="p-6 text-center text-sm text-red-600">無法載入聯絡人列表，請稍後再試</div>
-          ) : contactsLoading && contacts.length === 0 ? (
+          ) : contactsLoading && (contactsSafe.length === 0) ? (
             <div className="p-6 text-center text-sm text-stone-400">載入中...</div>
-          ) : searchQuery.trim().length >= 2 && (messageSearchResults.length > 0 || messageSearching) ? (
+          ) : searchQuery.trim().length >= 2 && ((messageSearchResults ?? []).length > 0 || messageSearching) ? (
             <div className="p-2">
               {contactListSafe.length > 0 && (
                 <div className="mb-2">
@@ -1702,7 +1743,7 @@ export default function ChatPage() {
                 <div className="px-3 py-1.5 text-[10px] font-semibold text-stone-400 uppercase tracking-wider flex items-center gap-1">
                   <MessageSquare className="w-3 h-3" />對話紀錄 {messageSearching && <Loader2 className="w-3 h-3 animate-spin" />}
                 </div>
-                {messageSearchResults.map((r) => (
+                {(messageSearchResults ?? []).map((r) => (
                   <button key={r.message_id} onClick={() => { setSelectedId(r.contact_id); lastMessageIdRef.current = 0; setSearchQuery(""); setMessageSearchResults([]); }}
                     className="w-full flex items-start gap-2.5 p-2.5 rounded-xl text-left transition-all hover:bg-stone-50"
                     data-testid={`search-message-${r.message_id}`}
@@ -1719,7 +1760,7 @@ export default function ChatPage() {
                     </div>
                   </button>
                 ))}
-                {messageSearchResults.length === 0 && !messageSearching && (
+                {(messageSearchResults ?? []).length === 0 && !messageSearching && (
                   <div className="px-3 py-2 text-xs text-stone-400">無符合的對話紀錄</div>
                 )}
               </div>
@@ -1894,11 +1935,11 @@ export default function ChatPage() {
                     >
                       <Copy className="w-3.5 h-3.5 mr-2" />複製對話代碼
                     </DropdownMenuItem>
-                    {linkedOrderIds.length > 0 && (
+                    {(linkedOrderIds ?? []).length > 0 && (
                       <>
                         <DropdownMenuItem
                           onClick={() => {
-                            const oid = linkedOrderIds[0];
+                            const oid = (linkedOrderIds ?? [])[0];
                             const url = `${window.location.origin}${window.location.pathname}?tab=orders&order=${encodeURIComponent(oid)}`;
                             navigator.clipboard.writeText(url).then(() => toast({ title: "已複製訂單連結" }));
                           }}
@@ -1908,7 +1949,7 @@ export default function ChatPage() {
                         </DropdownMenuItem>
                         <DropdownMenuItem
                           onClick={() => {
-                            navigator.clipboard.writeText(linkedOrderIds[0]).then(() => toast({ title: "已複製訂單編號" }));
+                            navigator.clipboard.writeText((linkedOrderIds ?? [])[0] ?? "").then(() => toast({ title: "已複製訂單編號" }));
                           }}
                           data-testid="menu-copy-order-id"
                         >
@@ -1989,7 +2030,7 @@ export default function ChatPage() {
                   .filter((t) => !contactTags.includes(t))
                   .slice(0, 16)
                   .map((tag) => {
-                    const isCustom = apiTagShortcuts.length === 0 && customTags.includes(tag);
+                    const isCustom = (apiTagShortcuts ?? []).length === 0 && (customTags ?? []).includes(tag);
                     return (
                       <span key={tag} className="inline-flex items-center gap-0.5">
                         <button
@@ -2030,9 +2071,9 @@ export default function ChatPage() {
               )}
               <div ref={chatViewportRef} className="flex-1 bg-[#faf9f5] overflow-y-auto">
                 <div className="p-5">
-                  {messages.length === 0 && messagesLoading ? (
+                  {(messages?.length ?? 0) === 0 && messagesLoading ? (
                     <div className="text-center text-sm text-stone-400 py-8">載入訊息中...</div>
-                  ) : messages.length === 0 ? (
+                  ) : (messages?.length ?? 0) === 0 ? (
                     <div className="text-center text-sm text-stone-400 py-8">尚無對話紀錄</div>
                   ) : (
                     <div className="space-y-4 max-w-2xl mx-auto">
@@ -2041,7 +2082,7 @@ export default function ChatPage() {
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />
                           <span>載入更早的訊息...</span>
                         </div>
-                      ) : !hasMoreOlder && displayMessages.length > 0 ? (
+                      ) : !hasMoreOlder && (displayMessages?.length ?? 0) > 0 ? (
                         <div className="text-center text-xs text-stone-400 py-2">已無更早的訊息</div>
                       ) : null}
                       {messagesFetching && !loadingOlder ? (
@@ -2201,7 +2242,7 @@ export default function ChatPage() {
                           訂單編號
                         </button>
                         <button
-                          onClick={() => { setSearchMode("product"); setOrderSearchResults([]); if (productPages.length === 0) loadProductPages(); }}
+                          onClick={() => { setSearchMode("product"); setOrderSearchResults([]); if ((productPages ?? []).length === 0) loadProductPages(); }}
                           className={`text-[11px] px-2 py-1 rounded-md font-medium transition-colors flex items-center gap-1 ${searchMode === "product" ? "bg-emerald-100 text-emerald-700" : "text-stone-400 hover:text-stone-600"}`}
                           data-testid="btn-search-mode-product"
                         >
@@ -2246,7 +2287,7 @@ export default function ChatPage() {
                               className="text-xs bg-white border-stone-200 h-7 mb-1"
                             />
                             <div className="max-h-[180px] overflow-y-auto border border-stone-200 rounded-md bg-white">
-                              {productPages.length === 0 ? (
+                              {(productPages ?? []).length === 0 ? (
                                 <div className="text-[10px] text-stone-400 p-2 text-center">載入中或無銷售頁...</div>
                               ) : (
                                 productPages
@@ -2267,7 +2308,7 @@ export default function ChatPage() {
                                     </button>
                                   ))
                               )}
-                              {productPages.length > 0 && pageSearchFilter.trim() && productPages.filter(p => {
+                              {(productPages ?? []).length > 0 && pageSearchFilter.trim() && (productPages ?? []).filter(p => {
                                 const q = pageSearchFilter.toLowerCase();
                                 return (p.productName?.toLowerCase().includes(q)) || (p.prefix?.toLowerCase().includes(q));
                               }).length === 0 && (
@@ -2337,10 +2378,10 @@ export default function ChatPage() {
                         </div>
                       )}
 
-                      {orderSearchResults.length > 0 ? (
+                              {(orderSearchResults ?? []).length > 0 ? (
                         <div className="space-y-2">
-                          <p className="text-[10px] text-stone-400">查詢結果：{orderSearchResults.length} 筆</p>
-                          {orderSearchResults.map((order, i) => {
+                          <p className="text-[10px] text-stone-400">查詢結果：{(orderSearchResults ?? []).length} 筆</p>
+                          {(orderSearchResults ?? []).map((order, i) => {
                             const statusInfo = ORDER_STATUS_MAP[order.status] || { label: order.status, color: "bg-stone-50 text-stone-600 border-stone-200" };
                             const parsedProducts = parseProductList(order.product_list);
                             return (
@@ -2456,10 +2497,10 @@ export default function ChatPage() {
             </div>
 
             <div className="border-t border-stone-200 bg-white">
-              {pendingFiles.length > 0 && (
+              {(pendingFiles ?? []).length > 0 && (
                 <div className="px-4 pt-3 pb-1" data-testid="file-preview-area">
                   <div className="flex gap-2 flex-wrap max-w-2xl mx-auto">
-                    {pendingFiles.map((pf, i) => (
+                    {(pendingFiles ?? []).map((pf, i) => (
                       <div key={i} className="relative group" data-testid={`file-preview-${i}`}>
                         <img src={pf.preview} alt={pf.file.name} className="w-16 h-16 object-cover rounded-xl border border-stone-200 shadow-sm" />
                         <button onClick={() => removePendingFile(i)} className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-sm" data-testid={`button-remove-file-${i}`}>
@@ -2516,7 +2557,7 @@ export default function ChatPage() {
                   </DropdownMenu>
                   <Input data-testid="input-message" placeholder="輸入訊息以真人客服身分回覆..." value={messageInput} onChange={(e) => setMessageInput(e.target.value)}
                     onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSendAll(); } }} disabled={sending || uploading} className="bg-stone-50 border-stone-200" />
-                  <Button onClick={handleSendAll} disabled={(!messageInput.trim() && pendingFiles.length === 0) || sending || uploading} data-testid="button-send-message" className="bg-emerald-600 hover:bg-emerald-700 text-white px-4">
+                  <Button onClick={handleSendAll} disabled={(!messageInput.trim() && (pendingFiles ?? []).length === 0) || sending || uploading} data-testid="button-send-message" className="bg-emerald-600 hover:bg-emerald-700 text-white px-4">
                     {uploading ? <><Loader2 className="w-4 h-4 mr-1.5 animate-spin" />上傳中</> : <><Send className="w-4 h-4 mr-1.5" />傳送</>}
                   </Button>
                 </div>
