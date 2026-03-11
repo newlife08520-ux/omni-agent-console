@@ -2054,7 +2054,7 @@ export async function registerRoutes(
     return res.json(brand);
   });
 
-  app.post("/api/brands", authMiddleware, superAdminOnly, async (req, res) => {
+  app.post("/api/brands", authMiddleware, managerOrAbove, async (req, res) => {
     const { name, slug, logo_url, description, system_prompt, superlanding_merchant_no, superlanding_access_key } = req.body;
     if (!name || !slug) return res.status(400).json({ message: "品牌名稱與代碼為必填" });
     try {
@@ -2068,7 +2068,7 @@ export async function registerRoutes(
     }
   });
 
-  app.put("/api/brands/:id", authMiddleware, superAdminOnly, async (req, res) => {
+  app.put("/api/brands/:id", authMiddleware, managerOrAbove, async (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const {
@@ -2091,7 +2091,7 @@ export async function registerRoutes(
     return res.json({ success: true });
   });
 
-  app.delete("/api/brands/:id", authMiddleware, superAdminOnly, async (req, res) => {
+  app.delete("/api/brands/:id", authMiddleware, managerOrAbove, async (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) return res.status(400).json({ message: "無效的 ID" });
     if (!(await storage.deleteBrand(id))) return res.status(404).json({ message: "品牌不存在" });
@@ -2119,7 +2119,7 @@ export async function registerRoutes(
     return res.json(channels);
   });
 
-  app.post("/api/brands/:id/channels", authMiddleware, superAdminOnly, async (req, res) => {
+  app.post("/api/brands/:id/channels", authMiddleware, managerOrAbove, async (req, res) => {
     const brandId = parseIdParam(req.params.id);
     if (brandId === null) return res.status(400).json({ message: "無效的 ID" });
     const { platform, channel_name, bot_id, access_token, channel_secret } = req.body;
@@ -2129,7 +2129,7 @@ export async function registerRoutes(
     return res.json({ success: true, channel });
   });
 
-  app.put("/api/channels/:id", authMiddleware, superAdminOnly, async (req, res) => {
+  app.put("/api/channels/:id", authMiddleware, managerOrAbove, async (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const { platform, channel_name, bot_id, access_token, channel_secret, is_active, is_ai_enabled, brand_id } = req.body;
@@ -2146,14 +2146,14 @@ export async function registerRoutes(
     return res.json({ success: true });
   });
 
-  app.delete("/api/channels/:id", authMiddleware, superAdminOnly, async (req, res) => {
+  app.delete("/api/channels/:id", authMiddleware, managerOrAbove, async (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) return res.status(400).json({ message: "無效的 ID" });
     if (!(await storage.deleteChannel(id))) return res.status(404).json({ message: "頻道不存在" });
     return res.json({ success: true });
   });
 
-  app.post("/api/brands/:id/test-superlanding", authMiddleware, superAdminOnly, async (req, res) => {
+  app.post("/api/brands/:id/test-superlanding", authMiddleware, managerOrAbove, async (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const brand = storage.getBrand(id);
@@ -2179,7 +2179,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/brands/:id/test-shopline", authMiddleware, superAdminOnly, async (req, res) => {
+  app.post("/api/brands/:id/test-shopline", authMiddleware, managerOrAbove, async (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const brand = storage.getBrand(id);
@@ -2320,7 +2320,14 @@ export async function registerRoutes(
           return res.json({ success: true, message: `Facebook 連線成功！粉專: ${pageInfo.name || "OK"} (ID: ${pageId})`, botId: pageId });
         }
         const errBody = await fbRes.text();
-        return res.json({ success: false, message: `Facebook 驗證失敗 (${fbRes.status}): ${errBody}` });
+        let userMessage = `Facebook 驗證失敗 (${fbRes.status}): ${errBody}`;
+        try {
+          const errJson = JSON.parse(errBody) as { error?: { code?: number; message?: string } };
+          if (errJson?.error?.code === 100 && /permission|pages_read_engagement|Page Public|review/i.test(errJson.error.message || "")) {
+            userMessage = "Facebook 應用程式權限不足：此 Token 所屬的 Facebook App 尚未取得所需權限（例如 pages_read_engagement）或尚未通過 App 審核。請至 Facebook 開發者後台 → 應用程式審查，申請「粉絲專頁公開內容存取」或相關權限，或確認 App 已從「開發中」切換為「上線」。詳見：https://developers.facebook.com/docs/apps/review";
+          }
+        } catch (_e) { /* 非 JSON 則用原訊息 */ }
+        return res.json({ success: false, message: userMessage });
       } catch (err: any) {
         return res.json({ success: false, message: `連線失敗: ${err.message}` });
       }

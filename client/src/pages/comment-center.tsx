@@ -1318,6 +1318,15 @@ export default function CommentCenterPage() {
                   )}
                 </div>
               )}
+              {health.today_total === 0 && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                  <p className="font-medium mb-1">若粉專貼文底下留言沒有出現在收件匣</p>
+                  <p className="text-amber-700 text-xs">請到 <strong>Meta 開發者後台</strong>（developers.facebook.com）→ 您的應用程式 → 產品「Facebook 登入」或「網頁」→ <strong>Webhook</strong>：<br />
+                  ① 回呼網址填 <code className="bg-amber-100 px-1 rounded">https://您的網域/api/webhook/facebook</code><br />
+                  ② 驗證權杖與系統設定中的一致（或環境變數 FB_VERIFY_TOKEN）<br />
+                  ③ 為要收留言的<strong>粉專</strong>訂閱 <strong>feed</strong>（貼文與留言）。設定完成後在粉專貼文留一則言測試。</p>
+                </div>
+              )}
             </>
           )}
           {commentSummary && (

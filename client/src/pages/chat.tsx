@@ -773,6 +773,19 @@ export default function ChatPage() {
     enabled: !!selectedId,
   });
 
+  /** 取得第一筆已綁定訂單詳情，用於預填客戶手機（訂單查詢） */
+  const firstLinkedOrderId = (linkedOrderIds?.length ?? 0) > 0 ? linkedOrderIds![0] : null;
+  const { data: firstLinkedOrderDetail } = useQuery<{ orders?: OrderInfo[] }>({
+    queryKey: ["/api/orders/lookup", selectedId ?? 0, firstLinkedOrderId ?? ""],
+    queryFn: async () => {
+      if (!firstLinkedOrderId) return {};
+      const res = await fetch(`/api/orders/lookup?q=${encodeURIComponent(firstLinkedOrderId)}`, { credentials: "include" });
+      if (!res.ok) return {};
+      return res.json();
+    },
+    enabled: rightTab === "orders" && !!selectedId && !!firstLinkedOrderId,
+  });
+
   const orderSearchResultsSafe = orderSearchResults ?? [];
   const orderIdsForLinked = orderSearchResultsSafe.map((o) => o.global_order_id);
   const { data: linkedContactsMap = {} } = useQuery<Record<string, number | null>>({
@@ -785,6 +798,18 @@ export default function ChatPage() {
     },
     enabled: orderIdsForLinked.length > 0,
   });
+
+  /** 從已綁定訂單帶入手機：僅在欄位為空時預填，且同一聯絡人只填一次，避免覆寫使用者輸入 */
+  const orderPrefillKeyRef = useRef<string>("");
+  useEffect(() => {
+    const phone = firstLinkedOrderDetail?.orders?.[0]?.buyer_phone?.trim();
+    if (!phone || !selectedId) return;
+    const key = `${selectedId}-${firstLinkedOrderId}`;
+    if (orderPrefillKeyRef.current === key) return;
+    orderPrefillKeyRef.current = key;
+    setProductPhone((prev) => (prev.trim() === "" ? phone : prev));
+    setAdvSearchQuery((prev) => (prev.trim() === "" ? phone : prev));
+  }, [firstLinkedOrderDetail, firstLinkedOrderId, selectedId]);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     requestAnimationFrame(() => {
@@ -1440,7 +1465,7 @@ export default function ChatPage() {
     finally { setOrderSearching(false); }
   };
 
-  const loadProductPages = async () => {
+  const loadProductPages = useCallback(async () => {
     try {
       const res = await fetch("/api/orders/pages", { credentials: "include" });
       if (res.ok) {
@@ -1453,7 +1478,20 @@ export default function ChatPage() {
     } catch (_e) {
       toast({ title: "無法載入銷售頁列表", variant: "destructive" });
     }
-  };
+  }, [toast]);
+
+  /** 訂單查詢 → 商品+電話：自動載入銷售頁（一頁商店連線後即可看到列表，不需手動輸入頁面名稱） */
+  const productPagesLoadTriggeredRef = useRef(false);
+  useEffect(() => {
+    if (rightTab !== "orders" || searchMode !== "product") {
+      productPagesLoadTriggeredRef.current = false;
+      return;
+    }
+    if (productPagesLoadTriggeredRef.current) return;
+    if ((productPages?.length ?? 0) > 0) return;
+    productPagesLoadTriggeredRef.current = true;
+    loadProductPages();
+  }, [rightTab, searchMode, productPages?.length, loadProductPages]);
 
   const handleProductSearch = async () => {
     if (!selectedPageId || !productPhone.trim()) return;
@@ -2324,6 +2362,9 @@ export default function ChatPage() {
                               value={productPhone} onChange={(e) => setProductPhone(e.target.value)}
                               onKeyDown={(e) => { if (e.key === "Enter") handleProductSearch(); }}
                               className="text-xs bg-white border-stone-200 h-8" />
+                            {(linkedOrderIds?.length ?? 0) > 0 && (
+                              <p className="text-[10px] text-emerald-600 mt-0.5">已從此聯絡人綁定訂單帶入手機，可直接查詢</p>
+                            )}
                           </div>
                           <Button size="sm" onClick={handleProductSearch}
                             disabled={orderSearching || !selectedPageId || !productPhone.trim()}

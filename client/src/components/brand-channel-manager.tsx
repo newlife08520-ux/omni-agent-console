@@ -221,7 +221,11 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
     setBrandSaving(true);
     try {
       if (editingBrand) {
-        await apiRequest("PUT", `/api/brands/${editingBrand.id}`, brandForm);
+        const payload = { ...brandForm };
+        // 編輯時：金鑰欄位留空表示「不變更」，不送出以免覆蓋既有設定
+        if (payload.superlanding_access_key === "") delete (payload as Record<string, unknown>).superlanding_access_key;
+        if (payload.shopline_api_token === "") delete (payload as Record<string, unknown>).shopline_api_token;
+        await apiRequest("PUT", `/api/brands/${editingBrand.id}`, payload);
       } else {
         const slug = brandForm.slug || brandForm.name.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9\-\u4e00-\u9fff]/g, "");
         await apiRequest("POST", "/api/brands", { ...brandForm, slug });
@@ -229,8 +233,24 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
       queryClient.invalidateQueries({ queryKey: ["/api/brands"] });
       toast({ title: editingBrand ? "品牌已更新" : "品牌已建立" });
       setShowBrandDialog(false);
-    } catch (_e) {
-      toast({ title: "操作失敗", variant: "destructive" });
+    } catch (e: unknown) {
+      const msg = typeof e === "object" && e !== null && "message" in e && typeof (e as Error).message === "string"
+        ? (e as Error).message
+        : "";
+      let title = "操作失敗";
+      let description: string | undefined;
+      const jsonMatch = msg.match(/^\d+:\s*(\{[\s\S]*\})$/);
+      if (jsonMatch) {
+        try {
+          const body = JSON.parse(jsonMatch[1]) as { message?: string };
+          if (body.message) title = body.message;
+        } catch {
+          if (msg) description = msg.slice(0, 120);
+        }
+      } else if (msg) {
+        description = msg.startsWith("4") || msg.startsWith("5") ? msg.slice(0, 120) : undefined;
+      }
+      toast({ title, description, variant: "destructive" });
     } finally {
       setBrandSaving(false);
     }
