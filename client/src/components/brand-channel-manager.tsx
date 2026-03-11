@@ -82,6 +82,7 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
   const [channelForm, setChannelForm] = useState({ platform: "line" as ChannelPlatform, channel_name: "", bot_id: "", access_token: "", channel_secret: "", is_ai_enabled: 0 });
   const [channelSaving, setChannelSaving] = useState(false);
   const [testingChannel, setTestingChannel] = useState<number | null>(null);
+  const [subscribingFeedChannelId, setSubscribingFeedChannelId] = useState<number | null>(null);
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
   const [healthStatus, setHealthStatus] = useState<Record<string, HealthEntry>>({});
   const [healthLoading, setHealthLoading] = useState(false);
@@ -335,6 +336,23 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
     }
   };
 
+  const handleSubscribeFeed = async (id: number) => {
+    setSubscribingFeedChannelId(id);
+    try {
+      const res = await fetch(`/api/channels/${id}/subscribe-feed`, { method: "POST", credentials: "include" });
+      const data = await res.json();
+      if (data.success) {
+        toast({ title: "訂閱成功", description: data.message });
+      } else {
+        toast({ title: "訂閱失敗", description: data.message, variant: "destructive" });
+      }
+    } catch (_e) {
+      toast({ title: "訂閱失敗", variant: "destructive" });
+    } finally {
+      setSubscribingFeedChannelId(null);
+    }
+  };
+
   const maskValue = (value: string) => {
     if (!value) return "";
     if (value.length <= 8) return "*".repeat(value.length);
@@ -481,6 +499,11 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
                       {ch.access_token && (
                         <Button size="sm" variant="secondary" onClick={() => handleTestChannel(ch.id)} disabled={testingChannel === ch.id} className="text-xs h-7 bg-stone-100 hover:bg-stone-200" data-testid={`button-test-channel-${ch.id}`}>
                           {testingChannel === ch.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <><Plug className="w-3 h-3 mr-1" />測試</>}
+                        </Button>
+                      )}
+                      {ch.platform === "messenger" && ch.bot_id && ch.access_token && (
+                        <Button size="sm" variant="outline" onClick={() => handleSubscribeFeed(ch.id)} disabled={subscribingFeedChannelId === ch.id} className="text-xs h-7 border-amber-200 text-amber-700 hover:bg-amber-50" data-testid={`button-subscribe-feed-${ch.id}`} title="讓貼文底下留言送進留言收件匣">
+                          {subscribingFeedChannelId === ch.id ? <Loader2 className="w-3 h-3 animate-spin" /> : "訂閱留言"}
                         </Button>
                       )}
                       <Button size="icon" variant="ghost" onClick={() => openEditChannel(ch)} className="h-7 w-7 text-stone-400 hover:text-emerald-600" data-testid={`button-edit-channel-${ch.id}`}>

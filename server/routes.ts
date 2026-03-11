@@ -308,6 +308,9 @@ E. 轉人工時的表達方式
 F. 禁止事項
 你不可以：一看到退貨就直接答應退款；一看到退款就直接轉人工；一看到久候就直接丟真人；一看到缺貨就直接 needs_human；還沒理解問題就直接給表單；還沒收過一次必要資訊就直接推給真人；只因顧客提到售後主題就呼叫 transfer_to_human；因單一字詞（退貨、退款、客服、缺貨、取消、爛）直接判定真人。
 
+F2. 退貨／退款第一句禁止「區分官方／其他平台」
+當顧客只說想退貨、退款、換貨、取消時，不可第一句就說「若您是透過官方通路下單…若是其他平台購買建議向該平台客服確認」或任何讓顧客覺得被推給別家的說法。顧客會認為自己就是在你們家買的，一開口就區分通路會造成不滿。正確做法：先安撫、先理解原因（是等待太久、商品問題、還是其他），再依退換貨三階段處理。只有在「顧客已提供訂單編號或商品+手機且你已用工具查詢，結果確實查無此筆」時，才可禮貌說明可能為其他通路訂單並建議轉真人協助，且不得在顧客尚未提供任何訂單資訊前就提其他平台。
+
 G. 最終判斷原則
 提到退貨，不等於需要人工。提到退款、取消、久候、缺貨、查單，不等於需要人工。先由 AI 接住、理解、處理第一輪。只有在明確要求真人、高風險、人工權限、AI 已無法推進、或顧客明確堅持時，才轉人工。
 
@@ -2335,6 +2338,35 @@ export async function registerRoutes(
     return res.json({ success: false, message: `暫不支援 ${channel.platform} 頻道測試` });
   });
 
+  /** 為 FB 粉專訂閱 feed（貼文與留言），留言才會送進 Webhook；需 Page Access Token 具 pages_manage_metadata */
+  app.post("/api/channels/:id/subscribe-feed", authMiddleware, managerOrAbove, async (req, res) => {
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
+    const channel = storage.getChannel(id);
+    if (!channel) return res.status(404).json({ message: "頻道不存在" });
+    if (channel.platform !== "messenger") return res.status(400).json({ message: "僅支援 Facebook Messenger 渠道" });
+    const pageId = (channel.bot_id || "").trim();
+    const token = (channel.access_token || "").trim();
+    if (!pageId || !token) return res.status(400).json({ message: "請先設定 Bot ID (Page ID) 與 Page Access Token" });
+    try {
+      const url = `https://graph.facebook.com/v19.0/${encodeURIComponent(pageId)}/subscribed_apps?subscribed_fields=feed,messages&access_token=${encodeURIComponent(token)}`;
+      const subRes = await fetch(url, { method: "POST" });
+      const bodyText = await subRes.text();
+      if (subRes.ok) {
+        const data = JSON.parse(bodyText || "{}") as { success?: boolean };
+        if (data.success !== false) {
+          return res.json({ success: true, message: "已為此粉專訂閱 feed（貼文與留言），貼文底下留言應會送進留言收件匣。請到粉專貼文留一則言測試。" });
+        }
+      }
+      const errMsg = bodyText.slice(0, 400);
+      console.log("[FB] subscribe-feed failed:", subRes.status, errMsg);
+      return res.json({ success: false, message: `訂閱失敗 (${subRes.status})：${errMsg || subRes.statusText}` });
+    } catch (e: any) {
+      console.error("[FB] subscribe-feed error:", e?.message);
+      return res.status(500).json({ message: e?.message || "訂閱失敗" });
+    }
+  });
+
   /** 緊急案件判定：任一符合即為緊急（UI 顯示用，內部仍可用 status/case_priority） */
   const URGENT_TAGS = ["客訴", "退款", "轉主管", "緊急案件"];
   const OVERDUE_MS = 60 * 60 * 1000;
@@ -4076,6 +4108,7 @@ export async function registerRoutes(
   app.post("/api/webhook/facebook", (req, res) => {
     const body = req.body;
     if (body.object !== "page") {
+      console.log("[FB Webhook] 404 原因：非 page 事件，收到 object=", body?.object ?? "(空)", "body 鍵:", body && typeof body === "object" ? Object.keys(body) : typeof body);
       return res.status(404).json({ message: "Not a page event" });
     }
 
@@ -4110,20 +4143,31 @@ export async function registerRoutes(
       ? humanKeywordsSetting2.split(",").map((k: string) => k.trim()).filter(Boolean)
       : ["真人客服", "轉人工", "找主管", "不要機器人", "人工客服", "真人處理"];
 
-    async function fetchAndUpdateFBProfile(psid: string, contactId: number, pageAccessToken: string | null) {
+    async function fetchAndUpdateFBProfile(psid: string, contactId: number, pageAccessToken: string | null, brandId?: number | null) {
       if (!pageAccessToken || !psid) return;
       try {
-        const url = `https://graph.facebook.com/v19.0/${encodeURIComponent(psid)}?fields=first_name,last_name,profile_pic&access_token=${encodeURIComponent(pageAccessToken)}`;
+        const url = `https://graph.facebook.com/v19.0/${encodeURIComponent(psid)}?fields=first_name,last_name,name,picture.type(large)&access_token=${encodeURIComponent(pageAccessToken)}`;
         const profileRes = await fetch(url);
+        const bodyText = await profileRes.text();
         if (profileRes.ok) {
-          const profile = await profileRes.json() as { first_name?: string; last_name?: string; profile_pic?: string };
-          const fullName = [profile.first_name, profile.last_name].filter(Boolean).join(" ").trim() || undefined;
-          if (fullName || profile.profile_pic) {
-            storage.updateContactProfile(contactId, fullName || "FB用戶", profile.profile_pic || null);
-            console.log("[FB Webhook] Profile updated:", fullName || "(name unchanged)", profile.profile_pic ? "(has avatar)" : "(no avatar)");
+          const profile = JSON.parse(bodyText) as {
+            first_name?: string;
+            last_name?: string;
+            name?: string;
+            picture?: { data?: { url?: string } };
+          };
+          const fullName = [profile.first_name, profile.last_name].filter(Boolean).join(" ").trim()
+            || (typeof profile.name === "string" ? profile.name.trim() : undefined);
+          const avatarUrl = profile.picture?.data?.url || null;
+          if (fullName || avatarUrl) {
+            storage.updateContactProfile(contactId, fullName || "FB用戶", avatarUrl);
+            broadcastSSE("contacts_updated", { brand_id: brandId ?? undefined });
+            console.log("[FB Webhook] Profile updated:", fullName || "(name unchanged)", avatarUrl ? "(has avatar)" : "(no avatar)");
+          } else {
+            console.log("[FB Webhook] Profile response had no name/picture:", bodyText.slice(0, 200));
           }
         } else {
-          console.log("[FB Webhook] Profile fetch failed:", profileRes.status);
+          console.log("[FB Webhook] Profile fetch failed:", profileRes.status, bodyText.slice(0, 300));
         }
       } catch (err: any) {
         console.log("[FB Webhook] Profile fetch error:", err?.message);
@@ -4160,7 +4204,7 @@ export async function registerRoutes(
             const displayName = `FB用戶_${senderId.substring(0, 6)}`;
             const contact = storage.getOrCreateContact("messenger", senderId, displayName, matchedBrandId, matchedChannel?.id);
             if (matchedChannel?.access_token && (contact.display_name === displayName || (contact.display_name || "").startsWith("FB用戶_"))) {
-              fetchAndUpdateFBProfile(senderId, contact.id, matchedChannel.access_token).catch(() => {});
+              fetchAndUpdateFBProfile(senderId, contact.id, matchedChannel.access_token, matchedBrandId).catch(() => {});
             }
 
             if (messagingEvent.message.attachments) {
@@ -4247,8 +4291,8 @@ export async function registerRoutes(
             const text = messagingEvent.postback.title || messagingEvent.postback.payload || "[Postback]";
             const displayName = `FB用戶_${senderId.substring(0, 6)}`;
             const contact = storage.getOrCreateContact("messenger", senderId, displayName, matchedBrandId, matchedChannel?.id);
-            if (contact.display_name === displayName || !contact.avatar_url) {
-              fetchAndUpdateFBProfile(senderId, contact.id, matchedChannel?.access_token ?? null).catch(() => {});
+            if (matchedChannel?.access_token && (contact.display_name === displayName || (contact.display_name || "").startsWith("FB用戶_"))) {
+              fetchAndUpdateFBProfile(senderId, contact.id, matchedChannel.access_token, matchedBrandId).catch(() => {});
             }
             const pbMsg = storage.createMessage(contact.id, "messenger", "user", text);
             broadcastSSE("new_message", { contact_id: contact.id, message: pbMsg, brand_id: matchedBrandId || contact.brand_id });

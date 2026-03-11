@@ -256,8 +256,10 @@ export class SQLiteStorage implements IStorage {
   async updateBrand(id: number, data: Partial<Omit<Brand, "id" | "created_at">>): Promise<boolean> {
     const client = getRedisClient();
     if (client) {
-      const ok = await redisBC.updateBrand(client, id, data);
-      if (ok) {
+      let ok = await redisBC.updateBrand(client, id, data);
+      if (!ok) {
+        const brand = this.getBrand(id);
+        if (!brand) return false;
         const fields: string[] = [];
         const values: any[] = [];
         for (const [key, val] of Object.entries(data)) {
@@ -268,8 +270,21 @@ export class SQLiteStorage implements IStorage {
           values.push(id);
           try { db.prepare(`UPDATE brands SET ${fields.join(", ")} WHERE id = ?`).run(...values); } catch (_e) { /* ignore */ }
         }
+        const fullBrand: Brand = { ...brand, ...data };
+        await redisBC.syncBrandToRedis(client, fullBrand);
+        return true;
       }
-      return ok;
+      const fields: string[] = [];
+      const values: any[] = [];
+      for (const [key, val] of Object.entries(data)) {
+        fields.push(`${key} = ?`);
+        values.push(val);
+      }
+      if (fields.length > 0) {
+        values.push(id);
+        try { db.prepare(`UPDATE brands SET ${fields.join(", ")} WHERE id = ?`).run(...values); } catch (_e) { /* ignore */ }
+      }
+      return true;
     }
     const fields: string[] = [];
     const values: any[] = [];

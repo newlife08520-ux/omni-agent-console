@@ -83,6 +83,19 @@ export async function updateBrand(client: RedisClient, id: number, data: Partial
   return true;
 }
 
+/** 將單一品牌同步進 Redis（品牌僅在 SQLite 存在時，更新後可寫入 Redis 以保持一致） */
+export async function syncBrandToRedis(client: RedisClient, brand: Brand): Promise<void> {
+  const brands = await getBrands(client);
+  const idx = brands.findIndex((b) => b.id === brand.id);
+  if (idx >= 0) {
+    brands[idx] = { ...brand };
+  } else {
+    brands.push({ ...brand });
+  }
+  brands.sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""));
+  await client.set(KEY_BRANDS, JSON.stringify(brands));
+}
+
 export async function deleteBrand(client: RedisClient, id: number): Promise<boolean> {
   const [brands, channels] = await Promise.all([getBrands(client), getChannels(client)]);
   const newBrands = brands.filter((b) => b.id !== id);
