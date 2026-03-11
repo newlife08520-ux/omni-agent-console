@@ -2383,7 +2383,7 @@ export async function registerRoutes(
     const assignedToUserId = assignedToMe && userId ? userId : undefined;
     const agentIdForFlags = userId ?? undefined;
     const limitParam = req.query.limit != null ? parseInt(String(req.query.limit), 10) : undefined;
-    const limit = (limitParam > 0 && limitParam <= 2000) ? limitParam : 500;
+    const limit = (limitParam > 0 && limitParam <= 500) ? limitParam : 100;
     let contacts = storage.getContacts(brandId, assignedToUserId, agentIdForFlags, limit);
     const afterGet = Date.now();
     if (needReplyFirst) {
