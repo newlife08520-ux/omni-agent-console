@@ -155,6 +155,22 @@ export interface Contact {
   assignment_reason: string | null;
   /** SLA 首次回覆截止時間（可選） */
   response_sla_deadline_at: string | null;
+  /** 流程用：解決狀態 open | awaiting_customer | awaiting_human | resolved | closed */
+  resolution_status?: string | null;
+  /** 流程用：正在等客戶提供什麼 */
+  waiting_for_customer?: string | null;
+  /** 轉人工原因代碼 */
+  human_reason?: string | null;
+  /** 退換貨階段 0|1|2|3 */
+  return_stage?: number | null;
+  /** 已發送評價邀請時間 */
+  rating_invited_at?: string | null;
+  /** 結案原因（idle_24h / manual / 等） */
+  close_reason?: string | null;
+  /** QA 規則分數 */
+  qa_score?: number | null;
+  /** QA 扣分原因摘要 */
+  qa_score_reason?: string | null;
 }
 
 

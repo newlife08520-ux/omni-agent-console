@@ -151,6 +151,7 @@ export function initDatabase() {
   seedMockData();
   migrateRemoveOldHandoffAndReturnRules();
   migrateTightenHumanTransferKeywords();
+  migrateConversationStateFields();
 }
 
 /** 常用查詢欄位索引，避免資料量成長後掃全表 */
@@ -180,6 +181,27 @@ function migrateTightenHumanTransferKeywords() {
   if (!hasForbidden) return;
   db.prepare("UPDATE settings SET value = ? WHERE key = 'human_transfer_keywords'").run(HUMAN_TRANSFER_KEYWORDS_NEW);
   console.log("[DB] 已將 human_transfer_keywords 收緊為新短語清單（移除過寬字詞）");
+}
+
+/** 新增對話狀態／結案／評價／QA 欄位（先判斷再說話、24h 結案、評價條件） */
+function migrateConversationStateFields() {
+  const contactCols = db.prepare("PRAGMA table_info(contacts)").all() as { name: string }[];
+  const contactColNames = contactCols.map((c) => c.name);
+  const newCols: [string, string][] = [
+    ["resolution_status", "TEXT"],
+    ["waiting_for_customer", "TEXT"],
+    ["human_reason", "TEXT"],
+    ["return_stage", "INTEGER"],
+    ["rating_invited_at", "TEXT"],
+    ["close_reason", "TEXT"],
+    ["qa_score", "INTEGER"],
+    ["qa_score_reason", "TEXT"],
+  ];
+  for (const [col, typ] of newCols) {
+    if (!contactColNames.includes(col)) {
+      db.exec(`ALTER TABLE contacts ADD COLUMN ${col} ${typ}`);
+    }
+  }
 }
 
 /** 移除 system_prompt 中舊版「售後服務 SOP 與退換貨防守機制」整段，改由 runtime 注入新版轉人工規則 */

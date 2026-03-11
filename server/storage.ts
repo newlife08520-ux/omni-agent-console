@@ -119,7 +119,8 @@ export interface IStorage {
   updateContactIntentLevel(contactId: number, level: string | null): void;
   updateContactOrderNumberType(contactId: number, type: string | null): void;
   updateContactCasePriority(contactId: number, priority: number | null): void;
-  updateContactClosed(contactId: number, closedByAgentId: number): void;
+  updateContactClosed(contactId: number, closedByAgentId: number, closeReason?: string | null): void;
+  updateContactConversationFields(contactId: number, fields: { resolution_status?: string | null; waiting_for_customer?: string | null; human_reason?: string | null; return_stage?: number | null; rating_invited_at?: string | null; close_reason?: string | null; qa_score?: number | null; qa_score_reason?: string | null }): void;
   getUnreadHumanCaseCount(): number;
   markCaseNotificationsRead(contactId?: number): void;
   createCaseNotification(contactId: number, channel?: string): void;
@@ -1122,9 +1123,40 @@ export class SQLiteStorage implements IStorage {
     db.prepare("UPDATE contacts SET case_priority = ? WHERE id = ?").run(priority, contactId);
   }
 
-  updateContactClosed(contactId: number, closedByAgentId: number): void {
+  updateContactClosed(contactId: number, closedByAgentId: number, closeReason?: string | null): void {
     const now = new Date().toISOString().replace("T", " ").substring(0, 19);
-    db.prepare("UPDATE contacts SET closed_at = ?, closed_by_agent_id = ?, status = 'closed' WHERE id = ?").run(now, closedByAgentId, contactId);
+    const reason = closeReason ?? null;
+    try {
+      db.prepare("UPDATE contacts SET closed_at = ?, closed_by_agent_id = ?, status = 'closed', close_reason = ? WHERE id = ?").run(now, closedByAgentId, reason, contactId);
+    } catch (_e) {
+      db.prepare("UPDATE contacts SET closed_at = ?, closed_by_agent_id = ?, status = 'closed' WHERE id = ?").run(now, closedByAgentId, contactId);
+    }
+  }
+
+  /** 更新對話狀態／結案／評價／QA 等欄位（僅更新傳入的鍵） */
+  updateContactConversationFields(contactId: number, fields: {
+    resolution_status?: string | null;
+    waiting_for_customer?: string | null;
+    human_reason?: string | null;
+    return_stage?: number | null;
+    rating_invited_at?: string | null;
+    close_reason?: string | null;
+    qa_score?: number | null;
+    qa_score_reason?: string | null;
+  }): void {
+    const allowed = ["resolution_status", "waiting_for_customer", "human_reason", "return_stage", "rating_invited_at", "close_reason", "qa_score", "qa_score_reason"];
+    const setParts: string[] = [];
+    const values: any[] = [];
+    for (const [k, v] of Object.entries(fields)) {
+      if (!allowed.includes(k)) continue;
+      setParts.push(`${k} = ?`);
+      values.push(v ?? null);
+    }
+    if (setParts.length === 0) return;
+    values.push(contactId);
+    try {
+      db.prepare(`UPDATE contacts SET ${setParts.join(", ")} WHERE id = ?`).run(...values);
+    } catch (_e) { /* 欄位可能尚未 migrate */ }
   }
 
   getUnreadHumanCaseCount(): number {

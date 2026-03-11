@@ -17,6 +17,9 @@ import {
 } from "./safe-after-sale-classifier";
 import { runAutoExecution, computeMainStatus } from "./meta-comment-auto-execute";
 import * as riskRules from "./meta-comment-risk-rules";
+import { resolveConversationState } from "./conversation-state-resolver";
+import { buildReplyPlan, shouldNotLeadWithOrderLookup } from "./reply-plan-builder";
+import { isRatingEligible } from "./rating-eligibility";
 import db from "./db";
 import { fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, fetchPages, lookupOrdersByPageAndPhone, ensurePagesCacheLoaded, refreshPagesCache, getCachedPages, getCachedPagesAge, buildProductCatalogPrompt } from "./superlanding";
 import type { SuperLandingConfig } from "./superlanding";
@@ -2576,7 +2579,7 @@ export async function registerRoutes(
 
     if (status === "resolved" || status === "closed") {
       const contactForRating = storage.getContact(id);
-      if (contactForRating) {
+      if (contactForRating && isRatingEligible({ contact: contactForRating, state: null })) {
         let ratingSent = false;
         if (contactForRating.needs_human === 1 && contactForRating.cs_rating == null) {
           if (contactForRating.platform === "line") {
@@ -2585,6 +2588,8 @@ export async function registerRoutes(
               try {
                 await sendRatingFlexMessage(contactForRating, "human");
                 storage.createMessage(id, contactForRating.platform, "system", "(系統提示) 已自動發送真人客服滿意度調查卡片給客戶");
+                const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+                storage.updateContactConversationFields(id, { rating_invited_at: now });
                 ratingSent = true;
               } catch (err) {
                 console.error("Auto rating (human) send failed:", err);
@@ -2599,6 +2604,8 @@ export async function registerRoutes(
               try {
                 await sendRatingFlexMessage(contactForRating, "ai");
                 storage.createMessage(id, contactForRating.platform, "system", "(系統提示) 已自動發送 AI 客服滿意度調查卡片給客戶");
+                const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+                storage.updateContactConversationFields(id, { rating_invited_at: now });
               } catch (err) {
                 console.error("Auto rating (ai) send failed:", err);
               }
@@ -3434,10 +3441,69 @@ export async function registerRoutes(
       const priority = computeCasePriority(intentLevel, [...currentTags, ...suggested]);
       storage.updateContactCasePriority(contact.id, priority);
 
-      const systemPrompt = await getEnrichedSystemPrompt(contact.brand_id || brandId || undefined);
+      const recentMessages = storage.getMessages(contact.id).slice(-20);
+      const recentAiMessages = recentMessages.filter((m) => m.sender_type === "ai").map((m) => m.content || "");
+      const lastUserMsg = recentMessages.filter((m) => m.sender_type === "user").pop();
+      const lastAiMsg = recentMessages.filter((m) => m.sender_type === "ai").pop();
+      const lastMessageAtBySender = lastUserMsg && lastAiMsg
+        ? { user: lastUserMsg.created_at, ai: lastAiMsg.created_at }
+        : undefined;
+      const freshContact = storage.getContact(contact.id) || contact;
+      const state = resolveConversationState({
+        contact: freshContact,
+        userMessage,
+        recentUserMessages: recentUserMsgs,
+        recentAiMessages,
+        lastMessageAtBySender,
+      });
+      let returnFormUrl = "https://www.lovethelife.shop/returns";
+      if (effectiveBrandId) {
+        const brandData = storage.getBrand(effectiveBrandId);
+        if (brandData?.return_form_url) returnFormUrl = brandData.return_form_url;
+      }
+      const isReturnFirstRound = (freshContact as any).return_stage == null || (freshContact as any).return_stage === 0;
+      const plan = buildReplyPlan({ state, returnFormUrl, isReturnFirstRound });
+
+      if (plan.mode === "return_form_first") {
+        const returnFormFirstText = `了解，這邊先幫您處理🙏 若您要申請退換貨，麻煩先幫我填寫退換貨表單，填完後我們的專人會接續協助您確認後續流程。${returnFormUrl ? `\n表單連結：${returnFormUrl}` : ""}\n若您是因為等太久、商品異常，或其他原因，也可以在表單裡一起備註，這樣我們處理會更快。`;
+        const contactPlatform = platform || contact.platform || "line";
+        const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", returnFormFirstText);
+        storage.updateContactConversationFields(contact.id, { return_stage: 1, resolution_status: "awaiting_customer", waiting_for_customer: "return_form_submit" });
+        broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: effectiveBrandId || contact.brand_id });
+        broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+        if (contactPlatform === "messenger" && channelToken) {
+          await sendFBMessage(channelToken, contact.platform_user_id, returnFormFirstText);
+        } else if (channelToken) {
+          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: returnFormFirstText }], channelToken);
+        }
+        storage.createAiLog({
+          contact_id: contact.id,
+          message_id: aiMsg.id,
+          brand_id: effectiveBrandId || undefined,
+          prompt_summary: `return_form_first: ${userMessage.slice(0, 80)}`,
+          knowledge_hits: [],
+          tools_called: ["return_form_first"],
+          transfer_triggered: false,
+          result_summary: "退換貨優先導表單（F2 合規）",
+          token_usage: 0,
+          model: "reply-plan",
+          response_time_ms: Date.now() - startTime,
+        });
+        return;
+      }
+
+      let systemPrompt = await getEnrichedSystemPrompt(contact.brand_id || brandId || undefined);
+      if (plan.mode === "handoff") {
+        systemPrompt += "\n\n【本輪】已判斷需轉人工，請呼叫 transfer_to_human 並以自然語氣告知將安排真人接手（例：了解，我先幫您整理目前狀況，接著安排真人客服為您接手處理，這樣會比較快一些🙏）。";
+      }
+      if (plan.must_not_include && plan.must_not_include.length > 0) {
+        systemPrompt += "\n\n【本輪硬規則 F2】回覆中禁止出現：" + plan.must_not_include.map((p) => `「${p}」`).join("、") + "。不得區分官方通路與其他平台，除非客戶已提供訂單/商品+手機且你已用工具查詢後確實查無此筆。";
+      }
+      if (shouldNotLeadWithOrderLookup(plan, state)) {
+        systemPrompt += "\n\n【本輪】本輪為退換貨承接，不可先走訂單查詢為主流程；先承接需求並引導表單。";
+      }
       const openai = new OpenAI({ apiKey });
 
-      const recentMessages = storage.getMessages(contact.id).slice(-20);
       const chatMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
         { role: "system", content: systemPrompt },
       ];
@@ -4112,6 +4178,8 @@ export async function registerRoutes(
       return res.status(404).json({ message: "Not a page event" });
     }
 
+    console.log("🔥🔥🔥 [FB RAW WEBHOOK]:", JSON.stringify(req.body, null, 2));
+
     const fbAppSecret = storage.getSetting("fb_app_secret");
     if (fbAppSecret && req.rawBody) {
       const fbSignature = req.headers["x-hub-signature-256"] as string | undefined;
@@ -4175,10 +4243,23 @@ export async function registerRoutes(
     }
 
     (async () => {
-    for (const entry of body.entry || []) {
+    const entries = body.entry || [];
+    if (entries.length === 0) {
+      console.log("[FB Webhook] body.entry 為空陣列，無 entry 可處理");
+    }
+    for (const entry of entries) {
       const pageId = entry.id;
       const matchedChannel = storage.getChannelByBotId(pageId);
       const matchedBrandId = matchedChannel?.brand_id;
+
+      const hasMessaging = (entry.messaging || []).length > 0;
+      const hasChanges = (entry.changes || []).length > 0;
+      if (hasChanges) {
+        console.log(`[FB Webhook] entry 含 changes (feed/留言)，數量: ${(entry.changes || []).length}, pageId: ${pageId}`);
+      }
+      if (!hasMessaging && !hasChanges) {
+        console.log(`[FB Webhook] entry 無 messaging 也無 changes，略過 pageId: ${pageId}`);
+      }
 
       if (matchedChannel) {
         console.log(`[FB Webhook] 動態路由 → 品牌: ${matchedChannel.brand_name}, 頻道: ${matchedChannel.channel_name}`);

@@ -178,6 +178,22 @@ app.use((req, res, next) => {
         }, 60 * 1000);
       }
 
+      // 24 小時閒置結案：每 15 分鐘掃描一次，客戶最後一則為 user 且超過 idle_close_hours 未回則結案（排除 awaiting_human / high_risk）。
+      setInterval(async () => {
+        try {
+          const { storage } = await import("./storage");
+          const { runIdleCloseJob, getIdleCloseHours } = await import("./idle-close-job");
+          const hours = getIdleCloseHours(storage);
+          const results = runIdleCloseJob(storage, hours);
+          if (results.length > 0) {
+            const closed = results.filter((r) => r.closed);
+            if (closed.length > 0) console.log("[idle-close] 24h 閒置結案:", closed.length, "筆", closed.map((r) => r.contactId));
+          }
+        } catch (e) {
+          console.error("[idle-close] runIdleCloseJob error:", e);
+        }
+      }, 15 * 60 * 1000);
+
       const domain = process.env.APP_DOMAIN
         ? `https://${process.env.APP_DOMAIN}`
         : `http://localhost:${port}`;
