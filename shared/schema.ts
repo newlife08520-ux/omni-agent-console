@@ -171,6 +171,8 @@ export interface Contact {
   qa_score?: number | null;
   /** QA 扣分原因摘要 */
   qa_score_reason?: string | null;
+  /** Phase 2：已鎖定商品範圍（如 bag / sweet），回覆不得跨品類 */
+  product_scope_locked?: string | null;
 }
 
 
@@ -298,6 +300,19 @@ export interface OrderInfo {
   source?: OrderSource;
 }
 
+/** 回覆來源：用於區分「有無進 LLM」與短路路徑（Phase 0 可觀測性） */
+export type ReplySource =
+  | "gate_skip"
+  | "high_risk_short_circuit"
+  | "safe_confirm_template"
+  | "image_short_caption"
+  | "image_dm_only"
+  | "return_form_first"
+  | "off_topic_guard"
+  | "llm"
+  | "handoff"
+  | "error";
+
 export interface AiLog {
   id: number;
   contact_id: number | null;
@@ -313,6 +328,14 @@ export interface AiLog {
   model: string;
   response_time_ms: number;
   created_at: string;
+  /** Phase 0：回覆來源，便於篩選有無進 LLM */
+  reply_source?: ReplySource | string | null;
+  /** Phase 0：本輪是否曾呼叫 LLM */
+  used_llm?: number | null;
+  /** Phase 0：本輪 reply plan mode（若未走到 plan 則 null） */
+  plan_mode?: string | null;
+  /** Phase 0：未進 LLM 時簡短原因 */
+  reason_if_bypassed?: string | null;
 }
 
 export interface LoginRequest {

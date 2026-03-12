@@ -132,6 +132,7 @@ export function initDatabase() {
 
   migrateContactStatusExpansion();
   migrateAiLogsTable();
+  migrateAiLogsPhase0Observability();
   migrateBrandsAndChannels();
   migrateShoplineFields();
   migrateSystemPrompt();
@@ -196,6 +197,7 @@ function migrateConversationStateFields() {
     ["close_reason", "TEXT"],
     ["qa_score", "INTEGER"],
     ["qa_score_reason", "TEXT"],
+    ["product_scope_locked", "TEXT"],
   ];
   for (const [col, typ] of newCols) {
     if (!contactColNames.includes(col)) {
@@ -897,6 +899,24 @@ function migrateAiLogsTable() {
       FOREIGN KEY (contact_id) REFERENCES contacts(id)
     );
   `);
+}
+
+/** Phase 0 可觀測性：ai_logs 新增 reply_source, used_llm, plan_mode, reason_if_bypassed */
+function migrateAiLogsPhase0Observability() {
+  const columns = db.prepare("PRAGMA table_info(ai_logs)").all() as { name: string }[];
+  const names = new Set(columns.map((c) => c.name));
+  if (!names.has("reply_source")) {
+    db.exec("ALTER TABLE ai_logs ADD COLUMN reply_source TEXT DEFAULT ''");
+  }
+  if (!names.has("used_llm")) {
+    db.exec("ALTER TABLE ai_logs ADD COLUMN used_llm INTEGER DEFAULT 0");
+  }
+  if (!names.has("plan_mode")) {
+    db.exec("ALTER TABLE ai_logs ADD COLUMN plan_mode TEXT");
+  }
+  if (!names.has("reason_if_bypassed")) {
+    db.exec("ALTER TABLE ai_logs ADD COLUMN reason_if_bypassed TEXT");
+  }
 }
 
 function migrateBrandsAndChannels() {

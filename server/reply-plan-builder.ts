@@ -1,25 +1,45 @@
 /**
  * Reply Plan Builder：在產出文字前決定本輪只能走哪一個 mode，避免多流程同時搶答。
- * 流程優先級（由高到低）：
- * 1. 明確要真人 / 法務/投訴 / 明確堅持退款退貨 → handoff
- * 2. 商品瑕疵／損壞／錯貨／缺件 → return_form_first（正式表單）
- * 3. 久候型退換貨／取消 → aftersales_comfort_first（先安撫＋查詢＋加急，不先表單）
- * 4. 單純訂單／出貨查詢 → order_lookup
- * 5. 其餘 → answer_directly
+ * Phase 2：一輪一個 mode，一旦決定不得被其他 probing/安撫/查單/退貨搶答。
+ *
+ * 【Mode 優先級表】（由高到低，先命中先得，只出一個）
+ * 1. handoff（明確要真人 / 法務投訴 / 明確堅持退款退貨）
+ * 2. return_form_first（商品問題型：瑕疵損壞錯貨缺件 → 正式表單）
+ * 3. aftersales_comfort_first（久候型：等太久不想等 → 先安撫+查單，不先表單）
+ * 4. return_stage_1（退換貨第一階段承接，尚未給表單）
+ * 5. order_lookup（單純訂單/出貨查詢）
+ * 6. off_topic_guard（品牌外問題，不陪聊）
+ * 7. answer_directly（商品問答、價格、smalltalk、其餘）
  */
 import type { ConversationState } from "./conversation-state-resolver";
 
 export type ReplyPlanMode =
-  | "answer_directly"
-  | "ask_one_question"
-  | "order_lookup"
+  | "handoff"
+  | "return_form_first"
   | "aftersales_comfort_first"
   | "return_stage_1"
-  | "return_form_first"
-  | "handoff"
+  | "order_lookup"
+  | "off_topic_guard"
+  | "answer_directly"
+  | "ask_one_question"
   | "fallback_unknown"
   | "idle_closure"
   | "invite_rating";
+
+/** Phase 2：mode 優先級順序（數字越小越優先），用於文件與除錯 */
+export const MODE_PRIORITY_ORDER: ReplyPlanMode[] = [
+  "handoff",
+  "return_form_first",
+  "aftersales_comfort_first",
+  "return_stage_1",
+  "order_lookup",
+  "off_topic_guard",
+  "answer_directly",
+  "ask_one_question",
+  "fallback_unknown",
+  "idle_closure",
+  "invite_rating",
+];
 
 export interface ReplyPlan {
   mode: ReplyPlanMode;
@@ -91,6 +111,10 @@ export function buildReplyPlan(input: PlanBuilderInput): ReplyPlan {
 
   if (primary_intent === "order_lookup" && !isRefundReturnIntent) {
     return { mode: "order_lookup", must_not_include: F2_FORBIDDEN_PHRASES };
+  }
+
+  if (primary_intent === "off_topic") {
+    return { mode: "off_topic_guard" };
   }
 
   if (primary_intent === "product_consult" || primary_intent === "price_purchase") {

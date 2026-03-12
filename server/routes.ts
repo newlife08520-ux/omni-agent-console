@@ -19,6 +19,7 @@ import { runAutoExecution, computeMainStatus } from "./meta-comment-auto-execute
 import * as riskRules from "./meta-comment-risk-rules";
 import { resolveConversationState } from "./conversation-state-resolver";
 import { buildReplyPlan, shouldNotLeadWithOrderLookup, isAftersalesComfortFirst } from "./reply-plan-builder";
+import { OFF_TOPIC_GUARD_MESSAGE, enforceOutputGuard } from "./phase2-output";
 import { isRatingEligible } from "./rating-eligibility";
 import db from "./db";
 import { fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, fetchPages, lookupOrdersByPageAndPhone, ensurePagesCacheLoaded, refreshPagesCache, getCachedPages, getCachedPagesAge, buildProductCatalogPrompt } from "./superlanding";
@@ -159,11 +160,16 @@ const avatarUpload = multer({
   limits: { fileSize: 5 * 1024 * 1024 },
 });
 
-const HIGH_RISK_KEYWORDS = [
+/** Phase 1：法務／公關／詐騙風險 → 才走高風險短路；其餘情緒字不短路 */
+const LEGAL_RISK_KEYWORDS = [
   "投訴", "客訴", "消保", "消費者保護", "消基會", "法律", "律師", "告你", "告你們",
   "提告", "訴訟", "報警", "警察", "公平會", "媒體", "爆料", "上新聞", "找記者",
-  "詐騙", "騙子", "垃圾", "廢物", "爛", "靠北", "幹", "他媽", "媽的", "狗屎",
-  "去死", "白痴", "智障", "噁心", "極度不滿", "非常生氣", "太扯", "離譜",
+  "詐騙", "騙子", "去死",
+];
+/** Phase 1：僅標記情緒，不走高風險短路；不可因這些字就 high_risk_short_circuit */
+const FRUSTRATED_ONLY_KEYWORDS = [
+  "爛", "很煩", "很慢", "不爽", "靠北", "幹", "他媽", "媽的", "狗屎",
+  "垃圾", "廢物", "噁心", "極度不滿", "非常生氣", "太扯", "離譜", "白痴", "智障",
 ];
 
 const RETURN_REFUND_KEYWORDS = ["退貨", "退款", "換貨", "退錢", "退費", "取消訂單", "不要了"];
@@ -178,14 +184,22 @@ const ISSUE_TYPE_KEYWORDS: Record<IssueType, string[]> = {
   other: [],
 };
 
-function detectHighRisk(text: string): { isHighRisk: boolean; reasons: string[] } {
+/** Phase 1：拆級為 legal_risk（才短路）／frustrated_only（不短路）／none */
+function detectHighRisk(text: string): { level: "legal_risk" | "frustrated_only" | "none"; reasons: string[] } {
   const reasons: string[] = [];
-  for (const kw of HIGH_RISK_KEYWORDS) {
+  for (const kw of LEGAL_RISK_KEYWORDS) {
     if (text.includes(kw)) {
-      reasons.push(`高風險關鍵字: ${kw}`);
+      reasons.push(`legal_risk: ${kw}`);
     }
   }
-  return { isHighRisk: reasons.length > 0, reasons };
+  if (reasons.length > 0) return { level: "legal_risk", reasons };
+  for (const kw of FRUSTRATED_ONLY_KEYWORDS) {
+    if (text.includes(kw)) {
+      reasons.push(`frustrated_only: ${kw}`);
+    }
+  }
+  if (reasons.length > 0) return { level: "frustrated_only", reasons };
+  return { level: "none", reasons: [] };
 }
 
 function detectIssueType(messages: string[]): IssueType | null {
@@ -356,7 +370,8 @@ F2. 退貨／退款第一句禁止「區分官方／其他平台」
 const contactProcessingLocks = new Map<number, Promise<void>>();
 
 const messageDebounceBuffers = new Map<number, { texts: string[]; timer: ReturnType<typeof setTimeout>; resolve: () => void }>();
-const DEBOUNCE_MS = 3000;
+/** 文字合併防抖：過短會合併不到連續訊息，過長會讓用戶覺得回覆慢。1.2 秒可兼顧合併與體感速度 */
+const DEBOUNCE_MS = 1200;
 
 function debounceTextMessage(
   contactId: number,
@@ -406,13 +421,22 @@ function getTransferUnavailableSystemMessage(reason: "lunch" | "after_hours" | "
   return "目前人工客服暫時忙碌中，已幫您排入待處理清單，上班後會依序回覆。";
 }
 
+/** Phase 2：從訊息推斷商品範圍，用於 product_scope_locked（存 bag/sweet） */
+function getProductScopeFromMessage(text: string): "bag" | "sweet" | null {
+  const t = (text || "").trim();
+  if (/包包|通勤包|城市輕旅|輕旅包|托特|後背包|背包/i.test(t)) return "bag";
+  if (/甜點|巴斯克|蛋糕|餅乾|點心|禮盒/i.test(t)) return "sweet";
+  return null;
+}
+
 async function withContactLock<T>(contactId: number, fn: () => Promise<T>): Promise<T> {
   const existing = contactProcessingLocks.get(contactId);
   let resolve: () => void;
   const lockPromise = new Promise<void>(r => { resolve = r; });
   contactProcessingLocks.set(contactId, lockPromise);
   if (existing) {
-    const timeout = new Promise<void>(r => setTimeout(r, 60000));
+    /** 前一個 AI 處理最長等 25 秒，避免「回覆要等兩分鐘」；逾時則並行跑，由後端控管並發 */
+    const timeout = new Promise<void>(r => setTimeout(r, 25000));
     await Promise.race([existing, timeout]);
   }
   try {
@@ -3395,21 +3419,71 @@ export async function registerRoutes(
     const apiKey = storage.getSetting("openai_api_key");
     if (!apiKey || apiKey.trim() === "") return;
 
+    const startTime = Date.now();
+    const effectiveBrandIdForLog = contact.brand_id || brandId;
+
     const freshCheck = storage.getContact(contact.id);
     if (freshCheck && (freshCheck.status === "awaiting_human" || freshCheck.status === "high_risk")) {
       console.log(`[AI Mute] Contact ${contact.id} status=${freshCheck.status}, AI 靜音中 - 跳過`);
+      storage.createAiLog({
+        contact_id: contact.id,
+        brand_id: effectiveBrandIdForLog || undefined,
+        prompt_summary: userMessage.slice(0, 200),
+        knowledge_hits: [],
+        tools_called: [],
+        transfer_triggered: false,
+        result_summary: "gate_skip:status",
+        token_usage: 0,
+        model: "gate",
+        response_time_ms: Date.now() - startTime,
+        reply_source: "gate_skip",
+        used_llm: 0,
+        plan_mode: null,
+        reason_if_bypassed: `status=${freshCheck.status}`,
+      });
       return;
     }
     if (freshCheck && freshCheck.needs_human) {
       console.log(`[AI Mute] Contact ${contact.id} needs_human=1, AI 靜音中 - 跳過`);
+      storage.createAiLog({
+        contact_id: contact.id,
+        brand_id: effectiveBrandIdForLog || undefined,
+        prompt_summary: userMessage.slice(0, 200),
+        knowledge_hits: [],
+        tools_called: [],
+        transfer_triggered: false,
+        result_summary: "gate_skip:needs_human",
+        token_usage: 0,
+        model: "gate",
+        response_time_ms: Date.now() - startTime,
+        reply_source: "gate_skip",
+        used_llm: 0,
+        plan_mode: null,
+        reason_if_bypassed: "needs_human",
+      });
       return;
     }
     if (storage.isAiMuted(contact.id)) {
       console.log(`[AI Mute] Contact ${contact.id} 靜音窗尚未結束 - 跳過`);
+      storage.createAiLog({
+        contact_id: contact.id,
+        brand_id: effectiveBrandIdForLog || undefined,
+        prompt_summary: userMessage.slice(0, 200),
+        knowledge_hits: [],
+        tools_called: [],
+        transfer_triggered: false,
+        result_summary: "gate_skip:ai_muted",
+        token_usage: 0,
+        model: "gate",
+        response_time_ms: Date.now() - startTime,
+        reply_source: "gate_skip",
+        used_llm: 0,
+        plan_mode: null,
+        reason_if_bypassed: "ai_muted",
+      });
       return;
     }
 
-    const startTime = Date.now();
     const toolsCalled: string[] = [];
     let transferTriggered = false;
     let transferReason: string | undefined;
@@ -3423,8 +3497,8 @@ export async function registerRoutes(
       broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
 
       const riskCheck = detectHighRisk(userMessage);
-      if (riskCheck.isHighRisk) {
-        console.log(`[AI Risk] 高風險訊息偵測: ${riskCheck.reasons.join(", ")}`);
+      if (riskCheck.level === "legal_risk") {
+        console.log(`[AI Risk] 法務/公關風險偵測: ${riskCheck.reasons.join(", ")}`);
         storage.updateContactStatus(contact.id, "high_risk");
         storage.updateContactHumanFlag(contact.id, 1);
         storage.createMessage(contact.id, contact.platform, "system",
@@ -3438,11 +3512,15 @@ export async function registerRoutes(
           knowledge_hits: [],
           tools_called: [],
           transfer_triggered: true,
-          transfer_reason: `高風險關鍵字: ${riskCheck.reasons.join(", ")}`,
-          result_summary: "高風險自動轉人工",
+          transfer_reason: `legal_risk: ${riskCheck.reasons.join(", ")}`,
+          result_summary: "法務/公關風險自動轉人工",
           token_usage: 0,
           model: "risk-detection",
           response_time_ms: Date.now() - startTime,
+          reply_source: "high_risk_short_circuit",
+          used_llm: 0,
+          plan_mode: null,
+          reason_if_bypassed: "high_risk",
         });
         return;
       }
@@ -3502,6 +3580,10 @@ export async function registerRoutes(
             token_usage: 0,
             model: "safe-after-sale-classifier",
             response_time_ms: Date.now() - startTime,
+            reply_source: "safe_confirm_template",
+            used_llm: 0,
+            plan_mode: null,
+            reason_if_bypassed: "safe_confirm",
           });
         }
         return;
@@ -3515,7 +3597,7 @@ export async function registerRoutes(
           m.sender_type === "user" && (m.message_type === "image" || m.content === "[圖片訊息]" || (m.content && m.content.startsWith("[圖片")))
       );
       const imageCaptionRiskCheck = detectHighRisk(userMessage);
-      if (hasRecentImageFromUser && isShortOrAmbiguousImageCaption(userMessage) && !imageCaptionRiskCheck.isHighRisk) {
+      if (hasRecentImageFromUser && isShortOrAmbiguousImageCaption(userMessage) && imageCaptionRiskCheck.level !== "legal_risk") {
         const escalate = shouldEscalateImageSupplement(recentMsgs);
         const replyText = escalate ? IMAGE_SUPPLEMENT_ESCALATE_MESSAGE : getImageDmReplyForShortCaption(userMessage);
         const templateName = getImageDmTemplateNameForShortCaption(userMessage);
@@ -3547,6 +3629,10 @@ export async function registerRoutes(
           token_usage: 0,
           model: "safe-after-sale-classifier",
           response_time_ms: Date.now() - startTime,
+          reply_source: "image_short_caption",
+          used_llm: 0,
+          plan_mode: null,
+          reason_if_bypassed: "image_short_caption",
         });
         return;
       }
@@ -3629,13 +3715,62 @@ export async function registerRoutes(
           token_usage: 0,
           model: "reply-plan",
           response_time_ms: Date.now() - startTime,
+          reply_source: "return_form_first",
+          used_llm: 0,
+          plan_mode: "return_form_first",
+          reason_if_bypassed: "return_form_first",
         });
         return;
+      }
+
+      // Phase 2 off_topic_guard：品牌外問題不進 LLM，固定短句收邊界
+      if (plan.mode === "off_topic_guard") {
+        storage.updateContactConversationFields(contact.id, { product_scope_locked: null });
+        const contactPlatform = platform || contact.platform || "line";
+        const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", OFF_TOPIC_GUARD_MESSAGE);
+        broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: effectiveBrandId || contact.brand_id });
+        broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+        if (contactPlatform === "messenger" && channelToken) {
+          await sendFBMessage(channelToken, contact.platform_user_id, OFF_TOPIC_GUARD_MESSAGE);
+        } else if (channelToken) {
+          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: OFF_TOPIC_GUARD_MESSAGE }], channelToken);
+        }
+        storage.createAiLog({
+          contact_id: contact.id,
+          message_id: aiMsg.id,
+          brand_id: effectiveBrandId || undefined,
+          prompt_summary: userMessage.slice(0, 100),
+          knowledge_hits: [],
+          tools_called: ["off_topic_guard"],
+          transfer_triggered: false,
+          result_summary: "off_topic_guard",
+          token_usage: 0,
+          model: "reply-plan",
+          response_time_ms: Date.now() - startTime,
+          reply_source: "off_topic_guard",
+          used_llm: 0,
+          plan_mode: "off_topic_guard",
+          reason_if_bypassed: "off_topic_guard",
+        });
+        return;
+      }
+
+      // Phase 2 product_scope_locked：handoff/off_topic 清除；order_lookup/answer_directly 可從本句推斷並寫入
+      if (plan.mode === "handoff") {
+        storage.updateContactConversationFields(contact.id, { product_scope_locked: null });
+      } else if (plan.mode === "order_lookup" || plan.mode === "answer_directly") {
+        const inferredScope = getProductScopeFromMessage(userMessage);
+        if (inferredScope) {
+          storage.updateContactConversationFields(contact.id, { product_scope_locked: inferredScope });
+        }
       }
 
       let systemPrompt = await getEnrichedSystemPrompt(contact.brand_id || brandId || undefined);
       if (plan.mode === "handoff") {
         systemPrompt += "\n\n【本輪】已判斷需轉人工，請呼叫 transfer_to_human 並以自然語氣告知將安排真人接手（例：了解，我先幫您整理目前狀況，接著安排真人客服為您接手處理，這樣會比較快一些🙏）。";
+        if (state.human_reason === "explicit_human_request") {
+          systemPrompt += " 顧客已明確要求真人，直接告知已安排接手，不得再問「您是想找真人嗎」；最多補一句「若方便可留訂單編號，專人會更快處理」。";
+        }
       }
       // 地雷2：F2 規則（禁止過早提其他平台）須涵蓋 order_lookup 及所有尚未查單成功情境。reply-plan-builder 已對 order_lookup 回傳 must_not_include，此處統一注入。
       if (plan.must_not_include && plan.must_not_include.length > 0) {
@@ -3646,6 +3781,16 @@ export async function registerRoutes(
       }
       if (isAftersalesComfortFirst(plan)) {
         systemPrompt += "\n\n【本輪 久候型售後】客人因等太久／不想等／想取消而抱怨。你要：先一句自然安撫（如：不好意思讓您久等了）→ 主動幫他查詢出貨狀況 → 說明是否有現貨、能否加急、或約需 7–20 工作天 → 補一句「會盡量幫您加快／備註加急」。不要一開口就丟表單、不要一開口就轉人工、不要先提「其他平台」。可呼叫訂單查詢工具。";
+      }
+      if (plan.mode === "order_lookup") {
+        systemPrompt += "\n\n【本輪 查單】本輪只做查單。承接一句後只問一個最有效欄位（訂單編號或商品+手機），不要問卷、不要多餘問題。回覆簡短（約 90～140 字）。";
+      }
+      const effectiveScope = state.product_scope_locked || ((plan.mode === "order_lookup" || plan.mode === "answer_directly") ? getProductScopeFromMessage(userMessage) : null);
+      if (effectiveScope === "bag") {
+        systemPrompt += "\n\n【本輪 商品範圍】已鎖定為包包/袋類，回覆中不得提及甜點、蛋糕、巴斯克等無關品類。";
+      }
+      if (effectiveScope === "sweet") {
+        systemPrompt += "\n\n【本輪 商品範圍】已鎖定為甜點類，回覆中不得提及包包、袋類等無關品類。";
       }
       const openai = new OpenAI({ apiKey });
 
@@ -3935,11 +4080,16 @@ export async function registerRoutes(
           token_usage: totalTokens,
           model: getOpenAIModel(),
           response_time_ms: Date.now() - startTime,
+          reply_source: "handoff",
+          used_llm: 1,
+          plan_mode: plan.mode,
+          reason_if_bypassed: null,
         });
         return;
       }
 
-      const reply = responseMessage?.content;
+      const rawReply = responseMessage?.content;
+      const reply = rawReply && rawReply.trim() ? enforceOutputGuard(rawReply.trim(), plan.mode) : rawReply;
       if (reply && reply.trim()) {
         const contactPlatform = platform || contact.platform || "line";
         const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", reply);
@@ -3964,6 +4114,10 @@ export async function registerRoutes(
           token_usage: totalTokens,
           model: getOpenAIModel(),
           response_time_ms: Date.now() - startTime,
+          reply_source: "llm",
+          used_llm: 1,
+          plan_mode: plan.mode,
+          reason_if_bypassed: null,
         });
       }
     } catch (err) {
@@ -3979,6 +4133,10 @@ export async function registerRoutes(
         token_usage: totalTokens,
         model: getOpenAIModel(),
         response_time_ms: Date.now() - startTime,
+        reply_source: "error",
+        used_llm: 0,
+        plan_mode: null,
+        reason_if_bypassed: `error: ${(err as Error).message}`.slice(0, 200),
       });
     }
   }
@@ -4221,6 +4379,10 @@ export async function registerRoutes(
                 token_usage: 0,
                 model: "safe-after-sale-classifier",
                 response_time_ms: 0,
+                reply_source: "image_dm_only",
+                used_llm: 0,
+                plan_mode: null,
+                reason_if_bypassed: "image_dm_only",
               });
             }
           } else {
@@ -4487,6 +4649,10 @@ export async function registerRoutes(
                       token_usage: 0,
                       model: "safe-after-sale-classifier",
                       response_time_ms: 0,
+                      reply_source: "image_dm_only",
+                      used_llm: 0,
+                      plan_mode: null,
+                      reason_if_bypassed: "image_dm_only",
                     });
                   }
                 } else {
@@ -5148,25 +5314,85 @@ export async function registerRoutes(
   app.get("/api/sandbox/prompt-preview", authMiddleware, async (req, res) => {
     try {
       const brandId = req.query.brand_id ? parseInt(req.query.brand_id as string) : undefined;
-      const fullPrompt = await getEnrichedSystemPrompt(brandId);
+      const testMessage = (req.query.message as string)?.trim() || undefined;
+      const globalPrompt = storage.getSetting("system_prompt") || "";
       const brand = brandId ? storage.getBrand(brandId) : undefined;
+      const brandPrompt = brand?.system_prompt || "";
+      const fullPrompt = await getEnrichedSystemPrompt(brandId);
       const knowledgeFiles = storage.getKnowledgeFiles(brandId);
       const marketingRules = storage.getMarketingRules(brandId);
       const imageAssets = storage.getImageAssets(brandId);
       const channels = brandId ? storage.getChannelsByBrand(brandId) : [];
+      const channelId = channels[0]?.id ?? null;
+      const globalPromptHash = crypto.createHash("sha256").update(globalPrompt).digest("hex").slice(0, 8);
+      const brandPromptHash = crypto.createHash("sha256").update(brandPrompt).digest("hex").slice(0, 8);
+      let simulatedReplySource: string | null = null;
+      let wouldUseLlm: boolean | null = null;
+      if (testMessage) {
+        const riskCheck = detectHighRisk(testMessage);
+        const safeConfirmDm = classifyMessageForSafeAfterSale(testMessage);
+        if (riskCheck.level === "legal_risk") {
+          simulatedReplySource = "high_risk_short_circuit";
+          wouldUseLlm = false;
+        } else if (safeConfirmDm.matched) {
+          simulatedReplySource = "safe_confirm_template";
+          wouldUseLlm = false;
+        } else {
+          const stubContact = {
+            id: 0,
+            brand_id: brandId ?? null,
+            status: "pending",
+            needs_human: 0,
+            tags: "[]",
+            platform: "line",
+            order_number_type: null,
+            last_message_at: null,
+          } as any;
+          const state = resolveConversationState({
+            contact: stubContact,
+            userMessage: testMessage,
+            recentUserMessages: [testMessage],
+            recentAiMessages: [],
+          });
+          const returnFormUrl = brand?.return_form_url || "https://www.lovethelife.shop/returns";
+          const plan = buildReplyPlan({ state, returnFormUrl, isReturnFirstRound: true });
+          if (plan.mode === "off_topic_guard") {
+            simulatedReplySource = "off_topic_guard";
+            wouldUseLlm = false;
+          } else if (plan.mode === "return_form_first") {
+            simulatedReplySource = "return_form_first";
+            wouldUseLlm = false;
+          } else if (plan.mode === "handoff") {
+            simulatedReplySource = "handoff";
+            wouldUseLlm = true;
+          } else {
+            simulatedReplySource = "llm";
+            wouldUseLlm = true;
+          }
+        }
+      }
       return res.json({
         success: true,
+        brand_id: brandId ?? null,
         brand_name: brand?.name || "全域",
-        brand_prompt: brand?.system_prompt || "",
-        global_prompt: storage.getSetting("system_prompt") || "",
+        channel_id: channelId,
+        global_prompt: globalPrompt,
+        brand_prompt: brandPrompt,
+        global_prompt_hash: globalPromptHash,
+        brand_prompt_hash: brandPromptHash,
         full_prompt_length: fullPrompt.length,
         full_prompt_preview: fullPrompt.substring(0, 2000) + (fullPrompt.length > 2000 ? "\n...(truncated)" : ""),
+        final_assembled_preview: fullPrompt.substring(0, 2000) + (fullPrompt.length > 2000 ? "\n...(truncated)" : ""),
+        final_assembled_length: fullPrompt.length,
         context_stats: {
           knowledge_files: knowledgeFiles.length,
           marketing_rules: marketingRules.length,
           image_assets: imageAssets.length,
           channels: channels.length,
         },
+        ...(testMessage
+          ? { simulated_reply_source: simulatedReplySource, would_use_llm: wouldUseLlm, test_message: testMessage }
+          : {}),
       });
     } catch (err: any) {
       return res.status(500).json({ success: false, message: err.message });

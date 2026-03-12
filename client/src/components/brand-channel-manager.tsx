@@ -419,7 +419,7 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
           </div>
           {!readOnly && (
           <div className="flex items-center gap-2">
-            <Button size="sm" variant="ghost" onClick={handleRefreshProfiles} disabled={refreshingProfiles} className="text-xs text-stone-500 hover:text-emerald-600" data-testid="button-refresh-profiles">
+            <Button size="sm" variant="ghost" onClick={handleRefreshProfiles} disabled={refreshingProfiles} className="text-xs text-stone-500 hover:text-emerald-600" data-testid="button-refresh-profiles" title="若某品牌下 LINE 沒有大頭照，請先將該渠道 Bot ID 改為日誌 destination 後再點此按鈕">
               <RefreshCw className={`w-3.5 h-3.5 mr-1 ${refreshingProfiles ? "animate-spin" : ""}`} />
               {refreshingProfiles ? "更新中..." : "同步頭貼 (LINE / Facebook)"}
             </Button>

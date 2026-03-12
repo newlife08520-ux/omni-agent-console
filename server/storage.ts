@@ -81,6 +81,14 @@ export interface IStorage {
     token_usage: number;
     model: string;
     response_time_ms: number;
+    /** Phase 0: reply_source (gate_skip | high_risk_short_circuit | safe_confirm_template | image_short_caption | image_dm_only | return_form_first | llm | handoff | error) */
+    reply_source?: string;
+    /** Phase 0: 本輪是否曾呼叫 LLM (1/0) */
+    used_llm?: number;
+    /** Phase 0: 本輪 plan.mode */
+    plan_mode?: string | null;
+    /** Phase 0: 未進 LLM 時原因 */
+    reason_if_bypassed?: string | null;
   }): AiLog;
   getAiLogs(contactId: number): AiLog[];
   getAiLogStats(startDate: string, endDate: string, brandId?: number): {
@@ -122,7 +130,7 @@ export interface IStorage {
   updateContactOrderNumberType(contactId: number, type: string | null): void;
   updateContactCasePriority(contactId: number, priority: number | null): void;
   updateContactClosed(contactId: number, closedByAgentId: number, closeReason?: string | null): void;
-  updateContactConversationFields(contactId: number, fields: { resolution_status?: string | null; waiting_for_customer?: string | null; human_reason?: string | null; return_stage?: number | null; rating_invited_at?: string | null; close_reason?: string | null; qa_score?: number | null; qa_score_reason?: string | null }): void;
+  updateContactConversationFields(contactId: number, fields: { resolution_status?: string | null; waiting_for_customer?: string | null; human_reason?: string | null; return_stage?: number | null; rating_invited_at?: string | null; close_reason?: string | null; qa_score?: number | null; qa_score_reason?: string | null; product_scope_locked?: string | null }): void;
   getUnreadHumanCaseCount(): number;
   markCaseNotificationsRead(contactId?: number): void;
   createCaseNotification(contactId: number, channel?: string): void;
@@ -836,10 +844,14 @@ export class SQLiteStorage implements IStorage {
     token_usage: number;
     model: string;
     response_time_ms: number;
+    reply_source?: string;
+    used_llm?: number;
+    plan_mode?: string | null;
+    reason_if_bypassed?: string | null;
   }): AiLog {
     const result = db.prepare(`
-      INSERT INTO ai_logs (contact_id, message_id, brand_id, prompt_summary, knowledge_hits, tools_called, transfer_triggered, transfer_reason, result_summary, token_usage, model, response_time_ms)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO ai_logs (contact_id, message_id, brand_id, prompt_summary, knowledge_hits, tools_called, transfer_triggered, transfer_reason, result_summary, token_usage, model, response_time_ms, reply_source, used_llm, plan_mode, reason_if_bypassed)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       data.contact_id || null,
       data.message_id || null,
@@ -852,7 +864,11 @@ export class SQLiteStorage implements IStorage {
       data.result_summary,
       data.token_usage,
       data.model,
-      data.response_time_ms
+      data.response_time_ms,
+      data.reply_source ?? "",
+      data.used_llm ?? 0,
+      data.plan_mode ?? null,
+      data.reason_if_bypassed ?? null
     );
     return db.prepare("SELECT * FROM ai_logs WHERE id = ?").get(Number(result.lastInsertRowid)) as AiLog;
   }
@@ -1157,8 +1173,9 @@ export class SQLiteStorage implements IStorage {
     close_reason?: string | null;
     qa_score?: number | null;
     qa_score_reason?: string | null;
+    product_scope_locked?: string | null;
   }): void {
-    const allowed = ["resolution_status", "waiting_for_customer", "human_reason", "return_stage", "rating_invited_at", "close_reason", "qa_score", "qa_score_reason"];
+    const allowed = ["resolution_status", "waiting_for_customer", "human_reason", "return_stage", "rating_invited_at", "close_reason", "qa_score", "qa_score_reason", "product_scope_locked"];
     const setParts: string[] = [];
     const values: any[] = [];
     for (const [k, v] of Object.entries(fields)) {
