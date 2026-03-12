@@ -582,7 +582,7 @@ export default function ChatPage() {
     queryClient.invalidateQueries({ queryKey: ["/api/agent-stats/me"] });
   }, [queryClient]);
   const lastMessageIdRef = useRef<number>(0);
-  const { selectedBrandId } = useBrand();
+  const { selectedBrandId, selectedBrand } = useBrand();
 
   const sseConnectedRef = useRef(false);
   const [sseConnected, setSseConnected] = useState(true);
@@ -711,7 +711,8 @@ export default function ChatPage() {
     refetchInterval: 5000,
     refetchIntervalInBackground: true,
     staleTime: 15000,
-    placeholderData: keepPreviousData,
+    /** 切換品牌時不沿用上一筆資料，強制等新列表載入，避免「沒切過去」的錯覺 */
+    placeholderData: undefined,
   });
   const contacts = Array.isArray(contactsRaw) ? contactsRaw : [];
 
@@ -1743,8 +1744,11 @@ export default function ChatPage() {
               </button>
             ))}
           </div>
+          <p className="mt-2 text-[10px] text-stone-500 font-medium" data-testid="text-current-brand-filter">
+            目前品牌：{selectedBrandId == null ? "全部（不篩選）" : (selectedBrand?.name ?? `ID ${selectedBrandId}`)}
+          </p>
           {(isCsAgent || isManager) && (
-            <p className="mt-2 text-[10px] text-stone-400 leading-tight">我的案件＝分配給我的；待我回覆＝輪到我回覆</p>
+            <p className="mt-1 text-[10px] text-stone-400 leading-tight">我的案件＝分配給我的；待我回覆＝輪到我回覆</p>
           )}
           {selectedBrandId != null && !dismissedBotIdHint && (
             <div className="mt-2 p-2 rounded-lg bg-amber-50 border border-amber-200 flex items-start gap-2">

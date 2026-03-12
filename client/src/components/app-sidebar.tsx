@@ -266,10 +266,10 @@ export function AppSidebar({ user, userRole, systemName, logoUrl }: AppSidebarPr
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-xs font-medium truncate text-stone-200" data-testid="text-current-brand">
-                {selectedBrand?.name || "選擇品牌"}
+                {selectedBrandId == null ? "全部" : (selectedBrand?.name ?? "選擇品牌")}
               </p>
               <p className="text-[10px] text-stone-500 truncate">
-                {activeChannelCount > 0 ? `${activeChannelCount} 個渠道` : "尚無渠道"}
+                {selectedBrandId == null ? "不依品牌篩選" : (activeChannelCount > 0 ? `${activeChannelCount} 個渠道` : "尚無渠道")}
               </p>
             </div>
             <ChevronDown className={`w-3.5 h-3.5 text-stone-400 transition-transform ${brandMenuOpen ? "rotate-180" : ""}`} />
@@ -277,6 +277,19 @@ export function AppSidebar({ user, userRole, systemName, logoUrl }: AppSidebarPr
 
           {brandMenuOpen && (
             <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-stone-700 rounded-xl border border-stone-600/50 shadow-xl overflow-hidden">
+              <button
+                onClick={() => { setSelectedBrandId(null); setBrandMenuOpen(false); }}
+                className={`w-full flex items-center gap-2.5 px-3 py-2 text-left transition-all ${
+                  selectedBrandId === null ? "bg-emerald-600/20 text-emerald-300" : "text-stone-300 hover:bg-stone-600/50"
+                }`}
+                data-testid="button-brand-all"
+              >
+                <div className="w-6 h-6 rounded-md bg-stone-600 flex items-center justify-center shrink-0">
+                  <Building2 className="w-3 h-3 text-stone-400" />
+                </div>
+                <span className="text-xs truncate flex-1">全部</span>
+                {selectedBrandId === null && <div className="w-1.5 h-1.5 rounded-full bg-emerald-400" />}
+              </button>
               {brands.map((brand) => (
                 <button
                   key={brand.id}

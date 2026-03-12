@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback, useEffect } from "react";
+import { createContext, useContext, useState, useCallback, useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getQueryFn } from "./queryClient";
 import type { Brand, Channel } from "@shared/schema";
@@ -25,6 +25,7 @@ const BrandContext = createContext<BrandContextType>({
 
 export function BrandProvider({ children }: { children: React.ReactNode }) {
   const [selectedBrandId, setSelectedBrandId] = useState<number | null>(null);
+  const hasInitializedDefault = useRef(false);
 
   const { data: brandsRaw, isLoading: brandsLoading } = useQuery<Brand[] | null>({
     queryKey: ["/api/brands"],
@@ -52,10 +53,12 @@ export function BrandProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (!brandsLoading && brands.length > 0 && selectedBrandId === null) {
+    if (hasInitializedDefault.current) return;
+    if (!brandsLoading && brands.length > 0 && brands[0]) {
+      hasInitializedDefault.current = true;
       setSelectedBrandId(brands[0].id);
     }
-  }, [brandsLoading, brands, selectedBrandId]);
+  }, [brandsLoading, brands]);
 
   const selectedBrand = brands.find((b) => b.id === selectedBrandId);
 
