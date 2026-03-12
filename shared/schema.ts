@@ -307,6 +307,7 @@ export type ReplySource =
   | "safe_confirm_template"
   | "image_short_caption"
   | "image_dm_only"
+  | "image_vision_first"
   | "return_form_first"
   | "off_topic_guard"
   | "llm"

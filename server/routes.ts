@@ -9,6 +9,7 @@ import {
   classifyMessageForSafeAfterSale,
   FALLBACK_AFTER_SALE_LINE_LABEL,
   SAFE_IMAGE_ONLY_REPLY,
+  SHORT_IMAGE_FALLBACK,
   isShortOrAmbiguousImageCaption,
   getImageDmReplyForShortCaption,
   getImageDmTemplateNameForShortCaption,
@@ -19,7 +20,7 @@ import { runAutoExecution, computeMainStatus } from "./meta-comment-auto-execute
 import * as riskRules from "./meta-comment-risk-rules";
 import { resolveConversationState } from "./conversation-state-resolver";
 import { buildReplyPlan, shouldNotLeadWithOrderLookup, isAftersalesComfortFirst } from "./reply-plan-builder";
-import { OFF_TOPIC_GUARD_MESSAGE, enforceOutputGuard } from "./phase2-output";
+import { OFF_TOPIC_GUARD_MESSAGE, enforceOutputGuard, HANDOFF_MANDATORY_OPENING, buildHandoffReply } from "./phase2-output";
 import { isRatingEligible } from "./rating-eligibility";
 import db from "./db";
 import { fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, fetchPages, lookupOrdersByPageAndPhone, ensurePagesCacheLoaded, refreshPagesCache, getCachedPages, getCachedPagesAge, buildProductCatalogPrompt } from "./superlanding";
@@ -3236,6 +3237,108 @@ export async function registerRoutes(
     }
   }
 
+  /** 圖片意圖類型：供 vision-first 判讀與 log */
+  const IMAGE_INTENT_ORDER = "order_screenshot";
+  const IMAGE_INTENT_PRODUCT_ISSUE = "product_issue_defect";
+  const IMAGE_INTENT_PRODUCT_PAGE = "product_page_size";
+  const IMAGE_INTENT_OFF_BRAND = "off_brand";
+  const IMAGE_INTENT_UNREADABLE = "unreadable";
+
+  /**
+   * Vision-first 圖片處理：先看圖 + 近期對話與脈絡，判讀意圖後回覆或使用縮短 fallback。
+   * 僅在低信心或 unreadable 時使用 SHORT_IMAGE_FALLBACK（只問 1 個關鍵問題）。
+   */
+  async function handleImageVisionFirst(
+    imageFilePath: string,
+    contactId: number
+  ): Promise<{ reply: string; usedFallback: boolean; intent?: string; confidence?: string }> {
+    const apiKey = storage.getSetting("openai_api_key");
+    if (!apiKey?.trim()) {
+      return { reply: SHORT_IMAGE_FALLBACK, usedFallback: true };
+    }
+    const dataUri = imageFileToDataUri(imageFilePath);
+    if (!dataUri) {
+      return { reply: SHORT_IMAGE_FALLBACK, usedFallback: true };
+    }
+    const contact = storage.getContact(contactId);
+    const brandId = contact?.brand_id;
+    const recentMessages = storage.getMessages(contactId).slice(-10);
+    const tags = (contact?.tags && typeof contact.tags === "string") ? (() => { try { return JSON.parse(contact.tags) as string[]; } catch { return []; } })() : [];
+    const productScope = (contact as any)?.product_scope_locked ?? null;
+    const contextParts: string[] = [];
+    for (const m of recentMessages) {
+      if (m.sender_type === "user" && m.content && m.content !== "[圖片訊息]" && !m.content.startsWith("[圖片")) {
+        contextParts.push(`顧客：${m.content.slice(0, 80)}`);
+      } else if (m.sender_type === "ai" && m.content) {
+        contextParts.push(`客服：${m.content.slice(0, 80)}`);
+      }
+    }
+    if (tags.length) contextParts.push(`案件標籤：${tags.join("、")}`);
+    if (productScope) contextParts.push(`已鎖定商品範圍：${productScope === "bag" ? "包包/袋類" : "甜點類"}`);
+    const contextStr = contextParts.length ? contextParts.join("\n") : "（無近期文字對話）";
+
+    const systemPrompt = await getEnrichedSystemPrompt(brandId);
+    const visionInstruction = `
+【圖片處理 - Vision First】請根據客戶傳送的圖片與以下脈絡，判讀圖片意圖並回覆。
+意圖分類（五選一）：
+- order_screenshot：訂單/物流/客服對話截圖、出貨畫面
+- product_issue_defect：商品瑕疵、損壞、問題照片
+- product_page_size：商品頁、尺寸圖、款式圖
+- off_brand：與品牌無關的圖片（如生活照、無關內容）
+- unreadable：無法判讀、模糊、或無法歸類
+
+脈絡：
+${contextStr}
+
+請回傳一個 JSON 物件，格式：{"intent":"上述五選一","confidence":"high 或 low","reply_to_customer":"給顧客的簡短回覆（繁體中文）"}
+規則：
+- 若 confidence 為 low 或 intent 為 unreadable，請將 reply_to_customer 設為空字串 ""，系統會改用簡短 fallback 只問一個問題。
+- 若 confidence 為 high：order_screenshot 可簡短說明會協助查單並只問一個最必要欄位（如訂單編號或手機）；product_issue_defect 先安撫並引導售後；product_page_size 可簡短回答商品相關；off_brand 短句收邊界拉回客服範圍。
+- reply_to_customer 務必簡短（約 50～120 字），不要多段、不要問卷式多選。`;
+
+    const userContent: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [
+      { type: "text", text: "請根據此圖與脈絡判讀意圖並回傳 JSON。" },
+      { type: "image_url", image_url: { url: dataUri } },
+    ];
+
+    try {
+      const openai = new OpenAI({ apiKey: apiKey.trim() });
+      const completion = await openai.chat.completions.create({
+        model: getOpenAIModel(),
+        messages: [
+          { role: "system", content: systemPrompt + "\n\n" + visionInstruction },
+          { role: "user", content: userContent },
+        ],
+        response_format: { type: "json_object" },
+        max_completion_tokens: 400,
+        temperature: 0.3,
+      });
+      const raw = completion.choices[0]?.message?.content?.trim();
+      if (!raw) return { reply: SHORT_IMAGE_FALLBACK, usedFallback: true };
+      let parsed: { intent?: string; confidence?: string; reply_to_customer?: string };
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        return { reply: SHORT_IMAGE_FALLBACK, usedFallback: true };
+      }
+      const intent = parsed.intent ?? "";
+      const confidence = (parsed.confidence ?? "low").toLowerCase();
+      const replyText = (parsed.reply_to_customer ?? "").trim();
+      const useFallback =
+        confidence === "low" ||
+        intent === IMAGE_INTENT_UNREADABLE ||
+        replyText.length === 0;
+      if (useFallback) {
+        return { reply: SHORT_IMAGE_FALLBACK, usedFallback: true, intent, confidence };
+      }
+      const guarded = enforceOutputGuard(replyText, "answer_directly");
+      return { reply: guarded, usedFallback: false, intent, confidence };
+    } catch (err: any) {
+      console.error("[handleImageVisionFirst] Vision error:", err?.message);
+      return { reply: SHORT_IMAGE_FALLBACK, usedFallback: true };
+    }
+  }
+
   async function analyzeImageWithAI(imageFilePath: string, contactId: number, lineToken?: string | null, platform?: string) {
     const apiKey = storage.getSetting("openai_api_key");
     if (!apiKey || apiKey.trim() === "") return;
@@ -3504,6 +3607,15 @@ export async function registerRoutes(
         storage.createMessage(contact.id, contact.platform, "system",
           `(系統提示) 偵測到高風險訊息，已自動標記並轉接真人客服。原因：${riskCheck.reasons.join("、")}`);
         broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+        const handoffReplyLegal = buildHandoffReply({ customerEmotion: "high_risk" });
+        const aiMsgRisk = storage.createMessage(contact.id, contact.platform, "ai", handoffReplyLegal);
+        broadcastSSE("new_message", { contact_id: contact.id, message: aiMsgRisk, brand_id: contact.brand_id });
+        broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+        if (contact.platform === "messenger" && channelToken) {
+          await sendFBMessage(channelToken, contact.platform_user_id, handoffReplyLegal);
+        } else if (channelToken) {
+          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: handoffReplyLegal }], channelToken);
+        }
 
         storage.createAiLog({
           contact_id: contact.id,
@@ -3876,7 +3988,7 @@ export async function registerRoutes(
           if (timeoutCount >= 2) {
             storage.updateContactStatus(contact.id, "awaiting_human");
             storage.updateContactHumanFlag(contact.id, 1);
-            const comfortMsg = "不好意思，系統目前處理較慢，我已為您轉接專人客服，請稍候片刻。";
+            const comfortMsg = HANDOFF_MANDATORY_OPENING;
             storage.createMessage(contact.id, contact.platform, "ai", comfortMsg);
             if (platform === "messenger") {
               sendFBMessage(channelToken || "", contact.platform_user_id, comfortMsg).catch(() => {});
@@ -4047,7 +4159,7 @@ export async function registerRoutes(
             if (loopTimeoutCount >= 2) {
               storage.updateContactStatus(contact.id, "awaiting_human");
               storage.updateContactHumanFlag(contact.id, 1);
-              const comfortMsg = "不好意思，系統目前處理較慢，我已為您轉接專人客服，請稍候片刻。";
+              const comfortMsg = HANDOFF_MANDATORY_OPENING;
               storage.createMessage(contact.id, contact.platform, "ai", comfortMsg);
               if (platform === "messenger") {
                 sendFBMessage(channelToken || "", contact.platform_user_id, comfortMsg).catch(() => {});
@@ -4067,16 +4179,30 @@ export async function registerRoutes(
 
       const finalContact = storage.getContact(contact.id);
       if (finalContact?.needs_human || storage.isAiMuted(contact.id) || finalContact?.status === "awaiting_human" || finalContact?.status === "high_risk") {
-        console.log(`[Webhook AI] 已轉接真人或靜音中，跳過 AI 回覆 (needs_human=${finalContact?.needs_human}, status=${finalContact?.status})`);
+        console.log(`[Webhook AI] 已轉接真人或靜音中，送出 handoff 強制告知句 (needs_human=${finalContact?.needs_human}, status=${finalContact?.status})`);
+        const handoffReply = buildHandoffReply({
+          customerEmotion: state.customer_emotion,
+          humanReason: state.human_reason ?? undefined,
+        });
+        const contactPlatform = platform || contact.platform || "line";
+        const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", handoffReply);
+        broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: contact.brand_id });
+        broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+        if (contactPlatform === "messenger" && channelToken) {
+          await sendFBMessage(channelToken, contact.platform_user_id, handoffReply);
+        } else if (channelToken) {
+          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: handoffReply }], channelToken);
+        }
         storage.createAiLog({
           contact_id: contact.id,
+          message_id: aiMsg.id,
           brand_id: effectiveBrandId || undefined,
           prompt_summary: userMessage.slice(0, 200),
           knowledge_hits: knowledgeHits,
           tools_called: toolsCalled,
           transfer_triggered: true,
-          transfer_reason: transferReason,
-          result_summary: "轉接真人客服",
+          transfer_reason: transferReason ?? undefined,
+          result_summary: "轉接真人客服（強制告知句）",
           token_usage: totalTokens,
           model: getOpenAIModel(),
           response_time_ms: Date.now() - startTime,
@@ -4292,9 +4418,13 @@ export async function registerRoutes(
           const needsHuman = HUMAN_KEYWORDS.some((kw) => text.includes(kw));
           if (needsHuman) {
             storage.updateContactHumanFlag(contact.id, 1);
-            const aiMsg = storage.createMessage(contact.id, "line", "ai", "好的，我已為您轉接真人客服，請稍候片刻。");
+            const handoffText = HANDOFF_MANDATORY_OPENING;
+            const aiMsg = storage.createMessage(contact.id, "line", "ai", handoffText);
             broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: matchedBrandId || contact.brand_id });
             broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
+            if (channelToken) {
+              await pushLineMessage(contact.platform_user_id, [{ type: "text", text: handoffText }], channelToken);
+            }
           } else if (!contact.needs_human) {
             const aiEnabled = matchedChannel ? matchedChannel.is_ai_enabled : 0;
             if (!aiEnabled) {
@@ -4353,13 +4483,14 @@ export async function registerRoutes(
             const aiEnabledImg = matchedChannel ? matchedChannel.is_ai_enabled : 0;
             if (!matchedChannel && !contact.needs_human) console.log("[WEBHOOK] 無匹配 channel，跳過圖片自動回覆（fail-closed）");
             if (!contact.needs_human && aiEnabledImg) {
-              const recentMsgsForEscalate = storage.getMessages(contact.id).slice(-8);
-              const escalate = shouldEscalateImageSupplement(recentMsgsForEscalate);
-              const replyText = escalate ? IMAGE_SUPPLEMENT_ESCALATE_MESSAGE : SAFE_IMAGE_ONLY_REPLY;
+              const visionResult = await handleImageVisionFirst(imageUrl, contact.id);
+              const replyText = visionResult.reply;
               const aiMsg = storage.createMessage(contact.id, "line", "ai", replyText);
               broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: matchedBrandId || contact.brand_id });
               broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
               await pushLineMessage(contact.platform_user_id, [{ type: "text", text: replyText }], channelToken);
+              const recentMsgsForEscalate = storage.getMessages(contact.id).slice(-8);
+              const escalate = shouldEscalateImageSupplement(recentMsgsForEscalate);
               if (escalate) {
                 storage.updateContactStatus(contact.id, "awaiting_human");
                 storage.updateContactHumanFlag(contact.id, 1);
@@ -4372,17 +4503,17 @@ export async function registerRoutes(
                 brand_id: matchedBrandId || contact.brand_id || undefined,
                 prompt_summary: "[圖片訊息]",
                 knowledge_hits: [],
-                tools_called: ["image_dm_only"],
+                tools_called: ["image_vision_first"],
                 transfer_triggered: escalate,
                 transfer_reason: escalate ? "連續無效圖片補充升級人工" : undefined,
-                result_summary: escalate ? "image_only | escalated_awaiting_human" : "image_only | IMAGE_DM_GENERIC",
+                result_summary: `image_vision_first | intent=${visionResult.intent ?? "—"} | ${visionResult.usedFallback ? "fallback" : "direct"}`,
                 token_usage: 0,
-                model: "safe-after-sale-classifier",
+                model: "gpt-4o",
                 response_time_ms: 0,
-                reply_source: "image_dm_only",
-                used_llm: 0,
+                reply_source: "image_vision_first",
+                used_llm: 1,
                 plan_mode: null,
-                reason_if_bypassed: "image_dm_only",
+                reason_if_bypassed: visionResult.usedFallback ? "image_low_confidence_fallback" : undefined,
               });
             }
           } else {
@@ -4621,15 +4752,18 @@ export async function registerRoutes(
                   broadcastSSE("new_message", { contact_id: contact.id, message: imgMsg, brand_id: matchedBrandId || contact.brand_id });
                   const fbAiEnabledImg = matchedChannel ? (matchedChannel.is_ai_enabled === 1) : false;
                   if (!contact.needs_human && fbAiEnabledImg && matchedChannel?.access_token) {
-                    const recentMsgsForEscalate = storage.getMessages(contact.id).slice(-8);
-                    const escalate = shouldEscalateImageSupplement(recentMsgsForEscalate);
-                    const replyText = escalate ? IMAGE_SUPPLEMENT_ESCALATE_MESSAGE : SAFE_IMAGE_ONLY_REPLY;
+                    const visionResult = localImageUrl
+                      ? await handleImageVisionFirst(localImageUrl, contact.id)
+                      : { reply: SHORT_IMAGE_FALLBACK, usedFallback: true as const };
+                    const replyText = visionResult.reply;
                     const aiMsg = storage.createMessage(contact.id, "messenger", "ai", replyText);
                     broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: matchedBrandId || contact.brand_id });
                     broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
                     sendFBMessage(matchedChannel.access_token, senderId, replyText).catch(err =>
-                      console.error("[FB Webhook] 圖片安全回覆失敗:", err)
+                      console.error("[FB Webhook] 圖片回覆失敗:", err)
                     );
+                    const recentMsgsForEscalate = storage.getMessages(contact.id).slice(-8);
+                    const escalate = shouldEscalateImageSupplement(recentMsgsForEscalate);
                     if (escalate) {
                       storage.updateContactStatus(contact.id, "awaiting_human");
                       storage.updateContactHumanFlag(contact.id, 1);
@@ -4642,17 +4776,17 @@ export async function registerRoutes(
                       brand_id: matchedBrandId || contact.brand_id || undefined,
                       prompt_summary: "[圖片訊息]",
                       knowledge_hits: [],
-                      tools_called: ["image_dm_only"],
+                      tools_called: ["image_vision_first"],
                       transfer_triggered: escalate,
                       transfer_reason: escalate ? "連續無效圖片補充升級人工" : undefined,
-                      result_summary: escalate ? "image_only | escalated_awaiting_human" : "image_only | IMAGE_DM_GENERIC",
+                      result_summary: `image_vision_first | intent=${visionResult.intent ?? "—"} | ${visionResult.usedFallback ? "fallback" : "direct"}`,
                       token_usage: 0,
-                      model: "safe-after-sale-classifier",
+                      model: "gpt-4o",
                       response_time_ms: 0,
-                      reply_source: "image_dm_only",
-                      used_llm: 0,
+                      reply_source: "image_vision_first",
+                      used_llm: 1,
                       plan_mode: null,
-                      reason_if_bypassed: "image_dm_only",
+                      reason_if_bypassed: visionResult.usedFallback ? "image_low_confidence_fallback" : undefined,
                     });
                   }
                 } else {
@@ -4670,11 +4804,12 @@ export async function registerRoutes(
               const needsHuman2 = HUMAN_KW2.some((kw: string) => text.includes(kw));
               if (needsHuman2) {
                 storage.updateContactHumanFlag(contact.id, 1);
-                const aiMsg2 = storage.createMessage(contact.id, "messenger", "ai", "好的，我已為您轉接真人客服，請稍候片刻。");
+                const handoffTextFb = HANDOFF_MANDATORY_OPENING;
+                const aiMsg2 = storage.createMessage(contact.id, "messenger", "ai", handoffTextFb);
                 broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg2, brand_id: matchedBrandId || contact.brand_id });
                 broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
                 if (matchedChannel?.access_token) {
-                  sendFBMessage(matchedChannel.access_token, senderId, "好的，我已為您轉接真人客服，請稍候片刻。").catch(err =>
+                  sendFBMessage(matchedChannel.access_token, senderId, handoffTextFb).catch(err =>
                     console.error("[FB Webhook] 轉人工回覆失敗:", err)
                   );
                 }

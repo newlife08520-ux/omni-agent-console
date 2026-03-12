@@ -1,10 +1,11 @@
 /**
- * Phase 1 可重播驗收：高風險拆級、明確真人 handoff、correction override。
+ * Phase 1 可重播驗收：高風險拆級、明確真人 handoff、correction override、handoff 強制告知句。
  * 執行：npx tsx server/phase1-verify.ts（從專案根目錄）
  * 不啟動 server，僅驗證 state resolver、reply plan、與高風險關鍵字邏輯。
  */
 import { resolveConversationState } from "./conversation-state-resolver";
 import { buildReplyPlan } from "./reply-plan-builder";
+import { HANDOFF_MANDATORY_OPENING, buildHandoffReply } from "./phase2-output";
 import type { Contact } from "@shared/schema";
 
 const LEGAL_RISK_KEYWORDS = [
@@ -115,6 +116,31 @@ const stateF = resolveConversationState({
 });
 const planF = buildReplyPlan({ state: stateF, returnFormUrl, isReturnFirstRound: true });
 ok("F. 混句含轉人工 → handoff", stateF.primary_intent === "human_request" && planF.mode === "handoff");
+
+// Handoff 強制告知句：回覆必須明確含「轉接真人專員」或「請稍後」
+const handoffReplyOpening = HANDOFF_MANDATORY_OPENING;
+ok("G. handoff 固定句含轉接真人專員", /轉接真人專員|真人專員.*處理/.test(handoffReplyOpening));
+ok("H. handoff 固定句含請稍後", /請稍後|稍候/.test(handoffReplyOpening));
+
+// 我要找真人客服、我要找主管 → handoff，且 buildHandoffReply 產出含固定語意
+const stateG = resolveConversationState({
+  contact: stubContact,
+  userMessage: "我要找真人客服",
+  recentUserMessages: [],
+  recentAiMessages: [],
+});
+const planG = buildReplyPlan({ state: stateG, returnFormUrl, isReturnFirstRound: true });
+const stateH = resolveConversationState({
+  contact: stubContact,
+  userMessage: "我要找主管",
+  recentUserMessages: [],
+  recentAiMessages: [],
+});
+const planH = buildReplyPlan({ state: stateH, returnFormUrl, isReturnFirstRound: true });
+ok("I. 我要找真人客服 → handoff", stateG.primary_intent === "human_request" && planG.mode === "handoff");
+ok("J. 我要找主管 → handoff", stateH.primary_intent === "human_request" && planH.mode === "handoff");
+const replyExplicit = buildHandoffReply({ customerEmotion: "neutral", humanReason: "explicit_human_request" });
+ok("K. handoff 回覆明確告知（不可模糊）", /轉接真人專員|真人專員.*協助/.test(replyExplicit) && !/已安排處理|會協助您|幫您處理中/.test(replyExplicit));
 
 console.log("\n---");
 console.log(`Phase 1 驗收: ${passed} 通過, ${failed} 失敗`);

@@ -33,6 +33,13 @@ export const IMAGE_DM_PRODUCT_ISSUE =
 /** 僅圖片、無文字時沿用通用版（與原 SAFE_IMAGE_ONLY_REPLY 語意一致，改為上述通用補充版） */
 export const SAFE_IMAGE_ONLY_REPLY = IMAGE_DM_GENERIC;
 
+/**
+ * Vision-first 低信心時才用：只問 1 個最關鍵問題，不要四選一問卷。
+ * 用於圖片意圖判讀為 unreadable 或 confidence 為 low 時。
+ */
+export const SHORT_IMAGE_FALLBACK =
+  "收到圖了～可以簡單說一下這張圖是關於「訂單/出貨」、「商品問題」還是其他嗎？一句就好，我才能對應處理。";
+
 /** 圖片＋極短／模糊文字：視為尚未確認情境，不直接進一般售後承諾 */
 const SHORT_OR_AMBIGUOUS_PHRASES = [
   "幫我看", "幫我看看", "看一下", "你看一下", "這個怎麼辦", "怎麼辦", "這什麼", "是不是被騙", "被騙", "你看", "這個", "幫幫我",
@@ -68,13 +75,13 @@ export function getImageDmReplyAndTemplateForShortCaption(text: string): { text:
 /** 連續 N 次仍為圖片補充回覆時升級人工（避免無限循環補問） */
 export const IMAGE_SUPPLEMENT_ESCALATE_THRESHOLD = 2;
 
-/** 判斷近期 AI 回覆中有幾則為「圖片型補充模板」內容 */
+/** 判斷近期 AI 回覆中有幾則為「圖片型補充模板」內容（含舊版問卷與 vision 縮短 fallback） */
 export function countRecentImageSupplementReplies(messages: { sender_type: string; content?: string }[]): number {
   const ai = messages.filter((m) => m.sender_type === "ai");
   const recent = ai.slice(-6);
   return recent.filter((m) => {
     const c = (m.content || "").trim();
-    return c.startsWith("已收到您的圖片") || c.startsWith("收到您的圖片了");
+    return c.startsWith("已收到您的圖片") || c.startsWith("收到您的圖片了") || c.startsWith("收到圖了～");
   }).length;
 }
 
