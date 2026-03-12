@@ -52,6 +52,8 @@ export interface IStorage {
   searchMessages(query: string): { contact_id: number; contact_name: string; message_id: number; content: string; sender_type: string; created_at: string }[];
   createMessage(contactId: number, platform: string, senderType: string, content: string, messageType?: string, imageUrl?: string | null): Message;
   getOrCreateContact(platform: string, platformUserId: string, displayName: string, brandId?: number, channelId?: number): Contact;
+  /** 將指定 channel 下的所有聯絡人改為隸屬指定品牌（用於修正錯歸） */
+  reassignContactsByChannel(channelId: number, brandId: number): number;
   getKnowledgeFiles(brandId?: number): KnowledgeFile[];
   createKnowledgeFile(filename: string, originalName: string, size: number, brandId?: number, content?: string): KnowledgeFile;
   updateKnowledgeFileContent(id: number, content: string): boolean;
@@ -301,19 +303,20 @@ export class SQLiteStorage implements IStorage {
 
   async deleteBrand(id: number): Promise<boolean> {
     const client = getRedisClient();
-    if (client) {
-      const ok = await redisBC.deleteBrand(client, id);
-      if (ok) {
-        try {
-          db.prepare("DELETE FROM channels WHERE brand_id = ?").run(id);
-          db.prepare("DELETE FROM brands WHERE id = ?").run(id);
-        } catch (_e) { /* ignore */ }
-      }
-      return ok;
+    // 以 SQLite 為準：先刪除 channels / brands，避免因 Redis 未同步導致刪除失敗
+    try {
+      db.prepare("DELETE FROM channels WHERE brand_id = ?").run(id);
+      const result = db.prepare("DELETE FROM brands WHERE id = ?").run(id);
+      if (result.changes === 0) return false;
+    } catch (e) {
+      return false;
     }
-    db.prepare("DELETE FROM channels WHERE brand_id = ?").run(id);
-    const result = db.prepare("DELETE FROM brands WHERE id = ?").run(id);
-    return result.changes > 0;
+    if (client) {
+      try {
+        await redisBC.deleteBrand(client, id);
+      } catch (_e) { /* 僅同步 Redis，失敗不影響已完成的刪除 */ }
+    }
+    return true;
   }
 
   getChannels(): ChannelWithBrand[] {
@@ -607,26 +610,30 @@ export class SQLiteStorage implements IStorage {
       const result = db.prepare("INSERT INTO contacts (platform, platform_user_id, display_name, needs_human, is_pinned, status, tags, vip_level, order_count, total_spent, brand_id, channel_id, created_at) VALUES (?, ?, ?, 0, 0, 'pending', '[]', 0, 0, 0, ?, ?, ?)").run(platform, platformUserId, displayName, brandId || null, channelId || null, now);
       contact = { id: Number(result.lastInsertRowid), platform, platform_user_id: platformUserId, display_name: displayName, avatar_url: null, needs_human: 0, is_pinned: 0, status: "pending", tags: "[]", vip_level: 0, order_count: 0, total_spent: 0, cs_rating: null, ai_rating: null, last_message_at: null, created_at: now, brand_id: brandId || null, channel_id: channelId || null, issue_type: null, order_source: null, assigned_agent_id: null, intent_level: null, order_number_type: null, first_assigned_at: null, closed_at: null, closed_by_agent_id: null, case_priority: null };
     } else {
+      // 每次有帶入 brand/channel（例如 Webhook 匹配到渠道）就更新，讓「這則訊息從哪個渠道來」為準，避免錯歸一次就永遠錯
       let needsUpdate = false;
       let newBrandId = contact.brand_id;
       let newChannelId = contact.channel_id;
-      
-      if (brandId && !contact.brand_id) {
+      if (brandId != null && contact.brand_id !== brandId) {
         newBrandId = brandId;
         needsUpdate = true;
       }
-      if (channelId && !contact.channel_id) {
+      if (channelId != null && contact.channel_id !== channelId) {
         newChannelId = channelId;
         needsUpdate = true;
       }
-      
       if (needsUpdate) {
-        db.prepare("UPDATE contacts SET brand_id = ?, channel_id = ? WHERE id = ?").run(newBrandId || null, newChannelId || null, contact.id);
-        contact.brand_id = newBrandId;
-        contact.channel_id = newChannelId;
+        db.prepare("UPDATE contacts SET brand_id = ?, channel_id = ? WHERE id = ?").run(newBrandId ?? null, newChannelId ?? null, contact.id);
+        contact.brand_id = newBrandId ?? null;
+        contact.channel_id = newChannelId ?? null;
       }
     }
     return contact as Contact;
+  }
+
+  reassignContactsByChannel(channelId: number, brandId: number): number {
+    const result = db.prepare("UPDATE contacts SET brand_id = ? WHERE channel_id = ?").run(brandId, channelId);
+    return result.changes;
   }
 
   getKnowledgeFiles(brandId?: number): KnowledgeFile[] {

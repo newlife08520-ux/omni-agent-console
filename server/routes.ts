@@ -18,7 +18,7 @@ import {
 import { runAutoExecution, computeMainStatus } from "./meta-comment-auto-execute";
 import * as riskRules from "./meta-comment-risk-rules";
 import { resolveConversationState } from "./conversation-state-resolver";
-import { buildReplyPlan, shouldNotLeadWithOrderLookup } from "./reply-plan-builder";
+import { buildReplyPlan, shouldNotLeadWithOrderLookup, isAftersalesComfortFirst } from "./reply-plan-builder";
 import { isRatingEligible } from "./rating-eligibility";
 import db from "./db";
 import { fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, fetchPages, lookupOrdersByPageAndPhone, ensurePagesCacheLoaded, refreshPagesCache, getCachedPages, getCachedPagesAge, buildProductCatalogPrompt } from "./superlanding";
@@ -247,16 +247,34 @@ function buildKnowledgeBlock(brandId?: number): string {
   return "\n\n--- 知識庫內容 ---\n" + blocks.join("\n\n");
 }
 
+/** 精準發圖與導購的 Chain-of-Thought 規範（與知識庫、圖片素材庫搭配使用） */
+const IMAGE_PRECISION_COT_BLOCK = `
+
+--- 【精準發圖與導購最高指導原則】---
+以下為使用【知識庫】與【圖片素材庫】時的強制思考鏈，請嚴格依序執行。
+
+步驟一（語意翻譯）：當客戶詢問商品時，極可能使用「俗稱、簡稱或錯字」（例如：空氣戰神、胖子T）。你必須先利用【知識庫】將客戶用語翻譯為標準的【官方產品名稱】。
+
+步驟二（意圖判斷）：判斷客戶是否需要視覺輔助（例如：詢問尺寸、長相、材質、保存方式、食用方式、內容物）。若不需要發圖，則以純文字回覆即可。
+
+步驟三（精準匹配圖片）：若需要發圖，請以【官方產品名稱】結合意圖，去比對下方【圖片素材庫】列表。確保圖片的 name、description 或 keywords 嚴格對應該官方商品或該意圖（如尺寸表、保存方式）。只選「確定屬於客戶所問商品／情境」的圖片。
+
+步驟四（寧缺勿濫）：絕對禁止張冠李戴（例如把 A 商品的尺寸表發給詢問 B 商品的客戶）。若無確切對應的圖片，請純文字回覆即可，不要猜測發圖。若找到確切對應，請主動呼叫 send_image_to_customer，傳入該圖的 name（即下方列表的 name 欄位）。
+`;
+
 function buildImageAssetCatalog(brandId?: number): string {
   const assets = storage.getImageAssets(brandId);
   if (assets.length === 0) return "";
   const lines = assets.map((a, i) => {
-    const parts = [`#${i + 1} ${a.display_name}`];
-    if (a.description) parts.push(`(${a.description})`);
-    if (a.keywords) parts.push(`關鍵字: ${a.keywords}`);
+    const name = a.display_name || a.original_name || "";
+    const desc = (a.description || "").trim();
+    const kw = (a.keywords || "").trim();
+    const parts = [`#${i + 1} name: ${name}`];
+    if (desc) parts.push(`description: ${desc}`);
+    if (kw) parts.push(`keywords: ${kw}`);
     return parts.join(" ");
   });
-  return "\n\n--- 圖片素材庫 ---\n你具備發送圖片的能力。如果客戶的問題用圖片回覆會更清晰，且素材庫中有對應圖片，請優先使用 send_image_to_customer 工具來回覆。\n可用圖片：\n" + lines.join("\n");
+  return "\n\n--- 圖片素材庫 ---\n你具備發送圖片的能力。若客戶問題用圖片回覆更清晰，且下方列表中有「與客戶所問商品／意圖確切對應」的圖片，請使用 send_image_to_customer，傳入該圖的 name。\n可用圖片（請依 name / description / keywords 精準匹配官方商品與意圖）：\n" + lines.join("\n");
 }
 
 async function getEnrichedSystemPrompt(brandId?: number): Promise<string> {
@@ -272,7 +290,8 @@ async function getEnrichedSystemPrompt(brandId?: number): Promise<string> {
   const pages = await ensurePagesCacheLoaded(config);
   const catalogBlock = buildProductCatalogPrompt(pages);
   const knowledgeBlock = buildKnowledgeBlock(brandId);
-  const imageBlock = buildImageAssetCatalog(brandId);
+  const imageCatalog = buildImageAssetCatalog(brandId);
+  const imageBlock = imageCatalog ? IMAGE_PRECISION_COT_BLOCK + imageCatalog : "";
 
   let returnFormUrl = "https://www.lovethelife.shop/returns";
   if (brandId) {
@@ -282,45 +301,40 @@ async function getEnrichedSystemPrompt(brandId?: number): Promise<string> {
 
   const handoffBlock = `
 
---- 轉人工與退換貨判斷規則（完整替換版，嚴格遵守）---
-若上方有「品牌專屬指令」，人設與語氣依該指令；以下只規範「何時可轉人工」與「退換貨如何處理」。
+--- 訂單出貨與退換貨規則（營運邏輯版，嚴格遵守）---
+總原則：第一優先不是「丟流程」，而是「先接住客人」。問出貨、等太久、想取消、想退貨、不耐煩時，都要先有一句自然承接與安撫，不能一上來就像系統機器人。不要太早提「其他平台」「若非官方通路」「建議找該平台客服」；除非已實際查單且確實查不到，否則禁止。
 
-你必須先分清楚：顧客主題（intent）≠ 是否需要人工（needs_human）。顧客提到退貨、退款、取消、久候、缺貨、查單，只代表目前在談售後主題，不代表必須轉人工。
+一、商品類型與出貨邏輯
+- 甜點類：多為現貨，通常 3 天內出貨。客人 3 天內詢問時不要過度渲染延誤，以「幫您查詢、若有現貨會盡快安排」為主。若倉庫缺貨可自然說明可能改為預購約 7–20 工作天，並補「會盡量協助加快」。
+- 其他產品：多為預售，常見 7–20 個工作天。先道歉、說明目前排單／預售，若有現貨就盡快安排；若無則誠實說明約 7–20 工作天，一定要補「會盡量幫您加快」或「這邊幫您備註加急」。不要回得像推託，要像真的在幫客人處理。
 
-A. 不可直接轉人工的主題
-以下情況一律先由 AI 處理第一輪，不可因單一字詞直接轉人工：只提到退貨、只提到退款、只提到換貨、只提到取消訂單、只說不想等了、只說等太久、只問退貨流程、只問退款多久、只問訂單在哪、只問為什麼還沒出貨、只說缺貨很久、只說想申請售後。以上都只能先標記對應 intent（如 refund_or_return、order_delay、order_lookup、cancellation_request、aftersales_request），不得直接設為 needs_human。
+二、詢問訂單／出貨進度
+- 觸發：訂單、查單、什麼時候到、何時出貨、怎麼還沒收到、單號、出貨進度、還沒寄、等太久等。
+- 回覆前：先一句承接再收資訊，例如「了解，這邊先幫您確認一下出貨狀況」「不好意思讓您久等了，我先幫您查一下目前進度」。不要一次丟太多欄位，優先收訂單編號或商品名稱＋手機。
+- 有查到：依商品類型分流回覆（甜點 3 天節奏／其他 7–20 工作天），語氣柔和，可加「會盡快安排／備註加急」。
+- 查不到：先說「目前這邊暫時還沒查到這筆資料」，再問「您方便再提供訂單編號／商品名稱＋手機，我再幫您確認一次嗎？」只有在已查過、資訊足夠、仍明確查無此筆時，才可自然提到「有可能不是從我們這個系統下單，若您願意我也可以幫您轉專人再確認」。不得在未查單前就提其他平台。
+- 多次查單仍查無且客人明顯不耐煩時，可轉人工，但回話要自然，不要像系統宣告。
 
-B. 只有以下五大情況可以直接轉人工
-1. 顧客明確要求真人（例：我要真人客服、不要機器人、幫我轉人工、找客服本人、找主管、我要真人處理、請真人跟我聯絡）→ reason = explicit_human_request
-2. 顧客情緒明顯升高且出現投訴/法務/公開風險（例：你們是詐騙嗎、我要投訴、我要檢舉、我要去消保官、我要公開這件事、你們到底要不要處理、再不處理我就發文）→ reason = legal_or_reputation_threat
-3. 問題涉及 AI 無法處理的人工權限（重複扣款、金流異常、物流簽收爭議、收到錯商品、補償要求、例外退款、需人工判定照片/影片/特殊個案、規則外案件）→ reason = payment_or_order_risk 或 policy_exception
-4. AI 已處理至少一輪，顧客仍明確表示沒解決（例：你前面沒有回答到我的問題、我已經講第二次了、我不要再看流程了、你現在就幫我處理、我不是問這個、你一直在重複）→ reason = repeat_unresolved
-5. 退換貨已進入「明確堅持退款/退貨」階段（例：我就是要退、直接幫我退、我不要其他方案、我就是要退款、不要再跟我說別的方法、我不接受其他處理方式）→ reason = return_stage_3_insist
+三、退換貨／取消（分型處理）
+- 久候型（等太久、不想等、想取消但尚未堅持）：先安撫、先查詢出貨、說明能否加急或約需 7–20 工作天、優先嘗試留單。不要一開口就丟表單、不要一開口就轉人工。只有客人明確不要等、已安撫一輪仍堅持取消／退款、或情緒升高時，再進表單或轉人工。
+- 商品問題型（瑕疵、損壞、錯貨、缺件、漏寄、收到有問題）：一律先道歉、表示會協助處理，導向正式退換貨／售後表單（售後表單：${returnFormUrl}），必要時轉人工。這類不要只靠安撫，要走正式售後。
+- 明確堅持退款退貨（我就是要退、直接幫我退、不要其他方案等）：可轉人工或提供表單，但仍先一句安撫再處理。
 
-C. 退換貨一律走三段判斷，不可直接跳第三段
-第一段：先理解原因，不直接轉人工。顧客提到退貨、退款、取消、不想等、缺貨、久候時，先判斷是問流程、情緒焦慮、想知道能否取消、查進度或表達失望尚未堅持，先安撫、理解、收一次必要資訊。
-第二段：先提供 AI 可處理的下一步。說明規則與可能處理方式、引導提供訂單編號/商品名稱/下單通路、說明後續流程、給查詢或申請的下一步；若有表單可在合適時機提供（售後表單：${returnFormUrl}），不可一開始就丟表單。
-第三段：只有在明確要求真人、明確堅持退款/退貨、AI 已處理一輪仍無法推進、問題屬人工權限、或情緒/法務/投訴風險過高時，才呼叫 transfer_to_human。
+四、轉人工條件
+可轉：明確要求真人；明確堅持退款／退貨／取消且不接受等待；商品損壞／瑕疵且情況較複雜；補償、爭議、金流異常；情緒高風險、投訴、公開負評風險；AI 已嘗試一輪仍無法推進。
+不可太快轉：不要只因為第一次問進度、第一次抱怨久候、語氣有點急、或只提到「退貨」兩字但尚未說明原因就轉人工。
 
-D. 轉人工前要做的事
-若已判斷需要轉人工，先盡量幫真人收一次：訂單編號、商品名稱、問題重點、顧客目前明確訴求、是否已提供過資料、是否已嘗試過某個流程。若顧客已明顯不耐煩、明確要求真人或情緒高張，收一次失敗就直接轉人工，不可反覆追問。
-
-E. 轉人工時的表達方式
-轉人工不可冷硬、不可像踢皮球。建議：「了解，我先幫您整理目前狀況，接著安排真人客服為您接手處理，這樣會比較快一些🙏」若需補資料：「我先幫您安排人工客服，若方便的話，也可以先提供一下訂單編號或商品名稱，這樣會更快接到對應的人員唷🙏」
-
-F. 禁止事項
-你不可以：一看到退貨就直接答應退款；一看到退款就直接轉人工；一看到久候就直接丟真人；一看到缺貨就直接 needs_human；還沒理解問題就直接給表單；還沒收過一次必要資訊就直接推給真人；只因顧客提到售後主題就呼叫 transfer_to_human；因單一字詞（退貨、退款、客服、缺貨、取消、爛）直接判定真人。
+五、語氣與禁止
+- 必須像真人客服，避免像制度公告。用「我先幫您確認看看」「這邊幫您查一下」「不好意思讓您久等了」「若有現貨會盡快替您安排」「我這邊也會幫您備註、盡量協助加快」。
+- 禁止太早出現：你是不是在別的平台買的、那可能不是我們這邊的單、建議去找別的平台客服、這不屬於我們處理範圍。只有真正查不到且資訊完整時，才能自然提一次。
+- 遇到久候要偏安撫與協助，不是偏辯解；讓客人感覺你有在幫他處理、幫他催、幫他加快。
 
 F2. 退貨／退款第一句禁止「區分官方／其他平台」
-當顧客只說想退貨、退款、換貨、取消時，不可第一句就說「若您是透過官方通路下單…若是其他平台購買建議向該平台客服確認」或任何讓顧客覺得被推給別家的說法。顧客會認為自己就是在你們家買的，一開口就區分通路會造成不滿。正確做法：先安撫、先理解原因（是等待太久、商品問題、還是其他），再依退換貨三階段處理。只有在「顧客已提供訂單編號或商品+手機且你已用工具查詢，結果確實查無此筆」時，才可禮貌說明可能為其他通路訂單並建議轉真人協助，且不得在顧客尚未提供任何訂單資訊前就提其他平台。
+不得第一句就說「若您是透過官方通路下單…若是其他平台購買建議向該平台客服確認」。只有在顧客已提供訂單編號或商品+手機且你已用工具查詢、結果確實查無此筆時，才可禮貌說明可能為其他通路並建議轉真人，且不得在顧客尚未提供任何訂單資訊前就提其他平台。
 
-G. 最終判斷原則
-提到退貨，不等於需要人工。提到退款、取消、久候、缺貨、查單，不等於需要人工。先由 AI 接住、理解、處理第一輪。只有在明確要求真人、高風險、人工權限、AI 已無法推進、或顧客明確堅持時，才轉人工。
-
---- AI 身分透明規則 ---
-你是 AI 助手，在適當時機自然地讓客戶知道你是 AI，用品牌人設的語氣表達，嚴禁假裝是真人。當客戶要求轉真人時，自然地回覆並呼叫 transfer_to_human。
-
-注意：訂單來源（一頁商店、SHOPLINE 等）不是轉接人工的判斷依據。訂單查詢工具回傳 found=false 或空陣列時，用你的語氣告知客戶查不到資料，主動詢問是否有其他資訊可協助查詢，不要自動轉人工。`;
+--- AI 身分透明 ---
+在適當時機自然讓客戶知道你是 AI，嚴禁假裝是真人。客戶要求轉真人時，自然回覆並呼叫 transfer_to_human。
+訂單查詢回傳 found=false 時，用你的語氣告知查不到、主動詢問是否有其他資訊可協助，不要自動轉人工。`;
 
   const schedule = storage.getGlobalSchedule();
   const unavailableReason = assignment.getUnavailableReason();
@@ -2159,6 +2173,21 @@ export async function registerRoutes(
     return res.json({ success: true });
   });
 
+  /** 批次修正：將「某渠道下所有聯絡人」改歸到指定品牌（用於 LINE 錯歸後一次拉回正確品牌） */
+  app.post("/api/admin/contacts/reassign-by-channel", authMiddleware, managerOrAbove, async (req, res) => {
+    const channelId = req.body?.channel_id != null ? parseInt(String(req.body.channel_id), 10) : null;
+    const brandId = req.body?.brand_id != null ? parseInt(String(req.body.brand_id), 10) : null;
+    if (channelId == null || brandId == null || isNaN(channelId) || isNaN(brandId)) {
+      return res.status(400).json({ message: "請提供 channel_id 與 brand_id" });
+    }
+    const channel = storage.getChannel(channelId);
+    if (!channel) return res.status(404).json({ message: "渠道不存在" });
+    const brand = storage.getBrand(brandId);
+    if (!brand) return res.status(404).json({ message: "品牌不存在" });
+    const updated = storage.reassignContactsByChannel(channelId, brandId);
+    return res.json({ success: true, updated, message: `已將 ${updated} 位聯絡人改歸到「${brand.name}」` });
+  });
+
   app.post("/api/brands/:id/test-superlanding", authMiddleware, managerOrAbove, async (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) return res.status(400).json({ message: "無效的 ID" });
@@ -3500,7 +3529,10 @@ export async function registerRoutes(
         systemPrompt += "\n\n【本輪硬規則 F2】回覆中禁止出現：" + plan.must_not_include.map((p) => `「${p}」`).join("、") + "。不得區分官方通路與其他平台，除非客戶已提供訂單/商品+手機且你已用工具查詢後確實查無此筆。";
       }
       if (shouldNotLeadWithOrderLookup(plan, state)) {
-        systemPrompt += "\n\n【本輪】本輪為退換貨承接，不可先走訂單查詢為主流程；先承接需求並引導表單。";
+        systemPrompt += "\n\n【本輪】本輪為商品問題型退換貨，先道歉並表示會協助處理，再引導填寫售後表單（可附表單連結）。不可先走訂單查詢為主流程。";
+      }
+      if (isAftersalesComfortFirst(plan)) {
+        systemPrompt += "\n\n【本輪 久候型售後】客人因等太久／不想等／想取消而抱怨。你要：先一句自然安撫（如：不好意思讓您久等了）→ 主動幫他查詢出貨狀況 → 說明是否有現貨、能否加急、或約需 7–20 工作天 → 補一句「會盡量幫您加快／備註加急」。不要一開口就丟表單、不要一開口就轉人工、不要先提「其他平台」。可呼叫訂單查詢工具。";
       }
       const openai = new OpenAI({ apiKey });
 
@@ -4543,13 +4575,13 @@ export async function registerRoutes(
       type: "function",
       function: {
         name: "send_image_to_customer",
-        description: "發送圖片素材給客戶。當你認為客戶的問題用圖片回覆會更清晰（例如：產品特色圖、使用教學圖、活動海報），且圖片素材庫中有對應圖片時使用。",
+        description: "發送圖片素材給客戶。僅在「客戶所問商品／意圖」與該圖片確切對應時使用（例如：客戶問 A 商品尺寸，則只能發 A 商品的尺寸表）。請務必確認：傳入的 image_name 對應的圖片，其 name／keywords 所屬的官方商品，與客戶當前詢問的商品完全一致。禁止張冠李戴（例如把 A 商品的圖發給問 B 商品的客戶）。當客戶問題用圖片回覆更清晰（如：尺寸、長相、保存方式、食用方式），且素材庫中有對應圖片時呼叫。",
         parameters: {
           type: "object",
           properties: {
             image_name: {
               type: "string",
-              description: "圖片素材庫中的圖片名稱（display_name 或 original_name）",
+              description: "圖片素材庫列表中的 name（即 display_name）。必須與客戶當前詢問的「官方產品名稱」或該意圖（如尺寸表、保存說明）確切對應。",
             },
             text_message: {
               type: "string",

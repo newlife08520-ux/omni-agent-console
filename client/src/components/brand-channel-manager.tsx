@@ -89,6 +89,9 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
   const [testingBrandSL, setTestingBrandSL] = useState<number | null>(null);
   const [testingBrandShopline, setTestingBrandShopline] = useState<number | null>(null);
   const [refreshingProfiles, setRefreshingProfiles] = useState(false);
+  const [reassignChannelId, setReassignChannelId] = useState<number | "">("");
+  const [reassignBrandId, setReassignBrandId] = useState<number | "">("");
+  const [reassignLoading, setReassignLoading] = useState(false);
 
   const handleRefreshProfiles = async () => {
     setRefreshingProfiles(true);
@@ -172,6 +175,12 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
       return res.json();
     },
     enabled: !!selectedBrandId,
+  });
+
+  const { data: allChannelsWithBrand = [] } = useQuery<Channel[] & { brand_name?: string }[]>({
+    queryKey: ["/api/channels"],
+    queryFn: getQueryFn({ on401: "throw" }),
+    enabled: !readOnly,
   });
 
   const assignedAgentsQueries = useQueries({
@@ -313,6 +322,35 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
       toast({ title: "渠道已刪除" });
     } catch (_e) {
       toast({ title: "刪除失敗", variant: "destructive" });
+    }
+  };
+
+  const handleReassignByChannel = async () => {
+    if (reassignChannelId === "" || reassignBrandId === "") {
+      toast({ title: "請選擇渠道與目標品牌", variant: "destructive" });
+      return;
+    }
+    setReassignLoading(true);
+    try {
+      const res = await fetch("/api/admin/contacts/reassign-by-channel", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channel_id: reassignChannelId, brand_id: reassignBrandId }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast({ title: data.message || "已更新歸屬", description: `共 ${data.updated} 位聯絡人` });
+        queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
+        setReassignChannelId("");
+        setReassignBrandId("");
+      } else {
+        toast({ title: data.message || "執行失敗", variant: "destructive" });
+      }
+    } catch (_e) {
+      toast({ title: "執行失敗", variant: "destructive" });
+    } finally {
+      setReassignLoading(false);
     }
   };
 
@@ -521,6 +559,46 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
         </div>
       )}
 
+      {!readOnly && allChannelsWithBrand.length > 0 && brands.length > 0 && (
+        <div className="bg-amber-50/80 rounded-2xl border border-amber-200 p-5 shadow-sm" data-testid="section-reassign-by-channel">
+          <div className="flex items-center gap-2 mb-3">
+            <RefreshCw className="w-4 h-4 text-amber-600" />
+            <span className="text-sm font-semibold text-stone-800">批次修正聯絡人歸屬</span>
+          </div>
+          <p className="text-xs text-stone-600 mb-3">若某渠道的訊息被錯歸到別的品牌，可將「該渠道下所有聯絡人」一次改歸到正確品牌（請先修正該渠道的 Bot ID，新訊息才會持續歸對）。</p>
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="min-w-[200px]">
+              <label className="text-xs font-medium text-stone-600 mb-1 block">選擇渠道</label>
+              <Select value={reassignChannelId === "" ? "_" : String(reassignChannelId)} onValueChange={(v) => setReassignChannelId(v === "_" ? "" : parseInt(v, 10))}>
+                <SelectTrigger className="bg-white border-stone-200 text-sm"><SelectValue placeholder="請選擇" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="_">請選擇渠道</SelectItem>
+                  {allChannelsWithBrand.map((ch) => (
+                    <SelectItem key={ch.id} value={String(ch.id)}>{ch.channel_name} {ch.brand_name ? `(${ch.brand_name})` : ""}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="min-w-[180px]">
+              <label className="text-xs font-medium text-stone-600 mb-1 block">改歸到品牌</label>
+              <Select value={reassignBrandId === "" ? "_" : String(reassignBrandId)} onValueChange={(v) => setReassignBrandId(v === "_" ? "" : parseInt(v, 10))}>
+                <SelectTrigger className="bg-white border-stone-200 text-sm"><SelectValue placeholder="請選擇" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="_">請選擇品牌</SelectItem>
+                  {brands.map((b) => (
+                    <SelectItem key={b.id} value={String(b.id)}>{b.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <Button onClick={handleReassignByChannel} disabled={reassignLoading} className="bg-amber-600 hover:bg-amber-700 text-white text-xs">
+              {reassignLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" /> : <RefreshCw className="w-3.5 h-3.5 mr-1.5" />}
+              執行
+            </Button>
+          </div>
+        </div>
+      )}
+
       <Dialog open={showBrandDialog} onOpenChange={setShowBrandDialog}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
@@ -615,6 +693,9 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
         <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle className="text-stone-800">{editingChannel ? "編輯渠道" : "新增渠道"}</DialogTitle>
+            {!editingChannel && selectedBrand && (
+              <p className="text-xs text-stone-500 mt-1">此渠道將隸屬於：<strong className="text-stone-700">{selectedBrand.name}</strong></p>
+            )}
           </DialogHeader>
           <div className="space-y-3">
             <div>

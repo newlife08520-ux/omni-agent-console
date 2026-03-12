@@ -50,9 +50,14 @@ export type WaitingForCustomer =
 
 export type ResolutionStatus = "open" | "awaiting_customer" | "awaiting_human" | "resolved" | "closed";
 
+/** 退換貨／取消的原因類型：久候型先安撫＋查詢；商品問題型走正式表單；明確堅持再升級 */
+export type ReturnReasonType = "wait_too_long" | "product_issue" | "insist" | null;
+
 export interface ConversationState {
   primary_intent: PrimaryIntent;
   secondary_intent?: string | null;
+  /** 退換貨時區分：久候型(先安撫查詢)、商品問題型(走表單)、明確堅持(轉人工) */
+  return_reason_type?: ReturnReasonType;
   needs_human: boolean;
   human_reason?: HumanReason;
   return_stage: 0 | 1 | 2 | 3;
@@ -69,9 +74,13 @@ export interface ConversationState {
 
 const HUMAN_REQUEST_PATTERNS = /真人|轉人工|不要機器人|找客服|找主管|真人處理|真人客服|人工客服/i;
 const HIGH_RISK_PATTERNS = /詐騙|檢舉|投訴|消保官|公開|發文|再不處理/i;
-const REFUND_RETURN_PATTERNS = /退貨|退款|換貨|取消訂單|不想等|不要了|等太久/i;
 const INSIST_REFUND_PATTERNS = /我就是要退|直接幫我退|我不要其他方案|我就是要退款|不要再跟我說別的方法|我不接受其他處理方式/i;
-const ORDER_LOOKUP_PATTERNS = /訂單|查單|出貨|物流|還沒到|單號|編號/i;
+/** 商品瑕疵／損壞／錯貨／缺件 → 正式售後，走表單或人工 */
+const PRODUCT_ISSUE_PATTERNS = /瑕疵|損壞|錯貨|缺件|漏寄|壞掉|破損|收到.*有問題|使用.*瑕疵|有問題|破掉/i;
+/** 退貨／退款／換貨／取消／久候等關鍵字 */
+const REFUND_RETURN_PATTERNS = /退貨|退款|換貨|取消訂單|不想等|不要了|等太久|怎麼還沒|還沒收到|等很久|不要等/i;
+/** 單純問訂單／出貨進度（不帶強烈退貨意圖時） */
+const ORDER_LOOKUP_PATTERNS = /訂單|查單|出貨|物流|還沒到|單號|編號|什麼時候到|何時出貨|出貨進度|還沒寄/i;
 const PRODUCT_CONSULT_PATTERNS = /尺寸|成分|規格|用法|怎麼用|哪款|比較|差異/i;
 const PRICE_PATTERNS = /價格|多少錢|優惠|折扣|活動/i;
 
@@ -82,13 +91,24 @@ function detectPrimaryIntent(userMessage: string, recentUserMessages: string[], 
   if (HUMAN_REQUEST_PATTERNS.test(text)) return "human_request";
   if (HIGH_RISK_PATTERNS.test(combined)) return "complaint";
   if (INSIST_REFUND_PATTERNS.test(text)) return "refund_or_return";
-  if (REFUND_RETURN_PATTERNS.test(text)) return "refund_or_return";
+  if (REFUND_RETURN_PATTERNS.test(combined)) return "refund_or_return";
   if (ORDER_LOOKUP_PATTERNS.test(combined) || /^[A-Z0-9\-]{5,}$/i.test(text)) return "order_lookup";
   if (PRODUCT_CONSULT_PATTERNS.test(combined)) return "product_consult";
   if (PRICE_PATTERNS.test(combined)) return "price_purchase";
   if (/^[\s\W]*$/.test(text) || /^(好|嗯|喔|謝謝|感謝|了解)$/.test(text)) return "smalltalk";
   if (text.length >= 5) return "unclear";
   return "unclear";
+}
+
+/** 區分退換貨／取消的原因類型：商品問題型(走表單)、久候型(先安撫查詢)、明確堅持(轉人工) */
+function detectReturnReasonType(userMessage: string, primary_intent: PrimaryIntent): ReturnReasonType {
+  if (!["refund_or_return", "exchange_request", "cancellation_request"].includes(primary_intent)) return null;
+  const t = (userMessage || "").trim();
+  const combined = [t].join(" ");
+  if (INSIST_REFUND_PATTERNS.test(t)) return "insist";
+  if (PRODUCT_ISSUE_PATTERNS.test(combined)) return "product_issue";
+  if (/等太久|不想等|不要等|怎麼還沒|還沒收到|等很久|想取消|不要了/.test(combined)) return "wait_too_long";
+  return "wait_too_long";
 }
 
 function detectEmotion(userMessage: string): CustomerEmotion {
@@ -168,11 +188,13 @@ export function resolveConversationState(input: ResolveInput): ConversationState
   }
 
   const return_stage = Math.min(3, Math.max(0, (contact as any).return_stage ?? 0)) as 0 | 1 | 2 | 3;
+  const return_reason_type = detectReturnReasonType(userMessage, primary_intent);
   const rating_invited_at = (contact as any).rating_invited_at ?? null;
   const rating_eligible = isRatingEligible(contact, { primary_intent, customer_emotion });
 
   return {
     primary_intent,
+    return_reason_type: return_reason_type ?? undefined,
     needs_human,
     human_reason: human_reason ?? undefined,
     return_stage,
