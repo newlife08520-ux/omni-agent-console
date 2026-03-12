@@ -76,7 +76,7 @@ export interface ConversationState {
 }
 
 /** Phase 1：明確要真人 → 直接 handoff；補齊「人呢、能轉人工嗎、我要人工、轉真人」等 */
-const HUMAN_REQUEST_PATTERNS = /真人|轉人工|不要機器人|找客服|找主管|真人處理|真人客服|人工客服|人呢|能轉人工嗎|我要人工|轉真人/i;
+const HUMAN_REQUEST_PATTERNS = /真人|轉人工|不要機器人|找客服|找主管|真人處理|真人客服|人工客服|人呢|能轉人工嗎|我要人工|轉真人|可以幫我轉人工|我要轉人工/i;
 const HIGH_RISK_PATTERNS = /詐騙|檢舉|投訴|消保官|公開|發文|再不處理/i;
 /** Phase 1：糾正語 → 本輪以當前句重算意圖，不沿用前輪 */
 const CORRECTION_OVERRIDE_PATTERNS = /說錯|不是|我要的是|改成|其實是|剛剛說錯/i;
@@ -226,4 +226,15 @@ export function resolveConversationState(input: ResolveInput): ConversationState
     last_ai_reply_at: lastMessageAtBySender?.ai ?? undefined,
     product_scope_locked: product_scope_locked || undefined,
   };
+}
+
+/** Hotfix：供 routes 在圖片/查單等分支前判斷是否為明確轉人工，避免被圖片模板搶答 */
+export function isHumanRequestMessage(text: string): boolean {
+  return HUMAN_REQUEST_PATTERNS.test((text || "").trim());
+}
+
+/** Hotfix：客戶說已給過資料（你拿過了/我就給過了/前面有/我貼過了/你沒看到嗎）→ 需先搜歷史再決定 */
+const ALREADY_PROVIDED_PATTERNS = /我給過了|你拿過了|我就給過了|前面有|我貼過了|你沒看到嗎|剛剛有|剛才給|已經給過|已經提供|上面有|剛剛傳了/i;
+export function isAlreadyProvidedMessage(text: string): boolean {
+  return ALREADY_PROVIDED_PATTERNS.test((text || "").trim());
 }

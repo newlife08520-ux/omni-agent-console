@@ -18,9 +18,12 @@ import {
 } from "./safe-after-sale-classifier";
 import { runAutoExecution, computeMainStatus } from "./meta-comment-auto-execute";
 import * as riskRules from "./meta-comment-risk-rules";
-import { resolveConversationState } from "./conversation-state-resolver";
-import { buildReplyPlan, shouldNotLeadWithOrderLookup, isAftersalesComfortFirst } from "./reply-plan-builder";
+import { resolveConversationState, isHumanRequestMessage, isAlreadyProvidedMessage } from "./conversation-state-resolver";
+import { buildReplyPlan, shouldNotLeadWithOrderLookup, isAftersalesComfortFirst, type ReplyPlanMode } from "./reply-plan-builder";
 import { OFF_TOPIC_GUARD_MESSAGE, enforceOutputGuard, HANDOFF_MANDATORY_OPENING, buildHandoffReply } from "./phase2-output";
+import { runPostGenerationGuard, isModeNoPromo, runOfficialChannelGuard } from "./content-guard";
+import { recordGuardHit, getGuardStats } from "./content-guard-stats";
+import { searchOrderInfoThreeLayers } from "./already-provided-search";
 import { isRatingEligible } from "./rating-eligibility";
 import db from "./db";
 import { fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, fetchPages, lookupOrdersByPageAndPhone, ensurePagesCacheLoaded, refreshPagesCache, getCachedPages, getCachedPagesAge, buildProductCatalogPrompt } from "./superlanding";
@@ -292,7 +295,11 @@ function buildImageAssetCatalog(brandId?: number): string {
   return "\n\n--- 圖片素材庫 ---\n你具備發送圖片的能力。若客戶問題用圖片回覆更清晰，且下方列表中有「與客戶所問商品／意圖確切對應」的圖片，請使用 send_image_to_customer，傳入該圖的 name。\n可用圖片（請依 name / description / keywords 精準匹配官方商品與意圖）：\n" + lines.join("\n");
 }
 
-async function getEnrichedSystemPrompt(brandId?: number): Promise<string> {
+/** 組裝 system prompt 時可傳入當前品類與 mode，用於知識 gating（甜點出貨說明僅在 sweet 時注入） */
+async function getEnrichedSystemPrompt(
+  brandId?: number,
+  context?: { productScope?: string | null; planMode?: ReplyPlanMode }
+): Promise<string> {
   const basePrompt = storage.getSetting("system_prompt") || "你是一位專業的客服助理。";
   let brandBlock = "";
   if (brandId) {
@@ -314,14 +321,27 @@ async function getEnrichedSystemPrompt(brandId?: number): Promise<string> {
     if (brandData?.return_form_url) returnFormUrl = brandData.return_form_url;
   }
 
+  // Knowledge gating：甜點出貨說明僅在 productScope === "sweet" 時注入；非甜點品類禁止提及甜點較快
+  const isSweet = context?.productScope === "sweet";
+  const isNonSweetLocked = context?.productScope && context.productScope !== "sweet";
+  let shippingLogicBlock: string;
+  if (isSweet) {
+    shippingLogicBlock = `- 甜點類：多為現貨，通常 3 天內出貨。客人 3 天內詢問時不要過度渲染延誤，以「幫您查詢、若有現貨會盡快安排」為主。若倉庫缺貨可自然說明可能改為預購約 7–20 工作天，並補「會盡量協助加快」。
+- 其他產品：多為預售，常見 7–20 個工作天。先道歉、說明目前排單／預售，若有現貨就盡快安排；若無則誠實說明約 7–20 工作天，一定要補「會盡量幫您加快」或「這邊幫您備註加急」。不要回得像推託，要像真的在幫客人處理。`;
+  } else if (isNonSweetLocked) {
+    shippingLogicBlock = `- 【當前已鎖定為非甜點品類】出貨多為預售，常見 7–20 個工作天。先道歉、說明排單／預售，補「會盡量幫您加快／備註加急」。禁止提及甜點、甜點較快、3 天內出貨、巴斯克、蛋糕等；不得說「甜點通常比較快」或任何甜點類出貨說明。`;
+  } else {
+    shippingLogicBlock = `- 出貨時程依商品類型與庫存（現貨較快、預售約 7–20 工作天）。未鎖定品類前勿主動說「甜點比較快」或「甜點 3 天」；僅在客人明確為甜點類且已鎖定為甜點時，才可說甜點通常較快。
+- 其他產品：多為預售，常見 7–20 個工作天。先道歉、說明排單／預售，補「會盡量幫您加快」。`;
+  }
+
   const handoffBlock = `
 
 --- 訂單出貨與退換貨規則（營運邏輯版，嚴格遵守）---
 總原則：第一優先不是「丟流程」，而是「先接住客人」。問出貨、等太久、想取消、想退貨、不耐煩時，都要先有一句自然承接與安撫，不能一上來就像系統機器人。不要太早提「其他平台」「若非官方通路」「建議找該平台客服」；除非已實際查單且確實查不到，否則禁止。
 
 一、商品類型與出貨邏輯
-- 甜點類：多為現貨，通常 3 天內出貨。客人 3 天內詢問時不要過度渲染延誤，以「幫您查詢、若有現貨會盡快安排」為主。若倉庫缺貨可自然說明可能改為預購約 7–20 工作天，並補「會盡量協助加快」。
-- 其他產品：多為預售，常見 7–20 個工作天。先道歉、說明目前排單／預售，若有現貨就盡快安排；若無則誠實說明約 7–20 工作天，一定要補「會盡量幫您加快」或「這邊幫您備註加急」。不要回得像推託，要像真的在幫客人處理。
+` + shippingLogicBlock + `
 
 二、詢問訂單／出貨進度
 - 觸發：訂單、查單、什麼時候到、何時出貨、怎麼還沒收到、單號、出貨進度、還沒寄、等太久等。
@@ -766,6 +786,13 @@ export async function registerRoutes(
     } catch (err: any) {
       return res.status(500).json({ success: false, message: err.message });
     }
+  });
+
+  app.get("/api/internal/guard-stats", authMiddleware, (req: any, res) => {
+    if (!["super_admin", "marketing_manager"].includes(req.session?.userRole)) {
+      return res.status(403).json({ message: "權限不足" });
+    }
+    return res.json(getGuardStats());
   });
 
   app.get("/api/settings", authMiddleware, (req: any, res) => {
@@ -2708,6 +2735,7 @@ export async function registerRoutes(
     broadcastSSE("contacts_updated", { contact_id: id });
 
     if (status === "resolved" || status === "closed") {
+      storage.updateContactConversationFields(id, { customer_goal_locked: null });
       const contactForRating = storage.getContact(id);
       if (contactForRating && isRatingEligible({ contact: contactForRating, state: null })) {
         let ratingSent = false;
@@ -3702,14 +3730,14 @@ ${contextStr}
       }
 
       // 圖片＋極短／模糊文字：不當成已確認情境，先回補充模板（不進一般 AI 售後承諾）
-      // 地雷1 防呆：若本則為文字且觸發高風險，絕不回覆「已收到您的圖片」罐頭，避免 routing 錯亂
+      // Hotfix：human_request 優先 — 若本則為「轉人工/找主管/人呢」等，不得進圖片模板，讓下方 state/plan 走 handoff
       const recentMsgs = storage.getMessages(contact.id).slice(-8);
       const hasRecentImageFromUser = recentMsgs.some(
         (m: { sender_type: string; message_type?: string; content?: string }) =>
           m.sender_type === "user" && (m.message_type === "image" || m.content === "[圖片訊息]" || (m.content && m.content.startsWith("[圖片")))
       );
       const imageCaptionRiskCheck = detectHighRisk(userMessage);
-      if (hasRecentImageFromUser && isShortOrAmbiguousImageCaption(userMessage) && imageCaptionRiskCheck.level !== "legal_risk") {
+      if (hasRecentImageFromUser && isShortOrAmbiguousImageCaption(userMessage) && imageCaptionRiskCheck.level !== "legal_risk" && !isHumanRequestMessage(userMessage)) {
         const escalate = shouldEscalateImageSupplement(recentMsgs);
         const replyText = escalate ? IMAGE_SUPPLEMENT_ESCALATE_MESSAGE : getImageDmReplyForShortCaption(userMessage);
         const templateName = getImageDmTemplateNameForShortCaption(userMessage);
@@ -3802,7 +3830,58 @@ ${contextStr}
       const isReturnFirstRound = (freshContact as any).return_stage == null || (freshContact as any).return_stage === 0;
       const plan = buildReplyPlan({ state, returnFormUrl, isReturnFirstRound });
 
-      // 地雷3：固定回覆短路「僅限」return_form_first（商品問題型／明確堅持時）。久候型(aftersales_comfort_first) 必須走下方 LLM，執行「先安撫＋查詢」。
+      // Hotfix：handoff 原子化 — 一旦 plan 為 handoff，只送一則強制告知句，不進 LLM，避免先出一大段再出第二則轉接
+      if (plan.mode === "handoff") {
+        storage.updateContactConversationFields(contact.id, { product_scope_locked: null, customer_goal_locked: null });
+        storage.updateContactHumanFlag(contact.id, 1);
+        storage.updateContactStatus(contact.id, "awaiting_human");
+        storage.createCaseNotification(contact.id, "in_app");
+        storage.updateContactAssignmentStatus(contact.id, "waiting_human");
+        const assignedId = assignment.assignCase(contact.id);
+        if (assignedId == null && assignment.isAllAgentsUnavailable()) {
+          storage.updateContactNeedsAssignment(contact.id, 1);
+          const tags = JSON.parse(contact.tags || "[]");
+          if (!tags.includes("午休待處理")) {
+            storage.updateContactTags(contact.id, [...tags, "午休待處理"]);
+          }
+          const reason = assignment.getUnavailableReason();
+          storage.createMessage(contact.id, contact.platform, "system", getTransferUnavailableSystemMessage(reason));
+        }
+        const handoffReply = buildHandoffReply({
+          customerEmotion: state.customer_emotion,
+          humanReason: state.human_reason ?? undefined,
+        });
+        const contactPlatform = platform || contact.platform || "line";
+        const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", handoffReply);
+        broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: effectiveBrandId || contact.brand_id });
+        broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+        if (contactPlatform === "messenger" && channelToken) {
+          await sendFBMessage(channelToken, contact.platform_user_id, handoffReply);
+        } else if (channelToken) {
+          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: handoffReply }], channelToken);
+        }
+        storage.createAiLog({
+          contact_id: contact.id,
+          message_id: aiMsg.id,
+          brand_id: effectiveBrandId || undefined,
+          prompt_summary: `handoff_short_circuit: ${userMessage.slice(0, 80)}`,
+          knowledge_hits: [],
+          tools_called: ["handoff_short_circuit"],
+          transfer_triggered: true,
+          transfer_reason: state.human_reason || "explicit_human_request",
+          result_summary: "轉接真人（僅一則強制告知句）",
+          token_usage: 0,
+          model: "reply-plan",
+          response_time_ms: Date.now() - startTime,
+          reply_source: "handoff",
+          used_llm: 0,
+          plan_mode: "handoff",
+          reason_if_bypassed: "handoff_short_circuit",
+        });
+        return;
+      }
+
+      // 地雷3：固定回覆短路「僅限」return_form_first
       if (plan.mode === "return_form_first") {
         const returnFormFirstText = `了解，這邊先幫您處理🙏 若您要申請退換貨，麻煩先幫我填寫退換貨表單，填完後我們的專人會接續協助您確認後續流程。${returnFormUrl ? `\n表單連結：${returnFormUrl}` : ""}\n若您是因為等太久、商品異常，或其他原因，也可以在表單裡一起備註，這樣我們處理會更快。`;
         const contactPlatform = platform || contact.platform || "line";
@@ -3837,7 +3916,7 @@ ${contextStr}
 
       // Phase 2 off_topic_guard：品牌外問題不進 LLM，固定短句收邊界
       if (plan.mode === "off_topic_guard") {
-        storage.updateContactConversationFields(contact.id, { product_scope_locked: null });
+        storage.updateContactConversationFields(contact.id, { product_scope_locked: null, customer_goal_locked: null });
         const contactPlatform = platform || contact.platform || "line";
         const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", OFF_TOPIC_GUARD_MESSAGE);
         broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: effectiveBrandId || contact.brand_id });
@@ -3869,15 +3948,34 @@ ${contextStr}
 
       // Phase 2 product_scope_locked：handoff/off_topic 清除；order_lookup/answer_directly 可從本句推斷並寫入
       if (plan.mode === "handoff") {
-        storage.updateContactConversationFields(contact.id, { product_scope_locked: null });
+        storage.updateContactConversationFields(contact.id, { product_scope_locked: null, customer_goal_locked: "handoff" });
       } else if (plan.mode === "order_lookup" || plan.mode === "answer_directly") {
         const inferredScope = getProductScopeFromMessage(userMessage);
         if (inferredScope) {
           storage.updateContactConversationFields(contact.id, { product_scope_locked: inferredScope });
         }
+        if (plan.mode === "order_lookup") {
+          storage.updateContactConversationFields(contact.id, { customer_goal_locked: "order_lookup" });
+        }
+      }
+      let goalLocked: string | null = null;
+      if (plan.mode === "return_form_first" || plan.mode === "return_stage_1") {
+        goalLocked = "return";
+        storage.updateContactConversationFields(contact.id, { customer_goal_locked: "return" });
+      } else if (plan.mode === "handoff") {
+        goalLocked = "handoff";
+      } else if (plan.mode === "order_lookup") {
+        goalLocked = "order_lookup";
+      } else {
+        goalLocked = (contact as any)?.customer_goal_locked ?? null;
       }
 
-      let systemPrompt = await getEnrichedSystemPrompt(contact.brand_id || brandId || undefined);
+      const effectiveScope = state.product_scope_locked || ((plan.mode === "order_lookup" || plan.mode === "answer_directly") ? getProductScopeFromMessage(userMessage) : null);
+
+      let systemPrompt = await getEnrichedSystemPrompt(contact.brand_id || brandId || undefined, { productScope: effectiveScope, planMode: plan.mode });
+      if (goalLocked) {
+        systemPrompt += `\n\n【客戶目標鎖定】本輪目標為「${goalLocked}」，不得跳去商品推薦、其他品類知識、與此目標無關的補充或推銷。`;
+      }
       if (plan.mode === "handoff") {
         systemPrompt += "\n\n【本輪】已判斷需轉人工，請呼叫 transfer_to_human 並以自然語氣告知將安排真人接手（例：了解，我先幫您整理目前狀況，接著安排真人客服為您接手處理，這樣會比較快一些🙏）。";
         if (state.human_reason === "explicit_human_request") {
@@ -3897,12 +3995,67 @@ ${contextStr}
       if (plan.mode === "order_lookup") {
         systemPrompt += "\n\n【本輪 查單】本輪只做查單。承接一句後只問一個最有效欄位（訂單編號或商品+手機），不要問卷、不要多餘問題。回覆簡短（約 90～140 字）。";
       }
-      const effectiveScope = state.product_scope_locked || ((plan.mode === "order_lookup" || plan.mode === "answer_directly") ? getProductScopeFromMessage(userMessage) : null);
+      // Mode-specific forbidden content：退貨/取消/handoff/order_lookup 禁止賣點、行銷、推薦、價格組合
+      if (isModeNoPromo(plan.mode)) {
+        systemPrompt += "\n\n【本輪禁止】不得輸出：商品賣點、行銷詞、推薦語、價格組合推導、無關品類補充、主動銷售。本輪只做承接／查單／退貨表單／安撫／轉接，不介紹產品、不推銷。";
+      }
       if (effectiveScope === "bag") {
         systemPrompt += "\n\n【本輪 商品範圍】已鎖定為包包/袋類，回覆中不得提及甜點、蛋糕、巴斯克等無關品類。";
       }
       if (effectiveScope === "sweet") {
         systemPrompt += "\n\n【本輪 商品範圍】已鎖定為甜點類，回覆中不得提及包包、袋類等無關品類。";
+      }
+      // Hotfix：已知為品牌官方渠道時，不得再問是否官方下單／其他平台
+      if (contact.channel_id) {
+        systemPrompt += "\n\n【本輪 官方渠道】客人目前透過品牌官方 LINE/渠道與你對話，請勿再詢問「是否官方下單」「若是其他平台購買」等與情境衝突的句子；直接依其需求協助查單或售後。";
+      }
+      // Hotfix：客戶說已給過資料 → 三層搜尋（1. 近期文字 2. 最近圖片 vision 3. linked order）；三層都沒有才轉真人
+      if (isAlreadyProvidedMessage(userMessage)) {
+        const openaiForSearch = apiKey ? new OpenAI({ apiKey }) : null;
+        const found = await searchOrderInfoThreeLayers(contact.id, recentMessages, {
+          imageFileToDataUri,
+          openai: openaiForSearch,
+        });
+        if (!found || (!found.orderId && !found.phone)) {
+          const apologyHandoff = "不好意思造成困擾，這邊先幫您轉接真人專員處理，請稍後。";
+          const contactPlatform = platform || contact.platform || "line";
+          const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", apologyHandoff);
+          broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: effectiveBrandId || contact.brand_id });
+          broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+          if (contactPlatform === "messenger" && channelToken) {
+            await sendFBMessage(channelToken, contact.platform_user_id, apologyHandoff);
+          } else if (channelToken) {
+            await pushLineMessage(contact.platform_user_id, [{ type: "text", text: apologyHandoff }], channelToken);
+          }
+          storage.updateContactHumanFlag(contact.id, 1);
+          storage.updateContactStatus(contact.id, "awaiting_human");
+          storage.createCaseNotification(contact.id, "in_app");
+          storage.updateContactAssignmentStatus(contact.id, "waiting_human");
+          assignment.assignCase(contact.id);
+          storage.createAiLog({
+            contact_id: contact.id,
+            message_id: aiMsg.id,
+            brand_id: effectiveBrandId || undefined,
+            prompt_summary: `already_provided_not_found: ${userMessage.slice(0, 60)}`,
+            knowledge_hits: [],
+            tools_called: ["already_provided_handoff"],
+            transfer_triggered: true,
+            transfer_reason: "客戶表示已給過但系統未找到，勿再問",
+            result_summary: "已給過未找到→道歉轉真人",
+            token_usage: 0,
+            model: "reply-plan",
+            response_time_ms: Date.now() - startTime,
+            reply_source: "handoff",
+            used_llm: 0,
+            plan_mode: plan.mode,
+            reason_if_bypassed: "already_provided_not_found",
+          });
+          return;
+        }
+        const parts = [];
+        if (found.orderId) parts.push(`訂單編號 ${found.orderId}`);
+        if (found.phone) parts.push(`手機 ${found.phone}`);
+        systemPrompt += "\n\n【本輪 已給過】客戶表示已提供過資料。以下為近期對話中曾出現的資訊，請直接使用：" + parts.join("、") + "。勿再重問同一項。";
       }
       const openai = new OpenAI({ apiKey });
 
@@ -4215,7 +4368,28 @@ ${contextStr}
       }
 
       const rawReply = responseMessage?.content;
-      const reply = rawReply && rawReply.trim() ? enforceOutputGuard(rawReply.trim(), plan.mode) : rawReply;
+      let reply = rawReply && rawReply.trim() ? enforceOutputGuard(rawReply.trim(), plan.mode) : rawReply;
+      // Post-generation content guard：品類不符或 mode 禁語則清洗後再送出
+      if (reply && reply.trim()) {
+        const guardResult = runPostGenerationGuard(reply, plan.mode, effectiveScope);
+        if (!guardResult.pass) {
+          const useCleaned = guardResult.cleaned && guardResult.cleaned.trim();
+          reply = useCleaned ? guardResult.cleaned : "了解，這邊幫您記錄，稍後由專人為您處理。";
+          const outcome = useCleaned ? "cleaned" : "fallback";
+          for (const r of (guardResult.reason || "").split(";").filter(Boolean)) {
+            recordGuardHit(r as import("./content-guard-stats").GuardRuleId, outcome);
+          }
+        }
+      }
+      // Official channel hard guard：已知官方渠道時，回覆不得出現「是否官方下單」「若是其他平台購買」等
+      if (reply && reply.trim() && contact.channel_id) {
+        const officialGuard = runOfficialChannelGuard(reply);
+        if (!officialGuard.pass) {
+          const useCleaned = officialGuard.cleaned && officialGuard.cleaned.trim();
+          reply = useCleaned ? officialGuard.cleaned : "了解，這邊幫您處理，請稍候。";
+          recordGuardHit("official_channel_forbidden", useCleaned ? "cleaned" : "fallback");
+        }
+      }
       if (reply && reply.trim()) {
         const contactPlatform = platform || contact.platform || "line";
         const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", reply);

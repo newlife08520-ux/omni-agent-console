@@ -130,7 +130,7 @@ export interface IStorage {
   updateContactOrderNumberType(contactId: number, type: string | null): void;
   updateContactCasePriority(contactId: number, priority: number | null): void;
   updateContactClosed(contactId: number, closedByAgentId: number, closeReason?: string | null): void;
-  updateContactConversationFields(contactId: number, fields: { resolution_status?: string | null; waiting_for_customer?: string | null; human_reason?: string | null; return_stage?: number | null; rating_invited_at?: string | null; close_reason?: string | null; qa_score?: number | null; qa_score_reason?: string | null; product_scope_locked?: string | null }): void;
+  updateContactConversationFields(contactId: number, fields: { resolution_status?: string | null; waiting_for_customer?: string | null; human_reason?: string | null; return_stage?: number | null; rating_invited_at?: string | null; close_reason?: string | null; qa_score?: number | null; qa_score_reason?: string | null; product_scope_locked?: string | null; customer_goal_locked?: string | null }): void;
   getUnreadHumanCaseCount(): number;
   markCaseNotificationsRead(contactId?: number): void;
   createCaseNotification(contactId: number, channel?: string): void;
@@ -1174,8 +1174,9 @@ export class SQLiteStorage implements IStorage {
     qa_score?: number | null;
     qa_score_reason?: string | null;
     product_scope_locked?: string | null;
+    customer_goal_locked?: string | null;
   }): void {
-    const allowed = ["resolution_status", "waiting_for_customer", "human_reason", "return_stage", "rating_invited_at", "close_reason", "qa_score", "qa_score_reason", "product_scope_locked"];
+    const allowed = ["resolution_status", "waiting_for_customer", "human_reason", "return_stage", "rating_invited_at", "close_reason", "qa_score", "qa_score_reason", "product_scope_locked", "customer_goal_locked"];
     const setParts: string[] = [];
     const values: any[] = [];
     for (const [k, v] of Object.entries(fields)) {

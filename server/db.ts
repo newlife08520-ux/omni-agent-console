@@ -198,6 +198,7 @@ function migrateConversationStateFields() {
     ["qa_score", "INTEGER"],
     ["qa_score_reason", "TEXT"],
     ["product_scope_locked", "TEXT"],
+    ["customer_goal_locked", "TEXT"],
   ];
   for (const [col, typ] of newCols) {
     if (!contactColNames.includes(col)) {
@@ -974,6 +975,13 @@ function migrateBrandsAndChannels() {
   }
   if (!kfColNames.includes("content")) {
     db.exec("ALTER TABLE knowledge_files ADD COLUMN content TEXT");
+  }
+  // knowledge_files metadata（草案：category, intent, allowed_modes, forbidden_modes, tone）
+  for (const col of ["category", "intent", "allowed_modes", "forbidden_modes", "tone"]) {
+    const currentCols = db.prepare("PRAGMA table_info(knowledge_files)").all() as { name: string }[];
+    if (!currentCols.some(c => c.name === col)) {
+      db.exec(`ALTER TABLE knowledge_files ADD COLUMN ${col} TEXT`);
+    }
   }
 
   db.exec(`

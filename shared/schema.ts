@@ -173,6 +173,8 @@ export interface Contact {
   qa_score_reason?: string | null;
   /** Phase 2：已鎖定商品範圍（如 bag / sweet），回覆不得跨品類 */
   product_scope_locked?: string | null;
+  /** 客戶目標鎖定：return | cancel | order_lookup | handoff | already_provided；鎖定期間不得推銷/跨品類 */
+  customer_goal_locked?: string | null;
 }
 
 
@@ -234,6 +236,11 @@ export interface Setting {
   value: string;
 }
 
+/** 知識適用條件（metadata 化後使用） */
+export type KnowledgeCategory = "sweet" | "bag" | "cleaning" | "skincare" | "all";
+export type KnowledgeIntent = "shipping" | "return" | "product_qa" | "order_lookup" | "all";
+export type KnowledgeTone = "factual" | "promo" | "operational";
+
 export interface KnowledgeFile {
   id: number;
   filename: string;
@@ -242,6 +249,16 @@ export interface KnowledgeFile {
   content: string | null;
   created_at: string;
   brand_id: number | null;
+  /** 適用品類；空/null 視為 all */
+  category?: string | null;
+  /** 適用意圖；空/null 視為 all */
+  intent?: string | null;
+  /** JSON 陣列，例 ["order_lookup"]；空/null 表示全部允許 */
+  allowed_modes?: string | null;
+  /** JSON 陣列，例 ["handoff"]；這些 mode 下不注入 */
+  forbidden_modes?: string | null;
+  /** factual | promo | operational */
+  tone?: string | null;
 }
 
 export interface ImageAsset {
