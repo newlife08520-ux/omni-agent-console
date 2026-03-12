@@ -2171,12 +2171,32 @@ export async function registerRoutes(
     return res.json(channels);
   });
 
+  /** 新增渠道自動驗證器：儲存前驗證 LINE access_token 是否有效 */
+  async function validateLineAccessToken(token: string): Promise<boolean> {
+    const t = (token || "").trim();
+    if (!t) return false;
+    try {
+      const res = await fetch("https://api.line.me/v2/bot/info", {
+        headers: { Authorization: `Bearer ${t}` },
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
   app.post("/api/brands/:id/channels", authMiddleware, managerOrAbove, async (req, res) => {
     const brandId = parseIdParam(req.params.id);
     if (brandId === null) return res.status(400).json({ message: "無效的 ID" });
     const { platform, channel_name, bot_id, access_token, channel_secret } = req.body;
     if (!platform || !channel_name) return res.status(400).json({ message: "平台與頻道名稱為必填" });
     if (!["line", "messenger"].includes(platform)) return res.status(400).json({ message: "平台須為 line 或 messenger" });
+    if (platform === "line" && access_token) {
+      const valid = await validateLineAccessToken(String(access_token));
+      if (!valid) {
+        return res.status(400).json({ message: "LINE Token 無效或已過期，請重新確認" });
+      }
+    }
     const channel = await storage.createChannel(brandId, platform, channel_name, bot_id, access_token, channel_secret);
     return res.json({ success: true, channel });
   });
@@ -2194,6 +2214,16 @@ export async function registerRoutes(
     if (is_active !== undefined) data.is_active = is_active;
     if (is_ai_enabled !== undefined) data.is_ai_enabled = (is_ai_enabled === true || is_ai_enabled === 1) ? 1 : 0;
     if (brand_id !== undefined) data.brand_id = brand_id;
+    if (access_token !== undefined) {
+      const existing = storage.getChannel(id);
+      const isLine = (platform ?? existing?.platform) === "line";
+      if (isLine && access_token) {
+        const valid = await validateLineAccessToken(String(access_token));
+        if (!valid) {
+          return res.status(400).json({ message: "LINE Token 無效或已過期，請重新確認" });
+        }
+      }
+    }
     if (!(await storage.updateChannel(id, data))) return res.status(404).json({ message: "頻道不存在" });
     return res.json({ success: true });
   });
@@ -2594,6 +2624,7 @@ export async function registerRoutes(
     };
   }
 
+  /** 僅回傳該聯絡人對應渠道的 LINE Token，絕不 fallback 到全域 .env Token（多租戶隔離） */
   function getLineTokenForContact(contact: { channel_id?: number | null; brand_id?: number | null }): string | null {
     if (contact.channel_id) {
       const channel = storage.getChannel(contact.channel_id);
@@ -2604,7 +2635,7 @@ export async function registerRoutes(
       const lineChannel = channels.find(c => c.platform === "line" && c.access_token);
       if (lineChannel?.access_token) return lineChannel.access_token;
     }
-    return storage.getSetting("line_channel_access_token");
+    return null;
   }
 
   function getFbTokenForContact(contact: { channel_id?: number | null; brand_id?: number | null }): string | null {
@@ -3078,10 +3109,15 @@ export async function registerRoutes(
     }
   });
 
-  async function downloadLineContent(messageId: string, fallbackExt: string, channelAccessToken?: string | null): Promise<string | null> {
-    const token = channelAccessToken || storage.getSetting("line_channel_access_token");
-    if (!token) {
-      console.error("[downloadLineContent] No token available for messageId:", messageId);
+  async function downloadLineContent(
+    messageId: string,
+    fallbackExt: string,
+    channelAccessToken?: string | null,
+    channelIdForLog?: number | null
+  ): Promise<string | null> {
+    const token = channelAccessToken ?? null;
+    if (!token || (typeof token === "string" && token.trim() === "")) {
+      console.error("[downloadLineContent] Token 防呆：access_token 為空或未定義，跳過 Get Content 請求 — messageId:", messageId, "channelId:", channelIdForLog ?? "unknown");
       return null;
     }
     const maxRetries = 3;
@@ -3096,12 +3132,12 @@ export async function registerRoutes(
         clearTimeout(timeout);
         if (!resp.ok) {
           const errText = await resp.text().catch(() => "");
+          console.error("[LINE API Error] Channel ID:", channelIdForLog ?? "unknown", "Status:", resp.status, errText);
           console.error(`[downloadLineContent] Attempt ${attempt}/${maxRetries} failed: HTTP ${resp.status} - ${errText} (msgId: ${messageId})`);
           if (resp.status === 404 || resp.status === 401 || resp.status === 403) break;
           if (attempt < maxRetries) { await new Promise(r => setTimeout(r, 1000 * attempt)); continue; }
           return null;
         }
-        if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
         const contentType = resp.headers.get("content-type") || "";
         const mimeExtMap: Record<string, string> = {
           "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp",
@@ -3111,11 +3147,25 @@ export async function registerRoutes(
         const buffer = Buffer.from(await resp.arrayBuffer());
         const filename = `line-${Date.now()}-${crypto.randomUUID()}${ext}`;
         const filePath = path.join(uploadDir, filename);
-        fs.writeFileSync(filePath, buffer);
+        if (!fs.existsSync(uploadDir)) {
+          fs.mkdirSync(uploadDir, { recursive: true });
+          console.log("[downloadLineContent] 已自動建立目錄:", uploadDir);
+        }
+        try {
+          fs.writeFileSync(filePath, buffer);
+        } catch (writeErr: any) {
+          console.error("[downloadLineContent] 寫入檔案失敗 — path:", filePath, "error.message:", writeErr?.message, "error.code:", writeErr?.code, "channelId:", channelIdForLog ?? "unknown");
+          if (writeErr?.stack) console.error("[downloadLineContent] writeFileSync stack:", writeErr.stack);
+          return null;
+        }
         console.log(`[downloadLineContent] Success: ${filename} (${buffer.length} bytes, attempt ${attempt})`);
         return `/uploads/${filename}`;
       } catch (err: any) {
-        console.error(`[downloadLineContent] Attempt ${attempt}/${maxRetries} error (msgId: ${messageId}):`, err.name === "AbortError" ? "Request timed out (15s)" : err.message);
+        const msg = err?.message ?? String(err);
+        const cause = err?.cause != null ? (err.cause?.message ?? String(err.cause)) : "";
+        const stack = err?.stack ?? "";
+        console.error("[downloadLineContent] Attempt", attempt, "/", maxRetries, "catch — messageId:", messageId, "error.message:", msg, "error.name:", err?.name, "error.cause:", cause, "channelId:", channelIdForLog ?? "unknown");
+        if (stack) console.error("[downloadLineContent] catch stack:", stack);
         if (attempt < maxRetries) { await new Promise(r => setTimeout(r, 1000 * attempt)); continue; }
         return null;
       }
@@ -3278,30 +3328,44 @@ export async function registerRoutes(
   }
 
   async function replyToLine(replyToken: string, messages: object[], token?: string | null) {
-    const resolvedToken = token || storage.getSetting("line_channel_access_token");
-    if (!resolvedToken || !replyToken) return;
+    const resolvedToken = token ?? null;
+    if (!resolvedToken || !replyToken) {
+      console.error("[LINE] replyToLine 跳過：Token 或 replyToken 為空");
+      return;
+    }
     try {
-      await fetch("https://api.line.me/v2/bot/message/reply", {
+      const res = await fetch("https://api.line.me/v2/bot/message/reply", {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${resolvedToken}` },
         body: JSON.stringify({ replyToken, messages }),
       });
-    } catch (err) {
-      console.error("LINE reply failed:", err);
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        console.error("[LINE] reply 失敗 — Status:", res.status, "body:", errText);
+      }
+    } catch (err: any) {
+      console.error("[LINE] replyToLine 例外 — error.message:", err?.message, "error.cause:", err?.cause);
     }
   }
 
   async function pushLineMessage(userId: string, messages: object[], token?: string | null) {
-    const resolvedToken = token || storage.getSetting("line_channel_access_token");
-    if (!resolvedToken) return;
+    const resolvedToken = token ?? null;
+    if (!resolvedToken) {
+      console.error("[LINE] pushLineMessage 跳過：Token 為空");
+      return;
+    }
     try {
-      await fetch("https://api.line.me/v2/bot/message/push", {
+      const res = await fetch("https://api.line.me/v2/bot/message/push", {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${resolvedToken}` },
         body: JSON.stringify({ to: userId, messages }),
       });
-    } catch (err) {
-      console.error("LINE push failed:", err);
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        console.error("[LINE] push 失敗 — Status:", res.status, "body:", errText);
+      }
+    } catch (err: any) {
+      console.error("[LINE] pushLineMessage 例外 — error.message:", err?.message, "error.cause:", err?.cause);
     }
   }
 
@@ -3444,12 +3508,14 @@ export async function registerRoutes(
       }
 
       // 圖片＋極短／模糊文字：不當成已確認情境，先回補充模板（不進一般 AI 售後承諾）
+      // 地雷1 防呆：若本則為文字且觸發高風險，絕不回覆「已收到您的圖片」罐頭，避免 routing 錯亂
       const recentMsgs = storage.getMessages(contact.id).slice(-8);
       const hasRecentImageFromUser = recentMsgs.some(
         (m: { sender_type: string; message_type?: string; content?: string }) =>
           m.sender_type === "user" && (m.message_type === "image" || m.content === "[圖片訊息]" || (m.content && m.content.startsWith("[圖片")))
       );
-      if (hasRecentImageFromUser && isShortOrAmbiguousImageCaption(userMessage)) {
+      const imageCaptionRiskCheck = detectHighRisk(userMessage);
+      if (hasRecentImageFromUser && isShortOrAmbiguousImageCaption(userMessage) && !imageCaptionRiskCheck.isHighRisk) {
         const escalate = shouldEscalateImageSupplement(recentMsgs);
         const replyText = escalate ? IMAGE_SUPPLEMENT_ESCALATE_MESSAGE : getImageDmReplyForShortCaption(userMessage);
         const templateName = getImageDmTemplateNameForShortCaption(userMessage);
@@ -3538,6 +3604,7 @@ export async function registerRoutes(
       const isReturnFirstRound = (freshContact as any).return_stage == null || (freshContact as any).return_stage === 0;
       const plan = buildReplyPlan({ state, returnFormUrl, isReturnFirstRound });
 
+      // 地雷3：固定回覆短路「僅限」return_form_first（商品問題型／明確堅持時）。久候型(aftersales_comfort_first) 必須走下方 LLM，執行「先安撫＋查詢」。
       if (plan.mode === "return_form_first") {
         const returnFormFirstText = `了解，這邊先幫您處理🙏 若您要申請退換貨，麻煩先幫我填寫退換貨表單，填完後我們的專人會接續協助您確認後續流程。${returnFormUrl ? `\n表單連結：${returnFormUrl}` : ""}\n若您是因為等太久、商品異常，或其他原因，也可以在表單裡一起備註，這樣我們處理會更快。`;
         const contactPlatform = platform || contact.platform || "line";
@@ -3570,6 +3637,7 @@ export async function registerRoutes(
       if (plan.mode === "handoff") {
         systemPrompt += "\n\n【本輪】已判斷需轉人工，請呼叫 transfer_to_human 並以自然語氣告知將安排真人接手（例：了解，我先幫您整理目前狀況，接著安排真人客服為您接手處理，這樣會比較快一些🙏）。";
       }
+      // 地雷2：F2 規則（禁止過早提其他平台）須涵蓋 order_lookup 及所有尚未查單成功情境。reply-plan-builder 已對 order_lookup 回傳 must_not_include，此處統一注入。
       if (plan.must_not_include && plan.must_not_include.length > 0) {
         systemPrompt += "\n\n【本輪硬規則 F2】回覆中禁止出現：" + plan.must_not_include.map((p) => `「${p}」`).join("、") + "。不得區分官方通路與其他平台，除非客戶已提供訂單/商品+手機且你已用工具查詢後確實查無此筆。";
       }
@@ -3936,7 +4004,7 @@ export async function registerRoutes(
         channelToken = matchedChannel.access_token || null;
         channelSecretVal = matchedChannel.channel_secret || null;
         matchedBrandId = matchedChannel.brand_id;
-        console.log("[WEBHOOK] MATCH FOUND - brand:", matchedChannel.brand_name, "channel:", matchedChannel.channel_name);
+        console.log("[WEBHOOK] MATCH FOUND - brand:", matchedChannel.brand_name, "channel:", matchedChannel.channel_name, "is_ai_enabled:", matchedChannel.is_ai_enabled ?? 0);
       } else {
         const allChannels = storage.getChannels();
         const botIds = allChannels.map(c => `${c.channel_name}(bot_id=${c.bot_id || "EMPTY"})`).join(", ");
@@ -3953,9 +4021,9 @@ export async function registerRoutes(
       channelSecretVal = storage.getSetting("line_channel_secret");
       console.log("[WEBHOOK] Using global channel_secret, exists:", !!channelSecretVal);
     }
+    // SaaS 多租戶：禁止用全域 Token 作為 LINE API 的 fallback，僅使用 matchedChannel.access_token
     if (!channelToken) {
-      channelToken = storage.getSetting("line_channel_access_token");
-      console.log("[WEBHOOK] Using global channel_token, exists:", !!channelToken);
+      console.log("[WEBHOOK] 無匹配渠道 Token，後續 Profile/Media/Reply 將不使用全域 Token（fail-closed）");
     }
 
     console.log("[WEBHOOK] Token available:", !!channelToken, "Secret available:", !!channelSecretVal);
@@ -3992,8 +4060,11 @@ export async function registerRoutes(
       : ["真人客服", "轉人工", "找主管", "不要機器人", "人工客服", "真人處理"];
 
     /** 取得 LINE 大頭照／姓名並寫回聯絡人；有 pictureUrl 時也會更新（保留原 display_name），確保新渠道／品牌也能顯示頭貼與姓名 */
-    async function fetchAndUpdateLineProfile(userId: string, contactId: number, token: string | null) {
-      if (!token || userId === "unknown") return;
+    async function fetchAndUpdateLineProfile(userId: string, contactId: number, token: string | null, channelIdForLog?: number | null) {
+      if (!token || (token && token.trim() === "") || userId === "unknown") {
+        console.error("[WEBHOOK] Token 防呆：access_token 為空或未定義，跳過 Get Profile 請求 — userId:", userId, "contactId:", contactId, "channelId:", channelIdForLog ?? "unknown");
+        return;
+      }
       try {
         const profileRes = await fetch(`https://api.line.me/v2/bot/profile/${userId}`, {
           headers: { Authorization: `Bearer ${token}` },
@@ -4010,10 +4081,16 @@ export async function registerRoutes(
             console.log("[WEBHOOK] Profile updated:", displayName, avatarUrl ? "(has avatar)" : "(no avatar)");
           }
         } else {
-          console.log("[WEBHOOK] Profile fetch failed:", profileRes.status);
+          const errText = await profileRes.text().catch(() => "");
+          console.error("[LINE API Error] Channel ID:", channelIdForLog ?? "unknown", "Status:", profileRes.status, errText);
+          console.error("[WEBHOOK] Profile fetch failed:", profileRes.status, errText);
         }
       } catch (err: any) {
-        console.log("[WEBHOOK] Profile fetch error:", err.message);
+        const msg = err?.message ?? String(err);
+        const cause = err?.cause != null ? (err.cause?.message ?? String(err.cause)) : "";
+        const stack = err?.stack ?? "";
+        console.error("[WEBHOOK] fetchAndUpdateLineProfile catch — error.message:", msg, "error.cause:", cause, "channelId:", channelIdForLog ?? "unknown", "userId:", userId);
+        if (stack) console.error("[WEBHOOK] fetchAndUpdateLineProfile stack:", stack);
       }
     }
 
@@ -4046,7 +4123,7 @@ export async function registerRoutes(
           console.log("[WEBHOOK] Text message from", userId, ":", text.substring(0, 50));
           const contact = storage.getOrCreateContact("line", userId, "LINE用戶", matchedBrandId, matchedChannel?.id);
           if (contact.display_name === "LINE用戶" || !contact.avatar_url) {
-            await fetchAndUpdateLineProfile(userId, contact.id, channelToken);
+            await fetchAndUpdateLineProfile(userId, contact.id, channelToken, matchedChannel?.id);
           }
           const contactAfterProfile = storage.getContact(contact.id) ?? contact;
           console.log("[WEBHOOK] Contact id:", contactAfterProfile.id, "brand_id:", contactAfterProfile.brand_id, "needs_human:", contactAfterProfile.needs_human);
@@ -4064,8 +4141,9 @@ export async function registerRoutes(
             const aiEnabled = matchedChannel ? matchedChannel.is_ai_enabled : 0;
             if (!aiEnabled) {
               if (!matchedChannel) console.log("[WEBHOOK] 無匹配 channel，跳過文字自動回覆（fail-closed）");
-              else console.log("[WEBHOOK] AI 已關閉 (channel:", matchedChannel.channel_name, ") - 跳過自動回覆");
+              else console.log("[WEBHOOK] AI 已關閉 (channel:", matchedChannel.channel_name, ", is_ai_enabled=", matchedChannel.is_ai_enabled, ") - 跳過自動回覆");
             } else {
+              console.log("[WEBHOOK] AI 已啟用，準備文字自動回覆 — channel:", matchedChannel?.channel_name);
               const testMode = storage.getSetting("test_mode");
               if (testMode === "true") {
                 storage.createMessage(contact.id, "line", "ai", `[測試模式] 收到您的訊息：「${text}」。`);
@@ -4106,10 +4184,10 @@ export async function registerRoutes(
           const userId = event.source?.userId || "unknown";
           const contact = storage.getOrCreateContact("line", userId, "LINE用戶", matchedBrandId, matchedChannel?.id);
           if (contact.display_name === "LINE用戶" || !contact.avatar_url) {
-            await fetchAndUpdateLineProfile(userId, contact.id, channelToken);
+            await fetchAndUpdateLineProfile(userId, contact.id, channelToken, matchedChannel?.id);
           }
           const messageId = event.message.id;
-          const imageUrl = await downloadLineContent(messageId, ".jpg", channelToken);
+          const imageUrl = await downloadLineContent(messageId, ".jpg", channelToken, matchedChannel?.id);
           if (imageUrl) {
             const imgMsg = storage.createMessage(contact.id, "line", "user", "[圖片訊息]", "image", imageUrl);
             broadcastSSE("new_message", { contact_id: contact.id, message: imgMsg, brand_id: matchedBrandId || contact.brand_id });
@@ -4152,10 +4230,10 @@ export async function registerRoutes(
           const userId = event.source?.userId || "unknown";
           const contact = storage.getOrCreateContact("line", userId, "LINE用戶", matchedBrandId, matchedChannel?.id);
           if (contact.display_name === "LINE用戶" || !contact.avatar_url) {
-            await fetchAndUpdateLineProfile(userId, contact.id, channelToken);
+            await fetchAndUpdateLineProfile(userId, contact.id, channelToken, matchedChannel?.id);
           }
           const messageId = event.message.id;
-          const videoUrl = await downloadLineContent(messageId, ".mp4", channelToken);
+          const videoUrl = await downloadLineContent(messageId, ".mp4", channelToken, matchedChannel?.id);
           if (videoUrl) {
             console.log("[影片處理成功]:", videoUrl);
             const vidMsg = storage.createMessage(contact.id, "line", "user", "[影片訊息]", "video", videoUrl);
@@ -4180,7 +4258,7 @@ export async function registerRoutes(
           const userId = event.source?.userId || "unknown";
           const contact = storage.getOrCreateContact("line", userId, "LINE用戶", matchedBrandId, matchedChannel?.id);
           if (contact.display_name === "LINE用戶" || !contact.avatar_url) {
-            await fetchAndUpdateLineProfile(userId, contact.id, channelToken);
+            await fetchAndUpdateLineProfile(userId, contact.id, channelToken, matchedChannel?.id);
           }
           const stickerId = (event.message as { stickerId?: string; sticker_id?: string }).stickerId
             ?? (event.message as { stickerId?: string; sticker_id?: string }).sticker_id;
@@ -4198,7 +4276,7 @@ export async function registerRoutes(
           const userId = event.source?.userId || "unknown";
           const contact = storage.getOrCreateContact("line", userId, "LINE用戶", matchedBrandId, matchedChannel?.id);
           if (contact.display_name === "LINE用戶" || !contact.avatar_url) {
-            await fetchAndUpdateLineProfile(userId, contact.id, channelToken);
+            await fetchAndUpdateLineProfile(userId, contact.id, channelToken, matchedChannel?.id);
           }
           const msgType = event.message?.type || "unknown";
           storage.createMessage(contact.id, "line", "user", `[${msgType === "audio" ? "音訊" : msgType === "location" ? "位置" : msgType === "file" ? "檔案" : msgType}訊息]`);

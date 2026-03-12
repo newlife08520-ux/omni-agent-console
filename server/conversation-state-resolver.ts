@@ -100,14 +100,17 @@ function detectPrimaryIntent(userMessage: string, recentUserMessages: string[], 
   return "unclear";
 }
 
-/** 區分退換貨／取消的原因類型：商品問題型(走表單)、久候型(先安撫查詢)、明確堅持(轉人工) */
+/** 區分退換貨／取消的原因類型：商品問題型(走表單)、久候型(先安撫查詢)、明確堅持(轉人工)。
+ * 地雷4：當同時命中「久候」與「商品問題」時，優先用久候型（先安撫＋查詢），避免誤走 return_form_first。 */
 function detectReturnReasonType(userMessage: string, primary_intent: PrimaryIntent): ReturnReasonType {
   if (!["refund_or_return", "exchange_request", "cancellation_request"].includes(primary_intent)) return null;
   const t = (userMessage || "").trim();
   const combined = [t].join(" ");
   if (INSIST_REFUND_PATTERNS.test(t)) return "insist";
-  if (PRODUCT_ISSUE_PATTERNS.test(combined)) return "product_issue";
-  if (/等太久|不想等|不要等|怎麼還沒|還沒收到|等很久|想取消|不要了/.test(combined)) return "wait_too_long";
+  const hasWaitTooLong = /等太久|不想等|不要等|怎麼還沒|還沒收到|等很久|想取消|不要了/.test(combined);
+  const hasProductIssue = PRODUCT_ISSUE_PATTERNS.test(combined);
+  if (hasWaitTooLong) return "wait_too_long";
+  if (hasProductIssue) return "product_issue";
   return "wait_too_long";
 }
 

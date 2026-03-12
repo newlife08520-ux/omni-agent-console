@@ -90,7 +90,7 @@ export function buildReplyPlan(input: PlanBuilderInput): ReplyPlan {
   }
 
   if (primary_intent === "order_lookup" && !isRefundReturnIntent) {
-    return { mode: "order_lookup" };
+    return { mode: "order_lookup", must_not_include: F2_FORBIDDEN_PHRASES };
   }
 
   if (primary_intent === "product_consult" || primary_intent === "price_purchase") {
