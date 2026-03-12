@@ -99,7 +99,12 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
       const res = await fetch("/api/admin/refresh-profiles", { method: "POST", credentials: "include" });
       if (res.ok) {
         const data = await res.json();
-        toast({ title: "LINE 頭貼更新完成", description: `共 ${data.total} 位聯絡人，成功更新 ${data.updated} 位${data.failed > 0 ? `，失敗 ${data.failed} 位` : ""}` });
+        const line = data.line ?? { total: 0, updated: 0, failed: 0 };
+        const fb = data.facebook ?? { total: 0, updated: 0, failed: 0 };
+        const parts: string[] = [];
+        if (line.total > 0) parts.push(`LINE: ${line.updated}/${line.total} 已更新${line.failed > 0 ? `，${line.failed} 失敗` : ""}`);
+        if (fb.total > 0) parts.push(`Facebook: ${fb.updated}/${fb.total} 已更新${fb.failed > 0 ? `，${fb.failed} 失敗` : ""}`);
+        toast({ title: "頭貼與姓名同步完成", description: parts.length ? parts.join("；") : "尚無需同步的聯絡人" });
       } else {
         toast({ title: "更新失敗", variant: "destructive" });
       }
@@ -416,7 +421,7 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
           <div className="flex items-center gap-2">
             <Button size="sm" variant="ghost" onClick={handleRefreshProfiles} disabled={refreshingProfiles} className="text-xs text-stone-500 hover:text-emerald-600" data-testid="button-refresh-profiles">
               <RefreshCw className={`w-3.5 h-3.5 mr-1 ${refreshingProfiles ? "animate-spin" : ""}`} />
-              {refreshingProfiles ? "更新中..." : "同步 LINE 頭貼"}
+              {refreshingProfiles ? "更新中..." : "同步頭貼 (LINE / Facebook)"}
             </Button>
             <Button size="sm" variant="ghost" onClick={fetchHealthStatus} disabled={healthLoading} className="text-xs text-stone-500 hover:text-emerald-600" data-testid="button-refresh-health">
               <RefreshCw className={`w-3.5 h-3.5 mr-1 ${healthLoading ? "animate-spin" : ""}`} />

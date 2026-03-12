@@ -682,30 +682,62 @@ export async function registerRoutes(
     try {
       const contacts = storage.getContacts();
       const lineContacts = contacts.filter(c => c.platform === "line" && c.platform_user_id && c.platform_user_id !== "unknown");
-      let updated = 0;
-      let failed = 0;
+      const fbContacts = contacts.filter(c => c.platform === "messenger" && c.platform_user_id);
+      let lineUpdated = 0;
+      let lineFailed = 0;
       for (const contact of lineContacts) {
         const token = getLineTokenForContact(contact);
-        if (!token) { failed++; continue; }
+        if (!token) { lineFailed++; continue; }
         try {
           const profileRes = await fetch(`https://api.line.me/v2/bot/profile/${contact.platform_user_id}`, {
             headers: { Authorization: `Bearer ${token}` },
           });
           if (profileRes.ok) {
             const profile = await profileRes.json() as { displayName?: string; pictureUrl?: string };
-            if (profile.displayName) {
-              storage.updateContactProfile(contact.id, profile.displayName, profile.pictureUrl || null);
-              updated++;
+            if (profile.displayName || profile.pictureUrl) {
+              const displayName = profile.displayName || (contact.display_name ?? "LINE用戶");
+              const avatarUrl = profile.pictureUrl ?? contact.avatar_url ?? null;
+              storage.updateContactProfile(contact.id, displayName, avatarUrl);
+              lineUpdated++;
             }
           } else {
-            failed++;
+            lineFailed++;
           }
           await new Promise(r => setTimeout(r, 100));
         } catch (_e) {
-          failed++;
+          lineFailed++;
         }
       }
-      return res.json({ success: true, total: lineContacts.length, updated, failed });
+      let fbUpdated = 0;
+      let fbFailed = 0;
+      for (const contact of fbContacts) {
+        const token = getFbTokenForContact(contact);
+        if (!token) { fbFailed++; continue; }
+        try {
+          const url = `https://graph.facebook.com/v19.0/${encodeURIComponent(contact.platform_user_id)}?fields=first_name,last_name,name,picture.type(large)&access_token=${encodeURIComponent(token)}`;
+          const profileRes = await fetch(url);
+          if (profileRes.ok) {
+            const profile = await profileRes.json() as { first_name?: string; last_name?: string; name?: string; picture?: { data?: { url?: string } } };
+            const fullName = [profile.first_name, profile.last_name].filter(Boolean).join(" ").trim()
+              || (typeof profile.name === "string" ? profile.name.trim() : undefined);
+            const avatarUrl = profile.picture?.data?.url || null;
+            if (fullName || avatarUrl) {
+              storage.updateContactProfile(contact.id, fullName || (contact.display_name ?? "FB用戶"), avatarUrl ?? contact.avatar_url ?? null);
+              fbUpdated++;
+            }
+          } else {
+            fbFailed++;
+          }
+          await new Promise(r => setTimeout(r, 100));
+        } catch (_e) {
+          fbFailed++;
+        }
+      }
+      return res.json({
+        success: true,
+        line: { total: lineContacts.length, updated: lineUpdated, failed: lineFailed },
+        facebook: { total: fbContacts.length, updated: fbUpdated, failed: fbFailed },
+      });
     } catch (err: any) {
       return res.status(500).json({ success: false, message: err.message });
     }
@@ -2575,6 +2607,19 @@ export async function registerRoutes(
     return storage.getSetting("line_channel_access_token");
   }
 
+  function getFbTokenForContact(contact: { channel_id?: number | null; brand_id?: number | null }): string | null {
+    if (contact.channel_id) {
+      const channel = storage.getChannel(contact.channel_id);
+      if (channel?.platform === "messenger" && channel?.access_token) return channel.access_token;
+    }
+    if (contact.brand_id) {
+      const channels = storage.getChannelsByBrand(contact.brand_id);
+      const fbChannel = channels.find(c => c.platform === "messenger" && c.access_token);
+      if (fbChannel?.access_token) return fbChannel.access_token;
+    }
+    return null;
+  }
+
   async function sendRatingFlexMessage(contact: { id: number; platform_user_id: string; channel_id?: number | null }, ratingType: "human" | "ai" = "human") {
     const token = getLineTokenForContact(contact);
     if (!token) return;
@@ -3946,6 +3991,7 @@ export async function registerRoutes(
       ? humanKeywordsSetting.split(",").map((k) => k.trim()).filter(Boolean)
       : ["真人客服", "轉人工", "找主管", "不要機器人", "人工客服", "真人處理"];
 
+    /** 取得 LINE 大頭照／姓名並寫回聯絡人；有 pictureUrl 時也會更新（保留原 display_name），確保新渠道／品牌也能顯示頭貼與姓名 */
     async function fetchAndUpdateLineProfile(userId: string, contactId: number, token: string | null) {
       if (!token || userId === "unknown") return;
       try {
@@ -3954,9 +4000,14 @@ export async function registerRoutes(
         });
         if (profileRes.ok) {
           const profile = await profileRes.json() as { displayName?: string; pictureUrl?: string };
-          if (profile.displayName) {
-            storage.updateContactProfile(contactId, profile.displayName, profile.pictureUrl || null);
-            console.log("[WEBHOOK] Profile updated:", profile.displayName, profile.pictureUrl ? "(has avatar)" : "(no avatar)");
+          const hasName = !!profile.displayName;
+          const hasAvatar = !!profile.pictureUrl;
+          if (hasName || hasAvatar) {
+            const contact = storage.getContact(contactId);
+            const displayName = profile.displayName || (contact?.display_name ?? "LINE用戶");
+            const avatarUrl = profile.pictureUrl ?? contact?.avatar_url ?? null;
+            storage.updateContactProfile(contactId, displayName, avatarUrl);
+            console.log("[WEBHOOK] Profile updated:", displayName, avatarUrl ? "(has avatar)" : "(no avatar)");
           }
         } else {
           console.log("[WEBHOOK] Profile fetch failed:", profileRes.status);
@@ -3995,10 +4046,11 @@ export async function registerRoutes(
           console.log("[WEBHOOK] Text message from", userId, ":", text.substring(0, 50));
           const contact = storage.getOrCreateContact("line", userId, "LINE用戶", matchedBrandId, matchedChannel?.id);
           if (contact.display_name === "LINE用戶" || !contact.avatar_url) {
-            fetchAndUpdateLineProfile(userId, contact.id, channelToken).catch(() => {});
+            await fetchAndUpdateLineProfile(userId, contact.id, channelToken);
           }
-          console.log("[WEBHOOK] Contact id:", contact.id, "brand_id:", contact.brand_id, "needs_human:", contact.needs_human);
-          const userMsg = storage.createMessage(contact.id, "line", "user", text);
+          const contactAfterProfile = storage.getContact(contact.id) ?? contact;
+          console.log("[WEBHOOK] Contact id:", contactAfterProfile.id, "brand_id:", contactAfterProfile.brand_id, "needs_human:", contactAfterProfile.needs_human);
+          const userMsg = storage.createMessage(contactAfterProfile.id, "line", "user", text);
           console.log("[WEBHOOK] Message saved id:", userMsg.id);
           broadcastSSE("new_message", { contact_id: contact.id, message: userMsg, brand_id: matchedBrandId || contact.brand_id });
           broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
@@ -4054,7 +4106,7 @@ export async function registerRoutes(
           const userId = event.source?.userId || "unknown";
           const contact = storage.getOrCreateContact("line", userId, "LINE用戶", matchedBrandId, matchedChannel?.id);
           if (contact.display_name === "LINE用戶" || !contact.avatar_url) {
-            fetchAndUpdateLineProfile(userId, contact.id, channelToken).catch(() => {});
+            await fetchAndUpdateLineProfile(userId, contact.id, channelToken);
           }
           const messageId = event.message.id;
           const imageUrl = await downloadLineContent(messageId, ".jpg", channelToken);
@@ -4100,7 +4152,7 @@ export async function registerRoutes(
           const userId = event.source?.userId || "unknown";
           const contact = storage.getOrCreateContact("line", userId, "LINE用戶", matchedBrandId, matchedChannel?.id);
           if (contact.display_name === "LINE用戶" || !contact.avatar_url) {
-            fetchAndUpdateLineProfile(userId, contact.id, channelToken).catch(() => {});
+            await fetchAndUpdateLineProfile(userId, contact.id, channelToken);
           }
           const messageId = event.message.id;
           const videoUrl = await downloadLineContent(messageId, ".mp4", channelToken);
@@ -4128,7 +4180,7 @@ export async function registerRoutes(
           const userId = event.source?.userId || "unknown";
           const contact = storage.getOrCreateContact("line", userId, "LINE用戶", matchedBrandId, matchedChannel?.id);
           if (contact.display_name === "LINE用戶" || !contact.avatar_url) {
-            fetchAndUpdateLineProfile(userId, contact.id, channelToken).catch(() => {});
+            await fetchAndUpdateLineProfile(userId, contact.id, channelToken);
           }
           const stickerId = (event.message as { stickerId?: string; sticker_id?: string }).stickerId
             ?? (event.message as { stickerId?: string; sticker_id?: string }).sticker_id;
@@ -4146,7 +4198,7 @@ export async function registerRoutes(
           const userId = event.source?.userId || "unknown";
           const contact = storage.getOrCreateContact("line", userId, "LINE用戶", matchedBrandId, matchedChannel?.id);
           if (contact.display_name === "LINE用戶" || !contact.avatar_url) {
-            fetchAndUpdateLineProfile(userId, contact.id, channelToken).catch(() => {});
+            await fetchAndUpdateLineProfile(userId, contact.id, channelToken);
           }
           const msgType = event.message?.type || "unknown";
           storage.createMessage(contact.id, "line", "user", `[${msgType === "audio" ? "音訊" : msgType === "location" ? "位置" : msgType === "file" ? "檔案" : msgType}訊息]`);
