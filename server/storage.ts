@@ -631,8 +631,15 @@ export class SQLiteStorage implements IStorage {
     return contact as Contact;
   }
 
+  /** 將指定 channel 下所有聯絡人改歸到指定品牌，並把 channel_id 改為該品牌同平台的渠道（若有），避免 brand 與 channel 不同步導致列表異常 */
   reassignContactsByChannel(channelId: number, brandId: number): number {
-    const result = db.prepare("UPDATE contacts SET brand_id = ? WHERE channel_id = ?").run(brandId, channelId);
+    const fromChannel = db.prepare("SELECT * FROM channels WHERE id = ?").get(channelId) as { platform?: string } | undefined;
+    const targetChannels = db.prepare("SELECT * FROM channels WHERE brand_id = ? ORDER BY id ASC").all(brandId) as { id: number; platform?: string }[];
+    const samePlatform = fromChannel?.platform
+      ? targetChannels.find((c) => c.platform === fromChannel.platform)
+      : targetChannels[0];
+    const newChannelId = samePlatform?.id ?? null;
+    const result = db.prepare("UPDATE contacts SET brand_id = ?, channel_id = ? WHERE channel_id = ?").run(brandId, newChannelId, channelId);
     return result.changes;
   }
 
