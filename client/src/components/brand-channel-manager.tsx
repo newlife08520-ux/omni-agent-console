@@ -81,6 +81,7 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
   const [editingChannel, setEditingChannel] = useState<Channel | null>(null);
   const [channelForm, setChannelForm] = useState({ platform: "line" as ChannelPlatform, channel_name: "", bot_id: "", access_token: "", channel_secret: "", is_ai_enabled: 0 });
   const [channelSaving, setChannelSaving] = useState(false);
+  const [channelVerifying, setChannelVerifying] = useState(false);
   const [testingChannel, setTestingChannel] = useState<number | null>(null);
   const [subscribingFeedChannelId, setSubscribingFeedChannelId] = useState<number | null>(null);
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
@@ -305,18 +306,62 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
     }
     setChannelSaving(true);
     try {
+      let channelId: number | null = null;
       if (editingChannel) {
         await apiRequest("PUT", `/api/channels/${editingChannel.id}`, channelForm);
+        channelId = editingChannel.id;
       } else {
-        await apiRequest("POST", `/api/brands/${selectedBrandId}/channels`, channelForm);
+        const res = await apiRequest("POST", `/api/brands/${selectedBrandId}/channels`, channelForm);
+        const data = await res.json().catch(() => ({}));
+        channelId = data?.channel?.id ?? null;
       }
       queryClient.invalidateQueries({ queryKey: ["/api/brands", selectedBrandId, "channels"] });
-      toast({ title: editingChannel ? "渠道已更新" : "渠道已建立" });
+      if (channelForm.platform === "line" && channelId != null) {
+        const testRes = await fetch(`/api/channels/${channelId}/test`, { method: "POST", credentials: "include" });
+        const testData = await testRes.json().catch(() => ({ success: false, message: "無法讀取驗證結果" }));
+        if (testData.success) {
+          toast({ title: editingChannel ? "渠道已更新" : "渠道已建立", description: "LINE 綁定成功，連線驗證通過。" });
+        } else {
+          toast({
+            title: editingChannel ? "渠道已更新" : "渠道已建立",
+            description: `LINE 連線驗證失敗：${testData.message || "請檢查 Token／Bot ID"}`,
+            variant: "destructive",
+          });
+        }
+      } else {
+        toast({ title: editingChannel ? "渠道已更新" : "渠道已建立" });
+      }
       setShowChannelDialog(false);
     } catch (_e) {
       toast({ title: "操作失敗", variant: "destructive" });
     } finally {
       setChannelSaving(false);
+    }
+  };
+
+  const handleVerifyLineConnection = async () => {
+    if (!channelForm.access_token?.trim()) {
+      toast({ title: "請先填寫 Channel Access Token", variant: "destructive" });
+      return;
+    }
+    setChannelVerifying(true);
+    try {
+      const res = await fetch("/api/channels/verify-line", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ access_token: channelForm.access_token.trim(), bot_id: channelForm.bot_id?.trim() || undefined }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data.success) {
+        toast({ title: "驗證成功", description: data.message });
+      } else {
+        toast({ title: "驗證失敗", description: data.message || "請檢查 Token", variant: "destructive" });
+      }
+    } catch (_e) {
+      toast({ title: "驗證失敗", variant: "destructive" });
+    } finally {
+      setChannelVerifying(false);
     }
   };
 
@@ -523,6 +568,7 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
                         <p className="text-sm font-medium text-stone-800">{ch.channel_name}</p>
+                        <span className="text-[10px] text-stone-400 font-mono" title="日誌 NO MATCH 時可對照此 ID">ID:{ch.id}</span>
                         <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${ch.platform === "line" ? "bg-green-100 text-green-700" : "bg-blue-100 text-blue-700"}`}>
                           {ch.platform === "line" ? "LINE" : "Messenger"}
                         </span>
@@ -721,12 +767,12 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
             </div>
             <div>
               <label className="text-xs font-medium text-stone-600 mb-1 block">
-                Bot ID ({channelForm.platform === "line" ? "LINE Webhook 的 destination（Channel ID）" : "Facebook Page ID"})
+                Bot ID ({channelForm.platform === "line" ? "LINE Webhook 的 destination" : "Facebook Page ID"})
               </label>
-              <Input data-testid="input-channel-bot-id" value={channelForm.bot_id} onChange={(e) => setChannelForm(f => ({ ...f, bot_id: e.target.value }))} placeholder={channelForm.platform === "line" ? "從 Railway 日誌 [WEBHOOK] destination: 取得，非 U 開頭" : "Page ID"} className="bg-stone-50 border-stone-200" />
+              <Input data-testid="input-channel-bot-id" value={channelForm.bot_id} onChange={(e) => setChannelForm(f => ({ ...f, bot_id: e.target.value }))} placeholder={channelForm.platform === "line" ? "從 Railway 日誌 [WEBHOOK] destination: 複製貼上" : "Page ID"} className="bg-stone-50 border-stone-200" />
               <p className="text-[10px] text-stone-400 mt-1">
                 {channelForm.platform === "line"
-                  ? "須與 LINE 送來的 destination 完全一致，新訊息才會歸到本品牌；填錯時只會在「全部」看到。勿填 U 開頭的 User ID。"
+                  ? "每個 LINE 機器人（如私藏生活、AQUILA 天鷹座）的 destination 都不同。此欄位請填「本渠道」對應的機器人在日誌 [WEBHOOK] destination 的值，須完全一致；勿與其他渠道混用。日誌 NO MATCH 時會列出各渠道 channel_id／名稱／bot_id 可對照。"
                   : "用於識別 Facebook 頁面的唯一 ID"}
               </p>
             </div>
@@ -752,6 +798,22 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
                 </button>
               </div>
             </div>
+            {channelForm.platform === "line" && (
+            <div className="rounded-lg border border-stone-200 bg-stone-50/50 px-4 py-3">
+              <p className="text-[11px] text-stone-500 mb-2">儲存前可先驗證 Token 是否有效，以及 Bot ID 是否與 LINE 回傳的 userId（Webhook destination）一致</p>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleVerifyLineConnection}
+                disabled={channelVerifying || !channelForm.access_token?.trim()}
+                className="text-xs"
+              >
+                {channelVerifying ? <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" /> : <Plug className="w-3.5 h-3.5 mr-1" />}
+                驗證連線
+              </Button>
+            </div>
+          )}
             <div className="flex items-center justify-between rounded-lg border border-stone-200 bg-stone-50 px-4 py-3">
               <div>
                 <label className="text-sm font-medium text-stone-700">啟用 AI 自動回覆</label>

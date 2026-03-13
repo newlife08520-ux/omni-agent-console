@@ -2301,6 +2301,39 @@ export async function registerRoutes(
     return res.json({ success: true });
   });
 
+  /** 綁定前／表單內驗證：僅用 Token 呼叫 LINE API，不寫入 DB。可帶 bot_id 比對是否與 LINE 回傳的 userId 一致。 */
+  app.post("/api/channels/verify-line", authMiddleware, managerOrAbove, async (req, res) => {
+    const { access_token, bot_id: formBotId } = req.body || {};
+    if (!access_token || typeof access_token !== "string" || !access_token.trim()) {
+      return res.json({ success: false, message: "請先填寫 Channel Access Token" });
+    }
+    try {
+      const verifyRes = await fetch("https://api.line.me/v2/bot/info", {
+        headers: { Authorization: `Bearer ${access_token.trim()}` },
+      });
+      if (!verifyRes.ok) {
+        const errBody = await verifyRes.text();
+        return res.json({ success: false, message: `LINE 驗證失敗 (${verifyRes.status})：Token 無效或已過期。${errBody.slice(0, 200)}` });
+      }
+      const botInfo = (await verifyRes.json()) as { userId?: string; displayName?: string; basicId?: string };
+      const botUserId = (botInfo.userId || "").trim();
+      let message = `LINE 連線成功！Bot: ${botInfo.displayName || botInfo.basicId || "OK"}，userId（即 Webhook destination）= ${botUserId || "(空)"}`;
+      if (formBotId != null && typeof formBotId === "string") {
+        const a = formBotId.trim();
+        const b = botUserId;
+        const match = a === b || a === (b.startsWith("U") ? b.slice(1) : "U" + b) || b === (a.startsWith("U") ? a.slice(1) : "U" + a);
+        if (!match && botUserId) {
+          message += `。您填的 Bot ID 與 LINE 回傳的 userId 不一致，Webhook 時請將 Bot ID 設為：${botUserId}`;
+        } else if (match) {
+          message += "，與您填的 Bot ID 一致，綁定後可正常收發。";
+        }
+      }
+      return res.json({ success: true, message, botUserId: botUserId || undefined });
+    } catch (err: any) {
+      return res.json({ success: false, message: `連線失敗：${err.message}` });
+    }
+  });
+
   /** 批次修正：將「某渠道下所有聯絡人」改歸到指定品牌（用於 LINE 錯歸後一次拉回正確品牌） */
   app.post("/api/admin/contacts/reassign-by-channel", authMiddleware, managerOrAbove, async (req, res) => {
     const channelId = req.body?.channel_id != null ? parseInt(String(req.body.channel_id), 10) : null;
@@ -2445,7 +2478,7 @@ export async function registerRoutes(
     return res.json(results);
   });
 
-  app.post("/api/channels/:id/test", authMiddleware, superAdminOnly, async (req, res) => {
+  app.post("/api/channels/:id/test", authMiddleware, managerOrAbove, async (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) return res.status(400).json({ message: "無效的 ID" });
     const channel = storage.getChannel(id);
@@ -3205,7 +3238,10 @@ export async function registerRoutes(
   ): Promise<string | null> {
     const token = channelAccessToken ?? null;
     if (!token || (typeof token === "string" && token.trim() === "")) {
-      console.error("[downloadLineContent] Token 防呆：access_token 為空或未定義，跳過 Get Content 請求 — messageId:", messageId, "channelId:", channelIdForLog ?? "unknown", "→ 請到後台「渠道」填寫 access_token");
+      const hint = channelIdForLog == null
+        ? "本則 destination 未對到任何渠道或對到的渠道未填 Token。請看日誌上方 [WEBHOOK] NO MATCH 列出的 channel_id／名稱／bot_id，將「要收此機器人」的渠道 Bot ID 設為該 destination 並填 Token。"
+        : "請到後台 設定→品牌與渠道，找到 channel_id=" + channelIdForLog + " 並填寫 Channel Access Token。";
+      console.error("[downloadLineContent] Token 防呆：access_token 為空或未定義，跳過 Get Content 請求 — messageId:", messageId, "channelId:", channelIdForLog ?? "unknown", "→", hint);
       return null;
     }
     const maxRetries = 3;
@@ -4045,6 +4081,7 @@ ${contextStr}
         systemPrompt += "\n\n【客戶提供訂單編號時先查單、不轉人工】當客戶貼出訂單編號（例如要確認配送方式、出貨、付款時），你**必須先呼叫 lookup_order_by_id** 取得該筆訂單的 shipping_method、payment_method、address 等完整資訊，並依結果如實回覆（有宅配/超商就說，沒有就說目前沒有顯示）。**不得**未查就先轉人工；僅在查詢後仍無法取得該筆資料、且客戶明確要求轉專人時才轉。";
         systemPrompt += "\n\n【金額與收件資訊】訂單查詢工具回傳的 order 若含有 amount、address、buyer_phone、shipping_method，**可直接依此回覆**客人（如付款金額、收件地址、配送方式／超商門市）。有資料就依資料回答，勿說「沒辦法在聊天視窗直接調出」；僅在工具確實未回傳該欄位時才說明需由專人協助確認。若 orders 陣列中每筆有 shipping_method，請依該欄位說明宅配或超商。";
         systemPrompt += "\n\n【宅配 vs 便利商店】order 的 shipping_method 若有回傳，請依內容如實說明是「宅配」或「超商取貨／便利商店」。便利商店包含：全家、7-11、萊爾富、OK 等。若內容含宅配、黑貓、新竹、大榮等可說宅配；若含超商、門市、取貨、全家、7-11、萊爾富等可說超商取貨。勿自行猜測。";
+        systemPrompt += "\n\n【地址與門市】訂單回傳若有「收件地址」或「取貨門市／收件地址」，**必須明確告知客人**：宅配時說「您的宅配地址是：xxx」、超商取貨時說「您的取貨門市是：xxx」（或貼上完整門市名稱／地址）。有資料就照資料回答；若欄位為空（例如未完成付款、門市尚未成立），則如實說明「目前訂單資料中收件地址／取貨門市尚未帶出，可能因付款未完成或訂單尚未成立」並可建議完成付款或聯繫專人。";
         systemPrompt += "\n\n【如實回報、禁止推給介面】回覆時以「這筆訂單」為主語：工具有回傳的欄位（狀態、金額、付款方式、payment_interpretation、物流單號等）就**照實說**；若某欄位工具**沒回傳**（例如沒有物流單號、沒有付款方式），就說「這筆訂單目前沒有物流單號」或「這筆訂單目前沒有顯示付款方式，可請專人協助確認」。**禁止**說「我這邊畫面沒有顯示」「我沒辦法判斷」「系統沒有顯示」「我這邊目前沒有…欄位」等以機器人自身或介面為主的說法；只描述訂單查到的狀態即可。";
         systemPrompt += "\n\n【付款與出貨】訂單查詢工具回傳中若含有 payment_interpretation 欄位，請嚴格依該說明向客人解釋付款與出貨關係（貨到付款不需等付款即可出貨、信用卡/LINE Pay 已進入出貨流程視為已付、轉帳/超商需等入帳等）。勿自行推測「要先付款才能出貨」以免誤導。";
       }
@@ -4525,6 +4562,8 @@ ${contextStr}
 
     const signature = req.headers["x-line-signature"] as string | undefined;
     const destination = req.body?.destination as string | undefined;
+    const destinationTrimmed = (destination ?? "").trim();
+    if (destination) console.log("[WEBHOOK] destination (trimmed):", JSON.stringify(destinationTrimmed));
 
     let channelToken: string | null = null;
     let channelSecretVal: string | null = null;
@@ -4532,19 +4571,20 @@ ${contextStr}
     let matchedBrandId: number | undefined;
 
     if (destination) {
-      console.log("[WEBHOOK] Looking up bot_id:", destination);
-      matchedChannel = storage.getChannelByBotId(destination);
+      console.log("[WEBHOOK] destination（本則訊息來自的 LINE 機器人）:", destination);
+      matchedChannel = storage.getChannelByBotId(destinationTrimmed || destination);
       if (matchedChannel) {
         channelToken = matchedChannel.access_token || null;
         channelSecretVal = matchedChannel.channel_secret || null;
         matchedBrandId = matchedChannel.brand_id;
-        console.log("[WEBHOOK] MATCH FOUND - brand:", matchedChannel.brand_name, "channel:", matchedChannel.channel_name, "is_ai_enabled:", matchedChannel.is_ai_enabled ?? 0);
+        console.log("[WEBHOOK] MATCH FOUND — channel_id:", (matchedChannel as any).id, "渠道:", matchedChannel.channel_name, "品牌:", matchedChannel.brand_name, "is_ai_enabled:", matchedChannel.is_ai_enabled ?? 0);
       } else {
         const allChannels = storage.getChannels();
-        const botIds = allChannels.map(c => `${c.channel_name}(bot_id=${c.bot_id || "EMPTY"})`).join(", ");
-        console.log("[WEBHOOK] NO MATCH for bot_id:", destination);
-        console.log("[WEBHOOK] DB channels:", botIds || "NONE");
-        console.log("[WEBHOOK] 請到後台「渠道」新增或編輯 LINE 渠道，將 bot_id 設為:", destination, "並填寫 access_token、channel_secret（見 docs/LINE-渠道-Token-串接說明.md）");
+        console.log("[WEBHOOK] NO MATCH：本則 destination 與下列任一渠道的 Bot ID 均不符");
+        allChannels.forEach((c: any) => {
+          console.log("[WEBHOOK]   渠道 channel_id=" + c.id + " | 名稱=" + (c.channel_name || "") + " | bot_id=" + (c.bot_id || "(空)"));
+        });
+        console.log("[WEBHOOK] 請對照上方：要收「本則訊息」的 LINE 機器人，請到後台編輯「該渠道」(channel_id)，將 Bot ID 設為本則 destination:", destination, "勿與其他渠道（如私藏生活、AQUILA 等）混用；每個機器人 destination 不同。");
         console.log("[WEBHOOK] 不 fallback，無法確認渠道時不進行自動回覆（fail-closed）");
       }
     } else {
@@ -4598,7 +4638,10 @@ ${contextStr}
     /** 取得 LINE 大頭照／姓名並寫回聯絡人；有 pictureUrl 時也會更新（保留原 display_name），確保新渠道／品牌也能顯示頭貼與姓名 */
     async function fetchAndUpdateLineProfile(userId: string, contactId: number, token: string | null, channelIdForLog?: number | null) {
       if (!token || (token && token.trim() === "") || userId === "unknown") {
-        console.error("[WEBHOOK] Token 防呆：access_token 為空或未定義，跳過 Get Profile 請求 — userId:", userId, "contactId:", contactId, "channelId:", channelIdForLog ?? "unknown", "→ 請到後台「渠道」為該 LINE 填寫 access_token");
+        const hint = channelIdForLog == null
+          ? "本則 destination 未對到任何渠道或對到的渠道未填 Token。日誌上方 [WEBHOOK] NO MATCH 會列出各渠道 channel_id／名稱／bot_id，請對照後將「要收此機器人」的渠道 Bot ID 設為該 destination 並填寫 Token（勿與他渠道混用）。"
+          : "請到後台 設定→品牌與渠道，找到 channel_id=" + channelIdForLog + " 的渠道並填寫 Channel Access Token。";
+        console.error("[WEBHOOK] Token 防呆：access_token 為空或未定義，跳過 Get Profile 請求 — userId:", userId, "contactId:", contactId, "channelId:", channelIdForLog ?? "unknown", "→", hint);
         return;
       }
       try {
@@ -5376,7 +5419,8 @@ ${contextStr}
       if (o.amount != null) lines.push(`金額：$${Number(o.amount).toLocaleString()}`);
       if (o.shipping_method) lines.push(`配送方式：${o.shipping_method}`);
       if (o.tracking_number) lines.push(`物流單號：${o.tracking_number}`);
-      if (o.address) lines.push(`收件地址：${o.address}`);
+      const isCvs = /超商|門市|全家|7-11|7-ELEVEN|萊爾富|OK|取貨/i.test(o.shipping_method || "");
+      if (o.address) lines.push(isCvs ? `取貨門市／收件地址：${o.address}` : `收件地址：${o.address}`);
       if (o.product_list) lines.push(`訂單內容／商品：${o.product_list}`);
       if (o.status) lines.push(`訂單狀態：${o.status}`);
       if (o.shipped_at) lines.push(`出貨時間：${o.shipped_at}`);

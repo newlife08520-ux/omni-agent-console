@@ -347,12 +347,24 @@ export class SQLiteStorage implements IStorage {
   }
 
   getChannelByBotId(botId: string): ChannelWithBrand | undefined {
-    return db.prepare(`
+    const raw = (botId || "").trim();
+    if (!raw) return undefined;
+    let row = db.prepare(`
       SELECT c.*, b.name as brand_name, b.slug as brand_slug
       FROM channels c
       LEFT JOIN brands b ON c.brand_id = b.id
-      WHERE c.bot_id = ? AND c.is_active = 1
-    `).get(botId) as ChannelWithBrand | undefined;
+      WHERE TRIM(COALESCE(c.bot_id, '')) = ? AND c.is_active = 1
+    `).get(raw) as ChannelWithBrand | undefined;
+    if (row) return row;
+    /** LINE 有時送 U 開頭、有時不送；後台可能只填 200f74dd...，兩邊都試一次避免「填對卻沒反應」 */
+    const alt = raw.startsWith("U") ? raw.slice(1) : "U" + raw;
+    row = db.prepare(`
+      SELECT c.*, b.name as brand_name, b.slug as brand_slug
+      FROM channels c
+      LEFT JOIN brands b ON c.brand_id = b.id
+      WHERE TRIM(COALESCE(c.bot_id, '')) = ? AND c.is_active = 1
+    `).get(alt) as ChannelWithBrand | undefined;
+    return row;
   }
 
   getAgentBrandAssignments(userId: number): AgentBrandAssignment[] {
