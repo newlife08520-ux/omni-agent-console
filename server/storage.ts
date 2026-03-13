@@ -40,6 +40,8 @@ export interface IStorage {
   updateContactVipData(id: number, vipLevel: number, orderCount: number, totalSpent: number): void;
   updateContactRating(id: number, rating: number): void;
   updateContactAiRating(id: number, rating: number): void;
+  clearContactCsRating(id: number): void;
+  clearContactAiRating(id: number): void;
   updateContactProfile(id: number, displayName: string, avatarUrl: string | null): void;
   getTagShortcuts(): { name: string; order: number }[];
   setTagShortcuts(tags: { name: string; order: number }[]): void;
@@ -535,6 +537,14 @@ export class SQLiteStorage implements IStorage {
 
   updateContactAiRating(id: number, rating: number): void {
     db.prepare("UPDATE contacts SET ai_rating = ? WHERE id = ?").run(rating, id);
+  }
+
+  clearContactCsRating(id: number): void {
+    db.prepare("UPDATE contacts SET cs_rating = NULL WHERE id = ?").run(id);
+  }
+
+  clearContactAiRating(id: number): void {
+    db.prepare("UPDATE contacts SET ai_rating = NULL WHERE id = ?").run(id);
   }
 
   updateContactProfile(id: number, displayName: string, avatarUrl: string | null): void {

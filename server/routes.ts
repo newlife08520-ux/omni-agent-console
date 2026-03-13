@@ -355,6 +355,7 @@ async function getEnrichedSystemPrompt(
 - 有查到：依商品類型分流回覆（甜點 3 天節奏／其他 7–20 工作天），語氣柔和，可加會盡快安排／備註加急。
 - 查不到：直接轉人工，明講「幫您轉接真人專員處理」。不得再繞、不得再問其他問法、不得提及其他平台或官方通路。
 - 同一句或同輪已取得訂單編號或產品＋手機即不得再重問。若近期訊息中客人**已提供**手機或訂單編號，直接使用於查詢，**勿再請客人「確認手機是 XXX 對嗎」或重複問同一項**；查詢失敗／逾時時可說明原因後重試，或僅補問**尚未提供**的資訊（如下單日期）以縮小範圍。
+- **已有訂單編號且客戶說想等時**：若對話中**已出現訂單編號且你已查詢／回覆過該筆**，且客戶已表態「想等」「願意等」，則**禁止再問**商品名稱、訂單明細、截圖；直接依既有訂單回覆（如已備註加急、出貨會通知即可），勿補問任何查單欄位，避免客戶困惑。
 
 三、退換貨／取消（分型處理）
 - 久候型（等太久、不想等、想取消但尚未堅持）：先安撫、先查詢出貨、說明能否加急或約需 7–20 工作天、優先嘗試留單。不要一開口就丟表單、不要一開口就轉人工。
@@ -2623,29 +2624,30 @@ export async function registerRoutes(
 
   function buildRatingFlexMessage(contactId: number, ratingType: "human" | "ai" = "human"): object {
     const actionPrefix = ratingType === "ai" ? "rate_ai" : "rate";
-    const stars = [1, 2, 3, 4, 5].map((score) => ({
+    // 按鈕標示「1 顆星」～「5 顆星」：客戶一眼知道點下去代表幾分；用文字避免桌面版 emoji 顯示異常
+    const starButtons = [1, 2, 3, 4, 5].map((score) => ({
       type: "button",
       action: {
         type: "postback",
-        label: "⭐",
+        label: `${score} 顆星`,
         data: `action=${actionPrefix}&ticket_id=${contactId}&score=${score}`,
         displayText: `${"⭐".repeat(score)}`,
       },
       style: "link",
-      height: "sm",
+      height: "md",
       flex: 1,
     }));
 
     const headerText = ratingType === "ai" ? "感謝使用 AI 客服！" : "感謝您的詢問！";
-    const bodyText = ratingType === "ai" 
-      ? "請為本次 AI 客服體驗評分：" 
+    const bodyText = ratingType === "ai"
+      ? "請為本次 AI 客服體驗評分："
       : "為了提供更優質的服務，請為本次真人客服體驗評分：";
     const headerColor = ratingType === "ai" ? "#6366F1" : "#1DB446";
     const bgColor = ratingType === "ai" ? "#F5F3FF" : "#F7FFF7";
 
     return {
       type: "flex",
-      altText: ratingType === "ai" ? "AI 客服滿意度調查" : "真人客服滿意度調查",
+      altText: ratingType === "ai" ? "AI 客服滿意度調查（請點選 1～5 顆星）" : "真人客服滿意度調查（請點選 1～5 顆星）",
       contents: {
         type: "bubble",
         size: "kilo",
@@ -2654,6 +2656,7 @@ export async function registerRoutes(
           layout: "vertical",
           contents: [
             { type: "text", text: headerText, weight: "bold", size: "lg", color: headerColor, align: "center" },
+            { type: "text", text: "您的回饋對我們很重要", size: "xs", color: "#888888", align: "center", margin: "4px" },
           ],
           paddingAll: "16px",
           backgroundColor: bgColor,
@@ -2662,18 +2665,19 @@ export async function registerRoutes(
           type: "box",
           layout: "vertical",
           contents: [
-            { type: "text", text: bodyText, size: "sm", color: "#555555", wrap: true, align: "center" },
+            { type: "text", text: bodyText, size: "sm", color: "#333333", wrap: true, align: "center" },
             { type: "separator", margin: "lg" },
-            { type: "text", text: "點擊星星評分（1~5 顆星）", size: "xs", color: "#AAAAAA", align: "center", margin: "md" },
+            { type: "text", text: "1 ＝ 很不滿意　　5 ＝ 非常滿意", size: "xs", color: "#666666", align: "center", margin: "sm" },
+            { type: "text", text: "請點選下方一個選項", size: "xs", color: "#AAAAAA", align: "center", margin: "4px" },
           ],
           paddingAll: "16px",
         },
         footer: {
           type: "box",
           layout: "horizontal",
-          contents: stars,
-          spacing: "none",
-          paddingAll: "8px",
+          contents: starButtons,
+          spacing: "xs",
+          paddingAll: "12px",
         },
       },
     };
@@ -2847,14 +2851,15 @@ export async function registerRoutes(
     const ratingType = (req.body?.type === "ai" ? "ai" : "human") as "human" | "ai";
     const contact = storage.getContact(id);
     if (!contact) return res.status(404).json({ message: "聯絡人不存在" });
-    if (ratingType === "ai" && contact.ai_rating != null) {
-      return res.status(400).json({ message: "此客戶 AI 評分已完成，無法重複發送" });
-    }
-    if (ratingType === "human" && contact.cs_rating != null) {
-      return res.status(400).json({ message: "此客戶真人評分已完成，無法重複發送" });
-    }
     if (contact.platform !== "line") {
       return res.status(400).json({ message: "僅支援 LINE 平台" });
+    }
+    // 人工重新發送時：若該客戶已評過該類型，先清除舊評分，再發新卡，客戶即可再評一次（僅一次）
+    if (ratingType === "ai" && contact.ai_rating != null) {
+      storage.clearContactAiRating(id);
+    }
+    if (ratingType === "human" && contact.cs_rating != null) {
+      storage.clearContactCsRating(id);
     }
     const token = getLineTokenForContact(contact);
     if (!token) {
@@ -2864,6 +2869,7 @@ export async function registerRoutes(
       await sendRatingFlexMessage(contact, ratingType);
       const typeLabel = ratingType === "ai" ? "AI 客服" : "真人客服";
       storage.createMessage(id, contact.platform, "system", `(系統提示) 已手動發送${typeLabel}滿意度調查卡片給客戶`);
+      broadcastSSE("contacts_updated", { contact_id: id });
       return res.json({ success: true });
     } catch (err) {
       return res.status(500).json({ message: "發送失敗" });
@@ -3994,10 +4000,11 @@ ${contextStr}
         systemPrompt += "\n\n【本輪】本輪為商品問題型退換貨。先一兩句自然道歉與承接，再引導填寫售後表單（可附表單連結）。不可先走訂單查詢為主流程。";
       }
       if (isAftersalesComfortFirst(plan)) {
-        systemPrompt += "\n\n【本輪 久候型售後】客人等太久／不想等／想取消。先一句自然安撫（如不好意思久等～）→ 主動幫他查詢出貨 → 說明現貨/加急或約 7–20 工作天 → 補一句會盡量幫您加快。不要一開口就丟表單、不要一開口就轉人工、不要先提其他平台。可呼叫訂單查詢工具。";
+        systemPrompt += "\n\n【本輪 久候型售後】客人等太久／不想等／想取消。先一句自然安撫（如不好意思久等～）→ 主動幫他查詢出貨 → 說明現貨/加急或約 7–20 工作天 → 補一句會盡量幫您加快。不要一開口就丟表單、不要一開口就轉人工、不要先提其他平台。可呼叫訂單查詢工具。若對話中**已有訂單編號且已查詢過**、客戶並表態「想等」或「願意等」，則**不得再問**商品名稱或訂單截圖；直接確認已備註加急／會通知出貨即可。";
       }
       if (plan.mode === "order_lookup") {
         systemPrompt += "\n\n【本輪 查單】本輪只做查單。底線：只接受兩種輸入—① 訂單編號 或 ② 產品名稱＋手機；不得問其他欄位（購買頁面、收件資料、官方通路等）。用一兩句自然承接後再引導其中一種即可，不要列成選單或問卷。回覆簡短（約 90～140 字）。同一句或同輪已取得訂單編號或產品+手機即不得再重問。若客人**剛在上一則已提供**手機或訂單編號，直接使用、勿再請客人「確認手機／單號對嗎」；查詢失敗或逾時時可重試或僅補問**尚未提供**的資訊（如下單日期），勿重複問已給過的欄位。";
+        systemPrompt += "\n\n【已有訂單且客戶想等】若近期對話中你已提到某筆訂單編號（如 ESC20895）且已說明狀態／備註加急，客戶回「想等」「願意等」時，**禁止**再問「您這筆買的是什麼商品」「請貼商品名稱或訂單截圖」；直接回覆已備註加急、出貨會通知即可，勿再補問任何查單欄位。";
         systemPrompt += "\n\n【付款與出貨】訂單查詢工具回傳中若含有 payment_interpretation 欄位，請嚴格依該說明向客人解釋付款與出貨關係（貨到付款不需等付款即可出貨、信用卡/LINE Pay 已進入出貨流程視為已付、轉帳/超商需等入帳等）。勿自行推測「要先付款才能出貨」以免誤導。";
       }
       // Mode-specific forbidden content：退貨/取消/handoff/order_lookup 禁止賣點、行銷、推薦、價格組合（底線不變）
@@ -4651,18 +4658,27 @@ ${contextStr}
             const ticketId = parseInt(params.get("ticket_id") || "0");
             const score = parseInt(params.get("score") || "0");
             if (ticketId > 0 && score >= 1 && score <= 5) {
+              const contactForRating = storage.getContact(ticketId);
               const isAi = postbackAction === "rate_ai";
-              if (isAi) {
-                storage.updateContactAiRating(ticketId, score);
-                storage.createMessage(ticketId, "line", "system", `(系統提示) 客戶 AI 客服評分：${"⭐".repeat(score)}（${score} 分）`);
+              const alreadyRated = contactForRating && (isAi ? contactForRating.ai_rating != null : contactForRating.cs_rating != null);
+              if (alreadyRated) {
+                replyToLine(event.replyToken, [
+                  { type: "text", text: "您已評過分囉～感謝您的回饋！每則評價僅能提交一次。" },
+                ], channelToken);
               } else {
-                storage.updateContactRating(ticketId, score);
-                storage.createMessage(ticketId, "line", "system", `(系統提示) 客戶真人客服評分：${"⭐".repeat(score)}（${score} 分）`);
+                if (isAi) {
+                  storage.updateContactAiRating(ticketId, score);
+                  storage.createMessage(ticketId, "line", "system", `(系統提示) 客戶 AI 客服評分：${"⭐".repeat(score)}（${score} 分）`);
+                } else {
+                  storage.updateContactRating(ticketId, score);
+                  storage.createMessage(ticketId, "line", "system", `(系統提示) 客戶真人客服評分：${"⭐".repeat(score)}（${score} 分）`);
+                }
+                const typeLabel = isAi ? "AI 客服" : "真人客服";
+                replyToLine(event.replyToken, [
+                  { type: "text", text: `已收到您對${typeLabel}的 ${"⭐".repeat(score)} 評分，感謝您的寶貴意見！祝您有美好的一天。` },
+                ], channelToken);
+                broadcastSSE("contacts_updated", { contact_id: ticketId });
               }
-              const typeLabel = isAi ? "AI 客服" : "真人客服";
-              replyToLine(event.replyToken, [
-                { type: "text", text: `已收到您對${typeLabel}的 ${"⭐".repeat(score)} 評分，感謝您的寶貴意見！祝您有美好的一天。` },
-              ], channelToken);
             }
           }
         } else if (event.type === "follow" || event.type === "unfollow" || event.type === "join" || event.type === "leave" || event.type === "memberJoined" || event.type === "memberLeft") {

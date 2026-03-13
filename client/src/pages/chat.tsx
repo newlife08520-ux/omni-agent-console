@@ -1552,14 +1552,6 @@ export default function ChatPage() {
 
   const handleSendRating = useCallback(async (ratingType: "human" | "ai" = "human") => {
     if (!selectedId || sendingRating) return;
-    if (ratingType === "ai" && selectedContact?.ai_rating != null) {
-      toast({ title: "AI 評分已完成", description: "此客戶已完成 AI 客服滿意度評分", variant: "destructive" });
-      return;
-    }
-    if (ratingType === "human" && selectedContact?.cs_rating != null) {
-      toast({ title: "真人評分已完成", description: "此客戶已完成真人客服滿意度評分", variant: "destructive" });
-      return;
-    }
     setSendingRating(true);
     try {
       const res = await fetch(`/api/contacts/${selectedId}/send-rating`, {
@@ -1571,7 +1563,11 @@ export default function ChatPage() {
       const data = await res.json();
       if (res.ok) {
         const typeLabel = ratingType === "ai" ? "AI 客服" : "真人客服";
-        toast({ title: "已發送評價卡片", description: `${typeLabel}滿意度調查已傳送給客戶` });
+        const isResend = (ratingType === "ai" && selectedContact?.ai_rating != null) || (ratingType === "human" && selectedContact?.cs_rating != null);
+        toast({
+          title: isResend ? "已重新發送評價卡片" : "已發送評價卡片",
+          description: isResend ? `已清除舊評分，${typeLabel}滿意度調查已再次傳送，客戶可再評一次` : `${typeLabel}滿意度調查已傳送給客戶`,
+        });
         queryClient.invalidateQueries({ queryKey: ["/api/contacts", selectedId, "messages"] });
         invalidateContactsAndStats();
       } else {
@@ -2602,17 +2598,17 @@ export default function ChatPage() {
                     <DropdownMenuContent align="start" className="w-48">
                       <DropdownMenuItem
                         onClick={() => handleSendRating("ai")}
-                        disabled={sendingRating || !selectedContact || selectedContact.platform !== "line" || selectedContact.ai_rating != null}
+                        disabled={sendingRating || !selectedContact || selectedContact.platform !== "line"}
                         data-testid="button-send-ai-rating"
                       >
-                        {selectedContact?.ai_rating != null ? "AI 評分已完成" : "發送 AI 評價卡片"}
+                        {selectedContact?.ai_rating != null ? "重新發送 AI 評價卡片" : "發送 AI 評價卡片"}
                       </DropdownMenuItem>
                       <DropdownMenuItem
                         onClick={() => handleSendRating("human")}
-                        disabled={sendingRating || !selectedContact || selectedContact.platform !== "line" || selectedContact.cs_rating != null}
+                        disabled={sendingRating || !selectedContact || selectedContact.platform !== "line"}
                         data-testid="button-send-rating"
                       >
-                        {selectedContact?.cs_rating != null ? "真人評分已完成" : "發送真人評價卡片"}
+                        {selectedContact?.cs_rating != null ? "重新發送真人評價卡片" : "發送真人評價卡片"}
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
