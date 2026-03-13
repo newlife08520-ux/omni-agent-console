@@ -10,9 +10,6 @@ import {
   FALLBACK_AFTER_SALE_LINE_LABEL,
   SAFE_IMAGE_ONLY_REPLY,
   SHORT_IMAGE_FALLBACK,
-  isShortOrAmbiguousImageCaption,
-  getImageDmReplyForShortCaption,
-  getImageDmTemplateNameForShortCaption,
   shouldEscalateImageSupplement,
   IMAGE_SUPPLEMENT_ESCALATE_MESSAGE,
 } from "./safe-after-sale-classifier";
@@ -20,7 +17,7 @@ import { runAutoExecution, computeMainStatus } from "./meta-comment-auto-execute
 import * as riskRules from "./meta-comment-risk-rules";
 import { resolveConversationState, isHumanRequestMessage, isAlreadyProvidedMessage, isLinkRequestMessage, isLinkRequestCorrectionMessage, ORDER_LOOKUP_PATTERNS } from "./conversation-state-resolver";
 import { buildReplyPlan, shouldNotLeadWithOrderLookup, isAftersalesComfortFirst, type ReplyPlanMode } from "./reply-plan-builder";
-import { OFF_TOPIC_GUARD_MESSAGE, enforceOutputGuard, HANDOFF_MANDATORY_OPENING, buildHandoffReply, getHandoffReplyForCustomer } from "./phase2-output";
+import { enforceOutputGuard, HANDOFF_MANDATORY_OPENING, buildHandoffReply, getHandoffReplyForCustomer } from "./phase2-output";
 import { runPostGenerationGuard, isModeNoPromo, runOfficialChannelGuard, runGlobalPlatformGuard } from "./content-guard";
 import { recordGuardHit, getGuardStats } from "./content-guard-stats";
 import { searchOrderInfoThreeLayers, searchOrderInfoInRecentMessages } from "./already-provided-search";
@@ -30,7 +27,7 @@ import db from "./db";
 import { fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, fetchPages, lookupOrdersByPageAndPhone, ensurePagesCacheLoaded, refreshPagesCache, getCachedPages, getCachedPagesAge, buildProductCatalogPrompt } from "./superlanding";
 import type { SuperLandingConfig } from "./superlanding";
 import type { OrderInfo, Contact, ContactStatus, IssueType, MetaCommentTemplate, MetaComment } from "@shared/schema";
-import { unifiedLookupById, unifiedLookupByProductAndPhone, unifiedLookupByDateAndContact, getUnifiedStatusLabel, shouldPreferShoplineLookup } from "./order-service";
+import { unifiedLookupById, unifiedLookupByProductAndPhone, unifiedLookupByDateAndContact, getUnifiedStatusLabel, getPaymentInterpretationForAI, shouldPreferShoplineLookup } from "./order-service";
 import * as assignment from "./assignment";
 import {
   detectIntentLevel,
@@ -316,6 +313,13 @@ async function getEnrichedSystemPrompt(
   const imageCatalog = buildImageAssetCatalog(brandId);
   const imageBlock = imageCatalog ? IMAGE_PRECISION_COT_BLOCK + imageCatalog : "";
 
+  /** 表現層總則：像一般聊天，底線由下方規則與發送前 guard 把關 */
+  const toneBlock = `
+
+--- 回覆風格（表現層，不與下方底線衝突）---
+請像一般對話一樣自然接話，減少問卷感、選單感與公告感。招呼、承接、引導時用口語短句即可，不必列點或制式開場。
+公司底線（查單只收兩種方式、不講其他平台、轉人工必明講、午休/下班必明講、高風險短路、發送前 guard）由下方規則與系統發送前檢查把關，你只需在回覆中自然遵守，不需在每句前背誦規則。`;
+
   let returnFormUrl = "https://www.lovethelife.shop/returns";
   if (brandId) {
     const brandData = storage.getBrand(brandId);
@@ -344,13 +348,13 @@ async function getEnrichedSystemPrompt(
 一、商品類型與出貨邏輯
 ` + shippingLogicBlock + `
 
-二、詢問訂單／出貨進度（查單唯一合法輸入）
+二、詢問訂單／出貨進度（查單唯一合法輸入，底線不變）
 - 觸發：訂單、查單、出貨、物流、單號、出貨進度、還沒寄、等太久等。
-- 只允許引導兩種方式之一：① 請提供訂單編號；② 請提供產品名稱＋手機號碼。不得再問其他欄位（如購買頁面、收件資料、官方通路等）。
-- 回覆前：先一句承接再收資訊，例如「了解，這邊先幫您確認一下出貨狀況」「不好意思讓您久等了，我先幫您查一下目前進度」。只問訂單編號或商品名稱＋手機，不要一次丟太多欄位。
-- 有查到：依商品類型分流回覆（甜點 3 天節奏／其他 7–20 工作天），語氣柔和，可加「會盡快安排／備註加急」。
-- 查不到：直接轉人工。回覆「目前這邊暫時還沒查到這筆資料，這邊先幫您轉接真人專員處理，請稍後。」不得再繞、不得再問其他問法、不得提及其他平台或官方通路。
-- 同一句或同輪已取得「訂單編號」或「產品名稱＋手機」即不得再重問。
+- 只允許引導兩種方式之一：① 訂單編號；② 產品名稱＋手機號碼。不得再問其他欄位（如購買頁面、收件資料、官方通路等）。
+- 回覆方式：用一兩句自然承接即可（如「好喔我幫您查一下」「不好意思久等～我來看一下進度」），再依情境只問其中一種，不要列成選單或一次丟很多欄位。
+- 有查到：依商品類型分流回覆（甜點 3 天節奏／其他 7–20 工作天），語氣柔和，可加會盡快安排／備註加急。
+- 查不到：直接轉人工，明講「幫您轉接真人專員處理」。不得再繞、不得再問其他問法、不得提及其他平台或官方通路。
+- 同一句或同輪已取得訂單編號或產品＋手機即不得再重問。若近期訊息中客人**已提供**手機或訂單編號，直接使用於查詢，**勿再請客人「確認手機是 XXX 對嗎」或重複問同一項**；查詢失敗／逾時時可說明原因後重試，或僅補問**尚未提供**的資訊（如下單日期）以縮小範圍。
 
 三、退換貨／取消（分型處理）
 - 久候型（等太久、不想等、想取消但尚未堅持）：先安撫、先查詢出貨、說明能否加急或約需 7–20 工作天、優先嘗試留單。不要一開口就丟表單、不要一開口就轉人工。
@@ -362,8 +366,8 @@ async function getEnrichedSystemPrompt(
 不可太快轉：不要只因為第一次問進度、第一次抱怨久候、語氣有點急、或只提到「退貨」兩字但尚未說明原因就轉人工。
 
 五、語氣與禁止
-- 必須像真人客服，避免像制度公告。用「我先幫您確認看看」「這邊幫您查一下」「不好意思讓您久等了」「若有現貨會盡快替您安排」「我這邊也會幫您備註、盡量協助加快」。
-- 全域禁止：不得出現「其他平台」「該平台」「官方通路」「非官方」「若是其他平台購買」「建議向該平台客服確認」「不是我們這邊的單」等任何平台來源判斷。能查就查，查不到就轉人工，不討論平台來源。
+- 像真人對話即可：自然短句、口語承接，不必制式開場或列點問卷。例：「我先幫您確認看看」「這邊幫您查一下」「不好意思久等～」「有現貨會盡快幫您安排」。
+- 全域禁止（發送前也會檢查）：不得出現「其他平台」「該平台」「官方通路」「非官方」「若是其他平台購買」「建議向該平台客服確認」「不是我們這邊的單」等任何平台來源判斷。能查就查，查不到就轉人工，不討論平台來源。
 
 --- AI 身分透明 ---
 在適當時機自然讓客戶知道你是 AI，嚴禁假裝是真人。客戶要求轉真人時，自然回覆並呼叫 transfer_to_human。
@@ -383,7 +387,7 @@ async function getEnrichedSystemPrompt(
       : "";
   const humanHoursBlockWithStatus = humanHoursBlock + (nowStatusHint ? "\n" + nowStatusHint : "");
 
-  return basePrompt + brandBlock + handoffBlock + humanHoursBlockWithStatus + catalogBlock + knowledgeBlock + imageBlock;
+  return basePrompt + brandBlock + toneBlock + handoffBlock + humanHoursBlockWithStatus + catalogBlock + knowledgeBlock + imageBlock;
 }
 
 const contactProcessingLocks = new Map<number, Promise<void>>();
@@ -3743,54 +3747,8 @@ ${contextStr}
         return;
       }
 
-      // 圖片＋極短／模糊文字：不當成已確認情境，先回補充模板（不進一般 AI 售後承諾）
-      // Hotfix：human_request 優先 — 若本則為「轉人工/找主管/人呢」等，不得進圖片模板，讓下方 state/plan 走 handoff
-      const recentMsgs = storage.getMessages(contact.id).slice(-8);
-      const hasRecentImageFromUser = recentMsgs.some(
-        (m: { sender_type: string; message_type?: string; content?: string }) =>
-          m.sender_type === "user" && (m.message_type === "image" || m.content === "[圖片訊息]" || (m.content && m.content.startsWith("[圖片")))
-      );
-      const imageCaptionRiskCheck = detectHighRisk(userMessage);
-      if (hasRecentImageFromUser && isShortOrAmbiguousImageCaption(userMessage) && imageCaptionRiskCheck.level !== "legal_risk" && !isHumanRequestMessage(userMessage)) {
-        const escalate = shouldEscalateImageSupplement(recentMsgs);
-        const replyText = escalate ? IMAGE_SUPPLEMENT_ESCALATE_MESSAGE : getImageDmReplyForShortCaption(userMessage);
-        const templateName = getImageDmTemplateNameForShortCaption(userMessage);
-        const contactPlatform = platform || contact.platform || "line";
-        const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", replyText);
-        broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: contact.brand_id });
-        broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-        if (contactPlatform === "messenger" && channelToken) {
-          await sendFBMessage(channelToken, contact.platform_user_id, replyText);
-        } else if (channelToken) {
-          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: replyText }], channelToken);
-        }
-        if (escalate) {
-          storage.updateContactStatus(contact.id, "awaiting_human");
-          storage.updateContactHumanFlag(contact.id, 1);
-          storage.createCaseNotification(contact.id, "in_app");
-          broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-        }
-        storage.createAiLog({
-          contact_id: contact.id,
-          message_id: aiMsg.id,
-          brand_id: effectiveBrandId || undefined,
-          prompt_summary: userMessage.slice(0, 150),
-          knowledge_hits: [],
-          tools_called: ["image_dm_short_caption"],
-          transfer_triggered: escalate,
-          transfer_reason: escalate ? "連續無效圖片補充升級人工" : undefined,
-          result_summary: escalate ? `image_short_caption | escalated_awaiting_human` : `image_short_caption | ${templateName}`,
-          token_usage: 0,
-          model: "safe-after-sale-classifier",
-          response_time_ms: Date.now() - startTime,
-          reply_source: "image_short_caption",
-          used_llm: 0,
-          plan_mode: null,
-          reason_if_bypassed: "image_short_caption",
-        });
-        return;
-      }
-
+      // 第一階段收斂：圖片＋短句 — 僅「純圖片、完全無文字」才允許固定模板（該情境在 webhook 圖片分支處理）。
+      // 本流程為「有文字」的訊息，一律先進主流程理解，不再因近期有圖＋短句就短路。
       if (detectReturnRefund(userMessage)) {
         if (!contact.issue_type || contact.issue_type !== "return_refund") {
           storage.updateContactIssueType(contact.id, "return_refund");
@@ -3985,41 +3943,13 @@ ${contextStr}
         return;
       }
 
-      // Phase 2 off_topic_guard：品牌外問題不進 LLM，固定短句收邊界
-      if (plan.mode === "off_topic_guard") {
-        storage.updateContactConversationFields(contact.id, { product_scope_locked: null, customer_goal_locked: null });
-        const contactPlatform = platform || contact.platform || "line";
-        const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", OFF_TOPIC_GUARD_MESSAGE);
-        broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: effectiveBrandId || contact.brand_id });
-        broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-        if (contactPlatform === "messenger" && channelToken) {
-          await sendFBMessage(channelToken, contact.platform_user_id, OFF_TOPIC_GUARD_MESSAGE);
-        } else if (channelToken) {
-          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: OFF_TOPIC_GUARD_MESSAGE }], channelToken);
-        }
-        storage.createAiLog({
-          contact_id: contact.id,
-          message_id: aiMsg.id,
-          brand_id: effectiveBrandId || undefined,
-          prompt_summary: userMessage.slice(0, 100),
-          knowledge_hits: [],
-          tools_called: ["off_topic_guard"],
-          transfer_triggered: false,
-          result_summary: "off_topic_guard",
-          token_usage: 0,
-          model: "reply-plan",
-          response_time_ms: Date.now() - startTime,
-          reply_source: "off_topic_guard",
-          used_llm: 0,
-          plan_mode: "off_topic_guard",
-          reason_if_bypassed: "off_topic_guard",
-        });
-        return;
-      }
+      // 第一階段收斂：off_topic_guard 改由模型簡短收邊界，不再固定公告句（下方 systemPrompt 會加入指引，本輪進 LLM）
 
       // Phase 2 product_scope_locked：handoff/off_topic 清除；order_lookup/answer_directly 可從本句推斷並寫入
       if (plan.mode === "handoff") {
         storage.updateContactConversationFields(contact.id, { product_scope_locked: null, customer_goal_locked: "handoff" });
+      } else if (plan.mode === "off_topic_guard") {
+        storage.updateContactConversationFields(contact.id, { product_scope_locked: null, customer_goal_locked: null });
       } else if (plan.mode === "order_lookup" || plan.mode === "answer_directly") {
         const inferredScope = getProductScopeFromMessage(userMessage);
         if (inferredScope) {
@@ -4037,6 +3967,8 @@ ${contextStr}
         goalLocked = "handoff";
       } else if (plan.mode === "order_lookup") {
         goalLocked = "order_lookup";
+      } else if (plan.mode === "off_topic_guard") {
+        goalLocked = null;
       } else {
         goalLocked = (contact as any)?.customer_goal_locked ?? null;
       }
@@ -4045,27 +3977,31 @@ ${contextStr}
 
       let systemPrompt = await getEnrichedSystemPrompt(contact.brand_id || brandId || undefined, { productScope: effectiveScope, planMode: plan.mode });
       if (goalLocked) {
-        systemPrompt += `\n\n【客戶目標鎖定】本輪目標為「${goalLocked}」，不得跳去商品推薦、其他品類知識、與此目標無關的補充或推銷。`;
+        systemPrompt += `\n\n【本輪重點】這輪先專心處理「${goalLocked}」，不要岔到商品推薦、其他品類或推銷。`;
       }
       if (plan.mode === "handoff") {
-        systemPrompt += "\n\n【本輪】已判斷需轉人工，請呼叫 transfer_to_human 並以自然語氣告知將安排真人接手（例：了解，我先幫您整理目前狀況，接著安排真人客服為您接手處理，這樣會比較快一些🙏）。顧客已明確要求真人時，直接告知已安排接手，不得再問「您是想找真人嗎」。不得在轉人工回覆中補問訂單編號或產品+手機（除非同一句明確提到查單/訂單/出貨且真的缺關鍵資料時，由系統另行處理）。";
+        systemPrompt += "\n\n【本輪】已判斷需轉人工。請呼叫 transfer_to_human，並用一兩句自然話告知會轉真人接手即可（例：好喔我幫您轉真人客服處理～）。顧客已明確要真人時直接說已安排接手，不得再問「您是想找真人嗎」。不得在轉人工回覆中補問訂單編號或產品+手機（除非同一句明確提到查單/訂單/出貨且真的缺關鍵資料時由系統另行處理）。";
+      }
+      if (plan.mode === "off_topic_guard") {
+        systemPrompt += "\n\n【本輪 品牌外話題】此為品牌服務範圍外的問題（如晚餐吃什麼、電影推薦等）。用一兩句自然帶過、友善收邊即可（像朋友隨口說「這塊我們比較沒辦法幫上忙～有商品或訂單問題再跟我說」），不要像公告、不得推薦菜單/餐廳/電影，約 30～50 字。";
       }
       // 地雷2：F2 規則 — 全域禁止平台來源話術，不分情境。
       if (plan.must_not_include && plan.must_not_include.length > 0) {
         systemPrompt += "\n\n【本輪硬規則 F2】回覆中禁止出現：" + plan.must_not_include.map((p) => `「${p}」`).join("、") + "。不得提及其他平台、官方通路、該平台、非官方等任何平台來源判斷。";
       }
       if (shouldNotLeadWithOrderLookup(plan, state)) {
-        systemPrompt += "\n\n【本輪】本輪為商品問題型退換貨，先道歉並表示會協助處理，再引導填寫售後表單（可附表單連結）。不可先走訂單查詢為主流程。";
+        systemPrompt += "\n\n【本輪】本輪為商品問題型退換貨。先一兩句自然道歉與承接，再引導填寫售後表單（可附表單連結）。不可先走訂單查詢為主流程。";
       }
       if (isAftersalesComfortFirst(plan)) {
-        systemPrompt += "\n\n【本輪 久候型售後】客人因等太久／不想等／想取消而抱怨。你要：先一句自然安撫（如：不好意思讓您久等了）→ 主動幫他查詢出貨狀況 → 說明是否有現貨、能否加急、或約需 7–20 工作天 → 補一句「會盡量幫您加快／備註加急」。不要一開口就丟表單、不要一開口就轉人工、不要先提「其他平台」。可呼叫訂單查詢工具。";
+        systemPrompt += "\n\n【本輪 久候型售後】客人等太久／不想等／想取消。先一句自然安撫（如不好意思久等～）→ 主動幫他查詢出貨 → 說明現貨/加急或約 7–20 工作天 → 補一句會盡量幫您加快。不要一開口就丟表單、不要一開口就轉人工、不要先提其他平台。可呼叫訂單查詢工具。";
       }
       if (plan.mode === "order_lookup") {
-        systemPrompt += "\n\n【本輪 查單】本輪只做查單。查單只接受兩種輸入：① 訂單編號；② 產品名稱＋手機號碼。承接一句後只引導其中一種，不得問其他欄位（如購買頁面、收件資料、官方通路等）。回覆簡短（約 90～140 字）。同一句或同輪已取得訂單編號或產品+手機即不得再重問。";
+        systemPrompt += "\n\n【本輪 查單】本輪只做查單。底線：只接受兩種輸入—① 訂單編號 或 ② 產品名稱＋手機；不得問其他欄位（購買頁面、收件資料、官方通路等）。用一兩句自然承接後再引導其中一種即可，不要列成選單或問卷。回覆簡短（約 90～140 字）。同一句或同輪已取得訂單編號或產品+手機即不得再重問。若客人**剛在上一則已提供**手機或訂單編號，直接使用、勿再請客人「確認手機／單號對嗎」；查詢失敗或逾時時可重試或僅補問**尚未提供**的資訊（如下單日期），勿重複問已給過的欄位。";
+        systemPrompt += "\n\n【付款與出貨】訂單查詢工具回傳中若含有 payment_interpretation 欄位，請嚴格依該說明向客人解釋付款與出貨關係（貨到付款不需等付款即可出貨、信用卡/LINE Pay 已進入出貨流程視為已付、轉帳/超商需等入帳等）。勿自行推測「要先付款才能出貨」以免誤導。";
       }
-      // Mode-specific forbidden content：退貨/取消/handoff/order_lookup 禁止賣點、行銷、推薦、價格組合
+      // Mode-specific forbidden content：退貨/取消/handoff/order_lookup 禁止賣點、行銷、推薦、價格組合（底線不變）
       if (isModeNoPromo(plan.mode)) {
-        systemPrompt += "\n\n【本輪禁止】不得輸出：商品賣點、行銷詞、推薦語、價格組合推導、無關品類補充、主動銷售。本輪只做承接／查單／退貨表單／安撫／轉接，不介紹產品、不推銷。";
+        systemPrompt += "\n\n【本輪禁止】不得輸出：商品賣點、行銷詞、推薦語、價格組合、無關品類補充、主動銷售。本輪只做承接／查單／表單／安撫／轉接，不推銷。";
       }
       if (effectiveScope === "bag") {
         systemPrompt += "\n\n【本輪 商品範圍】已鎖定為包包/袋類，回覆中不得提及甜點、蛋糕、巴斯克等無關品類。";
@@ -5414,6 +5350,7 @@ ${contextStr}
           storage.updateContactOrderSource(context.contactId, result.source);
         }
 
+        const payment_interpretation = getPaymentInterpretationForAI(order.payment_method, statusLabel);
         return JSON.stringify({
           success: true,
           found: true,
@@ -5430,6 +5367,7 @@ ${contextStr}
             shipping_method: order.shipping_method,
             payment_method: order.payment_method,
           },
+          payment_interpretation,
         });
       }
 

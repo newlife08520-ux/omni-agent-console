@@ -46,11 +46,26 @@ const SHORT_OR_AMBIGUOUS_PHRASES = [
 ];
 const SHORT_CAPTION_MAX_LEN = 20;
 
+/** 明確意圖問句（出貨/訂貨/到貨時間等）：即使字數短也不當成「短/模糊」，改走一般流程回答 */
+const CLEAR_INTENT_PATTERNS = [
+  /訂貨要多久|出貨要多久|幾天會到|什麼時候出貨|何時出貨|多久會到|運送要多久|到貨要多久|要等多久|幾天到|幾天可以到|幾天能到|約幾天|大概幾天|要多久時間|要幾天|多久可以收到|幾天收到|幾天會收到|多久會到貨|幾天會到貨|到貨時間|出貨時間|配送時間|運送時間|送達時間|寄出要多久|出貨要幾天|訂單要多久|下單要多久|跟你們訂貨要多久|跟你們訂單要多久|在你們這訂要多久|在官網訂要多久|官網訂要多久|官網下單要多久|官網出貨要多久/,
+  /怎麼退|如何退|怎麼退款|如何退款|退貨流程|退款流程|可以退嗎|能退嗎|想退貨|要退貨|要退款/,
+  /有現貨嗎|還有貨嗎|什麼時候有貨|會補貨嗎|預購要等多久/,
+];
+
 export function isShortOrAmbiguousImageCaption(text: string): boolean {
   if (!text || typeof text !== "string") return true;
   const t = text.trim();
+  if (CLEAR_INTENT_PATTERNS.some((re) => re.test(t))) return false;
   if (t.length <= SHORT_CAPTION_MAX_LEN) return true;
   return SHORT_OR_AMBIGUOUS_PHRASES.some((p) => t.includes(p));
+}
+
+/** 判斷該則內容是否為「圖片型補充模板」回覆（供 routes 判斷上一則已回過則不再重複） */
+export function isImageSupplementContent(content: string | undefined): boolean {
+  if (!content || typeof content !== "string") return false;
+  const c = content.trim();
+  return c.startsWith("已收到您的圖片") || c.startsWith("收到您的圖片了") || c.startsWith("收到圖了～");
 }
 
 /** 圖片型補充模板名稱（供 log 追蹤） */
@@ -114,6 +129,11 @@ export const ORDER_SOURCE_AMBIGUOUS_KEYWORDS = [
   "訂單", "退款", "退貨", "沒收到", "漏寄", "改地址", "發票", "扣款", "品質", "瑕疵", "過敏", "客服不回",
 ];
 
+/** 第一階段收斂：safe_confirm_order 僅在「同時出現來源不明意圖」時短路，避免「我的訂單還沒到」等正常查單被誤傷 */
+const SOURCE_AMBIGUITY_PHRASES = [
+  "哪裡買", "哪買", "哪個平台", "什麼平台", "哪個網站", "在哪買", "這邊買", "這裡買", "那裏買", "別的平台", "其他平台買", "不是官網", "不是你們", "哪邊買", "什麼通路",
+];
+
 /** 本店提示：留言含任一時，不觸發「訂單來源不明」待確認 */
 export const OUR_STORE_HINTS = ["官網", "官方", "官網下單", "官方通路", "你們家", "你們官網"];
 
@@ -164,7 +184,8 @@ export function classifyMessageForSafeAfterSale(message: string): SafeConfirmRes
     }
   }
   const hasOurStoreHint = OUR_STORE_HINTS.some((h) => text.includes(h));
-  if (!hasOurStoreHint) {
+  const hasSourceAmbiguityPhrase = SOURCE_AMBIGUITY_PHRASES.some((p) => text.includes(p));
+  if (!hasOurStoreHint && hasSourceAmbiguityPhrase) {
     for (const keyword of ORDER_SOURCE_AMBIGUOUS_KEYWORDS) {
       if (text.includes(keyword)) {
         return {

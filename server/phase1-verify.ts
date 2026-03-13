@@ -178,6 +178,9 @@ ok("Link B. 有購買的連結嗎 → link_request + answer_directly", stateLink
 const safeC = classifyMessageForSafeAfterSale("有私人帳號叫我匯款，這是你們的嗎");
 ok("Link C. 私人帳號+匯款 → 觸發防詐", safeC.matched && safeC.type === "fraud_impersonation");
 ok("Link D. 我是要購買連結 → correction", isLinkRequestCorrectionMessage("我是要購買連結"));
+// 第一階段收斂：safe_confirm_order 須有「來源不明」意圖，正常查單不誤觸
+ok("SafeConfirm. 我的訂單還沒到 → 不觸發 safe_confirm", !classifyMessageForSafeAfterSale("我的訂單還沒到").matched);
+ok("SafeConfirm. 訂單是哪裡買的可以退嗎 → 觸發 safe_confirm_order", (() => { const r = classifyMessageForSafeAfterSale("訂單是哪裡買的可以退嗎"); return r.matched && r.type === "safe_confirm_order"; })());
 
 // --- E2E 案例 A～E（本輪 Hotfix 補齊）---
 // A. 官方 LINE + 取消訂單：回覆不得出現「是否官方下單」

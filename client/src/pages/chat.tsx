@@ -3,6 +3,7 @@ import { useQuery, useQueryClient, keepPreviousData } from "@tanstack/react-quer
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -514,6 +515,7 @@ function VipBadge({ level }: { level: number }) {
 export default function ChatPage() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [messageInput, setMessageInput] = useState("");
+  const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [sending, setSending] = useState(false);
   const [newTag, setNewTag] = useState("");
@@ -615,6 +617,17 @@ export default function ChatPage() {
       window.history.replaceState(null, "", url);
     }
   }, [selectedId, rightTab]);
+
+  /** 訊息輸入框自動長高：依內容調整高度，發送後重置為最小高度 */
+  const MESSAGE_INPUT_MIN_H = 40;
+  const MESSAGE_INPUT_MAX_H = 200;
+  useEffect(() => {
+    const el = messageInputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const h = Math.min(MESSAGE_INPUT_MAX_H, Math.max(MESSAGE_INPUT_MIN_H, el.scrollHeight));
+    el.style.height = `${h}px`;
+  }, [messageInput]);
 
   // SSE：僅在 mount 時綁定一次，deps=[] 避免點擊聯絡人重選時重複註冊造成「影分身」與死循環。
   // 內部只用 queryClientRef.current，絕不把 selectedId 等會變動的狀態放入 deps。cleanup 必須 close source。
@@ -2603,8 +2616,17 @@ export default function ChatPage() {
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
-                  <Input data-testid="input-message" placeholder="輸入訊息以真人客服身分回覆..." value={messageInput} onChange={(e) => setMessageInput(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSendAll(); } }} disabled={sending || uploading} className="bg-stone-50 border-stone-200" />
+                  <Textarea
+                    ref={messageInputRef}
+                    data-testid="input-message"
+                    placeholder="輸入訊息以真人客服身分回覆..."
+                    value={messageInput}
+                    onChange={(e) => setMessageInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSendAll(); } }}
+                    disabled={sending || uploading}
+                    rows={1}
+                    className="flex-1 min-w-0 min-h-[40px] max-h-[200px] overflow-y-auto resize-none bg-stone-50 border-stone-200 py-2.5"
+                  />
                   <Button onClick={handleSendAll} disabled={(!messageInput.trim() && (pendingFiles ?? []).length === 0) || sending || uploading} data-testid="button-send-message" className="bg-emerald-600 hover:bg-emerald-700 text-white px-4">
                     {uploading ? <><Loader2 className="w-4 h-4 mr-1.5 animate-spin" />上傳中</> : <><Send className="w-4 h-4 mr-1.5" />傳送</>}
                   </Button>
