@@ -4,13 +4,69 @@
  * 2. 最近圖片 vision 抽取欄位
  * 3. linked order / 最近查單結果（contact_order_links）
  * 若三層都找不到，再轉真人。
+ *
+ * 訂單資料解析（Hotfix）：同一句/同輪只接受兩種合法組合
+ * A. 訂單編號
+ * B. 產品名稱 + 手機號碼
+ * 支援格式：ESC20855 0922316609、ESC20855+0922316609、訂單編號 ESC20855，手機 0922316609、分兩行等。
  */
 import type OpenAI from "openai";
 import db from "./db";
 
 export type MessageLike = { sender_type: string; content?: string | null; message_type?: string; image_url?: string | null };
 
-/** Layer 1：從近期訊息文字抽取訂單編號、手機 */
+/** 台灣手機：09 開頭 8 碼 */
+const PHONE_RE = /\b(09\d{8})\b/;
+/** 訂單編號：含至少一英文字、5–25 字元，且不為純 09 開頭手機格式 */
+const ORDER_ID_RE = /\b([A-Za-z][A-Z0-9\-]{4,24})\b|\b([A-Z0-9\-]{6,25})\b/g;
+
+/**
+ * 從單一文字抽取訂單編號與手機（支援同句、兩行、加號分隔等）。
+ * 支援格式：ESC20855 0922316609、ESC20855+0922316609、ESC20855 + 0922316609、
+ * 訂單編號 ESC20855，手機 0922316609、訂單編號：ESC20855 手機：0922316609、分兩行。
+ */
+export function extractOrderAndPhoneFromText(text: string): { orderId?: string; phone?: string } {
+  const result: { orderId?: string; phone?: string } = {};
+  const t = (text || "").trim();
+  if (!t) return result;
+
+  // 手機：09 開頭 8 碼
+  const phoneMatch = t.match(PHONE_RE);
+  if (phoneMatch) result.phone = phoneMatch[1];
+
+  // 訂單編號：先試「訂單編號 XXX」「手機 XXX」句型
+  const orderLabelMatch = t.match(/(?:訂單編號|單號|編號)[\s:：]*([A-Za-z0-9\-]{5,25})/i);
+  if (orderLabelMatch) {
+    const cand = orderLabelMatch[1].trim();
+    if (!/^09\d{8}$/.test(cand)) result.orderId = cand.toUpperCase();
+  }
+  if (result.orderId) return result;
+
+  // 再試一般 token：含字母的 5–25 字元視為訂單編號（排除 09xxxxxxxx）
+  const tokens = t.split(/[\s+＋,，、\n]+/).map((s) => s.trim()).filter(Boolean);
+  for (const tok of tokens) {
+    if (/^09\d{8}$/.test(tok)) continue;
+    if (/^[A-Za-z0-9\-]{5,25}$/.test(tok) && /[A-Za-z]/.test(tok)) {
+      result.orderId = tok.toUpperCase();
+      break;
+    }
+  }
+  if (result.orderId) return result;
+
+  // 正則掃描：取第一個「像訂單編號」的片段（含字母、非純手機）
+  let m: RegExpExecArray | null;
+  ORDER_ID_RE.lastIndex = 0;
+  while ((m = ORDER_ID_RE.exec(t)) !== null) {
+    const cand = (m[1] || m[2] || "").trim();
+    if (cand && !/^09\d{8}$/.test(cand)) {
+      result.orderId = cand.toUpperCase();
+      break;
+    }
+  }
+  return result;
+}
+
+/** Layer 1：從近期訊息文字抽取訂單編號、手機（合併同輪多則／兩行） */
 export function searchOrderInfoInRecentMessages(
   recentMessages: MessageLike[]
 ): { orderId?: string; phone?: string } {
@@ -19,11 +75,18 @@ export function searchOrderInfoInRecentMessages(
     .filter((m) => m.sender_type === "user" && m.content && m.content !== "[圖片訊息]")
     .map((m) => (m.content || "").trim())
     .filter(Boolean);
-  for (const text of userContents) {
-    const orderMatch = text.match(/\b([A-Z0-9\-]{5,25})\b/);
-    if (orderMatch && !result.orderId) result.orderId = orderMatch[1];
-    const phoneMatch = text.match(/\b(09\d{8})\b/) || text.match(/\b(\d{10,11})\b/);
-    if (phoneMatch && !result.phone) result.phone = phoneMatch[1];
+
+  for (let i = 0; i < userContents.length; i++) {
+    const text = userContents[i];
+    const single = extractOrderAndPhoneFromText(text);
+    if (single.orderId && !result.orderId) result.orderId = single.orderId;
+    if (single.phone && !result.phone) result.phone = single.phone;
+    if (i > 0) {
+      const combined = [userContents[i - 1], text].join("\n");
+      const twoLine = extractOrderAndPhoneFromText(combined);
+      if (twoLine.orderId && !result.orderId) result.orderId = twoLine.orderId;
+      if (twoLine.phone && !result.phone) result.phone = twoLine.phone;
+    }
   }
   return result;
 }

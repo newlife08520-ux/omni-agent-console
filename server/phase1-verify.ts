@@ -3,11 +3,13 @@
  * 執行：npx tsx server/phase1-verify.ts（從專案根目錄）
  * 不啟動 server，僅驗證 state resolver、reply plan、與高風險關鍵字邏輯。
  */
-import { resolveConversationState, isHumanRequestMessage, isAlreadyProvidedMessage } from "./conversation-state-resolver";
+import { resolveConversationState, isHumanRequestMessage, isAlreadyProvidedMessage, isLinkRequestMessage, isLinkRequestCorrectionMessage } from "./conversation-state-resolver";
 import { buildReplyPlan } from "./reply-plan-builder";
-import { HANDOFF_MANDATORY_OPENING, buildHandoffReply } from "./phase2-output";
-import { runPostGenerationGuard, isModeNoPromo, runOfficialChannelGuard } from "./content-guard";
-import { searchOrderInfoInRecentMessages } from "./already-provided-search";
+import { classifyMessageForSafeAfterSale } from "./safe-after-sale-classifier";
+import { HANDOFF_MANDATORY_OPENING, buildHandoffReply, getHandoffReplyForCustomer, HANDOFF_OFF_HOURS_SUFFIX } from "./phase2-output";
+import { shouldHandoffDueToAwkwardOrRepeat } from "./awkward-repeat-handoff";
+import { runPostGenerationGuard, isModeNoPromo, runOfficialChannelGuard, runGlobalPlatformGuard } from "./content-guard";
+import { searchOrderInfoInRecentMessages, extractOrderAndPhoneFromText } from "./already-provided-search";
 import type { Contact } from "@shared/schema";
 
 const LEGAL_RISK_KEYWORDS = [
@@ -167,6 +169,16 @@ const stateD2 = resolveConversationState({
 const planD2 = buildReplyPlan({ state: stateD2, returnFormUrl, isReturnFirstRound: true });
 ok("Hotfix D. 煩死了我要轉人工 → handoff", stateD2.primary_intent === "human_request" && planD2.mode === "handoff");
 
+// --- link_request / 防詐優先級與 correction override 驗收 ---
+ok("Link A. 請開給我連結謝謝 → isLinkRequestMessage", isLinkRequestMessage("請開給我連結謝謝"));
+ok("Link A. 請開給我連結謝謝 → 不觸發防詐", !classifyMessageForSafeAfterSale("請開給我連結謝謝").matched);
+const stateLinkB = resolveConversationState({ contact: stubContact, userMessage: "有購買的連結嗎", recentUserMessages: [], recentAiMessages: [] });
+const planLinkB = buildReplyPlan({ state: stateLinkB, returnFormUrl, isReturnFirstRound: true });
+ok("Link B. 有購買的連結嗎 → link_request + answer_directly", stateLinkB.primary_intent === "link_request" && planLinkB.mode === "answer_directly");
+const safeC = classifyMessageForSafeAfterSale("有私人帳號叫我匯款，這是你們的嗎");
+ok("Link C. 私人帳號+匯款 → 觸發防詐", safeC.matched && safeC.type === "fraud_impersonation");
+ok("Link D. 我是要購買連結 → correction", isLinkRequestCorrectionMessage("我是要購買連結"));
+
 // --- E2E 案例 A～E（本輪 Hotfix 補齊）---
 // A. 官方 LINE + 取消訂單：回覆不得出現「是否官方下單」
 const e2eA = runOfficialChannelGuard("請問您是否官方下單？若是的話可以幫您取消。");
@@ -219,6 +231,70 @@ ok("KG-F. return_form_first 屬 no-promo mode", isModeNoPromo("return_form_first
 ok("KG-F. order_lookup 屬 no-promo mode", isModeNoPromo("order_lookup"));
 const guardF = runPostGenerationGuard("這邊幫您備註加急。限時優惠組合價要參考嗎？", "aftersales_comfort_first", null);
 ok("KG-F. aftersales 回覆含優惠/組合價 → 違規", !guardF.pass);
+
+// --- Hotfix 驗收 A～J ---
+// A. 輸入 ESC20855 + 0922316609 → 視為已給完整資料
+const extractA = extractOrderAndPhoneFromText("ESC20855 + 0922316609");
+ok("Hotfix A. ESC20855 + 0922316609 同句解析", extractA.orderId === "ESC20855" && extractA.phone === "0922316609");
+// B. 兩行 ESC20855 / 0922316609
+const extractB = searchOrderInfoInRecentMessages([
+  { sender_type: "user", content: "ESC20855" },
+  { sender_type: "user", content: "0922316609" },
+]);
+ok("Hotfix B. 兩行 訂單+手機", extractB.orderId === "ESC20855" && extractB.phone === "0922316609");
+// C. 潔廁泡泡 + 0922316609 → 合法查單資料（產品+手機）；Layer 1 可抽出手機
+const extractC = searchOrderInfoInRecentMessages([
+  { sender_type: "user", content: "潔廁泡泡 + 0922316609" },
+]);
+ok("Hotfix C. 產品名+手機 抽出手機", extractC.phone === "0922316609");
+// D. 我要查訂單 → 只引導兩種方式（由 prompt 與 order_lookup mode 保證；此處驗 plan）
+const stateOrderLookup = resolveConversationState({ contact: stubContact, userMessage: "我要查訂單", recentUserMessages: [], recentAiMessages: [] });
+const planOrderLookup = buildReplyPlan({ state: stateOrderLookup, returnFormUrl, isReturnFirstRound: true });
+ok("Hotfix D. 我要查訂單 → order_lookup", planOrderLookup.mode === "order_lookup");
+// E. 我給過了 + 三層找不到 → 直接轉人工（固定句）；由 routes already_provided 分支保證，此處驗固定句常數）
+ok("Hotfix E. 已給過找不到用固定句", HANDOFF_MANDATORY_OPENING.includes("轉接真人專員") && HANDOFF_MANDATORY_OPENING.includes("請稍後"));
+// F. 人呢 → handoff 固定句，不補訂單
+const replyF = buildHandoffReply({ customerEmotion: "neutral", humanReason: "explicit_human_request", isOrderLookupContext: false });
+ok("Hotfix F. 人呢 不補訂單提示", replyF === HANDOFF_MANDATORY_OPENING);
+// G. 我要轉人工 → handoff 固定句，不補訂單
+const replyG = buildHandoffReply({ customerEmotion: "neutral", humanReason: "explicit_human_request", isOrderLookupContext: false });
+ok("Hotfix G. 我要轉人工 不補訂單提示", replyG === HANDOFF_MANDATORY_OPENING);
+// H/I. 官方 LINE 查單/取消 → 回覆不得含平台話術（runGlobalPlatformGuard 全域擋）
+const guardH = runGlobalPlatformGuard("了解，請提供訂單編號。若是其他平台購買建議向該平台客服確認。");
+ok("Hotfix H. 回覆含其他平台 → 違規", !guardH.pass);
+// J. 任一回覆含「其他平台/該平台/官方通路」→ 驗收 FAIL
+ok("Hotfix J. 含該平台 → 違規", !runGlobalPlatformGuard("請向該平台客服確認").pass);
+ok("Hotfix J. 含官方通路 → 違規", !runGlobalPlatformGuard("若為官方通路下單請提供單號").pass);
+ok("Hotfix J. 不含平台話術 → 通過", runGlobalPlatformGuard("這邊先幫您轉接真人專員處理，請稍後。").pass);
+
+// 午休/下班轉人工：程式層硬規則補句
+const offHoursLunch = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, "lunch");
+ok("Off-hours. 午休時 handoff 含「不在線」「之後才會」", offHoursLunch.includes(HANDOFF_OFF_HOURS_SUFFIX) && offHoursLunch.includes("不在線"));
+const offHoursNull = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, null);
+ok("Off-hours. 非午休/下班時不補句", offHoursNull === HANDOFF_MANDATORY_OPENING);
+
+// 尷尬/重複轉人工：同一種資料重問兩次
+const awkwardSameData = shouldHandoffDueToAwkwardOrRepeat({
+  userMessage: "我要查訂單",
+  recentMessages: [
+    { sender_type: "ai", content: "請提供訂單編號，我幫您查。" },
+    { sender_type: "user", content: "ESC123" },
+    { sender_type: "ai", content: "請提供訂單編號或手機，方便查詢。" },
+  ],
+  primaryIntentOrderLookup: true,
+});
+ok("Awkward. 同一種資料重問兩次 → 轉人工", awkwardSameData.shouldHandoff && awkwardSameData.reason === "same_data_asked_twice");
+
+// 尷尬/重複：用戶說已給過且前一輪 AI 在討資料、更早已有訂單
+const awkwardAlreadyGave = shouldHandoffDueToAwkwardOrRepeat({
+  userMessage: "我給過了耶",
+  recentMessages: [
+    { sender_type: "user", content: "ESC20855" },
+    { sender_type: "ai", content: "請提供訂單編號。" },
+    { sender_type: "user", content: "我給過了耶" },
+  ],
+});
+ok("Awkward. 用戶說已給過且前輪 AI 討單號、更早已有單號 → 轉人工", awkwardAlreadyGave.shouldHandoff && awkwardAlreadyGave.reason === "user_said_already_gave_ai_wrong");
 
 console.log("\n---");
 console.log(`Phase 1 驗收: ${passed} 通過, ${failed} 失敗`);

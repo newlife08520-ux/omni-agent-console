@@ -12,22 +12,44 @@ export const OFF_TOPIC_GUARD_MESSAGE =
  */
 export const HANDOFF_MANDATORY_OPENING = "這邊先幫您轉接真人專員處理，請稍後。";
 
-/** Handoff 時最多補一句（僅在非情緒差時）：可選提供訂單編號以利專人更快處理 */
-export const HANDOFF_OPTIONAL_ORDER_HINT = "若方便可先提供訂單編號，專員會更快協助您確認。";
+/** Handoff 時僅在「明確查單且缺關鍵資料」時可補一句（Hotfix：handoff ≠ order_lookup） */
+export const HANDOFF_OPTIONAL_ORDER_HINT = "若方便，也可先提供訂單編號，專員會更快協助您確認。";
+
+/** 轉人工時若為午休／下班／非客服時段，程式層硬規則：必須在回覆中明確告知客戶（不依賴 prompt） */
+export const HANDOFF_OFF_HOURS_SUFFIX = "目前人工客服不在線，之後才會由真人客服回覆。";
 
 /**
- * 組裝 handoff 回覆：第一句必為固定告知句；情緒差時只保留第一句，否則最多補一句訂單提示。
- * @param customerEmotion - 來自 ConversationState.customer_emotion
- * @param humanReason - 來自 ConversationState.human_reason；explicit_human_request 時可補訂單提示
+ * 依是否為非客服時段，回傳要送給客戶的完整 handoff 文案（程式層硬規則）。
+ * 午休或下班時一律在主要轉接句後加上「目前人工客服不在線，之後才會由真人客服回覆。」
+ */
+export function getHandoffReplyForCustomer(
+  baseReply: string,
+  unavailableReason: "lunch" | "after_hours" | "all_paused" | null
+): string {
+  if (unavailableReason === "lunch" || unavailableReason === "after_hours") {
+    return baseReply + "\n" + HANDOFF_OFF_HOURS_SUFFIX;
+  }
+  return baseReply;
+}
+
+/**
+ * 組裝 handoff 回覆：第一句必為固定告知句。
+ * 第二句（訂單提示）僅當：已明確是查單/訂單處理、且真的缺關鍵資料、且非情緒差。
+ * 純「人呢」「我要轉人工」等不得補訂單提示。
  */
 export function buildHandoffReply(options: {
   customerEmotion?: string;
   humanReason?: string | null;
+  /** 同一句或本輪是否明確提到查單/訂單/出貨；僅此時才允許補訂單提示 */
+  isOrderLookupContext?: boolean;
+  /** 是否已有訂單編號或產品名稱+手機；有則不補訂單提示 */
+  hasOrderInfo?: boolean;
 }): string {
-  const { customerEmotion, humanReason } = options;
+  const { customerEmotion, humanReason, isOrderLookupContext, hasOrderInfo } = options;
   const emotionOnly = (customerEmotion === "angry" || customerEmotion === "high_risk" || customerEmotion === "frustrated");
   if (emotionOnly) return HANDOFF_MANDATORY_OPENING;
-  if (humanReason === "explicit_human_request") {
+  const mayAddHint = humanReason === "explicit_human_request" && isOrderLookupContext === true && hasOrderInfo !== true;
+  if (mayAddHint) {
     return HANDOFF_MANDATORY_OPENING + "\n" + HANDOFF_OPTIONAL_ORDER_HINT;
   }
   return HANDOFF_MANDATORY_OPENING;

@@ -26,12 +26,44 @@ function getShoplineConfig(brandId?: number): ShoplineConfig | null {
   return null;
 }
 
+/** 是否應優先以 SHOPLINE 查單（官網購買／推斷為 SHOPLINE 時） */
+const PREFER_SHOPLINE_HINTS = /官網|官方網站|官網購買|官網下單|官網買|在官網|從官網|SHOPLINE|shopline/i;
+
+export function shouldPreferShoplineLookup(userMessage: string, recentUserMessages?: string[]): boolean {
+  const current = (userMessage || "").trim();
+  if (PREFER_SHOPLINE_HINTS.test(current)) return true;
+  const recent = recentUserMessages ?? [];
+  const combined = [current, ...recent].join(" ");
+  return PREFER_SHOPLINE_HINTS.test(combined);
+}
+
+export type OrderLookupPreferSource = "superlanding" | "shopline";
+
 export async function unifiedLookupById(
   slConfig: SuperLandingConfig,
   orderId: string,
-  brandId?: number
+  brandId?: number,
+  preferSource?: OrderLookupPreferSource
 ): Promise<UnifiedOrderResult> {
-  if (slConfig.merchantNo && slConfig.accessKey) {
+  const tryShoplineFirst = preferSource === "shopline";
+
+  async function runShopline(): Promise<UnifiedOrderResult | null> {
+    const shoplineConfig = getShoplineConfig(brandId);
+    if (!shoplineConfig) return null;
+    try {
+      const order = await lookupShoplineOrderById(shoplineConfig, orderId);
+      if (order) {
+        order.source = "shopline";
+        return { orders: [order], source: "shopline", found: true };
+      }
+    } catch (_e) {
+      console.log("[UnifiedOrder] SHOPLINE 查詢失敗:", (_e as Error).message);
+    }
+    return null;
+  }
+
+  async function runSuperlanding(): Promise<UnifiedOrderResult | null> {
+    if (!slConfig.merchantNo || !slConfig.accessKey) return null;
     try {
       const order = await lookupOrderById(slConfig, orderId);
       if (order) {
@@ -41,7 +73,6 @@ export async function unifiedLookupById(
     } catch (_e) {
       console.log("[UnifiedOrder] SuperLanding 查詢失敗:", (_e as Error).message);
     }
-
     const allBrands = storage.getBrands();
     for (const brand of allBrands) {
       if (brand.id === brandId) continue;
@@ -57,19 +88,19 @@ export async function unifiedLookupById(
         }
       } catch (_e) {}
     }
+    return null;
   }
 
-  const shoplineConfig = getShoplineConfig(brandId);
-  if (shoplineConfig) {
-    try {
-      const order = await lookupShoplineOrderById(shoplineConfig, orderId);
-      if (order) {
-        order.source = "shopline";
-        return { orders: [order], source: "shopline", found: true };
-      }
-    } catch (_e) {
-      console.log("[UnifiedOrder] SHOPLINE 查詢失敗:", (_e as Error).message);
-    }
+  if (tryShoplineFirst) {
+    const shop = await runShopline();
+    if (shop?.found) return shop;
+    const sl = await runSuperlanding();
+    if (sl?.found) return sl;
+  } else {
+    const sl = await runSuperlanding();
+    if (sl?.found) return sl;
+    const shop = await runShopline();
+    if (shop?.found) return shop;
   }
 
   return { orders: [], source: "unknown", found: false };
@@ -79,9 +110,28 @@ export async function unifiedLookupByProductAndPhone(
   slConfig: SuperLandingConfig,
   matchedPages: { pageId: string; productName: string }[],
   phone: string,
-  brandId?: number
+  brandId?: number,
+  preferSource?: OrderLookupPreferSource
 ): Promise<UnifiedOrderResult> {
-  if (slConfig.merchantNo && slConfig.accessKey && matchedPages.length > 0) {
+  const tryShoplineFirst = preferSource === "shopline";
+
+  async function runShopline(): Promise<UnifiedOrderResult | null> {
+    const shoplineConfig = getShoplineConfig(brandId);
+    if (!shoplineConfig) return null;
+    try {
+      const orders = await lookupShoplineOrdersByPhone(shoplineConfig, phone);
+      if (orders.length > 0) {
+        orders.forEach(o => { o.source = "shopline"; });
+        return { orders, source: "shopline", found: true };
+      }
+    } catch (_e) {
+      console.log("[UnifiedOrder] SHOPLINE 手機查詢失敗:", (_e as Error).message);
+    }
+    return null;
+  }
+
+  async function runSuperlanding(): Promise<UnifiedOrderResult | null> {
+    if (!slConfig.merchantNo || !slConfig.accessKey || matchedPages.length === 0) return null;
     const batchSize = 3;
     let allResults: OrderInfo[] = [];
     for (let i = 0; i < matchedPages.length; i += batchSize) {
@@ -94,12 +144,10 @@ export async function unifiedLookupByProductAndPhone(
       }
       if (allResults.length > 0) break;
     }
-
     if (allResults.length > 0) {
       allResults.forEach(o => { o.source = "superlanding"; });
       return { orders: allResults, source: "superlanding", found: true };
     }
-
     const allBrands = storage.getBrands();
     for (const brand of allBrands) {
       if (brand.id === brandId) continue;
@@ -118,19 +166,19 @@ export async function unifiedLookupByProductAndPhone(
         }
       } catch (_e) {}
     }
+    return null;
   }
 
-  const shoplineConfig = getShoplineConfig(brandId);
-  if (shoplineConfig) {
-    try {
-      const orders = await lookupShoplineOrdersByPhone(shoplineConfig, phone);
-      if (orders.length > 0) {
-        orders.forEach(o => { o.source = "shopline"; });
-        return { orders, source: "shopline", found: true };
-      }
-    } catch (_e) {
-      console.log("[UnifiedOrder] SHOPLINE 手機查詢失敗:", (_e as Error).message);
-    }
+  if (tryShoplineFirst) {
+    const shop = await runShopline();
+    if (shop?.found) return shop;
+    const sl = await runSuperlanding();
+    if (sl?.found) return sl;
+  } else {
+    const sl = await runSuperlanding();
+    if (sl?.found) return sl;
+    const shop = await runShopline();
+    if (shop?.found) return shop;
   }
 
   return { orders: [], source: "unknown", found: false };
@@ -142,22 +190,14 @@ export async function unifiedLookupByDateAndContact(
   beginDate: string,
   endDate: string,
   pageId?: string,
-  brandId?: number
+  brandId?: number,
+  preferSource?: OrderLookupPreferSource
 ): Promise<UnifiedOrderResult> {
-  if (slConfig.merchantNo && slConfig.accessKey) {
-    try {
-      const result = await lookupOrdersByDateAndFilter(slConfig, contact, beginDate, endDate, pageId);
-      if (result.orders.length > 0) {
-        result.orders.forEach(o => { o.source = "superlanding"; });
-        return { orders: result.orders, source: "superlanding", found: true };
-      }
-    } catch (_e) {
-      console.log("[UnifiedOrder] SuperLanding 日期查詢失敗:", (_e as Error).message);
-    }
-  }
+  const tryShoplineFirst = preferSource === "shopline";
 
-  const shoplineConfig = getShoplineConfig(brandId);
-  if (shoplineConfig) {
+  async function runShopline(): Promise<UnifiedOrderResult | null> {
+    const shoplineConfig = getShoplineConfig(brandId);
+    if (!shoplineConfig) return null;
     try {
       const isEmail = contact.includes("@");
       const isPhone = /^[\d\-+\s()]+$/.test(contact) && contact.replace(/\D/g, "").length >= 8;
@@ -176,6 +216,33 @@ export async function unifiedLookupByDateAndContact(
     } catch (_e) {
       console.log("[UnifiedOrder] SHOPLINE 日期查詢失敗:", (_e as Error).message);
     }
+    return null;
+  }
+
+  async function runSuperlanding(): Promise<UnifiedOrderResult | null> {
+    if (!slConfig.merchantNo || !slConfig.accessKey) return null;
+    try {
+      const result = await lookupOrdersByDateAndFilter(slConfig, contact, beginDate, endDate, pageId);
+      if (result.orders.length > 0) {
+        result.orders.forEach(o => { o.source = "superlanding"; });
+        return { orders: result.orders, source: "superlanding", found: true };
+      }
+    } catch (_e) {
+      console.log("[UnifiedOrder] SuperLanding 日期查詢失敗:", (_e as Error).message);
+    }
+    return null;
+  }
+
+  if (tryShoplineFirst) {
+    const shop = await runShopline();
+    if (shop?.found) return shop;
+    const sl = await runSuperlanding();
+    if (sl?.found) return sl;
+  } else {
+    const sl = await runSuperlanding();
+    if (sl?.found) return sl;
+    const shop = await runShopline();
+    if (shop?.found) return shop;
   }
 
   return { orders: [], source: "unknown", found: false };

@@ -9,7 +9,8 @@ import { getDataDir } from "./data-dir";
 export type GuardRuleId =
   | "category_mismatch_sweet"
   | "mode_forbidden_promo"
-  | "official_channel_forbidden";
+  | "official_channel_forbidden"
+  | "global_platform_forbidden";
 
 export type GuardOutcome = "cleaned" | "fallback";
 
@@ -78,10 +79,12 @@ export function getGuardStats(): {
     category_mismatch_sweet: { total: 0, cleaned: 0, fallback: 0 },
     mode_forbidden_promo: { total: 0, cleaned: 0, fallback: 0 },
     official_channel_forbidden: { total: 0, cleaned: 0, fallback: 0 },
+    global_platform_forbidden: { total: 0, cleaned: 0, fallback: 0 },
   };
   let cleaned = 0;
   let fallback = 0;
   for (const h of combined) {
+    if (!(h.rule in byRule)) continue;
     byRule[h.rule].total += 1;
     if (h.outcome === "cleaned") {
       byRule[h.rule].cleaned += 1;

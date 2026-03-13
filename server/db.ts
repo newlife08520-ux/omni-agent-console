@@ -555,23 +555,23 @@ function migrateMetaCommentCenter() {
             INSERT INTO meta_comment_templates (brand_id, category, name, reply_first, reply_second, reply_comfort, reply_dm_guide, tone_hint, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).run(brand, cat, name, r1, r2, rc, rd, tone, now);
-    const dmOrder = "先跟您確認：若您是透過我們官方通路下單，請提供「訂單編號 + 下單手機」，我們會立刻幫您查。若是其他平台購買，建議向該平台客服確認會最快。";
-    const dmEmo = "不好意思讓您有不好的感受。我們先確認來源：請提供訂單編號與下單手機，我們會立刻幫您查；若為他平台購買，會引導您到正確客服。";
-    const dmPlatform = "若您是在蝦皮／其他平台購買，訂單與出貨以該平台為準，建議先聯繫該平台客服。若為官方通路下單，請提供訂單編號與下單手機，我們可幫您查。";
+    const dmOrder = "請提供訂單編號，或產品名稱＋手機號碼，我們會立刻幫您查。查不到會幫您轉專人處理。";
+    const dmEmo = "不好意思讓您有不好的感受。請提供訂單編號或產品名稱＋手機，我們會立刻幫您查；查不到會幫您轉專人。";
+    const dmPlatform = "請提供訂單編號或產品名稱＋手機，我們幫您查；查不到會幫您轉專人處理。";
     const dmFraud = "先提醒：我們不會用私人帳號要求轉帳或驗證碼。請提供對話截圖、付款資訊與對方帳號，我們協助確認是否冒用並給建議；必要時請同步報警與通知平台。";
     ins(null, "safe_confirm_order", "待確認訂單來源｜安全確認（通用）",
-      "我先幫您確認一下 🙏\n若您是透過我們**官方通路**下單，麻煩您加入 LINE 並提供「訂單編號 / 下單手機 / 收件資訊」，我們會立刻為您查詢處理。\n若是其他平台購買，建議也同步向原購買平台客服確認，通常處理會更快。",
-      "👉 請私訊我們 LINE：{after_sale_line_url}\n送出「訂單編號 + 下單手機」我們就能快速幫您查到進度。",
-      "為了保護您的個資，也方便我們加速查詢，麻煩您私訊 LINE：{after_sale_line_url}\n送出「訂單編號 + 下單手機」，我們會立刻幫您確認進度與後續處理。",
-      "為了保護您的個資，也方便我們加速查詢，麻煩您私訊 LINE：{after_sale_line_url}\n送出「訂單編號 + 下單手機」，我們會立刻幫您確認進度與後續處理。",
+      "我先幫您確認一下 🙏\n請提供「訂單編號」或「產品名稱＋手機號碼」，我們會立刻為您查詢處理。查不到會幫您轉專人。",
+      "👉 請私訊我們 LINE：{after_sale_line_url}\n送出「訂單編號」或「產品名稱＋手機」我們就能快速幫您查到進度。",
+      "為了保護您的個資，也方便我們加速查詢，麻煩您私訊 LINE：{after_sale_line_url}\n送出「訂單編號」或「產品名稱＋手機」，我們會立刻幫您確認進度與後續處理。",
+      "為了保護您的個資，也方便我們加速查詢，麻煩您私訊 LINE：{after_sale_line_url}\n送出「訂單編號」或「產品名稱＋手機」，我們會立刻幫您確認進度與後續處理。",
       dmOrder, "誠懇、不承諾");
     ins(null, "safe_confirm_emotional", "待確認訂單來源｜情緒客訴版",
-      "真的抱歉讓您有不好的感受 🙏\n我們先協助您把狀況確認清楚：麻煩您加入 LINE 私訊訂單資訊，我們會立刻幫您查。\n若您是在其他平台購買，也會引導您到正確客服，避免延誤處理。",
-      "👉 請私訊 LINE：{after_sale_line_url}\n直接貼上「訂單編號 / 下單手機 / 問題截圖」，我們會更快協助您。",
+      "真的抱歉讓您有不好的感受 🙏\n請提供訂單編號或產品名稱＋手機，我們會立刻幫您查。查不到會幫您轉專人。",
+      "👉 請私訊 LINE：{after_sale_line_url}\n直接貼上「訂單編號」或「產品名稱＋手機／問題截圖」，我們會更快協助您。",
       "", "", dmEmo, "誠懇、同理、不承諾");
     ins(null, "external_platform_order", "他平台訂單｜導正方向",
-      "我先跟您確認一下～如果您是在 **蝦皮 / 其他平台** 購買，訂單與出貨會以該平台系統為準，建議先聯繫原購買平台客服，處理會最快。\n若您是透過我們**官方通路**下單，也歡迎加入 LINE 私訊訂單資訊，我們一樣可以幫您確認。",
-      "若是官方通路訂單 👉 {after_sale_line_url}\n私訊「訂單編號 + 下單手機」我們立刻幫您查。",
+      "請提供訂單編號或產品名稱＋手機，我們幫您查；查不到會幫您轉專人處理。👉 私訊 LINE：{after_sale_line_url}",
+      "私訊「訂單編號」或「產品名稱＋手機」我們立刻幫您查。",
       "", "", dmPlatform, "中性、導正");
     ins(null, "fraud_impersonation", "疑似詐騙／冒用｜蒐證引導",
       "真的辛苦了…先提醒您：我們不會用私人帳號要求轉帳或提供驗證碼。\n麻煩您加入 LINE 私訊提供「對話截圖 / 付款資訊 / 對方帳號」，我們先協助您確認是否為冒用，並提供後續建議（必要時也建議同步報警與通知平台）。",
@@ -579,15 +579,31 @@ function migrateMetaCommentCenter() {
       "", "", dmFraud, "謹慎、同理、不承認");
     console.log("[DB Migration] Meta 安全確認模板已寫入 4 筆（待確認訂單／他平台／詐騙蒐證，含私訊版）");
   } else if (hasReplyPrivate) {
-    const dmOrder = "先跟您確認：若您是透過我們官方通路下單，請提供「訂單編號 + 下單手機」，我們會立刻幫您查。若是其他平台購買，建議向該平台客服確認會最快。";
-    const dmEmo = "不好意思讓您有不好的感受。我們先確認來源：請提供訂單編號與下單手機，我們會立刻幫您查；若為他平台購買，會引導您到正確客服。";
-    const dmPlatform = "若您是在蝦皮／其他平台購買，訂單與出貨以該平台為準，建議先聯繫該平台客服。若為官方通路下單，請提供訂單編號與下單手機，我們可幫您查。";
+    const dmOrder = "請提供訂單編號，或產品名稱＋手機號碼，我們會立刻幫您查。查不到會幫您轉專人處理。";
+    const dmEmo = "不好意思讓您有不好的感受。請提供訂單編號或產品名稱＋手機，我們會立刻幫您查；查不到會幫您轉專人。";
+    const dmPlatform = "請提供訂單編號或產品名稱＋手機，我們幫您查；查不到會幫您轉專人處理。";
     const dmFraud = "先提醒：我們不會用私人帳號要求轉帳或驗證碼。請提供對話截圖、付款資訊與對方帳號，我們協助確認是否冒用並給建議；必要時請同步報警與通知平台。";
     db.prepare("UPDATE meta_comment_templates SET reply_private = ? WHERE category = 'safe_confirm_order'").run(dmOrder);
     db.prepare("UPDATE meta_comment_templates SET reply_private = ? WHERE category = 'safe_confirm_emotional'").run(dmEmo);
     db.prepare("UPDATE meta_comment_templates SET reply_private = ? WHERE category = 'external_platform_order'").run(dmPlatform);
     db.prepare("UPDATE meta_comment_templates SET reply_private = ? WHERE category = 'fraud_impersonation'").run(dmFraud);
     console.log("[DB Migration] Meta 安全確認模板已補上 reply_private（私訊版）");
+  }
+  // Hotfix：全面移除平台來源話術 — 若已有安全確認模板，覆寫為僅引導訂單編號或產品+手機、查不到轉專人
+  const safeTplCountAfter = (db.prepare("SELECT COUNT(*) as c FROM meta_comment_templates WHERE category IN ('safe_confirm_order','safe_confirm_emotional','external_platform_order')").get() as { c: number }).c;
+  if (safeTplCountAfter > 0) {
+    const r1Order = "我先幫您確認一下 🙏\n請提供「訂單編號」或「產品名稱＋手機號碼」，我們會立刻為您查詢處理。查不到會幫您轉專人。";
+    const r2Order = "👉 請私訊我們 LINE：{after_sale_line_url}\n送出「訂單編號」或「產品名稱＋手機」我們就能快速幫您查到進度。";
+    const rdOrder = "請提供訂單編號，或產品名稱＋手機號碼，我們會立刻幫您查。查不到會幫您轉專人處理。";
+    db.prepare("UPDATE meta_comment_templates SET reply_first = ?, reply_second = ?, reply_dm_guide = ?, reply_private = ? WHERE category = 'safe_confirm_order'").run(r1Order, r2Order, rdOrder, rdOrder);
+    const r1Emo = "真的抱歉讓您有不好的感受 🙏\n請提供訂單編號或產品名稱＋手機，我們會立刻幫您查。查不到會幫您轉專人。";
+    const r2Emo = "👉 請私訊 LINE：{after_sale_line_url}\n直接貼上「訂單編號」或「產品名稱＋手機／問題截圖」，我們會更快協助您。";
+    const rdEmo = "不好意思讓您有不好的感受。請提供訂單編號或產品名稱＋手機，我們會立刻幫您查；查不到會幫您轉專人。";
+    db.prepare("UPDATE meta_comment_templates SET reply_first = ?, reply_second = ?, reply_dm_guide = ?, reply_private = ? WHERE category = 'safe_confirm_emotional'").run(r1Emo, r2Emo, rdEmo, rdEmo);
+    const r1Ext = "請提供訂單編號或產品名稱＋手機，我們幫您查；查不到會幫您轉專人處理。👉 私訊 LINE：{after_sale_line_url}";
+    const r2Ext = "私訊「訂單編號」或「產品名稱＋手機」我們立刻幫您查。";
+    const rdExt = "請提供訂單編號或產品名稱＋手機，我們幫您查；查不到會幫您轉專人處理。";
+    db.prepare("UPDATE meta_comment_templates SET reply_first = ?, reply_second = ?, reply_dm_guide = ?, reply_private = ? WHERE category = 'external_platform_order'").run(r1Ext, r2Ext, rdExt, rdExt);
   }
   const mappingCount = (db.prepare("SELECT COUNT(*) as c FROM meta_post_mappings").get() as { c: number }).c;
   if (mappingCount === 0) {

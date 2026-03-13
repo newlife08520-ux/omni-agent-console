@@ -18,18 +18,19 @@ import {
 } from "./safe-after-sale-classifier";
 import { runAutoExecution, computeMainStatus } from "./meta-comment-auto-execute";
 import * as riskRules from "./meta-comment-risk-rules";
-import { resolveConversationState, isHumanRequestMessage, isAlreadyProvidedMessage } from "./conversation-state-resolver";
+import { resolveConversationState, isHumanRequestMessage, isAlreadyProvidedMessage, isLinkRequestMessage, isLinkRequestCorrectionMessage, ORDER_LOOKUP_PATTERNS } from "./conversation-state-resolver";
 import { buildReplyPlan, shouldNotLeadWithOrderLookup, isAftersalesComfortFirst, type ReplyPlanMode } from "./reply-plan-builder";
-import { OFF_TOPIC_GUARD_MESSAGE, enforceOutputGuard, HANDOFF_MANDATORY_OPENING, buildHandoffReply } from "./phase2-output";
-import { runPostGenerationGuard, isModeNoPromo, runOfficialChannelGuard } from "./content-guard";
+import { OFF_TOPIC_GUARD_MESSAGE, enforceOutputGuard, HANDOFF_MANDATORY_OPENING, buildHandoffReply, getHandoffReplyForCustomer } from "./phase2-output";
+import { runPostGenerationGuard, isModeNoPromo, runOfficialChannelGuard, runGlobalPlatformGuard } from "./content-guard";
 import { recordGuardHit, getGuardStats } from "./content-guard-stats";
-import { searchOrderInfoThreeLayers } from "./already-provided-search";
+import { searchOrderInfoThreeLayers, searchOrderInfoInRecentMessages } from "./already-provided-search";
+import { shouldHandoffDueToAwkwardOrRepeat } from "./awkward-repeat-handoff";
 import { isRatingEligible } from "./rating-eligibility";
 import db from "./db";
 import { fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, fetchPages, lookupOrdersByPageAndPhone, ensurePagesCacheLoaded, refreshPagesCache, getCachedPages, getCachedPagesAge, buildProductCatalogPrompt } from "./superlanding";
 import type { SuperLandingConfig } from "./superlanding";
 import type { OrderInfo, Contact, ContactStatus, IssueType, MetaCommentTemplate, MetaComment } from "@shared/schema";
-import { unifiedLookupById, unifiedLookupByProductAndPhone, unifiedLookupByDateAndContact, getUnifiedStatusLabel } from "./order-service";
+import { unifiedLookupById, unifiedLookupByProductAndPhone, unifiedLookupByDateAndContact, getUnifiedStatusLabel, shouldPreferShoplineLookup } from "./order-service";
 import * as assignment from "./assignment";
 import {
   detectIntentLevel,
@@ -338,38 +339,35 @@ async function getEnrichedSystemPrompt(
   const handoffBlock = `
 
 --- 訂單出貨與退換貨規則（營運邏輯版，嚴格遵守）---
-總原則：第一優先不是「丟流程」，而是「先接住客人」。問出貨、等太久、想取消、想退貨、不耐煩時，都要先有一句自然承接與安撫，不能一上來就像系統機器人。不要太早提「其他平台」「若非官方通路」「建議找該平台客服」；除非已實際查單且確實查不到，否則禁止。
+總原則：第一優先「先接住客人」。問出貨、等太久、想取消、想退貨、不耐煩時，先一句自然承接與安撫。查單只收兩種資料，查不到就轉人工；禁止提及其他平台、官方通路、該平台等任何平台來源話術。
 
 一、商品類型與出貨邏輯
 ` + shippingLogicBlock + `
 
-二、詢問訂單／出貨進度
-- 觸發：訂單、查單、什麼時候到、何時出貨、怎麼還沒收到、單號、出貨進度、還沒寄、等太久等。
-- 回覆前：先一句承接再收資訊，例如「了解，這邊先幫您確認一下出貨狀況」「不好意思讓您久等了，我先幫您查一下目前進度」。不要一次丟太多欄位，優先收訂單編號或商品名稱＋手機。
+二、詢問訂單／出貨進度（查單唯一合法輸入）
+- 觸發：訂單、查單、出貨、物流、單號、出貨進度、還沒寄、等太久等。
+- 只允許引導兩種方式之一：① 請提供訂單編號；② 請提供產品名稱＋手機號碼。不得再問其他欄位（如購買頁面、收件資料、官方通路等）。
+- 回覆前：先一句承接再收資訊，例如「了解，這邊先幫您確認一下出貨狀況」「不好意思讓您久等了，我先幫您查一下目前進度」。只問訂單編號或商品名稱＋手機，不要一次丟太多欄位。
 - 有查到：依商品類型分流回覆（甜點 3 天節奏／其他 7–20 工作天），語氣柔和，可加「會盡快安排／備註加急」。
-- 查不到：先說「目前這邊暫時還沒查到這筆資料」，再問「您方便再提供訂單編號／商品名稱＋手機，我再幫您確認一次嗎？」只有在已查過、資訊足夠、仍明確查無此筆時，才可自然提到「有可能不是從我們這個系統下單，若您願意我也可以幫您轉專人再確認」。不得在未查單前就提其他平台。
-- 多次查單仍查無且客人明顯不耐煩時，可轉人工，但回話要自然，不要像系統宣告。
+- 查不到：直接轉人工。回覆「目前這邊暫時還沒查到這筆資料，這邊先幫您轉接真人專員處理，請稍後。」不得再繞、不得再問其他問法、不得提及其他平台或官方通路。
+- 同一句或同輪已取得「訂單編號」或「產品名稱＋手機」即不得再重問。
 
 三、退換貨／取消（分型處理）
-- 久候型（等太久、不想等、想取消但尚未堅持）：先安撫、先查詢出貨、說明能否加急或約需 7–20 工作天、優先嘗試留單。不要一開口就丟表單、不要一開口就轉人工。只有客人明確不要等、已安撫一輪仍堅持取消／退款、或情緒升高時，再進表單或轉人工。
-- 商品問題型（瑕疵、損壞、錯貨、缺件、漏寄、收到有問題）：一律先道歉、表示會協助處理，導向正式退換貨／售後表單（售後表單：${returnFormUrl}），必要時轉人工。這類不要只靠安撫，要走正式售後。
+- 久候型（等太久、不想等、想取消但尚未堅持）：先安撫、先查詢出貨、說明能否加急或約需 7–20 工作天、優先嘗試留單。不要一開口就丟表單、不要一開口就轉人工。
+- 商品問題型（瑕疵、損壞、錯貨、缺件、漏寄、收到有問題）：一律先道歉、表示會協助處理，導向正式退換貨／售後表單（售後表單：${returnFormUrl}），必要時轉人工。
 - 明確堅持退款退貨（我就是要退、直接幫我退、不要其他方案等）：可轉人工或提供表單，但仍先一句安撫再處理。
 
 四、轉人工條件
-可轉：明確要求真人；明確堅持退款／退貨／取消且不接受等待；商品損壞／瑕疵且情況較複雜；補償、爭議、金流異常；情緒高風險、投訴、公開負評風險；AI 已嘗試一輪仍無法推進。
+可轉：明確要求真人；明確堅持退款／退貨／取消且不接受等待；商品損壞／瑕疵且情況較複雜；補償、爭議、金流異常；情緒高風險、投訴、公開負評風險；AI 已嘗試一輪仍無法推進；查單查不到。
 不可太快轉：不要只因為第一次問進度、第一次抱怨久候、語氣有點急、或只提到「退貨」兩字但尚未說明原因就轉人工。
 
 五、語氣與禁止
 - 必須像真人客服，避免像制度公告。用「我先幫您確認看看」「這邊幫您查一下」「不好意思讓您久等了」「若有現貨會盡快替您安排」「我這邊也會幫您備註、盡量協助加快」。
-- 禁止太早出現：你是不是在別的平台買的、那可能不是我們這邊的單、建議去找別的平台客服、這不屬於我們處理範圍。只有真正查不到且資訊完整時，才能自然提一次。
-- 遇到久候要偏安撫與協助，不是偏辯解；讓客人感覺你有在幫他處理、幫他催、幫他加快。
-
-F2. 退貨／退款第一句禁止「區分官方／其他平台」
-不得第一句就說「若您是透過官方通路下單…若是其他平台購買建議向該平台客服確認」。只有在顧客已提供訂單編號或商品+手機且你已用工具查詢、結果確實查無此筆時，才可禮貌說明可能為其他通路並建議轉真人，且不得在顧客尚未提供任何訂單資訊前就提其他平台。
+- 全域禁止：不得出現「其他平台」「該平台」「官方通路」「非官方」「若是其他平台購買」「建議向該平台客服確認」「不是我們這邊的單」等任何平台來源判斷。能查就查，查不到就轉人工，不討論平台來源。
 
 --- AI 身分透明 ---
 在適當時機自然讓客戶知道你是 AI，嚴禁假裝是真人。客戶要求轉真人時，自然回覆並呼叫 transfer_to_human。
-訂單查詢回傳 found=false 時，用你的語氣告知查不到、主動詢問是否有其他資訊可協助，不要自動轉人工。`;
+訂單查詢回傳 found=false 時：告知查不到後直接轉接真人專員，不要再問其他問法。`;
 
   const schedule = storage.getGlobalSchedule();
   const unavailableReason = assignment.getUnavailableReason();
@@ -3555,44 +3553,58 @@ ${contextStr}
 
     const freshCheck = storage.getContact(contact.id);
     if (freshCheck && (freshCheck.status === "awaiting_human" || freshCheck.status === "high_risk")) {
-      console.log(`[AI Mute] Contact ${contact.id} status=${freshCheck.status}, AI 靜音中 - 跳過`);
-      storage.createAiLog({
-        contact_id: contact.id,
-        brand_id: effectiveBrandIdForLog || undefined,
-        prompt_summary: userMessage.slice(0, 200),
-        knowledge_hits: [],
-        tools_called: [],
-        transfer_triggered: false,
-        result_summary: "gate_skip:status",
-        token_usage: 0,
-        model: "gate",
-        response_time_ms: Date.now() - startTime,
-        reply_source: "gate_skip",
-        used_llm: 0,
-        plan_mode: null,
-        reason_if_bypassed: `status=${freshCheck.status}`,
-      });
-      return;
+      const isLinkAsk = isLinkRequestMessage(userMessage) || isLinkRequestCorrectionMessage(userMessage);
+      if (isLinkAsk) {
+        storage.updateContactHumanFlag(contact.id, 0);
+        storage.updateContactStatus(contact.id, "ai_handling");
+        broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+      } else {
+        console.log(`[AI Mute] Contact ${contact.id} status=${freshCheck.status}, AI 靜音中 - 跳過`);
+        storage.createAiLog({
+          contact_id: contact.id,
+          brand_id: effectiveBrandIdForLog || undefined,
+          prompt_summary: userMessage.slice(0, 200),
+          knowledge_hits: [],
+          tools_called: [],
+          transfer_triggered: false,
+          result_summary: "gate_skip:status",
+          token_usage: 0,
+          model: "gate",
+          response_time_ms: Date.now() - startTime,
+          reply_source: "gate_skip",
+          used_llm: 0,
+          plan_mode: null,
+          reason_if_bypassed: `status=${freshCheck.status}`,
+        });
+        return;
+      }
     }
     if (freshCheck && freshCheck.needs_human) {
-      console.log(`[AI Mute] Contact ${contact.id} needs_human=1, AI 靜音中 - 跳過`);
-      storage.createAiLog({
-        contact_id: contact.id,
-        brand_id: effectiveBrandIdForLog || undefined,
-        prompt_summary: userMessage.slice(0, 200),
-        knowledge_hits: [],
-        tools_called: [],
-        transfer_triggered: false,
-        result_summary: "gate_skip:needs_human",
-        token_usage: 0,
-        model: "gate",
-        response_time_ms: Date.now() - startTime,
-        reply_source: "gate_skip",
-        used_llm: 0,
-        plan_mode: null,
-        reason_if_bypassed: "needs_human",
-      });
-      return;
+      const isLinkAsk = isLinkRequestMessage(userMessage) || isLinkRequestCorrectionMessage(userMessage);
+      if (isLinkAsk) {
+        storage.updateContactHumanFlag(contact.id, 0);
+        storage.updateContactStatus(contact.id, "ai_handling");
+        broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+      } else {
+        console.log(`[AI Mute] Contact ${contact.id} needs_human=1, AI 靜音中 - 跳過`);
+        storage.createAiLog({
+          contact_id: contact.id,
+          brand_id: effectiveBrandIdForLog || undefined,
+          prompt_summary: userMessage.slice(0, 200),
+          knowledge_hits: [],
+          tools_called: [],
+          transfer_triggered: false,
+          result_summary: "gate_skip:needs_human",
+          token_usage: 0,
+          model: "gate",
+          response_time_ms: Date.now() - startTime,
+          reply_source: "gate_skip",
+          used_llm: 0,
+          plan_mode: null,
+          reason_if_bypassed: "needs_human",
+        });
+        return;
+      }
     }
     if (storage.isAiMuted(contact.id)) {
       console.log(`[AI Mute] Contact ${contact.id} 靜音窗尚未結束 - 跳過`);
@@ -3636,13 +3648,14 @@ ${contextStr}
           `(系統提示) 偵測到高風險訊息，已自動標記並轉接真人客服。原因：${riskCheck.reasons.join("、")}`);
         broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
         const handoffReplyLegal = buildHandoffReply({ customerEmotion: "high_risk" });
-        const aiMsgRisk = storage.createMessage(contact.id, contact.platform, "ai", handoffReplyLegal);
+        const handoffTextLegal = getHandoffReplyForCustomer(handoffReplyLegal, assignment.getUnavailableReason());
+        const aiMsgRisk = storage.createMessage(contact.id, contact.platform, "ai", handoffTextLegal);
         broadcastSSE("new_message", { contact_id: contact.id, message: aiMsgRisk, brand_id: contact.brand_id });
         broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
         if (contact.platform === "messenger" && channelToken) {
-          await sendFBMessage(channelToken, contact.platform_user_id, handoffReplyLegal);
+          await sendFBMessage(channelToken, contact.platform_user_id, handoffTextLegal);
         } else if (channelToken) {
-          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: handoffReplyLegal }], channelToken);
+          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: handoffTextLegal }], channelToken);
         }
 
         storage.createAiLog({
@@ -3666,8 +3679,9 @@ ${contextStr}
       }
 
       // 共用安全確認分流：非本店／他平台／詐騙／待確認來源 → 私訊走安全模板，不進標準售後承諾
+      // 例外：若本句明確為「購買連結／商品頁」需求，優先走一般回覆（從知識庫貼連結），不回防詐模板、不切待人工
       const safeConfirmDm = classifyMessageForSafeAfterSale(userMessage);
-      if (safeConfirmDm.matched) {
+      if (safeConfirmDm.matched && !isLinkRequestMessage(userMessage)) {
         const categoryByType: Record<string, string> = {
           fraud_impersonation: "fraud_impersonation",
           external_platform: "external_platform_order",
@@ -3830,6 +3844,57 @@ ${contextStr}
       const isReturnFirstRound = (freshContact as any).return_stage == null || (freshContact as any).return_stage === 0;
       const plan = buildReplyPlan({ state, returnFormUrl, isReturnFirstRound });
 
+      // 尷尬／重複轉人工：同一種資料重問兩次、同一模板重複、用戶說已給過但 AI 答錯、類別跳錯 → 直接轉人工
+      const awkwardCheck = shouldHandoffDueToAwkwardOrRepeat({
+        userMessage,
+        recentMessages: recentMessages.map((m: any) => ({ sender_type: m.sender_type, content: m.content })),
+        primaryIntentOrderLookup: state.primary_intent === "order_lookup",
+      });
+      if (awkwardCheck.shouldHandoff) {
+        storage.updateContactConversationFields(contact.id, { product_scope_locked: null, customer_goal_locked: null });
+        storage.updateContactHumanFlag(contact.id, 1);
+        storage.updateContactStatus(contact.id, "awaiting_human");
+        storage.createCaseNotification(contact.id, "in_app");
+        storage.updateContactAssignmentStatus(contact.id, "waiting_human");
+        const assignedIdAwk = assignment.assignCase(contact.id);
+        if (assignedIdAwk == null && assignment.isAllAgentsUnavailable()) {
+          const tags = JSON.parse(contact.tags || "[]");
+          if (!tags.includes("午休待處理")) storage.updateContactTags(contact.id, [...tags, "午休待處理"]);
+          storage.updateContactNeedsAssignment(contact.id, 1);
+          storage.createMessage(contact.id, contact.platform, "system", getTransferUnavailableSystemMessage(assignment.getUnavailableReason()));
+        }
+        const handoffReplyAwk = buildHandoffReply({ customerEmotion: state.customer_emotion });
+        const handoffTextAwk = getHandoffReplyForCustomer(handoffReplyAwk, assignment.getUnavailableReason());
+        const contactPlatformAwk = platform || contact.platform || "line";
+        const aiMsgAwk = storage.createMessage(contact.id, contactPlatformAwk, "ai", handoffTextAwk);
+        broadcastSSE("new_message", { contact_id: contact.id, message: aiMsgAwk, brand_id: effectiveBrandId || contact.brand_id });
+        broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+        if (contactPlatformAwk === "messenger" && channelToken) {
+          await sendFBMessage(channelToken, contact.platform_user_id, handoffTextAwk);
+        } else if (channelToken) {
+          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: handoffTextAwk }], channelToken);
+        }
+        storage.createAiLog({
+          contact_id: contact.id,
+          message_id: aiMsgAwk.id,
+          brand_id: effectiveBrandId || undefined,
+          prompt_summary: `awkward_repeat_handoff: ${awkwardCheck.reason ?? "unknown"} - ${userMessage.slice(0, 60)}`,
+          knowledge_hits: [],
+          tools_called: ["awkward_repeat_handoff"],
+          transfer_triggered: true,
+          transfer_reason: `尷尬/重複: ${awkwardCheck.reason ?? "unknown"}`,
+          result_summary: "尷尬或重複觸發轉人工",
+          token_usage: 0,
+          model: "reply-plan",
+          response_time_ms: Date.now() - startTime,
+          reply_source: "handoff",
+          used_llm: 0,
+          plan_mode: plan.mode,
+          reason_if_bypassed: `awkward_repeat: ${awkwardCheck.reason ?? "unknown"}`,
+        });
+        return;
+      }
+
       // Hotfix：handoff 原子化 — 一旦 plan 為 handoff，只送一則強制告知句，不進 LLM，避免先出一大段再出第二則轉接
       if (plan.mode === "handoff") {
         storage.updateContactConversationFields(contact.id, { product_scope_locked: null, customer_goal_locked: null });
@@ -3847,18 +3912,24 @@ ${contextStr}
           const reason = assignment.getUnavailableReason();
           storage.createMessage(contact.id, contact.platform, "system", getTransferUnavailableSystemMessage(reason));
         }
+        const recentMessagesForHandoff = storage.getMessages(contact.id).slice(-12).map((m: any) => ({ sender_type: m.sender_type, content: m.content, message_type: m.message_type, image_url: m.image_url }));
+        const orderInfoInRecent = searchOrderInfoInRecentMessages(recentMessagesForHandoff);
         const handoffReply = buildHandoffReply({
           customerEmotion: state.customer_emotion,
           humanReason: state.human_reason ?? undefined,
+          isOrderLookupContext: ORDER_LOOKUP_PATTERNS.test(userMessage),
+          hasOrderInfo: !!orderInfoInRecent.orderId,
         });
+        const unavailableReason = assignment.getUnavailableReason();
+        const handoffTextToSend = getHandoffReplyForCustomer(handoffReply, unavailableReason);
         const contactPlatform = platform || contact.platform || "line";
-        const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", handoffReply);
+        const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", handoffTextToSend);
         broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: effectiveBrandId || contact.brand_id });
         broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
         if (contactPlatform === "messenger" && channelToken) {
-          await sendFBMessage(channelToken, contact.platform_user_id, handoffReply);
+          await sendFBMessage(channelToken, contact.platform_user_id, handoffTextToSend);
         } else if (channelToken) {
-          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: handoffReply }], channelToken);
+          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: handoffTextToSend }], channelToken);
         }
         storage.createAiLog({
           contact_id: contact.id,
@@ -3977,14 +4048,11 @@ ${contextStr}
         systemPrompt += `\n\n【客戶目標鎖定】本輪目標為「${goalLocked}」，不得跳去商品推薦、其他品類知識、與此目標無關的補充或推銷。`;
       }
       if (plan.mode === "handoff") {
-        systemPrompt += "\n\n【本輪】已判斷需轉人工，請呼叫 transfer_to_human 並以自然語氣告知將安排真人接手（例：了解，我先幫您整理目前狀況，接著安排真人客服為您接手處理，這樣會比較快一些🙏）。";
-        if (state.human_reason === "explicit_human_request") {
-          systemPrompt += " 顧客已明確要求真人，直接告知已安排接手，不得再問「您是想找真人嗎」；最多補一句「若方便可留訂單編號，專人會更快處理」。";
-        }
+        systemPrompt += "\n\n【本輪】已判斷需轉人工，請呼叫 transfer_to_human 並以自然語氣告知將安排真人接手（例：了解，我先幫您整理目前狀況，接著安排真人客服為您接手處理，這樣會比較快一些🙏）。顧客已明確要求真人時，直接告知已安排接手，不得再問「您是想找真人嗎」。不得在轉人工回覆中補問訂單編號或產品+手機（除非同一句明確提到查單/訂單/出貨且真的缺關鍵資料時，由系統另行處理）。";
       }
-      // 地雷2：F2 規則（禁止過早提其他平台）須涵蓋 order_lookup 及所有尚未查單成功情境。reply-plan-builder 已對 order_lookup 回傳 must_not_include，此處統一注入。
+      // 地雷2：F2 規則 — 全域禁止平台來源話術，不分情境。
       if (plan.must_not_include && plan.must_not_include.length > 0) {
-        systemPrompt += "\n\n【本輪硬規則 F2】回覆中禁止出現：" + plan.must_not_include.map((p) => `「${p}」`).join("、") + "。不得區分官方通路與其他平台，除非客戶已提供訂單/商品+手機且你已用工具查詢後確實查無此筆。";
+        systemPrompt += "\n\n【本輪硬規則 F2】回覆中禁止出現：" + plan.must_not_include.map((p) => `「${p}」`).join("、") + "。不得提及其他平台、官方通路、該平台、非官方等任何平台來源判斷。";
       }
       if (shouldNotLeadWithOrderLookup(plan, state)) {
         systemPrompt += "\n\n【本輪】本輪為商品問題型退換貨，先道歉並表示會協助處理，再引導填寫售後表單（可附表單連結）。不可先走訂單查詢為主流程。";
@@ -3993,7 +4061,7 @@ ${contextStr}
         systemPrompt += "\n\n【本輪 久候型售後】客人因等太久／不想等／想取消而抱怨。你要：先一句自然安撫（如：不好意思讓您久等了）→ 主動幫他查詢出貨狀況 → 說明是否有現貨、能否加急、或約需 7–20 工作天 → 補一句「會盡量幫您加快／備註加急」。不要一開口就丟表單、不要一開口就轉人工、不要先提「其他平台」。可呼叫訂單查詢工具。";
       }
       if (plan.mode === "order_lookup") {
-        systemPrompt += "\n\n【本輪 查單】本輪只做查單。承接一句後只問一個最有效欄位（訂單編號或商品+手機），不要問卷、不要多餘問題。回覆簡短（約 90～140 字）。";
+        systemPrompt += "\n\n【本輪 查單】本輪只做查單。查單只接受兩種輸入：① 訂單編號；② 產品名稱＋手機號碼。承接一句後只引導其中一種，不得問其他欄位（如購買頁面、收件資料、官方通路等）。回覆簡短（約 90～140 字）。同一句或同輪已取得訂單編號或產品+手機即不得再重問。";
       }
       // Mode-specific forbidden content：退貨/取消/handoff/order_lookup 禁止賣點、行銷、推薦、價格組合
       if (isModeNoPromo(plan.mode)) {
@@ -4005,9 +4073,9 @@ ${contextStr}
       if (effectiveScope === "sweet") {
         systemPrompt += "\n\n【本輪 商品範圍】已鎖定為甜點類，回覆中不得提及包包、袋類等無關品類。";
       }
-      // Hotfix：已知為品牌官方渠道時，不得再問是否官方下單／其他平台
+      // Hotfix：官方渠道時不得出現任何平台來源話術
       if (contact.channel_id) {
-        systemPrompt += "\n\n【本輪 官方渠道】客人目前透過品牌官方 LINE/渠道與你對話，請勿再詢問「是否官方下單」「若是其他平台購買」等與情境衝突的句子；直接依其需求協助查單或售後。";
+        systemPrompt += "\n\n【本輪 官方渠道】客人目前透過品牌官方 LINE/渠道與你對話。回覆中禁止出現「其他平台」「該平台」「官方通路」「非官方」「若是其他平台購買」等任何平台來源話術；直接依其需求協助查單或售後。";
       }
       // Hotfix：客戶說已給過資料 → 三層搜尋（1. 近期文字 2. 最近圖片 vision 3. linked order）；三層都沒有才轉真人
       if (isAlreadyProvidedMessage(userMessage)) {
@@ -4017,15 +4085,15 @@ ${contextStr}
           openai: openaiForSearch,
         });
         if (!found || (!found.orderId && !found.phone)) {
-          const apologyHandoff = "不好意思造成困擾，這邊先幫您轉接真人專員處理，請稍後。";
           const contactPlatform = platform || contact.platform || "line";
-          const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", apologyHandoff);
+          const alreadyHandoffText = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, assignment.getUnavailableReason());
+          const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", alreadyHandoffText);
           broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: effectiveBrandId || contact.brand_id });
           broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
           if (contactPlatform === "messenger" && channelToken) {
-            await sendFBMessage(channelToken, contact.platform_user_id, apologyHandoff);
+            await sendFBMessage(channelToken, contact.platform_user_id, alreadyHandoffText);
           } else if (channelToken) {
-            await pushLineMessage(contact.platform_user_id, [{ type: "text", text: apologyHandoff }], channelToken);
+            await pushLineMessage(contact.platform_user_id, [{ type: "text", text: alreadyHandoffText }], channelToken);
           }
           storage.updateContactHumanFlag(contact.id, 1);
           storage.updateContactStatus(contact.id, "awaiting_human");
@@ -4141,7 +4209,7 @@ ${contextStr}
           if (timeoutCount >= 2) {
             storage.updateContactStatus(contact.id, "awaiting_human");
             storage.updateContactHumanFlag(contact.id, 1);
-            const comfortMsg = HANDOFF_MANDATORY_OPENING;
+            const comfortMsg = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, assignment.getUnavailableReason());
             storage.createMessage(contact.id, contact.platform, "ai", comfortMsg);
             if (platform === "messenger") {
               sendFBMessage(channelToken || "", contact.platform_user_id, comfortMsg).catch(() => {});
@@ -4172,12 +4240,17 @@ ${contextStr}
         console.log(`[Webhook AI] 觸發 ${responseMessage.tool_calls.length} 個 Tool Call（第 ${loopCount} 輪）`);
         chatMessages.push(responseMessage as OpenAI.Chat.Completions.ChatCompletionMessageParam);
 
+        const recentUserMessagesForLookup = recentMessages
+          .filter((m: any) => m.sender_type === "user" && m.content && m.content !== "[圖片訊息]")
+          .map((m: any) => (m.content || "").trim())
+          .filter(Boolean);
         const toolCtx = {
           contactId: contact.id,
           brandId: effectiveBrandId || undefined,
           channelToken: channelToken || undefined,
           platform: contact.platform,
           platformUserId: contact.platform_user_id,
+          preferShopline: shouldPreferShoplineLookup(userMessage, recentUserMessagesForLookup),
         };
 
         const toolResults = await Promise.all(
@@ -4312,7 +4385,7 @@ ${contextStr}
             if (loopTimeoutCount >= 2) {
               storage.updateContactStatus(contact.id, "awaiting_human");
               storage.updateContactHumanFlag(contact.id, 1);
-              const comfortMsg = HANDOFF_MANDATORY_OPENING;
+              const comfortMsg = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, assignment.getUnavailableReason());
               storage.createMessage(contact.id, contact.platform, "ai", comfortMsg);
               if (platform === "messenger") {
                 sendFBMessage(channelToken || "", contact.platform_user_id, comfortMsg).catch(() => {});
@@ -4333,18 +4406,24 @@ ${contextStr}
       const finalContact = storage.getContact(contact.id);
       if (finalContact?.needs_human || storage.isAiMuted(contact.id) || finalContact?.status === "awaiting_human" || finalContact?.status === "high_risk") {
         console.log(`[Webhook AI] 已轉接真人或靜音中，送出 handoff 強制告知句 (needs_human=${finalContact?.needs_human}, status=${finalContact?.status})`);
+        const recentForHandoff = storage.getMessages(contact.id).slice(-12).map((m: any) => ({ sender_type: m.sender_type, content: m.content, message_type: m.message_type, image_url: m.image_url }));
+        const orderInfoForHandoff = searchOrderInfoInRecentMessages(recentForHandoff);
         const handoffReply = buildHandoffReply({
           customerEmotion: state.customer_emotion,
           humanReason: state.human_reason ?? undefined,
+          isOrderLookupContext: ORDER_LOOKUP_PATTERNS.test(userMessage),
+          hasOrderInfo: !!orderInfoForHandoff.orderId,
         });
+        const unavailableReasonPost = assignment.getUnavailableReason();
+        const handoffTextToSendPost = getHandoffReplyForCustomer(handoffReply, unavailableReasonPost);
         const contactPlatform = platform || contact.platform || "line";
-        const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", handoffReply);
+        const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", handoffTextToSendPost);
         broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: contact.brand_id });
         broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
         if (contactPlatform === "messenger" && channelToken) {
-          await sendFBMessage(channelToken, contact.platform_user_id, handoffReply);
+          await sendFBMessage(channelToken, contact.platform_user_id, handoffTextToSendPost);
         } else if (channelToken) {
-          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: handoffReply }], channelToken);
+          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: handoffTextToSendPost }], channelToken);
         }
         storage.createAiLog({
           contact_id: contact.id,
@@ -4388,6 +4467,15 @@ ${contextStr}
           const useCleaned = officialGuard.cleaned && officialGuard.cleaned.trim();
           reply = useCleaned ? officialGuard.cleaned : "了解，這邊幫您處理，請稍候。";
           recordGuardHit("official_channel_forbidden", useCleaned ? "cleaned" : "fallback");
+        }
+      }
+      // 全域 platform hard guard：任一回覆不得含「其他平台／該平台／官方通路」等，不分 mode
+      if (reply && reply.trim()) {
+        const globalPlatformGuard = runGlobalPlatformGuard(reply);
+        if (!globalPlatformGuard.pass) {
+          const useCleaned = globalPlatformGuard.cleaned && globalPlatformGuard.cleaned.trim();
+          reply = useCleaned ? globalPlatformGuard.cleaned : "了解，這邊幫您處理，請稍候。";
+          recordGuardHit("global_platform_forbidden", useCleaned ? "cleaned" : "fallback");
         }
       }
       if (reply && reply.trim()) {
@@ -4592,7 +4680,7 @@ ${contextStr}
           const needsHuman = HUMAN_KEYWORDS.some((kw) => text.includes(kw));
           if (needsHuman) {
             storage.updateContactHumanFlag(contact.id, 1);
-            const handoffText = HANDOFF_MANDATORY_OPENING;
+            const handoffText = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, assignment.getUnavailableReason());
             const aiMsg = storage.createMessage(contact.id, "line", "ai", handoffText);
             broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: matchedBrandId || contact.brand_id });
             broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
@@ -4978,7 +5066,7 @@ ${contextStr}
               const needsHuman2 = HUMAN_KW2.some((kw: string) => text.includes(kw));
               if (needsHuman2) {
                 storage.updateContactHumanFlag(contact.id, 1);
-                const handoffTextFb = HANDOFF_MANDATORY_OPENING;
+                const handoffTextFb = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, assignment.getUnavailableReason());
                 const aiMsg2 = storage.createMessage(contact.id, "messenger", "ai", handoffTextFb);
                 broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg2, brand_id: matchedBrandId || contact.brand_id });
                 broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
@@ -5236,7 +5324,7 @@ ${contextStr}
   async function executeToolCall(
     toolName: string,
     args: Record<string, string>,
-    context?: { contactId?: number; brandId?: number; channelToken?: string; platform?: string; platformUserId?: string }
+    context?: { contactId?: number; brandId?: number; channelToken?: string; platform?: string; platformUserId?: string; preferShopline?: boolean }
   ): Promise<string> {
     if (toolName === "transfer_to_human") {
       const reason = (args.reason || "AI 判斷需要人工處理").trim();
@@ -5309,11 +5397,13 @@ ${contextStr}
           });
         }
 
-        const result = await unifiedLookupById(config, orderId, context?.brandId);
+        const preferSource = context?.preferShopline ? "shopline" as const : undefined;
+        if (preferSource) console.log(`[AI Tool Call] 優先 SHOPLINE 查單（官網/SHOPLINE 線索）`);
+        const result = await unifiedLookupById(config, orderId, context?.brandId, preferSource);
 
         if (!result.found || result.orders.length === 0) {
-          console.log(`[AI Tool Call] 所有平台皆查無訂單: ${orderId}`);
-          return JSON.stringify({ success: true, found: false, message: `所有平台（一頁商店 + SHOPLINE）皆查無訂單編號 ${orderId} 的紀錄。請告知客戶目前查不到這筆資料，並詢問是否需要轉接專人客服。` });
+          console.log(`[AI Tool Call] 查無訂單: ${orderId}`);
+          return JSON.stringify({ success: true, found: false, message: `目前查不到訂單編號 ${orderId} 的紀錄。請告知客戶查不到這筆資料，並直接幫客戶轉接真人專員處理（勿再問其他問法、勿提其他平台）。` });
         }
 
         const order = result.orders[0];
@@ -5465,24 +5555,33 @@ ${contextStr}
 
         console.log("[AI Tool Call] 匹配商品:", matchedPages.length, "個銷售頁:", matchedPages.slice(0, 5).map(p => `${p.productName}(${p.pageId})`).join(", "), matchedPages.length > 5 ? "..." : "");
         let allResults: any[] = [];
-        const searchBatchSize = 3;
-        for (let bi = 0; bi < matchedPages.length; bi += searchBatchSize) {
-          const batch = matchedPages.slice(bi, bi + searchBatchSize);
-          const batchResults = await Promise.all(
-            batch.map(mp => lookupOrdersByPageAndPhone(config, mp.pageId, phone))
-          );
-          for (const br of batchResults) {
-            allResults = allResults.concat(br.orders);
-          }
-          if (allResults.length > 0) break;
-        }
-        const result = { orders: allResults, totalFetched: allResults.length, truncated: false };
-
         let orderSource: string = "superlanding";
+        const preferSourceProduct = context?.preferShopline ? "shopline" as const : undefined;
 
-        if (result.orders.length === 0) {
+        if (preferSourceProduct) {
+          console.log(`[AI Tool Call] 官網/SHOPLINE 線索，直接以 SHOPLINE 優先做統一查詢`);
+          const unifiedResult = await unifiedLookupByProductAndPhone(config, matchedPages, phone, context?.brandId, preferSourceProduct);
+          if (unifiedResult.found) {
+            allResults = unifiedResult.orders;
+            orderSource = unifiedResult.source;
+          }
+        }
+        if (allResults.length === 0) {
+          const searchBatchSize = 3;
+          for (let bi = 0; bi < matchedPages.length; bi += searchBatchSize) {
+            const batch = matchedPages.slice(bi, bi + searchBatchSize);
+            const batchResults = await Promise.all(
+              batch.map(mp => lookupOrdersByPageAndPhone(config, mp.pageId, phone))
+            );
+            for (const br of batchResults) {
+              allResults = allResults.concat(br.orders);
+            }
+            if (allResults.length > 0) break;
+          }
+        }
+        if (allResults.length === 0) {
           console.log(`[AI Tool Call] 品牌 ${context?.brandId || "預設"} SuperLanding 查無結果，嘗試統一查詢...`);
-          const unifiedResult = await unifiedLookupByProductAndPhone(config, matchedPages, phone, context?.brandId);
+          const unifiedResult = await unifiedLookupByProductAndPhone(config, matchedPages, phone, context?.brandId, preferSourceProduct);
           if (unifiedResult.found) {
             allResults = unifiedResult.orders;
             orderSource = unifiedResult.source;
@@ -5579,7 +5678,8 @@ ${contextStr}
 
         if (matched.length === 0) {
           console.log("[AI Tool Call] SuperLanding 日期查詢查無結果，嘗試 SHOPLINE...");
-          const unifiedResult = await unifiedLookupByDateAndContact(config, contact, beginDate, endDate, pageId, context?.brandId);
+          const preferSourceDate = context?.preferShopline ? "shopline" as const : undefined;
+          const unifiedResult = await unifiedLookupByDateAndContact(config, contact, beginDate, endDate, pageId, context?.brandId, preferSourceDate);
           if (unifiedResult.found) {
             matched.push(...unifiedResult.orders);
             dateOrderSource = unifiedResult.source;

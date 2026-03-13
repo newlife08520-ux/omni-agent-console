@@ -47,13 +47,15 @@ export interface ReplyPlan {
   should_include?: string[];
 }
 
-/** F2：退換貨首輪禁止出現的內容（官方/其他平台區分） */
+/** F2：全域禁止平台來源話術（查單/取消/退貨/handoff 等一律不得出現） */
 export const F2_FORBIDDEN_PHRASES = [
   "官方通路",
   "其他平台",
   "若是其他平台購買",
   "向該平台客服",
+  "建議向該平台客服確認",
   "非官方",
+  "不是我們這邊的單",
 ];
 
 export interface PlanBuilderInput {
@@ -117,7 +119,7 @@ export function buildReplyPlan(input: PlanBuilderInput): ReplyPlan {
     return { mode: "off_topic_guard" };
   }
 
-  if (primary_intent === "product_consult" || primary_intent === "price_purchase") {
+  if (primary_intent === "product_consult" || primary_intent === "price_purchase" || primary_intent === "link_request") {
     return { mode: "answer_directly" };
   }
 

@@ -76,6 +76,45 @@ export function isModeNoPromo(mode: ReplyPlanMode): boolean {
 const OFFICIAL_CHANNEL_FORBIDDEN_SOURCE = "是否官方下單|若是其他平台|其他平台購買|官方通路下單|該平台客服|該平台|建議找該平台|若非官方|不是我們這邊的單";
 
 /**
+ * 全域禁止平台來源話術（Hotfix）：不分 mode、不分渠道，送出前一律檢查。
+ * 命中任一句型即不通過，清洗或替換後再送出。
+ */
+export const PLATFORM_FORBIDDEN_PATTERNS = [
+  "其他平台",
+  "該平台",
+  "官方通路",
+  "非官方",
+  "若是其他平台購買",
+  "建議向該平台客服確認",
+  "不是我們這邊的單",
+];
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildGlobalPlatformForbiddenRe(): RegExp {
+  return new RegExp(PLATFORM_FORBIDDEN_PATTERNS.map(escapeRe).join("|"), "gi");
+}
+
+/**
+ * 發送前 hard guard：回覆不得包含任何「其他平台／該平台／官方通路」等句型。全域適用，不分 mode。
+ */
+export function runGlobalPlatformGuard(reply: string): GuardResult {
+  const text = (reply || "").trim();
+  if (!text) return { pass: true, cleaned: text };
+  const re = buildGlobalPlatformForbiddenRe();
+  if (!re.test(text)) return { pass: true, cleaned: text };
+  let cleaned = text;
+  for (const p of PLATFORM_FORBIDDEN_PATTERNS) {
+    const re = new RegExp(escapeRe(p) + "[^。！？\n]*[。！？]?", "gi");
+    cleaned = cleaned.replace(re, "").replace(/\n{2,}/g, "\n").trim();
+  }
+  if (!cleaned) cleaned = "了解，這邊幫您處理，請稍候。";
+  return { pass: false, cleaned, reason: "global_platform_forbidden" };
+}
+
+/**
  * 若 current contact 已知為官方渠道，回覆不得出現「是否官方下單」「若是其他平台購買」等。
  * 命中則清洗後回傳 { pass: false, cleaned }。
  */

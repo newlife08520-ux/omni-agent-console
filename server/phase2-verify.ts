@@ -109,7 +109,7 @@ const state5 = resolveConversationState({
 const plan5 = buildReplyPlan({ state: state5, returnFormUrl, isReturnFirstRound: true });
 ok("我要查訂單 → order_lookup", plan5.mode === "order_lookup");
 // output guard：order_lookup 回覆上限 140 字，長文會被截斷
-const longReply = "您好，為您查詢訂單需要以下資訊之一。請提供訂單編號或訂購人手機號碼。若您是在官方網站訂購請提供訂單編號；若在其他平台請向該平台查詢。我們會盡快為您確認。謝謝。";
+const longReply = "您好，為您查詢訂單需要以下資訊之一：請提供訂單編號，或產品名稱＋手機號碼。我們會盡快為您確認。謝謝。若有其他問題也可以跟我說。";
 const guardedOrderLookup = enforceOutputGuard(longReply, "order_lookup");
 ok("order_lookup 回覆上限 140 字", guardedOrderLookup.length <= OUTPUT_GUARD_MAX_CHARS);
 

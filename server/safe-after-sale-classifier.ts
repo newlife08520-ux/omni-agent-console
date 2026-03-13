@@ -28,7 +28,7 @@ export const IMAGE_DM_FRAUD_PAYMENT =
 /** 4. 圖片型私訊商品問題／瑕疵／過敏 */
 export const IMAGE_DM_PRODUCT_ISSUE =
   "收到您的圖片了～若與商品使用、瑕疵或過敏有關，我們想先了解狀況。\n\n" +
-  "請補充：購買管道（官網／哪個平台）、訂單編號或商品名稱，以及目前狀況（例如：擦了過敏、有瑕疵），我們會依資訊協助後續。";
+  "請補充：訂單編號或商品名稱，以及目前狀況（例如：擦了過敏、有瑕疵），我們會依資訊協助後續。";
 
 /** 僅圖片、無文字時沿用通用版（與原 SAFE_IMAGE_ONLY_REPLY 語意一致，改為上述通用補充版） */
 export const SAFE_IMAGE_ONLY_REPLY = IMAGE_DM_GENERIC;
@@ -102,10 +102,12 @@ export const PLATFORM_KEYWORDS = [
   "蝦皮", "淘寶", "momo", "pchome", "露天", "yahoo購物", "yahoo", "amazon", "博客來", "東森", "康是美", "屈臣氏",
 ];
 
-/** 詐騙／冒用關鍵字：不承認責任，走蒐證引導 */
-export const FRAUD_IMPERSONATION_KEYWORDS = [
-  "詐騙", "冒用", "假客服", "匯款", "轉帳", "驗證碼", "連結", "付款後沒下文", "被騙", "盜用", "假官方", "騙錢", "詐欺",
+/** 詐騙／冒用：僅在出現明確風險訊號時觸發。不可僅因「連結」「帳號」「購買」就誤觸。 */
+export const FRAUD_RISK_SIGNAL_KEYWORDS = [
+  "私人帳號", "匯款", "轉帳", "驗證碼", "假客服", "冒用", "詐騙", "可疑收款", "被騙", "盜用", "假官方", "騙錢", "詐欺", "付款後沒下文",
 ];
+/** @deprecated 改用 FRAUD_RISK_SIGNAL_KEYWORDS；保留名稱以相容呼叫端，實際比對改為僅風險訊號 */
+export const FRAUD_IMPERSONATION_KEYWORDS = FRAUD_RISK_SIGNAL_KEYWORDS;
 
 /** 訂單／售後相關但來源不明時，先安全確認。須無「本店」提示才觸發 */
 export const ORDER_SOURCE_AMBIGUOUS_KEYWORDS = [
@@ -139,7 +141,7 @@ export function classifyMessageForSafeAfterSale(message: string): SafeConfirmRes
   const text = message.trim();
   if (!text) return { matched: false };
 
-  for (const keyword of FRAUD_IMPERSONATION_KEYWORDS) {
+  for (const keyword of FRAUD_RISK_SIGNAL_KEYWORDS) {
     if (text.includes(keyword)) {
       return {
         matched: true,
