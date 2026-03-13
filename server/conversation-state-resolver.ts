@@ -78,6 +78,8 @@ export interface ConversationState {
 
 /** Phase 1：明確要真人 → 直接 handoff；補齊「人呢、能轉人工嗎、我要人工、轉真人」等 */
 const HUMAN_REQUEST_PATTERNS = /真人|轉人工|不要機器人|找客服|找主管|真人處理|真人客服|人工客服|人呢|能轉人工嗎|我要人工|轉真人|可以幫我轉人工|我要轉人工/i;
+/** 純招呼或曖昧短句：不視為「明確要求真人」，避免誤切待人工（真人感 ≠ 轉真人） */
+const PURE_GREETING_OR_VAGUE = /^(在嗎|哈囉|嗨|嗯|好|喔|太誇張了|太扯了|等一下|有人嗎|喂)$/i;
 const HIGH_RISK_PATTERNS = /詐騙|檢舉|投訴|消保官|公開|發文|再不處理/i;
 /** Phase 1：糾正語 → 本輪以當前句重算意圖，不沿用前輪 */
 const CORRECTION_OVERRIDE_PATTERNS = /說錯|不是|我要的是|改成|其實是|剛剛說錯/i;
@@ -113,7 +115,7 @@ function detectPrimaryIntent(userMessage: string, recentUserMessages: string[], 
   const useOnlyCurrentMessage = CORRECTION_OVERRIDE_PATTERNS.test(text);
   const combined = useOnlyCurrentMessage ? text : [text, ...recentUserMessages].join(" ");
 
-  if (HUMAN_REQUEST_PATTERNS.test(text)) return "human_request";
+  if (HUMAN_REQUEST_PATTERNS.test(text) && !PURE_GREETING_OR_VAGUE.test(text)) return "human_request";
   /** link_request 優先於詐騙／高風險：索取商品頁／購買連結時不走防詐模板、不切待人工 */
   if (LINK_REQUEST_PATTERNS.test(text) || LINK_REQUEST_CORRECTION_PATTERNS.test(text)) return "link_request";
   if (HIGH_RISK_PATTERNS.test(combined)) return "complaint";
@@ -247,7 +249,8 @@ export function resolveConversationState(input: ResolveInput): ConversationState
 
 /** Hotfix：供 routes 在圖片/查單等分支前判斷是否為明確轉人工，避免被圖片模板搶答 */
 export function isHumanRequestMessage(text: string): boolean {
-  return HUMAN_REQUEST_PATTERNS.test((text || "").trim());
+  const t = (text || "").trim();
+  return HUMAN_REQUEST_PATTERNS.test(t) && !PURE_GREETING_OR_VAGUE.test(t);
 }
 
 /** Hotfix：客戶說已給過資料（你拿過了/我就給過了/前面有/我貼過了/你沒看到嗎）→ 需先搜歷史再決定 */
