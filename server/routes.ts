@@ -4019,7 +4019,10 @@ ${contextStr}
       if (plan.mode === "order_lookup") {
         systemPrompt += "\n\n【本輪 查單】本輪只做查單。底線：只接受兩種輸入—① 訂單編號 或 ② 產品名稱＋手機；不得問其他欄位（購買頁面、收件資料、官方通路等）。用一兩句自然承接後再引導其中一種即可，不要列成選單或問卷。回覆簡短（約 90～140 字）。同一句或同輪已取得訂單編號或產品+手機即不得再重問。若客人**剛在上一則已提供**手機或訂單編號，直接使用、勿再請客人「確認手機／單號對嗎」；查詢失敗或逾時時可重試或僅補問**尚未提供**的資訊（如下單日期），勿重複問已給過的欄位。";
         systemPrompt += "\n\n【已有訂單且客戶想等】若近期對話中你已提到某筆訂單編號（如 ESC20895）且已說明狀態／備註加急，客戶回「想等」「願意等」時，**禁止**再問「您這筆買的是什麼商品」「請貼商品名稱或訂單截圖」；直接回覆已備註加急、出貨會通知即可，勿再補問任何查單欄位。";
-        systemPrompt += "\n\n【金額與收件資訊】訂單查詢工具回傳的 order 若含有 amount、address、buyer_phone、shipping_method，**可直接依此回覆**客人（如付款金額、收件地址、配送方式／超商門市）。有資料就依資料回答，勿說「沒辦法在聊天視窗直接調出」；僅在工具確實未回傳該欄位時才說明需由專人協助確認。";
+        systemPrompt += "\n\n【一頁式訂單：完整貼給客戶】訂單查詢工具回傳 **one_page_summary**（單筆）或 **one_page_full**（多筆）時，你**必須在回覆中直接把該內容完整貼給客戶**，不要摘要、不要只列單號。內容包含：訂單編號、收件人姓名、聯絡電話、下單時間、付款方式、金額、配送方式、物流單號、收件地址、訂單內容／商品、訂單狀態等，有幾筆就全部貼（多筆時每筆之間用 --- 分隔）。貼完後若客戶再問出貨、付款、物流等，**從你已貼給他的訂單資訊裡回覆**即可，勿再重複查單或只說「請稍等」；僅當客戶問的是「新訂單」或「另一筆」時才再呼叫查詢。";
+        systemPrompt += "\n\n【多筆訂單必須全部列出】當訂單查詢工具回傳多筆（total > 1 或 orders 陣列多於一筆）時，你**必須在回覆中逐筆列出每一筆**（單號、日期、金額、狀態），不可只列一筆、不可省略、不可只說「共 N 筆」而不列出。若工具回傳有 one_page_full、formatted_list 或 note 內含清單，請以 one_page_full 為優先，完整貼上。";
+        systemPrompt += "\n\n【客戶提供訂單編號時先查單、不轉人工】當客戶貼出訂單編號（例如要確認配送方式、出貨、付款時），你**必須先呼叫 lookup_order_by_id** 取得該筆訂單的 shipping_method、payment_method、address 等完整資訊，並依結果如實回覆（有宅配/超商就說，沒有就說目前沒有顯示）。**不得**未查就先轉人工；僅在查詢後仍無法取得該筆資料、且客戶明確要求轉專人時才轉。";
+        systemPrompt += "\n\n【金額與收件資訊】訂單查詢工具回傳的 order 若含有 amount、address、buyer_phone、shipping_method，**可直接依此回覆**客人（如付款金額、收件地址、配送方式／超商門市）。有資料就依資料回答，勿說「沒辦法在聊天視窗直接調出」；僅在工具確實未回傳該欄位時才說明需由專人協助確認。若 orders 陣列中每筆有 shipping_method，請依該欄位說明宅配或超商。";
         systemPrompt += "\n\n【宅配 vs 便利商店】order 的 shipping_method 若有回傳，請依內容如實說明是「宅配」或「超商取貨／便利商店」。便利商店包含：全家、7-11、萊爾富、OK 等。若內容含宅配、黑貓、新竹、大榮等可說宅配；若含超商、門市、取貨、全家、7-11、萊爾富等可說超商取貨。勿自行猜測。";
         systemPrompt += "\n\n【如實回報、禁止推給介面】回覆時以「這筆訂單」為主語：工具有回傳的欄位（狀態、金額、付款方式、payment_interpretation、物流單號等）就**照實說**；若某欄位工具**沒回傳**（例如沒有物流單號、沒有付款方式），就說「這筆訂單目前沒有物流單號」或「這筆訂單目前沒有顯示付款方式，可請專人協助確認」。**禁止**說「我這邊畫面沒有顯示」「我沒辦法判斷」「系統沒有顯示」「我這邊目前沒有…欄位」等以機器人自身或介面為主的說法；只描述訂單查到的狀態即可。";
         systemPrompt += "\n\n【付款與出貨】訂單查詢工具回傳中若含有 payment_interpretation 欄位，請嚴格依該說明向客人解釋付款與出貨關係（貨到付款不需等付款即可出貨、信用卡/LINE Pay 已進入出貨流程視為已付、轉帳/超商需等入帳等）。勿自行推測「要先付款才能出貨」以免誤導。";
@@ -5341,6 +5344,24 @@ ${contextStr}
       return JSON.stringify({ success: false, error: "系統尚未設定訂單查詢 API 金鑰（一頁商店或 SHOPLINE），無法查詢訂單。請至系統設定 → 品牌管理中設定 API 金鑰。" });
     }
 
+    /** 一頁式訂單：完整訂單資訊一段貼給客戶（姓名、電話、下單時間、付款、金額、物流、訂單內容等），有幾筆就貼幾筆，後續從已貼內容回覆 */
+    function formatOrderOnePage(o: { order_id?: string; buyer_name?: string; buyer_phone?: string; created_at?: string; payment_method?: string; amount?: number; shipping_method?: string; tracking_number?: string; address?: string; product_list?: string; status?: string; shipped_at?: string }): string {
+      const lines: string[] = [];
+      if (o.order_id) lines.push(`訂單編號：${o.order_id}`);
+      if (o.buyer_name) lines.push(`收件人姓名：${o.buyer_name}`);
+      if (o.buyer_phone) lines.push(`聯絡電話：${o.buyer_phone}`);
+      if (o.created_at) lines.push(`下單時間：${o.created_at}`);
+      if (o.payment_method) lines.push(`付款方式：${o.payment_method}`);
+      if (o.amount != null) lines.push(`金額：$${Number(o.amount).toLocaleString()}`);
+      if (o.shipping_method) lines.push(`配送方式：${o.shipping_method}`);
+      if (o.tracking_number) lines.push(`物流單號：${o.tracking_number}`);
+      if (o.address) lines.push(`收件地址：${o.address}`);
+      if (o.product_list) lines.push(`訂單內容／商品：${o.product_list}`);
+      if (o.status) lines.push(`訂單狀態：${o.status}`);
+      if (o.shipped_at) lines.push(`出貨時間：${o.shipped_at}`);
+      return lines.join("\n");
+    }
+
     try {
       if (toolName === "lookup_order_by_id") {
         const orderIdRaw = (args.order_id || "").trim();
@@ -5395,25 +5416,28 @@ ${contextStr}
           prepaid: order.prepaid,
           paid_at: order.paid_at,
         });
+        const orderPayload = {
+          order_id: order.global_order_id,
+          status: statusLabel,
+          amount: order.final_total_order_amount,
+          product_list: order.product_list,
+          buyer_name: order.buyer_name,
+          buyer_phone: order.buyer_phone,
+          address: order.address,
+          tracking_number: order.tracking_number,
+          created_at: order.created_at,
+          shipped_at: order.shipped_at,
+          shipping_method: order.shipping_method,
+          payment_method: order.payment_method,
+        };
+        const one_page_summary = formatOrderOnePage(orderPayload);
         return JSON.stringify({
           success: true,
           found: true,
           source: result.source,
-          order: {
-            order_id: order.global_order_id,
-            status: statusLabel,
-            amount: order.final_total_order_amount,
-            product_list: order.product_list,
-            buyer_name: order.buyer_name,
-            buyer_phone: order.buyer_phone,
-            address: order.address,
-            tracking_number: order.tracking_number,
-            created_at: order.created_at,
-            shipped_at: order.shipped_at,
-            shipping_method: order.shipping_method,
-            payment_method: order.payment_method,
-          },
+          order: orderPayload,
           payment_interpretation,
+          one_page_summary,
         });
       }
 
@@ -5593,17 +5617,24 @@ ${contextStr}
           amount: o.final_total_order_amount,
           product_list: o.product_list,
           buyer_name: o.buyer_name,
+          buyer_phone: o.buyer_phone,
+          address: o.address,
           tracking_number: o.tracking_number,
           created_at: o.created_at,
           shipped_at: o.shipped_at,
+          shipping_method: o.shipping_method,
+          payment_method: o.payment_method,
           source: o.source || orderSource,
         }));
 
         console.log("[AI Tool Call] 查到", uniqueOrders.length, "筆訂單（全部列出）");
+        const formattedList = orderSummaries.map(o => `- **${o.order_id}** | ${o.created_at || ""} | $${o.amount ?? ""} | **${o.status || ""}**`).join("\n");
+        const onePageBlocks = orderSummaries.map(o => formatOrderOnePage(o));
+        const one_page_full = onePageBlocks.join("\n\n---\n\n");
         const multiOrderNote = uniqueOrders.length > 1
-          ? `此手機號碼在此商品下有 ${uniqueOrders.length} 筆訂單，請全部列出摘要（單號、日期、金額、狀態），並詢問客戶要查看哪一筆的詳情。`
+          ? `【重要】此手機+商品共有 ${uniqueOrders.length} 筆訂單，你必須在回覆中「逐筆列出」以下全部，不可只列一筆或省略：\n${formattedList}\n請照上述格式全部列出後，再問客戶要查看哪一筆的詳情。`
           : undefined;
-        return JSON.stringify({ success: true, found: true, total: uniqueOrders.length, orders: orderSummaries, note: multiOrderNote });
+        return JSON.stringify({ success: true, found: true, total: uniqueOrders.length, orders: orderSummaries, note: multiOrderNote, formatted_list: uniqueOrders.length > 1 ? formattedList : undefined, one_page_summary: uniqueOrders.length === 1 ? onePageBlocks[0] : undefined, one_page_full });
       }
 
       if (toolName === "lookup_order_by_date_and_contact") {
@@ -5691,17 +5722,24 @@ ${contextStr}
           amount: o.final_total_order_amount,
           product_list: o.product_list,
           buyer_name: o.buyer_name,
+          buyer_phone: o.buyer_phone,
+          address: o.address,
           tracking_number: o.tracking_number,
           created_at: o.created_at,
           shipped_at: o.shipped_at,
+          shipping_method: o.shipping_method,
+          payment_method: o.payment_method,
           source: o.source || dateOrderSource,
         }));
 
         console.log("[AI Tool Call] 查到", matched.length, "筆訂單（全部列出）");
+        const dateFormattedList = orderSummaries.map(o => `- **${o.order_id}** | ${o.created_at || ""} | $${o.amount ?? ""} | **${o.status || ""}**`).join("\n");
+        const onePageBlocks = orderSummaries.map(o => formatOrderOnePage(o));
+        const one_page_full = onePageBlocks.join("\n\n---\n\n");
         const multiOrderNote = matched.length > 1
-          ? `此聯絡資訊在指定日期範圍內有 ${matched.length} 筆訂單，請全部列出摘要（單號、日期、金額、狀態），並詢問客戶要查看哪一筆的詳情。`
+          ? `【重要】此聯絡資訊在指定日期範圍內共有 ${matched.length} 筆訂單，你必須在回覆中「逐筆列出」以下全部，不可只列一筆或省略：\n${dateFormattedList}\n請照上述格式全部列出後，再問客戶要查看哪一筆的詳情。`
           : undefined;
-        return JSON.stringify({ success: true, found: true, total: matched.length, orders: orderSummaries, truncated, note: multiOrderNote });
+        return JSON.stringify({ success: true, found: true, total: matched.length, orders: orderSummaries, truncated, note: multiOrderNote, formatted_list: matched.length > 1 ? dateFormattedList : undefined, one_page_summary: matched.length === 1 ? onePageBlocks[0] : undefined, one_page_full });
       }
 
       return JSON.stringify({ success: false, error: `未知的工具: ${toolName}` });

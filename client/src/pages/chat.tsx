@@ -22,7 +22,7 @@ import { apiRequest, getQueryFn } from "@/lib/queryClient";
 import { useBrand } from "@/lib/brand-context";
 import { useChatView, type ViewMode } from "@/lib/chat-view-context";
 import { useToast } from "@/hooks/use-toast";
-import type { ContactWithPreview, Message, OrderInfo, ContactStatus, IssueType, OrderSource } from "@shared/schema";
+import type { ContactWithPreview, Contact, Message, OrderInfo, ContactStatus, IssueType, OrderSource } from "@shared/schema";
 import type { TeamMember } from "@shared/schema";
 import { CONTACT_STATUS_LABELS, CONTACT_STATUS_COLORS, ISSUE_TYPE_LABELS, ISSUE_TYPE_COLORS, ORDER_SOURCE_LABELS, CASE_STATUS_VALUES, SYSTEM_MARK_VALUES } from "@shared/schema";
 
@@ -563,6 +563,8 @@ export default function ChatPage() {
   const [hasMoreOlder, setHasMoreOlder] = useState(true);
   const scrollRestorePrevHeightRef = useRef<number>(0);
   const loadOlderTriggeredRef = useRef(false);
+  /** 從「對話紀錄」搜尋點入的聯絡人可能不在左側 100 筆內，避免 useEffect 立刻把選取清掉 */
+  const selectedFromSearchRef = useRef(false);
   const { viewMode, setViewMode } = useChatView();
   const OVERDUE_MS = 60 * 60 * 1000;
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -670,6 +672,11 @@ export default function ChatPage() {
             if (contactId != null) q.invalidateQueries({ queryKey: ["/api/contacts", contactId, "messages"] });
             q.invalidateQueries({ queryKey: ["/api/manager-stats"], exact: false });
             q.invalidateQueries({ queryKey: ["/api/agent-stats/me"] });
+            /** 立即 refetch 避免「過陣子才出來」：明明沒幾筆卻找不到、等一會才出現 */
+            q.refetchQueries({ queryKey: ["/api/contacts"], exact: false }).catch(() => {});
+            if (contactId != null) q.refetchQueries({ queryKey: ["/api/contacts", contactId, "messages"] }).catch(() => {});
+            q.refetchQueries({ queryKey: ["/api/manager-stats"], exact: false }).catch(() => {});
+            q.refetchQueries({ queryKey: ["/api/agent-stats/me"] }).catch(() => {});
           } catch (err) {
             console.error("[SSE] Error parsing new_message:", err);
           }
@@ -680,6 +687,10 @@ export default function ChatPage() {
           q.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
           q.invalidateQueries({ queryKey: ["/api/manager-stats"], exact: false });
           q.invalidateQueries({ queryKey: ["/api/agent-stats/me"] });
+          /** 立即 refetch 讓新對話／更新馬上出現在列表，不要過陣子才出來 */
+          q.refetchQueries({ queryKey: ["/api/contacts"], exact: false }).catch(() => {});
+          q.refetchQueries({ queryKey: ["/api/manager-stats"], exact: false }).catch(() => {});
+          q.refetchQueries({ queryKey: ["/api/agent-stats/me"] }).catch(() => {});
         });
         es.onerror = (err) => {
           console.error("[SSE] Connection error, retry #" + retryCount, err);
@@ -712,7 +723,8 @@ export default function ChatPage() {
       if (selectedBrandId) params.set("brand_id", String(selectedBrandId));
       if (viewMode === "my" || viewMode === "tracking") params.set("assigned_to_me", "1");
       if (viewMode === "my" || viewMode === "pending") params.set("need_reply_first", "1");
-      const url = params.toString() ? `/api/contacts?${params}` : "/api/contacts";
+      params.set("limit", "300");
+      const url = `/api/contacts?${params}`;
       const res = await fetch(url, {
         credentials: "include",
         headers: { "Cache-Control": "no-cache", "Pragma": "no-cache" },
@@ -771,6 +783,7 @@ export default function ChatPage() {
 
   /** 穩定 callback：點選聯絡人，僅兩筆 item（取消選取/新選取）會 re-render */
   const handleSelectContact = useCallback((id: number) => {
+    selectedFromSearchRef.current = false;
     setSelectedId(id);
     lastMessageIdRef.current = 0;
   }, []);
@@ -1020,12 +1033,13 @@ export default function ChatPage() {
     overscan: 8,
   });
 
-  /** 切換篩選後若目前選中的聯絡人不在結果內：改選第一筆或清空，避免右側顯示失效或白屏 */
+  /** 切換篩選後若目前選中的聯絡人不在結果內：改選第一筆或清空；但若為搜尋點入的對話則保留選取，避免「點開後馬上被換掉」 */
   const filteredIdsKey = contactListSafe.map((c) => c.id).join(",");
   useEffect(() => {
     const ids = filteredIdsKey ? filteredIdsKey.split(",").map(Number) : [];
     const inList = selectedId != null && ids.includes(selectedId);
     if (inList) return;
+    if (selectedFromSearchRef.current) return;
     setSelectedId(ids.length > 0 ? ids[0] : null);
   }, [viewMode, filteredIdsKey, selectedId]);
 
@@ -1130,7 +1144,7 @@ export default function ChatPage() {
       await apiRequest("PUT", `/api/contacts/${selectedId}/status`, { status });
       queryClient.invalidateQueries({ queryKey: ["/api/contacts", selectedId, "messages"] });
       invalidateContactsAndStats();
-      if (status === "resolved" && selectedContact?.platform === "line") {
+      if (status === "resolved" && effectiveSelectedContact?.platform === "line") {
         toast({ title: "已標記為已解決", description: "系統將自動發送滿意度調查卡片給客戶" });
       }
     } catch (_e) { toast({ title: "操作失敗", variant: "destructive" }); }
@@ -1187,7 +1201,7 @@ export default function ChatPage() {
     enabled: !!selectedId,
   });
 
-  const { data: contactDetail } = useQuery<{ ai_suggestions?: string | null }>({
+  const { data: contactDetail } = useQuery<Contact & { ai_suggestions?: string | null; brand_name?: string }>({
     queryKey: ["/api/contacts", selectedId ?? 0, "detail"],
     queryFn: async () => {
       const res = await fetch(`/api/contacts/${selectedId}`, { credentials: "include" });
@@ -1196,6 +1210,8 @@ export default function ChatPage() {
     },
     enabled: !!selectedId,
   });
+  /** 從左側列表或由搜尋/連結開啟：列表僅顯示最近 100 筆，搜尋點入的聯絡人可能不在列表中，用 detail API 補上 */
+  const effectiveSelectedContact: (ContactWithPreview | (Contact & { brand_name?: string })) | undefined = selectedContact ?? (contactDetail as (Contact & { brand_name?: string }) | undefined);
   const aiSuggestions = (() => {
     try {
       const raw = contactDetail?.ai_suggestions;
@@ -1362,11 +1378,11 @@ export default function ChatPage() {
   };
 
   const handleAddTag = async () => {
-    if (!newTag.trim() || !selectedContact) return;
+    if (!newTag.trim() || !effectiveSelectedContact) return;
     const tag = newTag.trim();
     let currentTags: string[] = [];
     try {
-      const v = JSON.parse(selectedContact.tags || "[]");
+      const v = JSON.parse(effectiveSelectedContact.tags || "[]");
       currentTags = Array.isArray(v) ? v : [];
     } catch { /* ignore */ }
     if (currentTags.includes(tag)) { setNewTag(""); return; }
@@ -1380,10 +1396,10 @@ export default function ChatPage() {
   };
 
   const handleAddTagWithValue = async (tag: string) => {
-    if (!selectedContact || !tag.trim()) return;
+    if (!effectiveSelectedContact || !tag.trim()) return;
     let currentTags: string[] = [];
     try {
-      const v = JSON.parse(selectedContact.tags || "[]");
+      const v = JSON.parse(effectiveSelectedContact.tags || "[]");
       currentTags = Array.isArray(v) ? v : [];
     } catch { /* ignore */ }
     if (currentTags.includes(tag.trim())) return;
@@ -1394,10 +1410,10 @@ export default function ChatPage() {
   };
 
   const handleRemoveTag = async (tagToRemove: string) => {
-    if (!selectedContact) return;
+    if (!effectiveSelectedContact) return;
     let currentTags: string[] = [];
     try {
-      const v = JSON.parse(selectedContact.tags || "[]");
+      const v = JSON.parse(effectiveSelectedContact.tags || "[]");
       currentTags = Array.isArray(v) ? v : [];
     } catch { /* ignore */ }
     try {
@@ -1563,7 +1579,7 @@ export default function ChatPage() {
       const data = await res.json();
       if (res.ok) {
         const typeLabel = ratingType === "ai" ? "AI 客服" : "真人客服";
-        const isResend = (ratingType === "ai" && selectedContact?.ai_rating != null) || (ratingType === "human" && selectedContact?.cs_rating != null);
+        const isResend = (ratingType === "ai" && effectiveSelectedContact?.ai_rating != null) || (ratingType === "human" && effectiveSelectedContact?.cs_rating != null);
         toast({
           title: isResend ? "已重新發送評價卡片" : "已發送評價卡片",
           description: isResend ? `已清除舊評分，${typeLabel}滿意度調查已再次傳送，客戶可再評一次` : `${typeLabel}滿意度調查已傳送給客戶`,
@@ -1575,7 +1591,7 @@ export default function ChatPage() {
       }
     } catch (_e) { toast({ title: "發送失敗", variant: "destructive" }); }
     finally { setSendingRating(false); }
-  }, [selectedId, sendingRating, selectedContact, queryClient, toast, invalidateContactsAndStats]);
+  }, [selectedId, sendingRating, effectiveSelectedContact, queryClient, toast, invalidateContactsAndStats]);
 
   const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"];
   const MAX_FILE_SIZE = 10 * 1024 * 1024;
@@ -1674,9 +1690,9 @@ export default function ChatPage() {
   const avatarColors = ["bg-emerald-500", "bg-amber-500", "bg-violet-500", "bg-sky-500", "bg-rose-400", "bg-teal-500", "bg-orange-400"];
   const getAvatarColor = (id: number) => avatarColors[id % avatarColors.length];
   const contactTags = (() => {
-    if (!selectedContact) return [];
+    if (!effectiveSelectedContact) return [];
     try {
-      const v = JSON.parse(selectedContact.tags || "[]");
+      const v = JSON.parse(effectiveSelectedContact.tags || "[]");
       return Array.isArray(v) ? v : [];
     } catch {
       return [];
@@ -1813,7 +1829,7 @@ export default function ChatPage() {
                   <MessageSquare className="w-3 h-3" />對話紀錄 {messageSearching && <Loader2 className="w-3 h-3 animate-spin" />}
                 </div>
                 {(messageSearchResults ?? []).map((r) => (
-                  <button key={r.message_id} onClick={() => { setSelectedId(r.contact_id); lastMessageIdRef.current = 0; setSearchQuery(""); setMessageSearchResults([]); }}
+                  <button key={r.message_id} onClick={() => { selectedFromSearchRef.current = true; setSelectedId(r.contact_id); lastMessageIdRef.current = 0; setSearchQuery(""); setMessageSearchResults([]); }}
                     className="w-full flex items-start gap-2.5 p-2.5 rounded-xl text-left transition-all hover:bg-stone-50"
                     data-testid={`search-message-${r.message_id}`}
                   >
@@ -1839,6 +1855,10 @@ export default function ChatPage() {
               {searchQuery ? "查無結果" : viewMode === "my" ? "目前沒有分配給你的案件" : viewMode === "pending" ? "目前沒有需要你回覆的案件" : viewMode === "high_risk" ? "目前沒有緊急案件" : viewMode === "tracking" ? "目前沒有待追蹤案件" : viewMode === "overdue" ? "目前沒有逾時未回案件" : viewMode === "unassigned" ? "目前沒有待分配案件" : "無聯絡人"}
             </div>
           ) : (
+            <>
+            <div className="px-3 py-1.5 text-[10px] text-stone-400 border-b border-stone-100">
+              顯示 {contactListSafe.length} 筆 · 較早的對話請用上方「搜尋」查對話內容
+            </div>
             <div ref={listScrollRef} className="flex-1 min-h-0 overflow-auto p-2">
               <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, width: "100%", position: "relative" }}>
                 {(rowVirtualizer.getVirtualItems() ?? []).map((virtualRow) => {
@@ -1868,12 +1888,13 @@ export default function ChatPage() {
                 })}
               </div>
             </div>
+            </>
           )}
         </div>
       </div>
 
       <div className="flex-1 flex flex-col min-w-0">
-        {!selectedId || !selectedContact ? (
+        {!selectedId || !effectiveSelectedContact ? (
           <div className="flex-1 flex items-center justify-center">
             <div className="text-center">
               <div className="w-20 h-20 mx-auto mb-4 rounded-2xl bg-stone-100 flex items-center justify-center">
@@ -1885,30 +1906,36 @@ export default function ChatPage() {
           </div>
         ) : (
           <>
+            {selectedId != null && !contactListSafe.some((c) => c.id === selectedId) && (
+              <div className="px-4 py-2 bg-amber-50 border-b border-amber-100 flex items-center justify-between gap-2">
+                <span className="text-xs text-amber-800">此對話未顯示於左側列表（由搜尋開啟或為較早對話，列表僅顯示最近 300 筆）</span>
+                <Button type="button" variant="ghost" size="sm" className="text-amber-700 shrink-0" onClick={() => setViewMode("all")}>切換至「全部」</Button>
+              </div>
+            )}
             <div className="flex items-center justify-between gap-3 px-5 py-3 border-b border-stone-200 bg-white">
               <div className="flex items-center gap-3 min-w-0">
                 <Avatar className="w-9 h-9 shrink-0">
-                  {selectedContact?.avatar_url && <AvatarImage src={selectedContact.avatar_url} alt={selectedContact.display_name} />}
-                  <AvatarFallback className={`${getAvatarColor(selectedContact?.id || 0)} text-white text-sm`}>{getInitials(selectedContact?.display_name)}</AvatarFallback>
+                  {effectiveSelectedContact?.avatar_url && <AvatarImage src={effectiveSelectedContact.avatar_url} alt={effectiveSelectedContact.display_name} />}
+                  <AvatarFallback className={`${getAvatarColor(effectiveSelectedContact?.id || 0)} text-white text-sm`}>{getInitials(effectiveSelectedContact?.display_name)}</AvatarFallback>
                 </Avatar>
                 <div className="min-w-0">
                   <div className="flex items-center gap-1.5">
-                    <h3 className="text-sm font-bold text-stone-800 truncate" data-testid="text-selected-contact">{selectedContact?.display_name}</h3>
-                    {selectedContact?.is_pinned ? <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400 shrink-0" /> : null}
-                    {selectedContact && selectedContact.vip_level > 0 && <VipBadge level={selectedContact.vip_level} />}
+                    <h3 className="text-sm font-bold text-stone-800 truncate" data-testid="text-selected-contact">{effectiveSelectedContact?.display_name}</h3>
+                    {effectiveSelectedContact?.is_pinned ? <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400 shrink-0" /> : null}
+                    {effectiveSelectedContact && effectiveSelectedContact.vip_level > 0 && <VipBadge level={effectiveSelectedContact.vip_level} />}
                   </div>
                   <div className="flex items-center gap-1.5">
-                    <Circle className={`w-2 h-2 ${selectedContact?.platform === "messenger" ? "fill-blue-500 text-blue-500" : "fill-emerald-500 text-emerald-500"}`} />
-                    <span className="text-[11px] text-stone-400" data-testid="text-contact-platform">{selectedContact?.platform === "messenger" ? "Facebook Messenger" : "LINE"}</span>
-                    {selectedContact?.brand_name && <span className="text-[11px] text-stone-400">| {selectedContact.brand_name}</span>}
-                    {selectedContact && selectedContact.order_count > 0 && (
-                      <span className="text-[11px] text-stone-400 ml-1">| {selectedContact.order_count} 筆訂單 · ${selectedContact.total_spent.toLocaleString()}</span>
+                    <Circle className={`w-2 h-2 ${effectiveSelectedContact?.platform === "messenger" ? "fill-blue-500 text-blue-500" : "fill-emerald-500 text-emerald-500"}`} />
+                    <span className="text-[11px] text-stone-400" data-testid="text-contact-platform">{effectiveSelectedContact?.platform === "messenger" ? "Facebook Messenger" : "LINE"}</span>
+                    {effectiveSelectedContact?.brand_name && <span className="text-[11px] text-stone-400">| {effectiveSelectedContact.brand_name}</span>}
+                    {effectiveSelectedContact && effectiveSelectedContact.order_count > 0 && (
+                      <span className="text-[11px] text-stone-400 ml-1">| {effectiveSelectedContact.order_count} 筆訂單 · ${effectiveSelectedContact.total_spent.toLocaleString()}</span>
                     )}
                   </div>
                 </div>
               </div>
               <div className="flex items-center gap-2 shrink-0">
-                <Select value={selectedContact?.status || "pending"} onValueChange={handleStatusChange}>
+                <Select value={effectiveSelectedContact?.status || "pending"} onValueChange={handleStatusChange}>
                   <SelectTrigger className="w-[130px] h-8 text-xs border-stone-200" data-testid="select-contact-status"><SelectValue placeholder="案件狀態" /></SelectTrigger>
                   <SelectContent>
                     <SelectGroup>
@@ -1935,12 +1962,12 @@ export default function ChatPage() {
                     </SelectGroup>
                   </SelectContent>
                 </Select>
-                {isManager && selectedContact?.needs_human && selectedContact?.status === "awaiting_human" && (
+                {isManager && effectiveSelectedContact?.needs_human && effectiveSelectedContact?.status === "awaiting_human" && (
                   <Button size="sm" variant="outline" className="text-xs" onClick={() => setShowAssignDialog(true)} data-testid="button-assign">
                     <UserCog className="w-3.5 h-3.5 mr-1" />分配
                   </Button>
                 )}
-                {isManager && selectedContact?.assigned_agent_id && (
+                {isManager && effectiveSelectedContact?.assigned_agent_id && (
                   <>
                     <Button size="sm" variant="outline" className="text-xs" onClick={() => setShowReassignDialog(true)} data-testid="button-reassign">
                       <Users className="w-3.5 h-3.5 mr-1" />改派
@@ -1950,28 +1977,28 @@ export default function ChatPage() {
                     </Button>
                   </>
                 )}
-                {selectedContact?.assigned_agent_name ? (
+                {effectiveSelectedContact?.assigned_agent_name ? (
                   <span className="text-[11px] font-medium text-stone-700 flex items-center gap-1.5">
                     <Avatar className="w-4 h-4 shrink-0">
-                      {(selectedContact as ContactWithPreview).assigned_agent_avatar_url && <AvatarImage src={(selectedContact as ContactWithPreview).assigned_agent_avatar_url} alt={selectedContact.assigned_agent_name} />}
-                      <AvatarFallback className="bg-violet-100 text-violet-700 text-[10px]">{getInitials(selectedContact?.assigned_agent_name)}</AvatarFallback>
+                      {(effectiveSelectedContact as ContactWithPreview).assigned_agent_avatar_url && <AvatarImage src={(effectiveSelectedContact as ContactWithPreview).assigned_agent_avatar_url} alt={effectiveSelectedContact.assigned_agent_name} />}
+                      <AvatarFallback className="bg-violet-100 text-violet-700 text-[10px]">{getInitials(effectiveSelectedContact?.assigned_agent_name)}</AvatarFallback>
                     </Avatar>
-                    已分配：{selectedContact.assigned_agent_name}
+                    已分配：{effectiveSelectedContact.assigned_agent_name}
                   </span>
-                ) : selectedContact?.needs_human === 1 ? (
+                ) : effectiveSelectedContact?.needs_human === 1 ? (
                   <span className="text-[11px] text-amber-600">待分配</span>
-                ) : selectedContact?.status === "ai_handling" ? (
+                ) : effectiveSelectedContact?.status === "ai_handling" ? (
                   <span className="text-[11px] text-sky-600">AI處理中</span>
                 ) : (() => {
-                  const tags = JSON.parse(selectedContact?.tags || "[]");
+                  const tags = JSON.parse(effectiveSelectedContact?.tags || "[]");
                   return tags.includes("午休待處理") ? <span className="text-[11px] text-stone-500">午休待回覆</span> : null;
                 })()}
-                {selectedContact?.needs_human ? (
+                {effectiveSelectedContact?.needs_human ? (
                   <Badge variant="destructive" className="gap-1 text-xs" data-testid="badge-human-mode"><Headphones className="w-3 h-3" />人工模式</Badge>
                 ) : (
                   <Badge variant="secondary" className="gap-1 text-xs bg-stone-100 text-stone-600" data-testid="badge-ai-mode"><Bot className="w-3 h-3" />AI 模式</Badge>
                 )}
-                {selectedContact?.status === "awaiting_human" && (
+                {effectiveSelectedContact?.status === "awaiting_human" && (
                   <Badge variant="outline" className="gap-1 text-xs border-orange-300 bg-orange-50 text-orange-600" data-testid="badge-ai-muted">
                     <Circle className="w-2.5 h-2.5 fill-orange-400 text-orange-400" />AI 靜音中
                   </Badge>
@@ -2041,9 +2068,9 @@ export default function ChatPage() {
                     </DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
-                {selectedContact?.needs_human ? (
+                {effectiveSelectedContact?.needs_human ? (
                   <Button size="sm" variant="secondary"
-                    onClick={() => selectedContact && handleRestoreAi(selectedContact.id)}
+                    onClick={() => effectiveSelectedContact && handleRestoreAi(selectedId!)}
                     data-testid="button-restore-ai"
                     className="text-xs"
                   >
@@ -2065,7 +2092,7 @@ export default function ChatPage() {
                       </SelectContent>
                     </Select>
                     <Button size="sm" variant="default"
-                      onClick={() => selectedContact && handleTransferHuman(selectedContact.id)}
+                      onClick={() => effectiveSelectedContact && handleTransferHuman(selectedId!)}
                       data-testid="button-transfer-human"
                       className="text-xs bg-emerald-600 hover:bg-emerald-700 text-white"
                     >
@@ -2208,12 +2235,12 @@ export default function ChatPage() {
                           <CardTitle className="text-xs font-semibold text-stone-600">案件總覽</CardTitle>
                         </CardHeader>
                         <CardContent className="px-3 pb-3 pt-0 space-y-1.5 text-[11px]">
-                          <div className="flex justify-between"><span className="text-stone-500">狀態</span><span className="font-medium text-stone-700">{selectedContact?.status ? (CONTACT_STATUS_LABELS as Record<string, string>)[selectedContact.status] || selectedContact.status : "—"}</span></div>
-                          <div className="flex justify-between"><span className="text-stone-500">優先級</span><span className={selectedContact && isUrgent(selectedContact) ? "text-red-600 font-medium" : "text-stone-700"}>{selectedContact && isUrgent(selectedContact) ? "緊急案件" : (selectedContact?.case_priority != null && selectedContact.case_priority <= 2 ? "優先處理" : "一般")}</span></div>
-                          <div className="flex justify-between"><span className="text-stone-500">最後一句</span><span className="text-stone-700">{(selectedContact as ContactWithPreview)?.last_message_sender_type === "user" ? "客戶" : (selectedContact as ContactWithPreview)?.last_message_sender_type === "admin" ? "客服" : (selectedContact as ContactWithPreview)?.last_message_sender_type === "ai" ? "AI" : "—"}</span></div>
-                          {selectedContact?.last_message_at && <div className="flex justify-between"><span className="text-stone-500">最後互動</span><span className="text-stone-700">{formatDateTime(selectedContact.last_message_at)}</span></div>}
-                          {selectedContact && needReply(selectedContact) && isOverdue(selectedContact) && <div className="flex justify-between"><span className="text-stone-500">逾時</span><span className="text-red-600 font-medium">是</span></div>}
-                          <div className="flex justify-between items-center"><span className="text-stone-500">問題類型</span><Select value={selectedContact?.issue_type || "none"} onValueChange={(v) => handleIssueTypeChange(v === "none" ? "" : v)}><SelectTrigger className="w-[100px] h-6 text-[10px] border-stone-200" data-testid="select-issue-type" /><SelectContent><SelectItem value="none">未分類</SelectItem>{(Object.keys(ISSUE_TYPE_LABELS) as IssueType[]).map((it) => <SelectItem key={it} value={it}>{ISSUE_TYPE_LABELS[it]}</SelectItem>)}</SelectContent></Select></div>
+                          <div className="flex justify-between"><span className="text-stone-500">狀態</span><span className="font-medium text-stone-700">{effectiveSelectedContact?.status ? (CONTACT_STATUS_LABELS as Record<string, string>)[effectiveSelectedContact.status] || effectiveSelectedContact.status : "—"}</span></div>
+                          <div className="flex justify-between"><span className="text-stone-500">優先級</span><span className={effectiveSelectedContact && isUrgent(effectiveSelectedContact as ContactWithPreview) ? "text-red-600 font-medium" : "text-stone-700"}>{effectiveSelectedContact && isUrgent(effectiveSelectedContact as ContactWithPreview) ? "緊急案件" : (effectiveSelectedContact?.case_priority != null && effectiveSelectedContact.case_priority <= 2 ? "優先處理" : "一般")}</span></div>
+                          <div className="flex justify-between"><span className="text-stone-500">最後一句</span><span className="text-stone-700">{(effectiveSelectedContact as ContactWithPreview)?.last_message_sender_type === "user" ? "客戶" : (effectiveSelectedContact as ContactWithPreview)?.last_message_sender_type === "admin" ? "客服" : (effectiveSelectedContact as ContactWithPreview)?.last_message_sender_type === "ai" ? "AI" : "—"}</span></div>
+                          {effectiveSelectedContact?.last_message_at && <div className="flex justify-between"><span className="text-stone-500">最後互動</span><span className="text-stone-700">{formatDateTime(effectiveSelectedContact.last_message_at)}</span></div>}
+                          {effectiveSelectedContact && needReply(effectiveSelectedContact as ContactWithPreview) && isOverdue(effectiveSelectedContact as ContactWithPreview) && <div className="flex justify-between"><span className="text-stone-500">逾時</span><span className="text-red-600 font-medium">是</span></div>}
+                          <div className="flex justify-between items-center"><span className="text-stone-500">問題類型</span><Select value={effectiveSelectedContact?.issue_type || "none"} onValueChange={(v) => handleIssueTypeChange(v === "none" ? "" : v)}><SelectTrigger className="w-[100px] h-6 text-[10px] border-stone-200" data-testid="select-issue-type" /><SelectContent><SelectItem value="none">未分類</SelectItem>{(Object.keys(ISSUE_TYPE_LABELS) as IssueType[]).map((it) => <SelectItem key={it} value={it}>{ISSUE_TYPE_LABELS[it]}</SelectItem>)}</SelectContent></Select></div>
                         </CardContent>
                       </Card>
 
@@ -2223,11 +2250,11 @@ export default function ChatPage() {
                           <CardTitle className="text-xs font-semibold text-stone-600">負責人</CardTitle>
                         </CardHeader>
                         <CardContent className="px-3 pb-3 pt-0">
-                          {(selectedContact?.assigned_agent_id ?? assignmentData?.assigned_to_user_id) ? (() => {
-                            const assigneeId = selectedContact?.assigned_agent_id ?? assignmentData?.assigned_to_user_id;
+                          {(effectiveSelectedContact?.assigned_agent_id ?? assignmentData?.assigned_to_user_id) ? (() => {
+                            const assigneeId = effectiveSelectedContact?.assigned_agent_id ?? assignmentData?.assigned_to_user_id;
                             const assigneeFromList = agentList.find((a) => a.id === assigneeId);
-                            const name = selectedContact?.assigned_agent_name ?? assignmentData?.assigned_agent_name ?? "-";
-                            const avatarUrl = selectedContact?.assigned_agent_avatar_url ?? assignmentData?.assigned_agent_avatar_url;
+                            const name = (effectiveSelectedContact as ContactWithPreview)?.assigned_agent_name ?? assignmentData?.assigned_agent_name ?? "-";
+                            const avatarUrl = (effectiveSelectedContact as ContactWithPreview)?.assigned_agent_avatar_url ?? assignmentData?.assigned_agent_avatar_url;
                             return (
                               <div className="flex items-center gap-2">
                                 <Avatar className="w-10 h-10 shrink-0 ring-2 ring-white shadow-sm"><AvatarImage src={avatarUrl} alt={name} /><AvatarFallback className="bg-blue-100 text-blue-700 text-sm font-semibold">{name ? String(name).trim().slice(0, 1).toUpperCase() || "?" : "?"}</AvatarFallback></Avatar>
@@ -2258,11 +2285,11 @@ export default function ChatPage() {
                           <CardTitle className="text-xs font-semibold text-stone-600">案件屬性</CardTitle>
                         </CardHeader>
                         <CardContent className="px-3 pb-3 pt-0 space-y-1 text-[11px]">
-                          <div className="flex justify-between"><span className="text-stone-500">平台</span><span className={`font-medium ${selectedContact?.platform === "messenger" ? "text-blue-600" : "text-green-600"}`} data-testid="text-info-platform">{selectedContact?.platform === "messenger" ? "FB" : "LINE"}</span></div>
-                          {selectedContact?.brand_name && <div className="flex justify-between"><span className="text-stone-500">品牌</span><span className="text-stone-800 truncate max-w-[120px]" data-testid="text-info-brand">{selectedContact.brand_name}</span></div>}
-                          {selectedContact?.channel_name && <div className="flex justify-between"><span className="text-stone-500">渠道</span><span className="text-stone-800 truncate max-w-[120px]" data-testid="text-info-channel">{selectedContact.channel_name}</span></div>}
-                          <div className="flex justify-between"><span className="text-stone-500">平台 ID</span><span className="text-stone-600 font-mono text-[10px] truncate max-w-[100px]">{selectedContact?.platform_user_id}</span></div>
-                          <div className="flex justify-between"><span className="text-stone-500">建立日期</span><span className="text-stone-700">{selectedContact?.created_at ? formatDate(selectedContact.created_at) : "—"}</span></div>
+                          <div className="flex justify-between"><span className="text-stone-500">平台</span><span className={`font-medium ${effectiveSelectedContact?.platform === "messenger" ? "text-blue-600" : "text-green-600"}`} data-testid="text-info-platform">{effectiveSelectedContact?.platform === "messenger" ? "FB" : "LINE"}</span></div>
+                          {effectiveSelectedContact?.brand_name && <div className="flex justify-between"><span className="text-stone-500">品牌</span><span className="text-stone-800 truncate max-w-[120px]" data-testid="text-info-brand">{effectiveSelectedContact.brand_name}</span></div>}
+                          {(effectiveSelectedContact as ContactWithPreview)?.channel_name && <div className="flex justify-between"><span className="text-stone-500">渠道</span><span className="text-stone-800 truncate max-w-[120px]" data-testid="text-info-channel">{(effectiveSelectedContact as ContactWithPreview).channel_name}</span></div>}
+                          <div className="flex justify-between"><span className="text-stone-500">平台 ID</span><span className="text-stone-600 font-mono text-[10px] truncate max-w-[100px]">{effectiveSelectedContact?.platform_user_id}</span></div>
+                          <div className="flex justify-between"><span className="text-stone-500">建立日期</span><span className="text-stone-700">{effectiveSelectedContact?.created_at ? formatDate(effectiveSelectedContact.created_at) : "—"}</span></div>
                           {assignmentData?.assignment_reason && <div className="flex justify-between"><span className="text-stone-500">轉人工原因</span><span className="text-stone-700 text-[10px] truncate max-w-[120px]">{assignmentData.assignment_reason}</span></div>}
                           {assignmentData?.response_sla_deadline_at && <div className="flex justify-between"><span className="text-stone-500">SLA 截止</span><span className="text-stone-700">{formatDateTime(assignmentData.response_sla_deadline_at)}</span></div>}
                         </CardContent>
@@ -2283,18 +2310,18 @@ export default function ChatPage() {
                         </Card>
                       ) : null}
 
-                      {isCsAgent && selectedContact && selectedContact.assigned_agent_id === authUser?.user?.id && (
+                      {isCsAgent && effectiveSelectedContact && effectiveSelectedContact.assigned_agent_id === authUser?.user?.id && (
                         <div className="flex flex-wrap gap-1.5">
-                          <Button size="sm" variant={(selectedContact as ContactWithPreview).my_flag === "later" ? "default" : "outline"} className="h-7 text-xs" onClick={() => handleSetAgentFlag(selectedContact.id, (selectedContact as ContactWithPreview).my_flag === "later" ? null : "later")} data-testid="button-flag-later">稍後處理</Button>
-                          <Button size="sm" variant={(selectedContact as ContactWithPreview).my_flag === "tracking" ? "default" : "outline"} className="h-7 text-xs" onClick={() => handleSetAgentFlag(selectedContact.id, (selectedContact as ContactWithPreview).my_flag === "tracking" ? null : "tracking")} data-testid="button-flag-tracking">追蹤中</Button>
-                          {(selectedContact as ContactWithPreview).my_flag && <Button size="sm" variant="ghost" className="h-7 text-xs text-stone-500" onClick={() => handleSetAgentFlag(selectedContact.id, null)}>清除</Button>}
+                          <Button size="sm" variant={(effectiveSelectedContact as ContactWithPreview).my_flag === "later" ? "default" : "outline"} className="h-7 text-xs" onClick={() => handleSetAgentFlag(selectedId!, (effectiveSelectedContact as ContactWithPreview).my_flag === "later" ? null : "later")} data-testid="button-flag-later">稍後處理</Button>
+                          <Button size="sm" variant={(effectiveSelectedContact as ContactWithPreview).my_flag === "tracking" ? "default" : "outline"} className="h-7 text-xs" onClick={() => handleSetAgentFlag(selectedId!, (effectiveSelectedContact as ContactWithPreview).my_flag === "tracking" ? null : "tracking")} data-testid="button-flag-tracking">追蹤中</Button>
+                          {(effectiveSelectedContact as ContactWithPreview).my_flag && <Button size="sm" variant="ghost" className="h-7 text-xs text-stone-500" onClick={() => handleSetAgentFlag(selectedId!, null)}>清除</Button>}
                         </div>
                       )}
 
-                      {(selectedContact?.ai_rating != null || selectedContact?.cs_rating != null) && (
+                      {(effectiveSelectedContact?.ai_rating != null || effectiveSelectedContact?.cs_rating != null) && (
                         <div className="space-y-1 text-[11px]">
-                          {selectedContact?.ai_rating != null && <div className="flex justify-between text-indigo-600" data-testid="text-ai-rating"><span>AI 評分</span><span>{"⭐".repeat(selectedContact.ai_rating)}</span></div>}
-                          {selectedContact?.cs_rating != null && <div className="flex justify-between text-amber-600" data-testid="text-cs-rating"><span>真人評分</span><span>{"⭐".repeat(selectedContact.cs_rating)}</span></div>}
+                          {effectiveSelectedContact?.ai_rating != null && <div className="flex justify-between text-indigo-600" data-testid="text-ai-rating"><span>AI 評分</span><span>{"⭐".repeat(effectiveSelectedContact.ai_rating)}</span></div>}
+                          {effectiveSelectedContact?.cs_rating != null && <div className="flex justify-between text-amber-600" data-testid="text-cs-rating"><span>真人評分</span><span>{"⭐".repeat(effectiveSelectedContact.cs_rating)}</span></div>}
                         </div>
                       )}
                     </div>
@@ -2613,17 +2640,17 @@ export default function ChatPage() {
                     <DropdownMenuContent align="start" className="w-48">
                       <DropdownMenuItem
                         onClick={() => handleSendRating("ai")}
-                        disabled={sendingRating || !selectedContact || selectedContact.platform !== "line"}
+                        disabled={sendingRating || !effectiveSelectedContact || effectiveSelectedContact.platform !== "line"}
                         data-testid="button-send-ai-rating"
                       >
-                        {selectedContact?.ai_rating != null ? "重新發送 AI 評價卡片" : "發送 AI 評價卡片"}
+                        {effectiveSelectedContact?.ai_rating != null ? "重新發送 AI 評價卡片" : "發送 AI 評價卡片"}
                       </DropdownMenuItem>
                       <DropdownMenuItem
                         onClick={() => handleSendRating("human")}
-                        disabled={sendingRating || !selectedContact || selectedContact.platform !== "line"}
+                        disabled={sendingRating || !effectiveSelectedContact || effectiveSelectedContact.platform !== "line"}
                         data-testid="button-send-rating"
                       >
-                        {selectedContact?.cs_rating != null ? "重新發送真人評價卡片" : "發送真人評價卡片"}
+                        {effectiveSelectedContact?.cs_rating != null ? "重新發送真人評價卡片" : "發送真人評價卡片"}
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
@@ -2664,7 +2691,7 @@ export default function ChatPage() {
                 </SelectTrigger>
                 <SelectContent>
                   {agentListByLoad.map((a) => {
-                    const isCurrent = a.id === (selectedContact?.assigned_agent_id ?? assignmentData?.assigned_to_user_id);
+                    const isCurrent = a.id === (effectiveSelectedContact?.assigned_agent_id ?? assignmentData?.assigned_to_user_id);
                     return (
                       <SelectItem key={a.id} value={String(a.id)}>
                         <span className="flex flex-col items-start gap-0.5">
@@ -2685,7 +2712,7 @@ export default function ChatPage() {
                   })}
                 </SelectContent>
               </Select>
-              {reassignAgentId != null && reassignAgentId === (selectedContact?.assigned_agent_id ?? assignmentData?.assigned_to_user_id) && (
+              {reassignAgentId != null && reassignAgentId === (effectiveSelectedContact?.assigned_agent_id ?? assignmentData?.assigned_to_user_id) && (
                 <p className="text-[11px] text-amber-600 mt-1">請選擇其他客服以完成改派</p>
               )}
             </div>
@@ -2698,7 +2725,7 @@ export default function ChatPage() {
             <Button variant="outline" onClick={() => setShowReassignDialog(false)}>取消</Button>
             <Button
               onClick={handleReassignSubmit}
-              disabled={reassignAgentId == null || reassigning || reassignAgentId === (selectedContact?.assigned_agent_id ?? assignmentData?.assigned_to_user_id)}
+              disabled={reassignAgentId == null || reassigning || reassignAgentId === (effectiveSelectedContact?.assigned_agent_id ?? assignmentData?.assigned_to_user_id)}
               data-testid="button-reassign-submit"
             >
               {reassigning ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : null}確認改派
