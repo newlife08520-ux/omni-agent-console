@@ -1794,6 +1794,7 @@ export default function ChatPage() {
             <div className="mt-2 p-2 rounded-lg bg-amber-50 border border-amber-200 flex items-start gap-2">
               <p className="text-[10px] text-amber-800 leading-tight flex-1">
                 若 LINE 新訊息沒出現在此品牌：請先切到「全部」查看；若只在「全部」看到，請到 設定→品牌與渠道 將該 LINE 渠道的 Bot ID 改為 Railway 日誌中的 <code className="bg-amber-100 px-0.5 rounded">[WEBHOOK] destination</code> 值。
+                改完 Bot ID 後，<strong>之前的客人</strong>要等他們「再傳一則新訊息」才會自動歸到此品牌、頭貼／姓名也會補齊；若他們還沒再傳，可先到「全部」找到該客人處理。
                 若此品牌下 LINE 聯絡人沒有大頭照／姓名：同樣請先將該 LINE 的 Bot ID 改為日誌中的 destination 並儲存，再到 設定→品牌與渠道 點「同步頭貼 (LINE / Facebook)」補齊。
               </p>
               <button type="button" onClick={() => setDismissedBotIdHint(true)} className="text-amber-600 hover:text-amber-800 shrink-0 text-xs" aria-label="關閉提示">×</button>

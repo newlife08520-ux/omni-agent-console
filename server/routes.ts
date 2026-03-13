@@ -2851,8 +2851,23 @@ export async function registerRoutes(
     storage.updateContactHumanFlag(contactId, 0);
     storage.clearAiMuted(contactId);
     storage.resetConsecutiveTimeouts(contactId);
+    /** 手動轉回 AI ＝ 一次新的開始：清掉轉人工期間的對話狀態與標籤，避免 AI 沿用「待人工」脈絡 */
+    storage.updateContactConversationFields(contactId, {
+      product_scope_locked: null,
+      customer_goal_locked: null,
+      human_reason: null,
+      return_stage: 0,
+      resolution_status: "open",
+      waiting_for_customer: null,
+    });
+    const tags = JSON.parse(contact.tags || "[]") as string[];
+    const withoutPending = tags.filter((t) => t !== "午休待處理");
+    if (withoutPending.length !== tags.length) storage.updateContactTags(contactId, withoutPending);
+    const prevAgentId = contact.assigned_agent_id;
+    storage.updateContactAssignment(contactId, null, undefined, undefined, 0);
+    if (prevAgentId != null) assignment.syncAgentOpenCases(prevAgentId);
     broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-    console.log(`[Restore AI] contact ${contactId} 已恢復 AI 接管`);
+    console.log(`[Restore AI] contact ${contactId} 已恢復 AI 接管（一次新的開始，已清除轉人工狀態與分配）`);
     return res.json({ success: true, status: "ai_handling" });
   });
 
@@ -3603,10 +3618,15 @@ ${contextStr}
     }
     if (freshCheck && freshCheck.needs_human) {
       const isLinkAsk = isLinkRequestMessage(userMessage) || isLinkRequestCorrectionMessage(userMessage);
+      /** 查單意圖：客戶說「我要查訂單」「出貨多久」等時，不因已在待人工就跳過，必須讓 AI 跑查單工具，禁止再直接轉人工 */
+      const isOrderInquiry = ORDER_LOOKUP_PATTERNS.test((userMessage || "").trim()) || /我要查訂單|查訂單|想查訂單|要查單|幫我查訂單/i.test((userMessage || "").trim());
       if (isLinkAsk) {
         storage.updateContactHumanFlag(contact.id, 0);
         storage.updateContactStatus(contact.id, "ai_handling");
         broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+      } else if (isOrderInquiry) {
+        /** 放行：本輪做查單，不跳過；state resolver 會將本輪視為 order_lookup、needs_human 不沿用 */
+        console.log(`[Gate] Contact ${contact.id} needs_human=1 但本輪為查單意圖，放行執行查單`);
       } else {
         console.log(`[AI Mute] Contact ${contact.id} needs_human=1, AI 靜音中 - 跳過`);
         storage.createAiLog({
@@ -4021,6 +4041,7 @@ ${contextStr}
         systemPrompt += "\n\n【已有訂單且客戶想等】若近期對話中你已提到某筆訂單編號（如 ESC20895）且已說明狀態／備註加急，客戶回「想等」「願意等」時，**禁止**再問「您這筆買的是什麼商品」「請貼商品名稱或訂單截圖」；直接回覆已備註加急、出貨會通知即可，勿再補問任何查單欄位。";
         systemPrompt += "\n\n【一頁式訂單：完整貼給客戶】訂單查詢工具回傳 **one_page_summary**（單筆）或 **one_page_full**（多筆）時，你**必須在回覆中直接把該內容完整貼給客戶**，不要摘要、不要只列單號。內容包含：訂單編號、收件人姓名、聯絡電話、下單時間、付款方式、金額、配送方式、物流單號、收件地址、訂單內容／商品、訂單狀態等，有幾筆就全部貼（多筆時每筆之間用 --- 分隔）。貼完後若客戶再問出貨、付款、物流等，**從你已貼給他的訂單資訊裡回覆**即可，勿再重複查單或只說「請稍等」；僅當客戶問的是「新訂單」或「另一筆」時才再呼叫查詢。";
         systemPrompt += "\n\n【多筆訂單必須全部列出】當訂單查詢工具回傳多筆（total > 1 或 orders 陣列多於一筆）時，你**必須在回覆中逐筆列出每一筆**（單號、日期、金額、狀態），不可只列一筆、不可省略、不可只說「共 N 筆」而不列出。若工具回傳有 one_page_full、formatted_list 或 note 內含清單，請以 one_page_full 為優先，完整貼上。";
+        systemPrompt += "\n\n【客戶說要查訂單時禁止先轉人工】當客戶說「我要查訂單」「查訂單」「現在出貨多久」「想查單」等時，**禁止**回覆「目前客服午休／忙碌，先幫您轉接真人」或呼叫 transfer_to_human。你**必須**先引導訂單編號或商品+手機，並呼叫訂單查詢工具；僅在查詢後仍無結果、且客戶明確要求轉專人時才可轉。";
         systemPrompt += "\n\n【客戶提供訂單編號時先查單、不轉人工】當客戶貼出訂單編號（例如要確認配送方式、出貨、付款時），你**必須先呼叫 lookup_order_by_id** 取得該筆訂單的 shipping_method、payment_method、address 等完整資訊，並依結果如實回覆（有宅配/超商就說，沒有就說目前沒有顯示）。**不得**未查就先轉人工；僅在查詢後仍無法取得該筆資料、且客戶明確要求轉專人時才轉。";
         systemPrompt += "\n\n【金額與收件資訊】訂單查詢工具回傳的 order 若含有 amount、address、buyer_phone、shipping_method，**可直接依此回覆**客人（如付款金額、收件地址、配送方式／超商門市）。有資料就依資料回答，勿說「沒辦法在聊天視窗直接調出」；僅在工具確實未回傳該欄位時才說明需由專人協助確認。若 orders 陣列中每筆有 shipping_method，請依該欄位說明宅配或超商。";
         systemPrompt += "\n\n【宅配 vs 便利商店】order 的 shipping_method 若有回傳，請依內容如實說明是「宅配」或「超商取貨／便利商店」。便利商店包含：全家、7-11、萊爾富、OK 等。若內容含宅配、黑貓、新竹、大榮等可說宅配；若含超商、門市、取貨、全家、7-11、萊爾富等可說超商取貨。勿自行猜測。";
