@@ -151,6 +151,7 @@ export function initDatabase() {
   ensurePerformanceIndexes();
   seedMockData();
   migrateRemoveOldHandoffAndReturnRules();
+  migrateBleedHumanTransferKeywords();
   migrateTightenHumanTransferKeywords();
   migrateConversationStateFields();
 }
@@ -169,10 +170,20 @@ function ensurePerformanceIndexes() {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_ai_logs_created_at ON ai_logs(created_at DESC);`);
 }
 
-const HUMAN_TRANSFER_KEYWORDS_NEW = "真人客服,轉人工,找主管,不要機器人,人工客服,真人處理";
+/** 緊急止血：後台關鍵字強制縮為僅四項，移除招呼/情緒詞。每次啟動時若現有值與目標不同則覆寫。 */
+const HUMAN_TRANSFER_KEYWORDS_BLEED = "我要轉人工,轉人工,找真人客服,找主管";
+
+function migrateBleedHumanTransferKeywords() {
+  const row = db.prepare("SELECT value FROM settings WHERE key = 'human_transfer_keywords'").get() as { value: string } | undefined;
+  const current = (row?.value || "").trim();
+  if (current === HUMAN_TRANSFER_KEYWORDS_BLEED) return;
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('human_transfer_keywords', ?)").run(HUMAN_TRANSFER_KEYWORDS_BLEED);
+  console.log("[DB] 已將 human_transfer_keywords 強制設為止血四項：", HUMAN_TRANSFER_KEYWORDS_BLEED);
+}
+
 const HUMAN_TRANSFER_FORBIDDEN = ["退貨", "爛", "投訴", "退款", "缺貨", "取消", "久候"];
 
-/** 收緊快轉關鍵字：若現有設定含過寬字詞則改為新短語清單，避免單字觸發轉人工 */
+/** 收緊快轉關鍵字：若現有設定含過寬字詞則改為新短語清單，避免單字觸發轉人工（已由 migrateBleedHumanTransferKeywords 取代為固定四項） */
 function migrateTightenHumanTransferKeywords() {
   const row = db.prepare("SELECT value FROM settings WHERE key = 'human_transfer_keywords'").get() as { value: string } | undefined;
   if (!row?.value) return;
@@ -180,7 +191,7 @@ function migrateTightenHumanTransferKeywords() {
   const keywords = val.split(",").map((k) => k.trim()).filter(Boolean);
   const hasForbidden = HUMAN_TRANSFER_FORBIDDEN.some((w) => val.includes(w)) || keywords.includes("客服");
   if (!hasForbidden) return;
-  db.prepare("UPDATE settings SET value = ? WHERE key = 'human_transfer_keywords'").run(HUMAN_TRANSFER_KEYWORDS_NEW);
+  db.prepare("UPDATE settings SET value = ? WHERE key = 'human_transfer_keywords'").run(HUMAN_TRANSFER_KEYWORDS_BLEED);
   console.log("[DB] 已將 human_transfer_keywords 收緊為新短語清單（移除過寬字詞）");
 }
 
@@ -1129,7 +1140,7 @@ function seedMockData() {
     ["logo_url", ""],
     ["welcome_message", "哈囉！歡迎來到我們的官方帳號\n有任何問題都可以直接詢問我，我會盡快為您服務！"],
     ["quick_buttons", "最新優惠,查詢訂單,專人服務"],
-    ["human_transfer_keywords", "真人客服,轉人工,找主管,不要機器人,人工客服,真人處理"],
+    ["human_transfer_keywords", "我要轉人工,轉人工,找真人客服,找主管"],
     ["superlanding_merchant_no", ""],
     ["superlanding_access_key", ""],
   ];

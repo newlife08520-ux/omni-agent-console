@@ -91,7 +91,7 @@ const stateC = resolveConversationState({
 const planC = buildReplyPlan({ state: stateC, returnFormUrl, isReturnFirstRound: true });
 ok("C. 能轉人工嗎 → human_request + handoff", stateC.primary_intent === "human_request" && planC.mode === "handoff");
 
-// D: 人呢 → handoff
+// D: 人呢 → 不 handoff（緊急止血：招呼/曖昧不單獨觸發轉人工）
 const stateD = resolveConversationState({
   contact: stubContact,
   userMessage: "人呢",
@@ -99,7 +99,26 @@ const stateD = resolveConversationState({
   recentAiMessages: [],
 });
 const planD = buildReplyPlan({ state: stateD, returnFormUrl, isReturnFirstRound: true });
-ok("D. 人呢 → human_request + handoff", stateD.primary_intent === "human_request" && planD.mode === "handoff");
+ok("D. 人呢 → 不 handoff", stateD.primary_intent !== "human_request" && planD.mode !== "handoff");
+
+// --- 緊急止血 5 題：以下皆不得直接切待人工接手 ---
+const HUMAN_KEYWORDS_DEFAULT = ["我要轉人工", "轉人工", "找真人客服", "找主管"];
+const bleedTestPhrases = ["在嗎", "人呢", "太誇張了", "很煩", "你有沒有看"];
+for (const phrase of bleedTestPhrases) {
+  const hitKeyword = HUMAN_KEYWORDS_DEFAULT.some((kw) => phrase.includes(kw) || kw.includes(phrase));
+  ok(`止血. webhook 關鍵字不命中「${phrase}」`, !hitKeyword);
+}
+const contactNeedsHuman = { ...stubContact, needs_human: 1 } as unknown as Contact;
+for (const phrase of bleedTestPhrases) {
+  const stateBleed = resolveConversationState({
+    contact: contactNeedsHuman,
+    userMessage: phrase,
+    recentUserMessages: [],
+    recentAiMessages: [],
+  });
+  const planBleed = buildReplyPlan({ state: stateBleed, returnFormUrl, isReturnFirstRound: true });
+  ok(`止血. 「${phrase}」→ 不 handoff (needs_human=${stateBleed.needs_human}, mode=${planBleed.mode})`, !stateBleed.needs_human && planBleed.mode !== "handoff");
+}
 
 // E: 說錯，我要查出貨速度（前句退貨）→ 覆蓋為 order_lookup
 const stateE = resolveConversationState({
@@ -276,8 +295,8 @@ ok("Off-hours. 午休時 handoff 含「不在線」「之後才會」", offHours
 const offHoursNull = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, null);
 ok("Off-hours. 非午休/下班時不補句", offHoursNull === HANDOFF_MANDATORY_OPENING);
 
-// 尷尬/重複轉人工：同一種資料重問兩次
-const awkwardSameData = shouldHandoffDueToAwkwardOrRepeat({
+// 緊急止血：同一種資料重問「至少三次」才轉人工；僅兩次不轉
+const awkwardSameDataTwice = shouldHandoffDueToAwkwardOrRepeat({
   userMessage: "我要查訂單",
   recentMessages: [
     { sender_type: "ai", content: "請提供訂單編號，我幫您查。" },
@@ -286,9 +305,21 @@ const awkwardSameData = shouldHandoffDueToAwkwardOrRepeat({
   ],
   primaryIntentOrderLookup: true,
 });
-ok("Awkward. 同一種資料重問兩次 → 轉人工", awkwardSameData.shouldHandoff && awkwardSameData.reason === "same_data_asked_twice");
+ok("Awkward. 同一種資料重問僅兩次 → 不轉人工", !awkwardSameDataTwice.shouldHandoff);
+const awkwardSameDataThrice = shouldHandoffDueToAwkwardOrRepeat({
+  userMessage: "我要查訂單",
+  recentMessages: [
+    { sender_type: "ai", content: "請提供訂單編號。" },
+    { sender_type: "user", content: "ESC123" },
+    { sender_type: "ai", content: "請提供訂單編號或手機。" },
+    { sender_type: "user", content: "0922123456" },
+    { sender_type: "ai", content: "請再提供訂單編號以利查詢。" },
+  ],
+  primaryIntentOrderLookup: true,
+});
+ok("Awkward. 同一種資料重問至少三次 → 轉人工", awkwardSameDataThrice.shouldHandoff && awkwardSameDataThrice.reason === "same_data_asked_twice");
 
-// 尷尬/重複：用戶說已給過且前一輪 AI 在討資料、更早已有訂單
+// 緊急止血：單次「我給過了」不單獨觸發轉人工
 const awkwardAlreadyGave = shouldHandoffDueToAwkwardOrRepeat({
   userMessage: "我給過了耶",
   recentMessages: [
@@ -297,7 +328,7 @@ const awkwardAlreadyGave = shouldHandoffDueToAwkwardOrRepeat({
     { sender_type: "user", content: "我給過了耶" },
   ],
 });
-ok("Awkward. 用戶說已給過且前輪 AI 討單號、更早已有單號 → 轉人工", awkwardAlreadyGave.shouldHandoff && awkwardAlreadyGave.reason === "user_said_already_gave_ai_wrong");
+ok("Awkward. 單次我給過了 → 不轉人工", !awkwardAlreadyGave.shouldHandoff);
 
 console.log("\n---");
 console.log(`Phase 1 驗收: ${passed} 通過, ${failed} 失敗`);

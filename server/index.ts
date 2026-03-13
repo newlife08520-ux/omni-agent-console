@@ -81,6 +81,8 @@ app.use((req, res, next) => {
   next();
 });
 
+(globalThis as any).__serverStartTime = new Date().toISOString();
+
 (async () => {
   try {
     const dataDir = getDataDir();

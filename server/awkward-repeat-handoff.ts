@@ -32,7 +32,7 @@ function normalizeForCompare(s: string): string {
 }
 
 /**
- * 檢查近期 AI 回覆中是否有「討同一種資料」的句型出現至少 2 次。
+ * 緊急止血：改為「真正重複兩次以上」才升級。討同一種資料的句型需出現至少 3 次才轉人工。
  */
 function sameDataAskedTwice(recentMessages: MessageLike[]): boolean {
   const aiContents = recentMessages
@@ -40,7 +40,7 @@ function sameDataAskedTwice(recentMessages: MessageLike[]): boolean {
     .map((m) => (m.content || "").trim())
     .filter(Boolean);
   const askCount = aiContents.filter((c) => ASK_ORDER_PHONE_PATTERNS.test(c)).length;
-  return askCount >= 2;
+  return askCount >= 3;
 }
 
 /**
@@ -111,7 +111,7 @@ export interface AwkwardRepeatResult {
 }
 
 /**
- * 判斷是否應因「尷尬／重複」直接轉人工。任一條件成立即回傳 shouldHandoff: true。
+ * 緊急止血：不因一次尷尬或一次「我給過了」就轉人工。只保留真正重複兩次以上或高風險才升級。
  */
 export function shouldHandoffDueToAwkwardOrRepeat(input: AwkwardRepeatInput): AwkwardRepeatResult {
   const { userMessage, recentMessages, primaryIntentOrderLookup } = input;
@@ -123,9 +123,7 @@ export function shouldHandoffDueToAwkwardOrRepeat(input: AwkwardRepeatInput): Aw
   if (sameTemplateRepeatedTwice(recent)) {
     return { shouldHandoff: true, reason: "same_template_twice" };
   }
-  if (userSaidAlreadyGaveAndLastAiAskedAgain(userMessage, recent)) {
-    return { shouldHandoff: true, reason: "user_said_already_gave_ai_wrong" };
-  }
+  /* 移除：單次「我給過了」不單獨觸發轉人工，避免過度升級 */
   if (intentMismatchLastRound(recent, primaryIntentOrderLookup === true)) {
     return { shouldHandoff: true, reason: "intent_mismatch" };
   }

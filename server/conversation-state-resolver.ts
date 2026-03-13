@@ -52,6 +52,12 @@ export type WaitingForCustomer =
 
 export type ResolutionStatus = "open" | "awaiting_customer" | "awaiting_human" | "resolved" | "closed";
 
+/** 可由 AI 處理的意圖：本輪為此時不沿用 needs_human，僅明確要真人或 legal_risk／必須人工時才設。供 routes 判斷是否補 handoff 句。 */
+export const AI_HANDLABLE_INTENTS: PrimaryIntent[] = ["order_lookup", "link_request", "product_consult", "price_purchase", "smalltalk", "unclear"];
+export function isAiHandlableIntent(intent: PrimaryIntent): boolean {
+  return AI_HANDLABLE_INTENTS.includes(intent);
+}
+
 /** 退換貨／取消的原因類型：久候型先安撫＋查詢；商品問題型走正式表單；明確堅持再升級 */
 export type ReturnReasonType = "wait_too_long" | "product_issue" | "insist" | null;
 
@@ -78,8 +84,8 @@ export interface ConversationState {
 
 /** Phase 1：明確要真人 → 直接 handoff；補齊「人呢、能轉人工嗎、我要人工、轉真人」等 */
 const HUMAN_REQUEST_PATTERNS = /真人|轉人工|不要機器人|找客服|找主管|真人處理|真人客服|人工客服|人呢|能轉人工嗎|我要人工|轉真人|可以幫我轉人工|我要轉人工/i;
-/** 純招呼或曖昧短句：不視為「明確要求真人」，避免誤切待人工（真人感 ≠ 轉真人） */
-const PURE_GREETING_OR_VAGUE = /^(在嗎|哈囉|嗨|嗯|好|喔|太誇張了|太扯了|等一下|有人嗎|喂)$/i;
+/** 純招呼或曖昧短句：不視為「明確要求真人」，避免誤切待人工（真人感 ≠ 轉真人）。「人呢」多為打招呼，不單獨觸發 handoff。 */
+const PURE_GREETING_OR_VAGUE = /^(在嗎|哈囉|嗨|嗯|好|喔|太誇張了|太扯了|等一下|有人嗎|人呢|喂)$/i;
 const HIGH_RISK_PATTERNS = /詐騙|檢舉|投訴|消保官|公開|發文|再不處理/i;
 /** Phase 1：糾正語 → 本輪以當前句重算意圖，不沿用前輪 */
 const CORRECTION_OVERRIDE_PATTERNS = /說錯|不是|我要的是|改成|其實是|剛剛說錯/i;
@@ -209,6 +215,11 @@ export function resolveConversationState(input: ResolveInput): ConversationState
 
   let needs_human = contact.needs_human === 1;
   let human_reason: HumanReason = (contact as any).human_reason as HumanReason ?? null;
+  /** 本輪為「可由 AI 處理」的意圖時，不沿用前輪 handoff；僅本輪明確要真人或 legal_risk／必須人工權限時才重設 needs_human。 */
+  if (AI_HANDLABLE_INTENTS.includes(primary_intent)) {
+    needs_human = false;
+    human_reason = null;
+  }
   if (primary_intent === "human_request") {
     needs_human = true;
     human_reason = "explicit_human_request";

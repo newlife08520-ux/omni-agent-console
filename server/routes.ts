@@ -15,7 +15,7 @@ import {
 } from "./safe-after-sale-classifier";
 import { runAutoExecution, computeMainStatus } from "./meta-comment-auto-execute";
 import * as riskRules from "./meta-comment-risk-rules";
-import { resolveConversationState, isHumanRequestMessage, isAlreadyProvidedMessage, isLinkRequestMessage, isLinkRequestCorrectionMessage, ORDER_LOOKUP_PATTERNS } from "./conversation-state-resolver";
+import { resolveConversationState, isHumanRequestMessage, isAlreadyProvidedMessage, isLinkRequestMessage, isLinkRequestCorrectionMessage, ORDER_LOOKUP_PATTERNS, isAiHandlableIntent } from "./conversation-state-resolver";
 import { buildReplyPlan, shouldNotLeadWithOrderLookup, isAftersalesComfortFirst, type ReplyPlanMode } from "./reply-plan-builder";
 import { enforceOutputGuard, HANDOFF_MANDATORY_OPENING, buildHandoffReply, getHandoffReplyForCustomer } from "./phase2-output";
 import { runPostGenerationGuard, isModeNoPromo, runOfficialChannelGuard, runGlobalPlatformGuard } from "./content-guard";
@@ -797,6 +797,16 @@ export async function registerRoutes(
       return res.status(403).json({ message: "權限不足" });
     }
     return res.json(getGuardStats());
+  });
+
+  /** 供確認線上 deploy 與重啟時間（不需登入） */
+  app.get("/api/version", (_req, res) => {
+    const startTime = (globalThis as any).__serverStartTime ?? null;
+    res.json({
+      version: process.env.VERSION || process.env.npm_package_version || "1.0.0",
+      commit: process.env.COMMIT_SHA || "unknown",
+      startTime,
+    });
   });
 
   app.get("/api/settings", authMiddleware, (req: any, res) => {
@@ -3653,6 +3663,7 @@ ${contextStr}
 
       const riskCheck = detectHighRisk(userMessage);
       if (riskCheck.level === "legal_risk") {
+        console.log("[Webhook AI] needs_human=1 source=high_risk_short_circuit reasons=" + riskCheck.reasons.join(","));
         console.log(`[AI Risk] 法務/公關風險偵測: ${riskCheck.reasons.join(", ")}`);
         storage.updateContactStatus(contact.id, "high_risk");
         storage.updateContactHumanFlag(contact.id, 1);
@@ -3817,6 +3828,7 @@ ${contextStr}
         primaryIntentOrderLookup: state.primary_intent === "order_lookup",
       });
       if (awkwardCheck.shouldHandoff) {
+        console.log("[Webhook AI] needs_human=1 source=awkward_repeat reason=" + (awkwardCheck.reason ?? "unknown") + " msg=" + (userMessage || "").slice(0, 60));
         storage.updateContactConversationFields(contact.id, { product_scope_locked: null, customer_goal_locked: null });
         storage.updateContactHumanFlag(contact.id, 1);
         storage.updateContactStatus(contact.id, "awaiting_human");
@@ -3863,6 +3875,7 @@ ${contextStr}
 
       // Hotfix：handoff 原子化 — 一旦 plan 為 handoff，只送一則強制告知句，不進 LLM，避免先出一大段再出第二則轉接
       if (plan.mode === "handoff") {
+        console.log("[Webhook AI] needs_human=1 source=state_resolver reason=" + (state.human_reason ?? "handoff") + " msg=" + (userMessage || "").slice(0, 60));
         storage.updateContactConversationFields(contact.id, { product_scope_locked: null, customer_goal_locked: null });
         storage.updateContactHumanFlag(contact.id, 1);
         storage.updateContactStatus(contact.id, "awaiting_human");
@@ -4041,6 +4054,7 @@ ${contextStr}
           } else if (channelToken) {
             await pushLineMessage(contact.platform_user_id, [{ type: "text", text: alreadyHandoffText }], channelToken);
           }
+          console.log("[Webhook AI] needs_human=1 source=already_provided_not_found msg=" + (userMessage || "").slice(0, 60));
           storage.updateContactHumanFlag(contact.id, 1);
           storage.updateContactStatus(contact.id, "awaiting_human");
           storage.createCaseNotification(contact.id, "in_app");
@@ -4350,7 +4364,9 @@ ${contextStr}
       storage.resetConsecutiveTimeouts(contact.id);
 
       const finalContact = storage.getContact(contact.id);
-      if (finalContact?.needs_human || storage.isAiMuted(contact.id) || finalContact?.status === "awaiting_human" || finalContact?.status === "high_risk") {
+      /** 緊急止血：本輪為 AI 可處理意圖時，不因舊的 needs_human 再補轉人工訊息。 */
+      const shouldSkipPostHandoff = state && isAiHandlableIntent(state.primary_intent);
+      if (!shouldSkipPostHandoff && (finalContact?.needs_human || storage.isAiMuted(contact.id) || finalContact?.status === "awaiting_human" || finalContact?.status === "high_risk")) {
         console.log(`[Webhook AI] 已轉接真人或靜音中，送出 handoff 強制告知句 (needs_human=${finalContact?.needs_human}, status=${finalContact?.status})`);
         const recentForHandoff = storage.getMessages(contact.id).slice(-12).map((m: any) => ({ sender_type: m.sender_type, content: m.content, message_type: m.message_type, image_url: m.image_url }));
         const orderInfoForHandoff = searchOrderInfoInRecentMessages(recentForHandoff);
@@ -4547,9 +4563,10 @@ ${contextStr}
     console.log("[WEBHOOK] Sent 200 OK to LINE (ACK < 2s), processing events async...");
 
     const humanKeywordsSetting = storage.getSetting("human_transfer_keywords");
+    /** 緊急止血：僅保留明確要真人／主管，不含招呼與情緒詞。後台可覆寫此設定。 */
     const HUMAN_KEYWORDS = humanKeywordsSetting
       ? humanKeywordsSetting.split(",").map((k) => k.trim()).filter(Boolean)
-      : ["真人客服", "轉人工", "找主管", "不要機器人", "人工客服", "真人處理"];
+      : ["我要轉人工", "轉人工", "找真人客服", "找主管"];
 
     /** 取得 LINE 大頭照／姓名並寫回聯絡人；有 pictureUrl 時也會更新（保留原 display_name），確保新渠道／品牌也能顯示頭貼與姓名 */
     async function fetchAndUpdateLineProfile(userId: string, contactId: number, token: string | null, channelIdForLog?: number | null) {
@@ -4625,6 +4642,7 @@ ${contextStr}
           broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
           const needsHuman = HUMAN_KEYWORDS.some((kw) => text.includes(kw));
           if (needsHuman) {
+            console.log("[WEBHOOK] needs_human=1 source=webhook_keyword msg=" + (text || "").slice(0, 80));
             storage.updateContactHumanFlag(contact.id, 1);
             const handoffText = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, assignment.getUnavailableReason());
             const aiMsg = storage.createMessage(contact.id, "line", "ai", handoffText);
@@ -5020,6 +5038,7 @@ ${contextStr}
 
               const needsHuman2 = HUMAN_KW2.some((kw: string) => text.includes(kw));
               if (needsHuman2) {
+                console.log("[FB WEBHOOK] needs_human=1 source=webhook_keyword msg=" + (text || "").slice(0, 80));
                 storage.updateContactHumanFlag(contact.id, 1);
                 const handoffTextFb = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, assignment.getUnavailableReason());
                 const aiMsg2 = storage.createMessage(contact.id, "messenger", "ai", handoffTextFb);
