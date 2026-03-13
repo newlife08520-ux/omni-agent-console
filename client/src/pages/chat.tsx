@@ -1621,6 +1621,21 @@ export default function ChatPage() {
     }
   }, [addFiles]);
 
+  const handleInputPaste = useCallback((e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const files: File[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const file = items[i].getAsFile();
+      if (file && ALLOWED_IMAGE_TYPES.includes(file.type)) files.push(file);
+    }
+    if (files.length > 0) {
+      e.preventDefault();
+      addFiles(files);
+      toast({ title: "已貼上圖片", description: `已加入 ${files.length} 張圖片，可再輸入文字後傳送` });
+    }
+  }, [addFiles, toast]);
+
   const uploadAndSendFiles = useCallback(async () => {
     if ((pendingFiles ?? []).length === 0 || !selectedId || uploading) return;
     setUploading(true);
@@ -2615,10 +2630,11 @@ export default function ChatPage() {
                   <Textarea
                     ref={messageInputRef}
                     data-testid="input-message"
-                    placeholder="輸入訊息以真人客服身分回覆..."
+                    placeholder="輸入訊息以真人客服身分回覆...（可貼上文字或圖片）"
                     value={messageInput}
                     onChange={(e) => setMessageInput(e.target.value)}
                     onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSendAll(); } }}
+                    onPaste={handleInputPaste}
                     disabled={sending || uploading}
                     rows={1}
                     className="flex-1 min-w-0 min-h-[40px] max-h-[200px] overflow-y-auto resize-none bg-stone-50 border-stone-200 py-2.5"
@@ -2627,7 +2643,7 @@ export default function ChatPage() {
                     {uploading ? <><Loader2 className="w-4 h-4 mr-1.5 animate-spin" />上傳中</> : <><Send className="w-4 h-4 mr-1.5" />傳送</>}
                   </Button>
                 </div>
-                <p className="text-[10px] text-stone-400 text-center mt-2">以管理員身分發送訊息 · 支援圖片拖曳上傳或點擊 📎 附件按鈕</p>
+                <p className="text-[10px] text-stone-400 text-center mt-2">以管理員身分發送訊息 · 可複製貼上文字與圖片，或拖曳上傳、點擊 📎 附件</p>
               </div>
             </div>
           </>

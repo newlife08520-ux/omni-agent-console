@@ -2676,12 +2676,8 @@ export async function registerRoutes(
         footer: {
           type: "box",
           layout: "horizontal",
-          contents: [
-            { type: "text", text: "← 1", size: "xxs", color: "#888888", align: "center", flex: 0 },
-            ...starButtons,
-            { type: "text", text: "5 →", size: "xxs", color: "#888888", align: "center", flex: 0 },
-          ],
-          spacing: "xs",
+          contents: starButtons,
+          spacing: "sm",
           paddingAll: "12px",
         },
       },
