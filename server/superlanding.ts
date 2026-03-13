@@ -379,7 +379,7 @@ export async function lookupOrdersByPageAndPhone(
 
       let allOrders: OrderInfo[] = [];
       let p = 1;
-      const maxPages = 25;
+      const maxPages = 50;
 
       while (true) {
         const orders = await fetchOrders(config, {
@@ -412,7 +412,7 @@ export async function lookupOrdersByPageAndPhone(
   }
 
   let page = 1;
-  const maxPages = 15;
+  const maxPages = 40;
   let allOrders: OrderInfo[] = [];
   let truncated = false;
 

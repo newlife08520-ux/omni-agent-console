@@ -4020,6 +4020,8 @@ ${contextStr}
         systemPrompt += "\n\n【本輪 查單】本輪只做查單。底線：只接受兩種輸入—① 訂單編號 或 ② 產品名稱＋手機；不得問其他欄位（購買頁面、收件資料、官方通路等）。用一兩句自然承接後再引導其中一種即可，不要列成選單或問卷。回覆簡短（約 90～140 字）。同一句或同輪已取得訂單編號或產品+手機即不得再重問。若客人**剛在上一則已提供**手機或訂單編號，直接使用、勿再請客人「確認手機／單號對嗎」；查詢失敗或逾時時可重試或僅補問**尚未提供**的資訊（如下單日期），勿重複問已給過的欄位。";
         systemPrompt += "\n\n【已有訂單且客戶想等】若近期對話中你已提到某筆訂單編號（如 ESC20895）且已說明狀態／備註加急，客戶回「想等」「願意等」時，**禁止**再問「您這筆買的是什麼商品」「請貼商品名稱或訂單截圖」；直接回覆已備註加急、出貨會通知即可，勿再補問任何查單欄位。";
         systemPrompt += "\n\n【金額與收件資訊】訂單查詢工具回傳的 order 若含有 amount、address、buyer_phone、shipping_method，**可直接依此回覆**客人（如付款金額、收件地址、配送方式／超商門市）。有資料就依資料回答，勿說「沒辦法在聊天視窗直接調出」；僅在工具確實未回傳該欄位時才說明需由專人協助確認。";
+        systemPrompt += "\n\n【宅配 vs 便利商店】order 的 shipping_method 若有回傳，請依內容如實說明是「宅配」或「超商取貨／便利商店」。便利商店包含：全家、7-11、萊爾富、OK 等。若內容含宅配、黑貓、新竹、大榮等可說宅配；若含超商、門市、取貨、全家、7-11、萊爾富等可說超商取貨。勿自行猜測。";
+        systemPrompt += "\n\n【如實回報、禁止推給介面】回覆時以「這筆訂單」為主語：工具有回傳的欄位（狀態、金額、付款方式、payment_interpretation、物流單號等）就**照實說**；若某欄位工具**沒回傳**（例如沒有物流單號、沒有付款方式），就說「這筆訂單目前沒有物流單號」或「這筆訂單目前沒有顯示付款方式，可請專人協助確認」。**禁止**說「我這邊畫面沒有顯示」「我沒辦法判斷」「系統沒有顯示」「我這邊目前沒有…欄位」等以機器人自身或介面為主的說法；只描述訂單查到的狀態即可。";
         systemPrompt += "\n\n【付款與出貨】訂單查詢工具回傳中若含有 payment_interpretation 欄位，請嚴格依該說明向客人解釋付款與出貨關係（貨到付款不需等付款即可出貨、信用卡/LINE Pay 已進入出貨流程視為已付、轉帳/超商需等入帳等）。勿自行推測「要先付款才能出貨」以免誤導。";
       }
       // Mode-specific forbidden content：退貨/取消/handoff/order_lookup 禁止賣點、行銷、推薦、價格組合（底線不變）
@@ -5378,7 +5380,7 @@ ${contextStr}
 
         if (!result.found || result.orders.length === 0) {
           console.log(`[AI Tool Call] 查無訂單: ${orderId}`);
-          return JSON.stringify({ success: true, found: false, message: `目前查不到訂單編號 ${orderId} 的紀錄。請告知客戶查不到這筆資料，並直接幫客戶轉接真人專員處理（勿再問其他問法、勿提其他平台）。` });
+          return JSON.stringify({ success: true, found: false, message: `目前查不到訂單編號 ${orderId} 的紀錄。請如實告知客戶「這筆訂單編號目前查不到紀錄」，可請客戶確認編號是否正確或是否為不同商品／不同管道下單；若客戶需要可再詢問是否轉專人協助查詢。勿主動強制轉人工，除非客戶明確要求。` });
         }
 
         const order = result.orders[0];
@@ -5558,7 +5560,6 @@ ${contextStr}
             for (const br of batchResults) {
               allResults = allResults.concat(br.orders);
             }
-            if (allResults.length > 0) break;
           }
         }
         if (allResults.length === 0) {
@@ -5574,11 +5575,19 @@ ${contextStr}
           return JSON.stringify({ success: true, found: false, message: `所有平台（一頁商店 + SHOPLINE）皆查無此手機號碼的訂單（已搜尋 ${matchedPages.length} 個相關銷售頁）。請告知客戶目前查不到這筆資料，並詢問是否需要轉接專人客服。` });
         }
 
+        const seenIds = new Set<string>();
+        const uniqueOrders = allResults.filter(o => {
+          const id = (o.global_order_id || "").trim().toUpperCase();
+          if (!id || seenIds.has(id)) return false;
+          seenIds.add(id);
+          return true;
+        });
+
         if (context?.contactId) {
           storage.updateContactOrderSource(context.contactId, orderSource);
         }
 
-        const orderSummaries = allResults.map(o => ({
+        const orderSummaries = uniqueOrders.map(o => ({
           order_id: o.global_order_id,
           status: getUnifiedStatusLabel(o.status, o.source || orderSource),
           amount: o.final_total_order_amount,
@@ -5590,11 +5599,11 @@ ${contextStr}
           source: o.source || orderSource,
         }));
 
-        console.log("[AI Tool Call] 查到", allResults.length, "筆訂單（全部列出）");
-        const multiOrderNote = allResults.length > 1
-          ? `此手機號碼在此商品下有 ${allResults.length} 筆訂單，請全部列出摘要（單號、日期、金額、狀態），並詢問客戶要查看哪一筆的詳情。`
+        console.log("[AI Tool Call] 查到", uniqueOrders.length, "筆訂單（全部列出）");
+        const multiOrderNote = uniqueOrders.length > 1
+          ? `此手機號碼在此商品下有 ${uniqueOrders.length} 筆訂單，請全部列出摘要（單號、日期、金額、狀態），並詢問客戶要查看哪一筆的詳情。`
           : undefined;
-        return JSON.stringify({ success: true, found: true, total: allResults.length, orders: orderSummaries, note: multiOrderNote });
+        return JSON.stringify({ success: true, found: true, total: uniqueOrders.length, orders: orderSummaries, note: multiOrderNote });
       }
 
       if (toolName === "lookup_order_by_date_and_contact") {
