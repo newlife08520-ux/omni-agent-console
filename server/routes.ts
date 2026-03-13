@@ -3190,7 +3190,7 @@ export async function registerRoutes(
   ): Promise<string | null> {
     const token = channelAccessToken ?? null;
     if (!token || (typeof token === "string" && token.trim() === "")) {
-      console.error("[downloadLineContent] Token 防呆：access_token 為空或未定義，跳過 Get Content 請求 — messageId:", messageId, "channelId:", channelIdForLog ?? "unknown");
+      console.error("[downloadLineContent] Token 防呆：access_token 為空或未定義，跳過 Get Content 請求 — messageId:", messageId, "channelId:", channelIdForLog ?? "unknown", "→ 請到後台「渠道」填寫 access_token");
       return null;
     }
     const maxRetries = 3;
@@ -4518,6 +4518,7 @@ ${contextStr}
         const botIds = allChannels.map(c => `${c.channel_name}(bot_id=${c.bot_id || "EMPTY"})`).join(", ");
         console.log("[WEBHOOK] NO MATCH for bot_id:", destination);
         console.log("[WEBHOOK] DB channels:", botIds || "NONE");
+        console.log("[WEBHOOK] 請到後台「渠道」新增或編輯 LINE 渠道，將 bot_id 設為:", destination, "並填寫 access_token、channel_secret（見 docs/LINE-渠道-Token-串接說明.md）");
         console.log("[WEBHOOK] 不 fallback，無法確認渠道時不進行自動回覆（fail-closed）");
       }
     } else {
@@ -4531,7 +4532,7 @@ ${contextStr}
     }
     // SaaS 多租戶：禁止用全域 Token 作為 LINE API 的 fallback，僅使用 matchedChannel.access_token
     if (!channelToken) {
-      console.log("[WEBHOOK] 無匹配渠道 Token，後續 Profile/Media/Reply 將不使用全域 Token（fail-closed）");
+      console.log("[WEBHOOK] 無匹配渠道 Token，後續 Profile/Media/Reply 將不使用全域 Token（fail-closed）。請到後台「渠道」為該 LINE 機器人填寫 access_token（見 docs/LINE-渠道-Token-串接說明.md）");
     }
 
     console.log("[WEBHOOK] Token available:", !!channelToken, "Secret available:", !!channelSecretVal);
@@ -4571,7 +4572,7 @@ ${contextStr}
     /** 取得 LINE 大頭照／姓名並寫回聯絡人；有 pictureUrl 時也會更新（保留原 display_name），確保新渠道／品牌也能顯示頭貼與姓名 */
     async function fetchAndUpdateLineProfile(userId: string, contactId: number, token: string | null, channelIdForLog?: number | null) {
       if (!token || (token && token.trim() === "") || userId === "unknown") {
-        console.error("[WEBHOOK] Token 防呆：access_token 為空或未定義，跳過 Get Profile 請求 — userId:", userId, "contactId:", contactId, "channelId:", channelIdForLog ?? "unknown");
+        console.error("[WEBHOOK] Token 防呆：access_token 為空或未定義，跳過 Get Profile 請求 — userId:", userId, "contactId:", contactId, "channelId:", channelIdForLog ?? "unknown", "→ 請到後台「渠道」為該 LINE 填寫 access_token");
         return;
       }
       try {
