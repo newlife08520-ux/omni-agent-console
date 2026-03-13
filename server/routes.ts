@@ -2668,14 +2668,19 @@ export async function registerRoutes(
             { type: "text", text: bodyText, size: "sm", color: "#333333", wrap: true, align: "center" },
             { type: "separator", margin: "lg" },
             { type: "text", text: "1 ＝ 很不滿意　　5 ＝ 非常滿意", size: "xs", color: "#666666", align: "center", margin: "sm" },
-            { type: "text", text: "請點選下方一個選項", size: "xs", color: "#AAAAAA", align: "center", margin: "4px" },
+            { type: "text", text: "由左到右：1 顆星（最低）～ 5 顆星（最高）", size: "xs", color: "#1DB446", align: "center", margin: "4px", weight: "bold" },
+            { type: "text", text: "請點選下方一個選項（點哪個就代表幾分）", size: "xs", color: "#AAAAAA", align: "center", margin: "4px" },
           ],
           paddingAll: "16px",
         },
         footer: {
           type: "box",
           layout: "horizontal",
-          contents: starButtons,
+          contents: [
+            { type: "text", text: "← 1", size: "xxs", color: "#888888", align: "center", flex: 0 },
+            ...starButtons,
+            { type: "text", text: "5 →", size: "xxs", color: "#888888", align: "center", flex: 0 },
+          ],
           spacing: "xs",
           paddingAll: "12px",
         },
@@ -5367,7 +5372,10 @@ ${contextStr}
           storage.updateContactOrderSource(context.contactId, result.source);
         }
 
-        const payment_interpretation = getPaymentInterpretationForAI(order.payment_method, statusLabel);
+        const payment_interpretation = getPaymentInterpretationForAI(order.payment_method, statusLabel, {
+          prepaid: order.prepaid,
+          paid_at: order.paid_at,
+        });
         return JSON.stringify({
           success: true,
           found: true,

@@ -312,6 +312,10 @@ export interface OrderInfo {
   order_created_at?: string;
   shipping_method?: string;
   payment_method?: string;
+  /** 一頁商店：是否已預付／已付款（prepaid）。若為 false 且為需先付款之方式，表示付款未成功 */
+  prepaid?: boolean;
+  /** 一頁商店：實際付款完成時間。無值且非貨到付款時可能表示付款失敗 */
+  paid_at?: string | null;
   address?: string;
   note?: string;
   source?: OrderSource;

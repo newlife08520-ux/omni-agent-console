@@ -258,14 +258,35 @@ export function getUnifiedStatusLabel(status: string, source?: string): string {
 /** 訂單狀態是否表示「已可安排出貨」（已付款或為貨到付款） */
 const STATUS_IMPLIES_PAID_OR_COD = /已確認|待出貨|出貨中|已出貨|已送達|已完成|處理中/i;
 
+export interface PaymentInterpretationOptions {
+  /** 一頁商店：是否已預付。若為 false 且為需先付款之方式，表示付款未成功 */
+  prepaid?: boolean;
+  /** 實際付款完成時間。無值且非貨到付款時可能表示付款失敗 */
+  paid_at?: string | null;
+}
+
 /**
  * 依付款方式與訂單狀態，產出給 AI 的「付款與出貨」解讀說明，避免誤判（例如貨到付款卻說要先付款才能出貨）。
- * 回傳字串會附在訂單查詢工具結果中，供 AI 依此回覆客人。
+ * 若系統回傳 prepaid=false 或無 paid_at（且為需先付款方式），則產出「付款失敗，請重新下單」之指引。
  */
-export function getPaymentInterpretationForAI(paymentMethod: string | undefined, orderStatusLabel: string): string {
+export function getPaymentInterpretationForAI(
+  paymentMethod: string | undefined,
+  orderStatusLabel: string,
+  options?: PaymentInterpretationOptions
+): string {
   const pm = (paymentMethod || "").trim().toLowerCase();
   const status = (orderStatusLabel || "").trim();
   const looksPaidOrInProgress = STATUS_IMPLIES_PAID_OR_COD.test(status);
+  const prepaid = options?.prepaid;
+  const paidAt = options?.paid_at;
+
+  // 需先付款之方式（非貨到付款）：若系統明確回傳 prepaid=false，表示付款未成功
+  const requiresPaymentFirst = /credit_card|credit card|linepay|line_pay|line pay/.test(pm);
+  const paymentFailed = requiresPaymentFirst && prepaid === false;
+
+  if (paymentFailed) {
+    return "此筆訂單**付款未成功**（系統顯示未完成付款）。請明確告知客戶：此筆訂單付款失敗，需請您重新下單。勿說明出貨時間、備註加急或物流；勿讓客戶誤以為訂單有效。";
+  }
 
   // 貨到付款／取件時付款：不需等付款完成即可安排出貨，絕對不可對客人說「需先付款才能出貨」
   if (pm === "pending" || pm === "cod" || pm === "to_store" || pm === "cash_on_delivery" || pm === "取件時付款") {

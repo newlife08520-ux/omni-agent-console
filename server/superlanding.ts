@@ -93,6 +93,8 @@ function mapOrder(o: any): OrderInfo {
     order_created_at: o.order_created_at || "",
     shipping_method: o.shipping_method || "",
     payment_method: o.payment_method || "",
+    prepaid: o.prepaid === true,
+    paid_at: o.paid_at || null,
     address,
     note: o.note || "",
   };
