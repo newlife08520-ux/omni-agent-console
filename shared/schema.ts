@@ -321,6 +321,32 @@ export interface OrderInfo {
   source?: OrderSource;
 }
 
+/** 當前訂單上下文：成功對到訂單後存於 contact_active_order，後續問同一筆單的延伸問題優先用此回答 */
+export interface ActiveOrderContext {
+  order_id: string;
+  matched_by: "image" | "text" | "product_phone" | "manual";
+  matched_confidence?: "high" | "medium" | "low";
+  last_fetched_at: string;
+  payment_status: "success" | "pending" | "failed" | "unknown";
+  payment_method?: string;
+  fulfillment_status?: string;
+  shipping_method?: string;
+  tracking_no?: string;
+  receiver_name?: string;
+  receiver_phone?: string;
+  address_or_store?: string;
+  items?: string;
+  order_time?: string;
+  latest_logistics_update?: string;
+  payment_failure_reason?: string;
+  order_note?: string;
+  order_source_summary?: string;
+  /** 一頁式摘要（給 AI 回覆用） */
+  one_page_summary?: string;
+  /** 原始來源 superlanding | shopline */
+  source?: OrderSource;
+}
+
 /** 回覆來源：用於區分「有無進 LLM」與短路路徑（Phase 0 可觀測性） */
 export type ReplySource =
   | "gate_skip"

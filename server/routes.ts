@@ -20,7 +20,7 @@ import { buildReplyPlan, shouldNotLeadWithOrderLookup, isAftersalesComfortFirst,
 import { enforceOutputGuard, HANDOFF_MANDATORY_OPENING, buildHandoffReply, getHandoffReplyForCustomer } from "./phase2-output";
 import { runPostGenerationGuard, isModeNoPromo, runOfficialChannelGuard, runGlobalPlatformGuard } from "./content-guard";
 import { recordGuardHit, getGuardStats } from "./content-guard-stats";
-import { searchOrderInfoThreeLayers, searchOrderInfoInRecentMessages } from "./already-provided-search";
+import { searchOrderInfoThreeLayers, searchOrderInfoInRecentMessages, extractOrderInfoFromImage } from "./already-provided-search";
 import { shouldHandoffDueToAwkwardOrRepeat } from "./awkward-repeat-handoff";
 import { isRatingEligible } from "./rating-eligibility";
 import db from "./db";
@@ -3088,6 +3088,15 @@ export async function registerRoutes(
     return res.json({ order_ids: rows.map((r) => r.global_order_id) });
   });
 
+  app.get("/api/contacts/:id/active-order", authMiddleware, (req, res) => {
+    const contactId = parseIdParam(req.params.id);
+    if (contactId === null) return res.status(400).json({ message: "無效的 ID" });
+    const contact = storage.getContact(contactId);
+    if (!contact) return res.status(404).json({ message: "聯絡人不存在" });
+    const ctx = storage.getActiveOrderContext(contactId);
+    return res.json(ctx ? { active_order: ctx } : { active_order: null });
+  });
+
   app.get("/api/orders/linked-contacts", authMiddleware, (req, res) => {
     const raw = (req.query.order_ids as string) || "";
     const orderIds = raw.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
@@ -3361,6 +3370,63 @@ export async function registerRoutes(
     }
     const contact = storage.getContact(contactId);
     const brandId = contact?.brand_id;
+    /** 圖片 order_id 優先：若 vision 抽到合法訂單編號，先查單；有對到則設 active_order_context，不因綠界/ECPay 誤判為付款截圖 */
+    try {
+      const openaiForImage = new OpenAI({ apiKey: apiKey.trim() });
+      const extracted = await extractOrderInfoFromImage(openaiForImage, dataUri);
+      const orderIdRaw = (extracted.orderId || "").trim();
+      if (orderIdRaw.length >= 5 && /^[A-Za-z0-9\-]+$/.test(orderIdRaw)) {
+        const config = getSuperLandingConfig(brandId ?? undefined);
+        const hasCreds = (config.merchantNo && config.accessKey) || (brandId ? !!storage.getBrand(brandId)?.shopline_api_token?.trim() : false);
+        if (hasCreds) {
+          const result = await unifiedLookupById(config, orderIdRaw.toUpperCase(), brandId ?? undefined);
+          if (result.found && result.orders.length > 0) {
+            const order = result.orders[0];
+            const statusLabel = getUnifiedStatusLabel(order.status, result.source);
+            const lines: string[] = [];
+            if (order.global_order_id) lines.push(`訂單編號：${order.global_order_id}`);
+            if (order.buyer_name) lines.push(`收件人姓名：${order.buyer_name}`);
+            if (order.buyer_phone) lines.push(`聯絡電話：${order.buyer_phone}`);
+            if (order.created_at) lines.push(`下單時間：${order.created_at}`);
+            if (order.payment_method) lines.push(`付款方式：${order.payment_method}`);
+            if (order.final_total_order_amount != null) lines.push(`金額：$${Number(order.final_total_order_amount).toLocaleString()}`);
+            if (order.shipping_method) lines.push(`配送方式：${order.shipping_method}`);
+            if (order.tracking_number) lines.push(`物流單號：${order.tracking_number}`);
+            const isCvs = /超商|門市|全家|7-11|萊爾富|OK|取貨/i.test(order.shipping_method || "");
+            if (order.address) lines.push(isCvs ? `取貨門市／收件地址：${order.address}` : `收件地址：${order.address}`);
+            if (order.product_list) lines.push(`訂單內容／商品：${order.product_list}`);
+            lines.push(`訂單狀態：${statusLabel}`);
+            if (order.shipped_at) lines.push(`出貨時間：${order.shipped_at}`);
+            const one_page_summary = lines.join("\n");
+            const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+            let payment_status: "success" | "pending" | "failed" | "unknown" = "unknown";
+            if (/失敗|未成功|未完成付款/i.test(statusLabel) || (order.prepaid === false && !order.paid_at && !/貨到付款|到付/i.test(order.payment_method || ""))) payment_status = "failed";
+            else if (order.prepaid === true || order.paid_at || /已出貨|已完成|待出貨|已確認/i.test(statusLabel)) payment_status = "success";
+            else if (/待付款|未付款|確認中|新訂單/i.test(statusLabel)) payment_status = "pending";
+            storage.linkOrderForContact(contactId, order.global_order_id, "ai_lookup");
+            storage.setActiveOrderContext(contactId, {
+              order_id: order.global_order_id,
+              matched_by: "image",
+              matched_confidence: "high",
+              last_fetched_at: now,
+              payment_status,
+              payment_method: order.payment_method,
+              fulfillment_status: statusLabel,
+              shipping_method: order.shipping_method,
+              tracking_no: order.tracking_number,
+              receiver_name: order.buyer_name,
+              receiver_phone: order.buyer_phone,
+              address_or_store: order.address,
+              items: order.product_list,
+              order_time: order.created_at || order.order_created_at,
+              one_page_summary,
+              source: result.source as import("@shared/schema").OrderSource,
+            });
+            return { reply: "已收到您的圖片，幫您查到這筆訂單：\n\n" + one_page_summary, usedFallback: false, intent: IMAGE_INTENT_ORDER };
+          }
+        }
+      }
+    } catch (_e) { /* 抽不到或查單失敗則繼續走 vision 意圖 */ }
     const recentMessages = storage.getMessages(contactId).slice(-10);
     const tags = (contact?.tags && typeof contact.tags === "string") ? (() => { try { return JSON.parse(contact.tags) as string[]; } catch { return []; } })() : [];
     const productScope = (contact as any)?.product_scope_locked ?? null;
@@ -3883,7 +3949,14 @@ ${contextStr}
         recentMessages: recentMessages.map((m: any) => ({ sender_type: m.sender_type, content: m.content })),
         primaryIntentOrderLookup: state.primary_intent === "order_lookup",
       });
-      if (awkwardCheck.shouldHandoff) {
+      // 查單主線收斂：已有當前訂單且本輪為訂單延伸問句時，不因尷尬/重複就轉人工
+      const activeCtxForBypass = plan.mode === "order_lookup" ? storage.getActiveOrderContext(contact.id) : null;
+      const isOrderFollowUpForBypass = activeCtxForBypass && (
+        /什麼時候到貨|什麼時候出貨|有沒有出貨|付款有成功嗎|為什麼還沒到|可以取消嗎|好的|謝謝|收到|了解|重點是什麼時候|何時會到/.test((userMessage || "").trim()) ||
+        ((userMessage || "").trim().length <= 10 && /^[好謝收解了]+$/.test((userMessage || "").trim()))
+      );
+      const skipAwkwardHandoffDueToActiveOrder = !!(isOrderFollowUpForBypass && activeCtxForBypass?.one_page_summary);
+      if (awkwardCheck.shouldHandoff && !skipAwkwardHandoffDueToActiveOrder) {
         console.log("[Webhook AI] needs_human=1 source=awkward_repeat reason=" + (awkwardCheck.reason ?? "unknown") + " msg=" + (userMessage || "").slice(0, 60));
         storage.updateContactConversationFields(contact.id, { product_scope_locked: null, customer_goal_locked: null });
         storage.updateContactHumanFlag(contact.id, 1);
@@ -4073,6 +4146,18 @@ ${contextStr}
         systemPrompt += "\n\n【本輪 久候型售後】客人等太久／不想等／想取消。先一句自然安撫（如不好意思久等～）→ 主動幫他查詢出貨 → 說明現貨/加急或約 7–20 工作天 → 補一句會盡量幫您加快。不要一開口就丟表單、不要一開口就轉人工、不要先提其他平台。可呼叫訂單查詢工具。若對話中**已有訂單編號且已查詢過**、客戶並表態「想等」或「願意等」，則**不得再問**商品名稱或訂單截圖；直接確認已備註加急／會通知出貨即可。";
       }
       if (plan.mode === "order_lookup") {
+        const activeCtx = storage.getActiveOrderContext(contact.id);
+        const msgTrim = (userMessage || "").trim();
+        if (activeCtx && /另一筆|新訂單|別筆|其他訂單|換一筆|我要查別的|不是這筆/.test(msgTrim)) {
+          storage.clearActiveOrderContext(contact.id);
+        }
+        const isOrderFollowUp = activeCtx && (
+          /什麼時候到貨|什麼時候出貨|有沒有出貨|付款有成功嗎|為什麼還沒到|可以取消嗎|好的|謝謝|收到|了解|重點是什麼時候|何時會到/.test(msgTrim) ||
+          (msgTrim.length <= 10 && /^[好謝收解了]+$/.test(msgTrim))
+        );
+        if (activeCtx?.one_page_summary && isOrderFollowUp) {
+          systemPrompt += "\n\n【當前訂單上下文】此對話已成功對到一筆訂單，以下為完整資訊。本輪請**直接依此回答**，勿再問訂單編號或商品+手機，勿呼叫 lookup_order_by_id / lookup_order_by_product_and_phone，勿呼叫 transfer_to_human。\n\n" + activeCtx.one_page_summary + "\n\n若客人問到貨/出貨/付款/取消，皆依上列狀態回答；若無法給確切到貨日，就說明目前狀態與預計時程即可。**客人只問單一重點（如「有出貨嗎」「什麼時候到」「付款成功了嗎」）時，只回答該重點即可，勿每輪重貼完整訂單摘要。**";
+        }
         systemPrompt += "\n\n【本輪 查單】本輪只做查單。底線：只接受兩種輸入—① 訂單編號 或 ② 產品名稱＋手機；不得問其他欄位（購買頁面、收件資料、官方通路等）。用一兩句自然承接後再引導其中一種即可，不要列成選單或問卷。回覆簡短（約 90～140 字）。同一句或同輪已取得訂單編號或產品+手機即不得再重問。若客人**剛在上一則已提供**手機或訂單編號，直接使用、勿再請客人「確認手機／單號對嗎」；查詢失敗或逾時時可重試或僅補問**尚未提供**的資訊（如下單日期），勿重複問已給過的欄位。";
         systemPrompt += "\n\n【已有訂單且客戶想等】若近期對話中你已提到某筆訂單編號（如 ESC20895）且已說明狀態／備註加急，客戶回「想等」「願意等」時，**禁止**再問「您這筆買的是什麼商品」「請貼商品名稱或訂單截圖」；直接回覆已備註加急、出貨會通知即可，勿再補問任何查單欄位。";
         systemPrompt += "\n\n【一頁式訂單：完整貼給客戶】訂單查詢工具回傳 **one_page_summary**（單筆）或 **one_page_full**（多筆）時，你**必須在回覆中直接把該內容完整貼給客戶**，不要摘要、不要只列單號。內容包含：訂單編號、收件人姓名、聯絡電話、下單時間、付款方式、金額、配送方式、物流單號、收件地址、訂單內容／商品、訂單狀態等，有幾筆就全部貼（多筆時每筆之間用 --- 分隔）。貼完後若客戶再問出貨、付款、物流等，**從你已貼給他的訂單資訊裡回覆**即可，勿再重複查單或只說「請稍等」；僅當客戶問的是「新訂單」或「另一筆」時才再呼叫查詢。";
@@ -4084,7 +4169,10 @@ ${contextStr}
         systemPrompt += "\n\n【地址與門市】訂單回傳若有「收件地址」或「取貨門市／收件地址」，**必須明確告知客人**：宅配時說「您的宅配地址是：xxx」、超商取貨時說「您的取貨門市是：xxx」（或貼上完整門市名稱／地址）。有資料就照資料回答；若欄位為空（例如未完成付款、門市尚未成立），則如實說明「目前訂單資料中收件地址／取貨門市尚未帶出，可能因付款未完成或訂單尚未成立」並可建議完成付款或聯繫專人。";
         systemPrompt += "\n\n【如實回報、禁止推給介面】回覆時以「這筆訂單」為主語：工具有回傳的欄位（狀態、金額、付款方式、payment_interpretation、物流單號等）就**照實說**；若某欄位工具**沒回傳**（例如沒有物流單號、沒有付款方式），就說「這筆訂單目前沒有物流單號」或「這筆訂單目前沒有顯示付款方式，可請專人協助確認」。**禁止**說「我這邊畫面沒有顯示」「我沒辦法判斷」「系統沒有顯示」「我這邊目前沒有…欄位」等以機器人自身或介面為主的說法；只描述訂單查到的狀態即可。";
         systemPrompt += "\n\n【付款與出貨】訂單查詢工具回傳中若含有 payment_interpretation 欄位，請嚴格依該說明向客人解釋付款與出貨關係（貨到付款不需等付款即可出貨、信用卡/LINE Pay 已進入出貨流程視為已付、轉帳/超商需等入帳等）。勿自行推測「要先付款才能出貨」以免誤導。";
+        systemPrompt += "\n\n【問「什麼時候到貨／出貨」禁止直接轉人工】當客戶問「什麼時候到貨」「什麼時候出貨」「重點是什麼時候出貨」「何時會到」等時，**禁止**回覆「這邊先幫您轉接真人專員」或呼叫 transfer_to_human。你**必須**：① 若對話中已有該筆訂單資訊，依訂單狀態、出貨時間(shipped_at)、物流單號回覆；若工具有回傳 shipped_at 就照實說已出貨／預計送達；② 若尚無訂單或訂單無出貨時間，先引導訂單編號或商品+手機並查詢，再依查詢結果說明狀態或「通常約 7–20 工作天」；③ 僅在查詢後仍無法取得該筆、且客戶**明確要求轉專人**時才可轉。不得僅因「無法給出確切到貨日」就轉人工。";
       }
+      /** 對話收尾：由你判斷「感覺能收尾了」就自然收尾，不限於客人說好的/謝謝。任何情況只要話題已解決、客人無新問題、或明顯在道別，就簡短結束，勿再開新題、勿追問。 */
+      systemPrompt += "\n\n【收尾判斷】由你**自己判斷**何時可以收尾。只要感覺這輪能結束了（例如：問題已回答完、客人表示收到/謝謝/好的、或對話已告一段落），就**自然收尾**：用一句簡短回覆即可，**不要**再主動問新問題、不要給多個選項、不要追問。不限於客人是否說「好的」「謝謝」；任何情況只要判斷能收尾就收尾。";
       // Mode-specific forbidden content：退貨/取消/handoff/order_lookup 禁止賣點、行銷、推薦、價格組合（底線不變）
       if (isModeNoPromo(plan.mode)) {
         systemPrompt += "\n\n【本輪禁止】不得輸出：商品賣點、行銷詞、推薦語、價格組合、無關品類補充、主動銷售。本輪只做承接／查單／表單／安撫／轉接，不推銷。";
@@ -5427,6 +5515,47 @@ ${contextStr}
       return lines.join("\n");
     }
 
+    /** 從查單結果組出 ActiveOrderContext，供後續同一筆單延伸問題直接使用 */
+    function buildActiveOrderContext(
+      order: import("@shared/schema").OrderInfo,
+      source: string,
+      statusLabel: string,
+      onePageSummary: string,
+      matchedBy: "image" | "text" | "product_phone" | "manual"
+    ): import("@shared/schema").ActiveOrderContext {
+      const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+      let payment_status: "success" | "pending" | "failed" | "unknown" = "unknown";
+      if (/失敗|未成功|未完成付款|付款未完成/i.test(statusLabel) || (order.prepaid === false && order.paid_at == null && !/貨到付款|到付/i.test(order.payment_method || ""))) payment_status = "failed";
+      else if (order.prepaid === true || order.paid_at || /已出貨|已完成|待出貨|已確認/i.test(statusLabel)) payment_status = "success";
+      else if (/待付款|未付款|確認中|新訂單/i.test(statusLabel)) payment_status = "pending";
+      let fulfillment_status = statusLabel;
+      if (/新訂單|確認中/i.test(statusLabel)) fulfillment_status = "新訂單";
+      else if (/待出貨|備貨|處理中/i.test(statusLabel)) fulfillment_status = "備貨中";
+      else if (/已出貨|出貨中|配送/i.test(statusLabel)) fulfillment_status = "已出貨";
+      else if (/已完成|已送達/i.test(statusLabel)) fulfillment_status = "已完成";
+      else if (/取消/i.test(statusLabel)) fulfillment_status = "已取消";
+      else if (payment_status === "failed") fulfillment_status = "付款失敗";
+      else if (payment_status === "pending") fulfillment_status = "待付款";
+      return {
+        order_id: order.global_order_id,
+        matched_by: matchedBy,
+        matched_confidence: "high",
+        last_fetched_at: now,
+        payment_status,
+        payment_method: order.payment_method,
+        fulfillment_status,
+        shipping_method: order.shipping_method,
+        tracking_no: order.tracking_number,
+        receiver_name: order.buyer_name,
+        receiver_phone: order.buyer_phone,
+        address_or_store: order.address,
+        items: order.product_list,
+        order_time: order.created_at || order.order_created_at,
+        one_page_summary: onePageSummary,
+        source: source as import("@shared/schema").OrderSource,
+      };
+    }
+
     try {
       if (toolName === "lookup_order_by_id") {
         const orderIdRaw = (args.order_id || "").trim();
@@ -5496,6 +5625,11 @@ ${contextStr}
           payment_method: order.payment_method,
         };
         const one_page_summary = formatOrderOnePage(orderPayload);
+        if (context?.contactId) {
+          storage.linkOrderForContact(context.contactId, order.global_order_id, "ai_lookup");
+          const activeCtx = buildActiveOrderContext(order, result.source, statusLabel, one_page_summary, "text");
+          storage.setActiveOrderContext(context.contactId, activeCtx);
+        }
         return JSON.stringify({
           success: true,
           found: true,
@@ -5699,6 +5833,13 @@ ${contextStr}
         const multiOrderNote = uniqueOrders.length > 1
           ? `【重要】此手機+商品共有 ${uniqueOrders.length} 筆訂單，你必須在回覆中「逐筆列出」以下全部，不可只列一筆或省略：\n${formattedList}\n請照上述格式全部列出後，再問客戶要查看哪一筆的詳情。`
           : undefined;
+        if (context?.contactId && uniqueOrders.length === 1) {
+          const o0 = uniqueOrders[0];
+          const statusLabel0 = getUnifiedStatusLabel(o0.status, o0.source || orderSource);
+          storage.linkOrderForContact(context.contactId, o0.global_order_id, "ai_lookup");
+          const activeCtx = buildActiveOrderContext(o0, o0.source || orderSource, statusLabel0, onePageBlocks[0], "product_phone");
+          storage.setActiveOrderContext(context.contactId, activeCtx);
+        }
         return JSON.stringify({ success: true, found: true, total: uniqueOrders.length, orders: orderSummaries, note: multiOrderNote, formatted_list: uniqueOrders.length > 1 ? formattedList : undefined, one_page_summary: uniqueOrders.length === 1 ? onePageBlocks[0] : undefined, one_page_full });
       }
 

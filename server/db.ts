@@ -143,6 +143,7 @@ export function initDatabase() {
   migrateAgentDutyFields();
   migrateAgentContactFlags();
   migrateContactOrderLinks();
+  migrateContactActiveOrder();
   migrateMetaCommentCenter();
   migrateMetaCommentPhase1();
   migrateMetaCommentPhase2();
@@ -343,6 +344,22 @@ function migrateContactOrderLinks() {
       source TEXT NOT NULL DEFAULT 'manual',
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       PRIMARY KEY (contact_id, global_order_id),
+      FOREIGN KEY (contact_id) REFERENCES contacts(id)
+    );
+  `);
+}
+
+/** 當前訂單上下文（查單主線）：成功對到訂單後存一筆，後續問同一筆單的延伸問題優先用此回答 */
+function migrateContactActiveOrder() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS contact_active_order (
+      contact_id INTEGER PRIMARY KEY,
+      order_id TEXT NOT NULL,
+      matched_by TEXT NOT NULL DEFAULT 'text',
+      matched_confidence TEXT,
+      payload TEXT NOT NULL,
+      last_fetched_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (contact_id) REFERENCES contacts(id)
     );
   `);

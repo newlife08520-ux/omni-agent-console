@@ -1,5 +1,5 @@
 import db, { initDatabase, hashPassword } from "./db";
-import type { User, Contact, ContactWithPreview, Message, Setting, KnowledgeFile, TeamMember, MarketingRule, Brand, Channel, ChannelWithBrand, ImageAsset, AiLog, AgentStatus, AssignmentRecord, AgentBrandAssignment, AgentBrandRole } from "@shared/schema";
+import type { User, Contact, ContactWithPreview, Message, Setting, KnowledgeFile, TeamMember, MarketingRule, Brand, Channel, ChannelWithBrand, ImageAsset, AiLog, AgentStatus, AssignmentRecord, AgentBrandAssignment, AgentBrandRole, ActiveOrderContext } from "@shared/schema";
 import { CONTACT_STATUS_ALLOWED } from "@shared/schema";
 import { getRedisClient } from "./redis-client";
 import * as redisBC from "./redis-brands-channels";
@@ -104,6 +104,11 @@ export interface IStorage {
   };
   updateContactIssueType(id: number, issueType: string | null): void;
   updateContactOrderSource(id: number, orderSource: string): void;
+  /** 建立對話與訂單連結（AI 查單成功或手動綁定時呼叫） */
+  linkOrderForContact(contactId: number, globalOrderId: string, source?: "manual" | "ai_lookup"): void;
+  getActiveOrderContext(contactId: number): ActiveOrderContext | null;
+  setActiveOrderContext(contactId: number, ctx: ActiveOrderContext): void;
+  clearActiveOrderContext(contactId: number): void;
   setAiMutedUntil(id: number, until: string): void;
   isAiMuted(id: number): boolean;
   clearAiMuted(id: number): void;
@@ -955,6 +960,54 @@ export class SQLiteStorage implements IStorage {
 
   updateContactOrderSource(id: number, orderSource: string): void {
     db.prepare("UPDATE contacts SET order_source = ? WHERE id = ?").run(orderSource, id);
+  }
+
+  linkOrderForContact(contactId: number, globalOrderId: string, source: "manual" | "ai_lookup" = "ai_lookup"): void {
+    try {
+      db.prepare(
+        "INSERT OR IGNORE INTO contact_order_links (contact_id, global_order_id, source) VALUES (?, ?, ?)"
+      ).run(contactId, (globalOrderId || "").trim().toUpperCase(), source);
+    } catch (_e) { /* ignore */ }
+  }
+
+  getActiveOrderContext(contactId: number): ActiveOrderContext | null {
+    const row = db.prepare(
+      "SELECT order_id, matched_by, matched_confidence, payload, last_fetched_at FROM contact_active_order WHERE contact_id = ?"
+    ).get(contactId) as { order_id: string; matched_by: string; matched_confidence: string | null; payload: string; last_fetched_at: string } | undefined;
+    if (!row?.payload) return null;
+    try {
+      const payload = JSON.parse(row.payload) as Omit<ActiveOrderContext, "order_id" | "matched_by" | "matched_confidence" | "last_fetched_at">;
+      return {
+        order_id: row.order_id,
+        matched_by: row.matched_by as ActiveOrderContext["matched_by"],
+        matched_confidence: (row.matched_confidence as ActiveOrderContext["matched_confidence"]) ?? undefined,
+        last_fetched_at: row.last_fetched_at,
+        ...payload,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  setActiveOrderContext(contactId: number, ctx: ActiveOrderContext): void {
+    const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+    const { order_id, matched_by, matched_confidence, last_fetched_at, ...rest } = ctx;
+    const payload = JSON.stringify(rest);
+    db.prepare(`
+      INSERT INTO contact_active_order (contact_id, order_id, matched_by, matched_confidence, payload, last_fetched_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(contact_id) DO UPDATE SET
+        order_id = excluded.order_id,
+        matched_by = excluded.matched_by,
+        matched_confidence = excluded.matched_confidence,
+        payload = excluded.payload,
+        last_fetched_at = excluded.last_fetched_at,
+        updated_at = excluded.updated_at
+    `).run(contactId, order_id, matched_by, matched_confidence ?? null, payload, last_fetched_at, now);
+  }
+
+  clearActiveOrderContext(contactId: number): void {
+    db.prepare("DELETE FROM contact_active_order WHERE contact_id = ?").run(contactId);
   }
 
   setAiMutedUntil(id: number, until: string): void {

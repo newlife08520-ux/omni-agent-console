@@ -53,6 +53,29 @@ const ORDER_STATUS_MAP: Record<string, { label: string; color: string }> = {
   canceled: { label: "已取消", color: "bg-red-50 text-red-500 border-red-200" },
 };
 
+/** 從訂單狀態與 prepaid/paid_at 推斷付款狀態（右側面板與 AI 一致） */
+function getPaymentStatusLabel(order: { status?: string; prepaid?: boolean; paid_at?: string | null; payment_method?: string }): { label: string; color: string } {
+  const s = (order.status || "").toLowerCase();
+  const cod = /貨到付款|到付|取件.*付款/i.test(order.payment_method || "");
+  if (/失敗|未成功|未完成付款/i.test(s) || (order.prepaid === false && !order.paid_at && !cod)) return { label: "付款失敗", color: "bg-red-50 text-red-600 border-red-200" };
+  if (order.prepaid === true || order.paid_at || /已出貨|已完成|待出貨|已確認/i.test(s)) return { label: "付款成功", color: "bg-emerald-50 text-emerald-600 border-emerald-200" };
+  if (/待付款|未付款|確認中|新訂單/i.test(s)) return { label: "待付款", color: "bg-amber-50 text-amber-600 border-amber-200" };
+  return { label: "付款狀態", color: "bg-stone-50 text-stone-600 border-stone-200" };
+}
+
+/** 從訂單狀態推斷履行狀態（新訂單/備貨中/已出貨/已完成/已取消/付款失敗/待付款） */
+function getFulfillmentStatusLabel(order: { status?: string; prepaid?: boolean }): string {
+  const s = order.status || "";
+  if (/取消/i.test(s)) return "已取消";
+  if (order.prepaid === false && !/貨到付款|到付/i.test(s)) return "付款失敗";
+  if (/待付款|未付款|確認中|新訂單/i.test(s)) return "待付款";
+  if (/新訂單|確認中/i.test(s)) return "新訂單";
+  if (/待出貨|備貨|處理中/i.test(s)) return "備貨中";
+  if (/已出貨|出貨中|配送/i.test(s)) return "已出貨";
+  if (/已完成|已送達/i.test(s)) return "已完成";
+  return s || "—";
+}
+
 const SHIPPING_METHOD_MAP: Record<string, string> = {
   to_store: "超商取貨",
   to_home: "宅配到家",
@@ -2483,12 +2506,14 @@ export default function ChatPage() {
                           <p className="text-[10px] text-stone-400">查詢結果：{(orderSearchResults ?? []).length} 筆</p>
                           {(orderSearchResults ?? []).map((order, i) => {
                             const statusInfo = ORDER_STATUS_MAP[order.status] || { label: order.status, color: "bg-stone-50 text-stone-600 border-stone-200" };
+                            const paymentStatusInfo = getPaymentStatusLabel(order);
+                            const fulfillmentLabel = getFulfillmentStatusLabel(order);
                             const parsedProducts = parseProductList(order.product_list);
                             return (
-                              <div key={i} className="rounded-xl border border-stone-200 p-3 space-y-2" data-testid={`order-card-${i}`}>
+                              <div key={i} className="rounded-xl border border-stone-200 p-3 space-y-3" data-testid={`order-card-${i}`}>
                                 <div className="flex items-center justify-between gap-1 flex-wrap">
                                   <span className="text-xs font-mono font-semibold text-stone-800" data-testid={`order-id-${i}`}>{order.global_order_id}</span>
-                                  <div className="flex items-center gap-1">
+                                  <div className="flex items-center gap-1 flex-wrap">
                                     {linkedContactsMap[order.global_order_id] != null ? (
                                       <a
                                         href={`?contact=${linkedContactsMap[order.global_order_id]}`}
@@ -2510,72 +2535,34 @@ export default function ChatPage() {
                                         {ORDER_SOURCE_LABELS[order.source as OrderSource] || order.source}
                                       </span>
                                     )}
-                                    <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${statusInfo.color}`}>{statusInfo.label}</span>
+                                    <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${paymentStatusInfo.color}`} data-testid={`order-payment-status-${i}`}>{paymentStatusInfo.label}</span>
+                                    <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${statusInfo.color}`}>{fulfillmentLabel}</span>
                                   </div>
                                 </div>
-                                <div className="text-xs text-stone-600 space-y-1">
-                                  {order.buyer_name && (
-                                    <div className="flex justify-between">
-                                      <span className="text-stone-400">收件人</span>
-                                      <span>{order.buyer_name}</span>
-                                    </div>
-                                  )}
-                                  {order.buyer_phone && (
-                                    <div className="flex justify-between">
-                                      <span className="text-stone-400">電話</span>
-                                      <span className="text-[11px]">{order.buyer_phone}</span>
-                                    </div>
-                                  )}
-                                  {order.buyer_email && (
-                                    <div className="flex justify-between items-start">
-                                      <span className="text-stone-400 shrink-0">Email</span>
-                                      <span className="text-[11px] text-right break-all">{order.buyer_email}</span>
-                                    </div>
-                                  )}
-                                  <div className="flex justify-between">
-                                    <span className="text-stone-400">金額</span>
-                                    <span className="font-semibold text-stone-800">${order.final_total_order_amount.toLocaleString()}</span>
+                                <div className="text-xs text-stone-600 space-y-2">
+                                  <div className="space-y-1">
+                                    <p className="text-[10px] font-medium text-stone-400 uppercase tracking-wide">付款資訊</p>
+                                    <div className="flex justify-between"><span className="text-stone-400">付款方式</span><span>{PAYMENT_METHOD_MAP[order.payment_method as string] || order.payment_method || "—"}</span></div>
+                                    <div className="flex justify-between"><span className="text-stone-400">金額</span><span className="font-semibold text-stone-800">${order.final_total_order_amount.toLocaleString()}</span></div>
                                   </div>
-                                  {order.shipping_method && (
-                                    <div className="flex justify-between">
-                                      <span className="text-stone-400">配送方式</span>
-                                      <span>{SHIPPING_METHOD_MAP[order.shipping_method] || order.shipping_method}</span>
-                                    </div>
-                                  )}
-                                  {order.payment_method && (
-                                    <div className="flex justify-between">
-                                      <span className="text-stone-400">付款方式</span>
-                                      <span>{PAYMENT_METHOD_MAP[order.payment_method] || order.payment_method}</span>
-                                    </div>
-                                  )}
-                                  {order.tracking_number && (
-                                    <div className="flex justify-between items-start">
-                                      <span className="text-stone-400 shrink-0">物流單號</span>
-                                      <span className="font-mono text-[11px] text-emerald-700 cursor-pointer select-all text-right" title="點擊選取複製">{order.tracking_number}</span>
-                                    </div>
-                                  )}
-                                  {order.order_created_at && (
-                                    <div className="flex justify-between">
-                                      <span className="text-stone-400">下單時間</span>
-                                      <span className="text-[11px]">{formatDateTime(order.order_created_at)}</span>
-                                    </div>
-                                  )}
-                                  {order.shipped_at && (
-                                    <div className="flex justify-between">
-                                      <span className="text-stone-400">出貨時間</span>
-                                      <span className="text-[11px] text-emerald-600">{formatDateTime(order.shipped_at)}</span>
-                                    </div>
-                                  )}
+                                  <div className="space-y-1 pt-1 border-t border-stone-100">
+                                    <p className="text-[10px] font-medium text-stone-400 uppercase tracking-wide">配送資訊</p>
+                                    {order.shipping_method && <div className="flex justify-between"><span className="text-stone-400">配送方式</span><span>{SHIPPING_METHOD_MAP[order.shipping_method] || order.shipping_method}</span></div>}
+                                    {order.tracking_number && <div className="flex justify-between items-start"><span className="text-stone-400 shrink-0">物流單號</span><span className="font-mono text-[11px] text-emerald-700 select-all">{order.tracking_number}</span></div>}
+                                    {order.order_created_at && <div className="flex justify-between"><span className="text-stone-400">下單時間</span><span className="text-[11px]">{formatDateTime(order.order_created_at)}</span></div>}
+                                    {order.shipped_at && <div className="flex justify-between"><span className="text-stone-400">出貨時間</span><span className="text-[11px] text-emerald-600">{formatDateTime(order.shipped_at)}</span></div>}
+                                    {order.address && <div><span className="text-stone-400 text-[11px]">地址／門市</span><p className="text-[11px] text-stone-700 mt-0.5">{order.address}</p></div>}
+                                  </div>
+                                  <div className="space-y-1 pt-1 border-t border-stone-100">
+                                    <p className="text-[10px] font-medium text-stone-400 uppercase tracking-wide">顧客資訊</p>
+                                    {order.buyer_name && <div className="flex justify-between"><span className="text-stone-400">收件人</span><span>{order.buyer_name}</span></div>}
+                                    {order.buyer_phone && <div className="flex justify-between"><span className="text-stone-400">電話</span><span className="text-[11px]">{order.buyer_phone}</span></div>}
+                                    {order.buyer_email && <div className="flex justify-between items-start"><span className="text-stone-400 shrink-0">Email</span><span className="text-[11px] text-right break-all">{order.buyer_email}</span></div>}
+                                  </div>
                                   {parsedProducts && (
-                                    <div className="mt-1.5 pt-1.5 border-t border-stone-100">
-                                      <span className="text-stone-400 text-[11px]">品項：</span>
-                                      <p className="text-[11px] text-stone-700 mt-0.5 whitespace-pre-line">{parsedProducts}</p>
-                                    </div>
-                                  )}
-                                  {order.address && (
-                                    <div className="mt-1 pt-1 border-t border-stone-100">
-                                      <span className="text-stone-400 text-[11px]">地址：</span>
-                                      <p className="text-[11px] text-stone-700 mt-0.5">{order.address}</p>
+                                    <div className="pt-1 border-t border-stone-100">
+                                      <p className="text-[10px] font-medium text-stone-400 uppercase tracking-wide mb-1">商品資訊</p>
+                                      <p className="text-[11px] text-stone-700 whitespace-pre-line">{parsedProducts}</p>
                                     </div>
                                   )}
                                 </div>

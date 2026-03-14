@@ -95,7 +95,7 @@ const PRODUCT_ISSUE_PATTERNS = /瑕疵|損壞|錯貨|缺件|漏寄|壞掉|破損
 /** 退貨／退款／換貨／取消／久候等關鍵字 */
 const REFUND_RETURN_PATTERNS = /退貨|退款|換貨|取消訂單|不想等|不要了|等太久|怎麼還沒|還沒收到|等很久|不要等/i;
 /** 單純問訂單／出貨進度（不帶強烈退貨意圖時）；供 handoff 第二句條件用（同一句有提到才可補訂單提示） */
-export const ORDER_LOOKUP_PATTERNS = /訂單|查單|出貨|物流|還沒到|單號|編號|什麼時候到|何時出貨|出貨進度|還沒寄/i;
+export const ORDER_LOOKUP_PATTERNS = /訂單|查單|出貨|物流|還沒到|單號|編號|什麼時候到|什麼時候到貨|什麼時候出貨|何時出貨|出貨進度|還沒寄|何時會到/i;
 const PRODUCT_CONSULT_PATTERNS = /尺寸|成分|規格|用法|怎麼用|哪款|比較|差異/i;
 const PRICE_PATTERNS = /價格|多少錢|優惠|折扣|活動/i;
 /** Phase 2：品牌外生活問題，不陪聊；短句收邊界 */
