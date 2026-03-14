@@ -11,7 +11,7 @@
 
 ## 原因說明
 
-1. LINE 發送 webhook 時會帶 **`destination`**（即你的 LINE 機器人的 Channel ID）。
+1. LINE 發送 webhook 時會帶 **`destination`**（即你的 LINE 機器人的 **Bot User ID**，多為 U 開頭 33 碼；**不是** Basic settings 的數字 Channel ID）。
 2. 系統用這個 `destination` 去後台「渠道」裡找 **bot_id 相同**的那一筆 LINE 渠道。
 3. 若**找不到**（NO MATCH for bot_id）→ 就沒有該渠道的 **access_token** 與 **channel_secret** → 無法呼叫 LINE API（取得頭貼、回覆、下載圖片等）→ 出現上述紅字。
 
@@ -26,8 +26,7 @@
 到 [LINE Developers Console](https://developers.line.biz/console/)：
 
 - 選你的 **Provider** → 選 **Channel**（Messaging API 類型）。
-- 在 **Basic settings** 頁籤：
-  - **Channel ID**：複製起來，這就是 webhook 裡的 `destination`，要填到中控台的 **bot_id**。
+- 在 **Basic settings** 頁籤可看到數字 **Channel ID**（10 碼）；但 Webhook 傳來的 **destination** 是 **Bot 的 User ID**（U 開頭 33 碼）。請以「日誌中 `[WEBHOOK] destination:` 印出的值」或下方「驗證 LINE」回傳的 **userId** 為準，填到中控台該渠道的 **bot_id**，勿與數字 Channel ID 混淆。
 - 在 **Messaging API** 頁籤：
   - **Channel secret**：複製起來，填到中控台該渠道的 **channel_secret**。
   - **Channel access token**：可發行 Long-lived token，複製起來，填到中控台該渠道的 **access_token**。

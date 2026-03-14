@@ -15,7 +15,7 @@ import {
 } from "./safe-after-sale-classifier";
 import { runAutoExecution, computeMainStatus } from "./meta-comment-auto-execute";
 import * as riskRules from "./meta-comment-risk-rules";
-import { resolveConversationState, isHumanRequestMessage, isAlreadyProvidedMessage, isLinkRequestMessage, isLinkRequestCorrectionMessage, ORDER_LOOKUP_PATTERNS, isAiHandlableIntent } from "./conversation-state-resolver";
+import { resolveConversationState, isHumanRequestMessage, isAlreadyProvidedMessage, isLinkRequestMessage, isLinkRequestCorrectionMessage, ORDER_LOOKUP_PATTERNS, looksLikeOrderNumber, isAiHandlableIntent } from "./conversation-state-resolver";
 import { buildReplyPlan, shouldNotLeadWithOrderLookup, isAftersalesComfortFirst, type ReplyPlanMode } from "./reply-plan-builder";
 import { enforceOutputGuard, HANDOFF_MANDATORY_OPENING, buildHandoffReply, getHandoffReplyForCustomer } from "./phase2-output";
 import { runPostGenerationGuard, isModeNoPromo, runOfficialChannelGuard, runGlobalPlatformGuard } from "./content-guard";
@@ -4680,9 +4680,12 @@ ${contextStr}
       console.log("[WEBHOOK] 無 destination，視為未匹配 channel，不自動回覆（fail-closed）");
     }
 
-    if (!channelSecretVal) {
+    // 僅在「已匹配到渠道、但該渠道未填 channel_secret」時才用全域 secret；NO MATCH 時不用 global 驗簽，避免多租戶下用錯機器人的 secret
+    if (!channelSecretVal && matchedChannel) {
       channelSecretVal = storage.getSetting("line_channel_secret");
-      console.log("[WEBHOOK] Using global channel_secret, exists:", !!channelSecretVal);
+      console.log("[WEBHOOK] Using global channel_secret (matched channel had none), exists:", !!channelSecretVal);
+    } else if (!channelSecretVal && !matchedChannel) {
+      console.log("[WEBHOOK] NO MATCH — 不使用 global channel_secret 驗簽（fail-closed），避免用錯機器人 secret");
     }
     // SaaS 多租戶：禁止用全域 Token 作為 LINE API 的 fallback，僅使用 matchedChannel.access_token
     if (!channelToken) {
@@ -4809,22 +4812,28 @@ ${contextStr}
             if (channelToken) {
               await pushLineMessage(contact.platform_user_id, [{ type: "text", text: handoffText }], channelToken);
             }
-          } else if (!contact.needs_human) {
-            const aiEnabled = matchedChannel ? matchedChannel.is_ai_enabled : 0;
-            if (!aiEnabled) {
-              if (!matchedChannel) console.log("[WEBHOOK] 無匹配 channel，跳過文字自動回覆（fail-closed）");
-              else console.log("[WEBHOOK] AI 已關閉 (channel:", matchedChannel.channel_name, ", is_ai_enabled=", matchedChannel.is_ai_enabled, ") - 跳過自動回覆");
-            } else {
-              console.log("[WEBHOOK] AI 已啟用，準備文字自動回覆 — channel:", matchedChannel?.channel_name);
-              const testMode = storage.getSetting("test_mode");
-              if (testMode === "true") {
-                storage.createMessage(contact.id, "line", "ai", `[測試模式] 收到您的訊息：「${text}」。`);
+          } else {
+            /** 恢復 AI 後第一句：即使 DB 仍為 needs_human=1，若本則為明確查單意圖仍進 AI 流程。只要偵測到像訂單編號（含 DEN65234、DEN 65234）或查單關鍵字都進 AI 查單。 */
+            const trimmedText = (text || "").trim();
+            const isOrderLookupMsg = ORDER_LOOKUP_PATTERNS.test(trimmedText) || /我要查訂單|查訂單|想查訂單|要查單|幫我查訂單/i.test(trimmedText) || looksLikeOrderNumber(trimmedText);
+            const shouldInvokeAi = !contactAfterProfile.needs_human || isOrderLookupMsg;
+            if (shouldInvokeAi) {
+              const aiEnabled = matchedChannel ? matchedChannel.is_ai_enabled : 0;
+              if (!aiEnabled) {
+                if (!matchedChannel) console.log("[WEBHOOK] 無匹配 channel，跳過文字自動回覆（fail-closed）");
+                else console.log("[WEBHOOK] AI 已關閉 (channel:", matchedChannel.channel_name, ", is_ai_enabled=", matchedChannel.is_ai_enabled, ") - 跳過自動回覆");
               } else {
-                debounceTextMessage(contact.id, text, (mergedText) =>
-                  withContactLock(contact.id, () =>
-                    autoReplyWithAI(contact, mergedText, channelToken, matchedBrandId)
-                  )
-                );
+                console.log("[WEBHOOK] AI 已啟用，準備文字自動回覆 — channel:", matchedChannel?.channel_name);
+                const testMode = storage.getSetting("test_mode");
+                if (testMode === "true") {
+                  storage.createMessage(contact.id, "line", "ai", `[測試模式] 收到您的訊息：「${text}」。`);
+                } else {
+                  debounceTextMessage(contact.id, text, (mergedText) =>
+                    withContactLock(contact.id, () =>
+                      autoReplyWithAI(contact, mergedText, channelToken, matchedBrandId)
+                    )
+                  );
+                }
               }
             }
           }
@@ -5207,18 +5216,24 @@ ${contextStr}
                     console.error("[FB Webhook] 轉人工回覆失敗:", err)
                   );
                 }
-              } else if (!contact.needs_human) {
-                const fbAiEnabled = matchedChannel ? (matchedChannel.is_ai_enabled === 1) : false;
-                if (!fbAiEnabled) {
-                  console.log("[FB WEBHOOK] AI 已關閉 (channel:", matchedChannel?.channel_name, ") - 跳過自動回覆");
-                } else {
-                  const testMode = storage.getSetting("test_mode");
-                  if (testMode !== "true" && matchedChannel?.access_token) {
-                    debounceTextMessage(contact.id, text, (mergedText) =>
-                      withContactLock(contact.id, () =>
-                        autoReplyWithAI(contact, mergedText, matchedChannel!.access_token, matchedBrandId, "messenger")
-                      )
-                    );
+              } else {
+                /** 恢復 AI 後第一句：若本則為明確查單意圖仍進 AI 流程，與 LINE 一致；像訂單編號的內容也視為查單 */
+                const trimmedTextFb = (text || "").trim();
+                const isOrderLookupMsgFb = ORDER_LOOKUP_PATTERNS.test(trimmedTextFb) || /我要查訂單|查訂單|想查訂單|要查單|幫我查訂單/i.test(trimmedTextFb) || looksLikeOrderNumber(trimmedTextFb);
+                const shouldInvokeAiFb = !contact.needs_human || isOrderLookupMsgFb;
+                if (shouldInvokeAiFb) {
+                  const fbAiEnabled = matchedChannel ? (matchedChannel.is_ai_enabled === 1) : false;
+                  if (!fbAiEnabled) {
+                    console.log("[FB WEBHOOK] AI 已關閉 (channel:", matchedChannel?.channel_name, ") - 跳過自動回覆");
+                  } else {
+                    const testMode = storage.getSetting("test_mode");
+                    if (testMode !== "true" && matchedChannel?.access_token) {
+                      debounceTextMessage(contact.id, text, (mergedText) =>
+                        withContactLock(contact.id, () =>
+                          autoReplyWithAI(contact, mergedText, matchedChannel!.access_token, matchedBrandId, "messenger")
+                        )
+                      );
+                    }
                   }
                 }
               }

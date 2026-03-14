@@ -96,6 +96,11 @@ const PRODUCT_ISSUE_PATTERNS = /瑕疵|損壞|錯貨|缺件|漏寄|壞掉|破損
 const REFUND_RETURN_PATTERNS = /退貨|退款|換貨|取消訂單|不想等|不要了|等太久|怎麼還沒|還沒收到|等很久|不要等/i;
 /** 單純問訂單／出貨進度（不帶強烈退貨意圖時）；供 handoff 第二句條件用（同一句有提到才可補訂單提示） */
 export const ORDER_LOOKUP_PATTERNS = /訂單|查單|出貨|物流|還沒到|單號|編號|什麼時候到|什麼時候到貨|什麼時候出貨|何時出貨|出貨進度|還沒寄|何時會到/i;
+/** 像訂單編號的格式：英數字+連字號 5 碼以上，可含空格（會先去除）。只要偵測到就應觸發查單。 */
+export function looksLikeOrderNumber(text: string): boolean {
+  const normalized = (text || "").trim().replace(/\s+/g, "");
+  return normalized.length >= 5 && /^[A-Z0-9\-]+$/i.test(normalized);
+}
 const PRODUCT_CONSULT_PATTERNS = /尺寸|成分|規格|用法|怎麼用|哪款|比較|差異/i;
 const PRICE_PATTERNS = /價格|多少錢|優惠|折扣|活動/i;
 /** Phase 2：品牌外生活問題，不陪聊；短句收邊界 */
@@ -126,8 +131,8 @@ function detectPrimaryIntent(userMessage: string, recentUserMessages: string[], 
   if (LINK_REQUEST_PATTERNS.test(text) || LINK_REQUEST_CORRECTION_PATTERNS.test(text)) return "link_request";
   if (HIGH_RISK_PATTERNS.test(combined)) return "complaint";
   if (INSIST_REFUND_PATTERNS.test(text)) return "refund_or_return";
-  /** Phase 2：單純查單／出貨進度（如「我買OO怎麼還沒到」）優先於退換貨，避免誤判為 aftersales_comfort_first */
-  if (ORDER_LOOKUP_PATTERNS.test(combined) || /^[A-Z0-9\-]{5,}$/i.test(text)) return "order_lookup";
+  /** Phase 2：單純查單／出貨進度（如「我買OO怎麼還沒到」）優先於退換貨；像訂單編號的內容（含空格如 DEN 65234）也視為查單 */
+  if (ORDER_LOOKUP_PATTERNS.test(combined) || looksLikeOrderNumber(text)) return "order_lookup";
   if (REFUND_RETURN_PATTERNS.test(combined)) return "refund_or_return";
   if (OFF_TOPIC_PATTERNS.test(text)) return "off_topic";
   if (PRODUCT_CONSULT_PATTERNS.test(combined)) return "product_consult";

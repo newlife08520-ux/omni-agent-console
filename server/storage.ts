@@ -351,6 +351,7 @@ export class SQLiteStorage implements IStorage {
     return db.prepare("SELECT * FROM channels WHERE id = ?").get(id) as Channel | undefined;
   }
 
+  /** LINE：bot_id 存的是 Webhook 請求體的 destination（Bot User ID，通常 U 開頭 33 碼），用於多渠道路由匹配；非後台數字 Channel ID。 */
   getChannelByBotId(botId: string): ChannelWithBrand | undefined {
     const raw = (botId || "").trim();
     if (!raw) return undefined;

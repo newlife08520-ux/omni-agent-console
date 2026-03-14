@@ -99,7 +99,7 @@ export function getLinkedOrderIdsForContact(contactId: number): string[] {
   return rows.map((r) => r.global_order_id);
 }
 
-/** Layer 2：用 vision 從圖片抽取訂單編號、手機（訂單/出貨截圖） */
+/** Layer 2：用 vision 從圖片抽取訂單編號、手機。只要圖中有像訂單編號的都要盡量辨識並查單。 */
 export async function extractOrderInfoFromImage(
   openai: OpenAI,
   imageDataUri: string
@@ -114,7 +114,7 @@ export async function extractOrderInfoFromImage(
           content: [
             {
               type: "text",
-              text: "這張圖是訂單、出貨或客服對話截圖。請只回覆 JSON 一行，格式：{\"order_id\":\"訂單編號或空字串\",\"phone\":\"手機號碼或空字串\"}。若圖中沒有訂單編號或手機請回 {\"order_id\":\"\",\"phone\":\"\"}。不要其他說明。",
+              text: "這張圖可能是訂單、出貨、物流或客服對話截圖。請仔細辨識圖中任何「訂單編號／單號／編號」：只要看到 5 碼以上的英數字組合（如 DEN65234、ESC20895、KBT58265），都請填入 order_id；若有 09 開頭手機也填入 phone。回覆僅一行 JSON：{\"order_id\":\"辨識到的訂單編號或空字串\",\"phone\":\"手機或空字串\"}。若完全沒有訂單編號或手機則 {\"order_id\":\"\",\"phone\":\"\"}。不要其他說明。",
             },
             { type: "image_url", image_url: { url: imageDataUri } },
           ],

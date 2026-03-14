@@ -128,9 +128,13 @@ export async function getChannel(client: RedisClient, id: number): Promise<Chann
   return channels.find((c) => c.id === id);
 }
 
+/** LINE：bot_id 與 Webhook destination 比對；支援 TRIM 與 U 前綴有無的雙向匹配，與 SQLite storage.getChannelByBotId 行為一致。 */
 export async function getChannelByBotId(client: RedisClient, botId: string): Promise<ChannelWithBrand | undefined> {
+  const raw = (botId || "").trim();
+  if (!raw) return undefined;
+  const alt = raw.startsWith("U") ? raw.slice(1) : "U" + raw;
   const list = await getChannelsWithBrand(client);
-  return list.find((c) => c.bot_id === botId && c.is_active === 1);
+  return list.find((c) => c.is_active === 1 && ((c.bot_id ?? "").trim() === raw || (c.bot_id ?? "").trim() === alt));
 }
 
 export async function createChannel(
