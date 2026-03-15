@@ -24,7 +24,7 @@ import { useChatView, type ViewMode } from "@/lib/chat-view-context";
 import { useToast } from "@/hooks/use-toast";
 import type { ContactWithPreview, Contact, Message, OrderInfo, ContactStatus, IssueType, OrderSource } from "@shared/schema";
 import type { TeamMember } from "@shared/schema";
-import { CONTACT_STATUS_LABELS, CONTACT_STATUS_COLORS, ISSUE_TYPE_LABELS, ISSUE_TYPE_COLORS, ORDER_SOURCE_LABELS, CASE_STATUS_VALUES, SYSTEM_MARK_VALUES } from "@shared/schema";
+import { CONTACT_STATUS_LABELS, CONTACT_STATUS_COLORS, ISSUE_TYPE_LABELS, ISSUE_TYPE_COLORS, ORDER_SOURCE_LABELS, CASE_STATUS_VALUES, SYSTEM_MARK_VALUES } from "@/lib/contact-schema-constants";
 
 const CASE_PRIORITY_OPTIONS: { value: string; label: string }[] = [
   { value: "none", label: "未設定" },
