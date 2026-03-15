@@ -26,6 +26,15 @@ import type { ContactWithPreview, Contact, Message, OrderInfo, ContactStatus, Is
 import type { TeamMember } from "@shared/schema";
 import { CONTACT_STATUS_LABELS, CONTACT_STATUS_COLORS, ISSUE_TYPE_LABELS, ISSUE_TYPE_COLORS, ORDER_SOURCE_LABELS, CASE_STATUS_VALUES, SYSTEM_MARK_VALUES } from "@shared/schema";
 
+const CASE_PRIORITY_OPTIONS: { value: string; label: string }[] = [
+  { value: "none", label: "未設定" },
+  { value: "1", label: "緊急" },
+  { value: "2", label: "優先處理" },
+  { value: "3", label: "一般" },
+  { value: "4", label: "低" },
+  { value: "5", label: "最低" },
+];
+
 /** 全站統一狀態語意色：紅=超時/高風險、橘=待處理、藍=已分配、綠=已回覆/正常、灰=待分配/離線 */
 const STATUS_SEMANTIC = {
   danger: { bg: "bg-red-100 text-red-700 border-red-200", dot: "bg-red-500" },
@@ -1188,6 +1197,18 @@ export default function ChatPage() {
     } catch (_e) { toast({ title: "操作失敗", variant: "destructive" }); }
   };
 
+  const handleCasePriorityChange = async (value: string) => {
+    if (!selectedId) return;
+    const priority = value === "none" ? null : parseInt(value, 10);
+    try {
+      await apiRequest("PUT", `/api/contacts/${selectedId}/case-priority`, { case_priority: priority });
+      invalidateContactsAndStats();
+      queryClient.invalidateQueries({ queryKey: ["/api/contacts", selectedBrandId], exact: false });
+      queryClient.invalidateQueries({ queryKey: ["/api/contacts", selectedId, "detail"] });
+      toast({ title: "已更新優先級" });
+    } catch (_e) { toast({ title: "更新優先級失敗", variant: "destructive" }); }
+  };
+
   const isManager = authUser?.user?.role === "super_admin" || authUser?.user?.role === "marketing_manager";
   const isCsAgent = authUser?.user?.role === "cs_agent";
 
@@ -2274,8 +2295,8 @@ export default function ChatPage() {
                           <CardTitle className="text-xs font-semibold text-stone-600">案件總覽</CardTitle>
                         </CardHeader>
                         <CardContent className="px-3 pb-3 pt-0 space-y-1.5 text-[11px]">
-                          <div className="flex justify-between"><span className="text-stone-500">狀態</span><span className="font-medium text-stone-700">{effectiveSelectedContact?.status ? (CONTACT_STATUS_LABELS as Record<string, string>)[effectiveSelectedContact.status] || effectiveSelectedContact.status : "—"}</span></div>
-                          <div className="flex justify-between"><span className="text-stone-500">優先級</span><span className={effectiveSelectedContact && isUrgent(effectiveSelectedContact as ContactWithPreview) ? "text-red-600 font-medium" : "text-stone-700"}>{effectiveSelectedContact && isUrgent(effectiveSelectedContact as ContactWithPreview) ? "緊急案件" : (effectiveSelectedContact?.case_priority != null && effectiveSelectedContact.case_priority <= 2 ? "優先處理" : "一般")}</span></div>
+                          <div className="flex justify-between items-center"><span className="text-stone-500">狀態</span><Select value={effectiveSelectedContact?.status || ""} onValueChange={(v) => v && handleStatusChange(v)}><SelectTrigger className="w-[100px] h-6 text-[10px] border-stone-200" /><SelectContent>{(Object.keys(CONTACT_STATUS_LABELS) as ContactStatus[]).map((s) => <SelectItem key={s} value={s}>{(CONTACT_STATUS_LABELS as Record<string, string>)[s] || s}</SelectItem>)}</SelectContent></Select></div>
+                          <div className="flex justify-between items-center"><span className="text-stone-500">優先級</span><Select value={effectiveSelectedContact?.case_priority != null ? String(effectiveSelectedContact.case_priority) : "none"} onValueChange={handleCasePriorityChange}><SelectTrigger className={`w-[100px] h-6 text-[10px] border-stone-200 ${effectiveSelectedContact?.case_priority != null && effectiveSelectedContact.case_priority <= 2 ? "text-red-600 font-medium" : ""}`} /><SelectContent>{CASE_PRIORITY_OPTIONS.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}</SelectContent></Select></div>
                           <div className="flex justify-between"><span className="text-stone-500">最後一句</span><span className="text-stone-700">{(effectiveSelectedContact as ContactWithPreview)?.last_message_sender_type === "user" ? "客戶" : (effectiveSelectedContact as ContactWithPreview)?.last_message_sender_type === "admin" ? "客服" : (effectiveSelectedContact as ContactWithPreview)?.last_message_sender_type === "ai" ? "AI" : "—"}</span></div>
                           {effectiveSelectedContact?.last_message_at && <div className="flex justify-between"><span className="text-stone-500">最後互動</span><span className="text-stone-700">{formatDateTime(effectiveSelectedContact.last_message_at)}</span></div>}
                           {effectiveSelectedContact && needReply(effectiveSelectedContact as ContactWithPreview) && isOverdue(effectiveSelectedContact as ContactWithPreview) && <div className="flex justify-between"><span className="text-stone-500">逾時</span><span className="text-red-600 font-medium">是</span></div>}

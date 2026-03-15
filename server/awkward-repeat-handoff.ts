@@ -98,6 +98,21 @@ function intentMismatchLastRound(
   return aiGaveReturnForm;
 }
 
+/** 用戶明確要求轉人工的關鍵字（此類不禁用） */
+const HANDOFF_EXPLICIT = /轉人工|找真人|不要機器人|找主管|要真人|人工客服/i;
+
+/**
+ * 白名單：查單情境下用戶僅回覆短句（如商品名「天鷹包」）視為正在補齊參數，不判為尷尬／重複。
+ */
+function isShortNounReplyInOrderLookup(userMessage: string, primaryIntentOrderLookup: boolean): boolean {
+  const trimmed = (userMessage || "").trim();
+  if (trimmed.length > 20) return false;
+  if (primaryIntentOrderLookup !== true) return false;
+  if (ALREADY_GAVE_OR_CONFUSED.test(trimmed)) return false;
+  if (HANDOFF_EXPLICIT.test(trimmed)) return false;
+  return true;
+}
+
 export interface AwkwardRepeatInput {
   userMessage: string;
   recentMessages: MessageLike[];
@@ -112,10 +127,15 @@ export interface AwkwardRepeatResult {
 
 /**
  * 緊急止血：不因一次尷尬或一次「我給過了」就轉人工。只保留真正重複兩次以上或高風險才升級。
+ * 放寬：查單時用戶單純回覆幾個字（如商品名稱「天鷹包」）不判為尷尬／重複，加入 bypass 白名單。
  */
 export function shouldHandoffDueToAwkwardOrRepeat(input: AwkwardRepeatInput): AwkwardRepeatResult {
   const { userMessage, recentMessages, primaryIntentOrderLookup } = input;
   const recent = Array.isArray(recentMessages) ? recentMessages : [];
+
+  if (isShortNounReplyInOrderLookup(userMessage || "", primaryIntentOrderLookup === true)) {
+    return { shouldHandoff: false };
+  }
 
   if (sameDataAskedTwice(recent)) {
     return { shouldHandoff: true, reason: "same_data_asked_twice" };

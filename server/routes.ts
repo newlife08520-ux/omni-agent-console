@@ -349,6 +349,7 @@ async function getEnrichedSystemPrompt(
 ` + shippingLogicBlock + `
 
 二、詢問訂單／出貨進度（查單唯一合法輸入，底線不變）
+【最高指導原則】當用戶提供的資訊不完整（例如：只有商品名沒有電話、或只有電話沒有商品名）時，**絕對禁止**立刻呼叫轉人工工具或判定 handoff。你必須以友善的客服口吻**主動追問**缺少的資訊（例如：「好的，請提供您購買天鷹包時留的手機號碼喔！」「請問您買的是哪一款商品呢？再提供下單時留的手機號碼我就能幫您查～」），直到湊齊參數為止。僅在客戶**明確要求找真人**、客訴、或**多次追問仍無效**時才可轉人工。
 - 觸發：訂單、查單、出貨、物流、單號、出貨進度、還沒寄、等太久等。
 - 只允許引導兩種方式之一：① 訂單編號；② 產品名稱＋手機號碼。不得再問其他欄位（如購買頁面、收件資料、官方通路等）。
 - 回覆方式：用一兩句自然承接即可（如「好喔我幫您查一下」「不好意思久等～我來看一下進度」），再依情境只問其中一種，不要列成選單或一次丟很多欄位。
@@ -365,7 +366,7 @@ async function getEnrichedSystemPrompt(
 四、轉人工條件
 可轉：明確要求真人；明確堅持退款／退貨／取消且不接受等待；商品損壞／瑕疵且情況較複雜；補償、爭議、金流異常；情緒高風險、投訴、公開負評風險；AI 已嘗試一輪仍無法推進；查單查不到。
 不可太快轉：不要只因為第一次問進度、第一次抱怨久候、語氣有點急、或只提到「退貨」兩字但尚未說明原因就轉人工。
-【重要】「真人感」≠「轉真人客服」：真人感是指回覆語氣自然、溫暖、像真人，**絕不表示要轉接真人**。只有當顧客**明確說出**要轉人工、找真人、找主管、不要機器人時，才呼叫 transfer_to_human。**禁止**因以下情況就轉接：打招呼（在嗎、哈囉）、一般情緒或催促（太誇張了、等一下、怎麼還沒）、短句、或僅因希望回覆有人味而轉接。
+【重要】「真人感」≠「轉真人客服」：真人感是指回覆語氣自然、溫暖、像真人，**絕不表示要轉接真人**。只有當顧客**明確說出**要轉人工、找真人、找主管、不要機器人時，才呼叫 transfer_to_human。**禁止**因以下情況就轉接：打招呼（在嗎、哈囉）、一般情緒或催促（太誇張了、等一下、怎麼還沒）、短句、或僅因希望回覆有人味而轉接。**禁止**因查單時「用戶只給了商品名還沒給電話」或「只給了部分資訊」就呼叫 transfer_to_human；必須先追問缺少的項目。
 
 五、語氣與禁止
 - 像真人對話即可：自然短句、口語承接，不必制式開場或列點問卷。例：「我先幫您確認看看」「這邊幫您查一下」「不好意思久等～」「有現貨會盡快幫您安排」。此處「像真人」僅指語氣，不觸發轉接。
@@ -2846,6 +2847,19 @@ export async function registerRoutes(
     return res.json({ success: true });
   });
 
+  app.put("/api/contacts/:id/case-priority", authMiddleware, (req, res) => {
+    const id = parseIdParam(req.params.id);
+    if (id === null) return res.status(400).json({ message: "無效的 ID" });
+    const v = req.body?.case_priority;
+    const priority = v === undefined || v === null || v === "" ? null : Number(v);
+    if (priority !== null && (Number.isNaN(priority) || priority < 1 || priority > 5)) {
+      return res.status(400).json({ message: "case_priority 須為 1–5 或 null" });
+    }
+    storage.updateContactCasePriority(id, priority);
+    broadcastSSE("contacts_updated", { contact_id: id });
+    return res.json({ success: true });
+  });
+
   app.get("/api/contacts/:id/ai-logs", authMiddleware, (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) return res.status(400).json({ message: "無效的 ID" });
@@ -3726,17 +3740,13 @@ ${contextStr}
     }
     if (freshCheck && freshCheck.needs_human) {
       const isLinkAsk = isLinkRequestMessage(userMessage) || isLinkRequestCorrectionMessage(userMessage);
-      /** 查單意圖：客戶說「我要查訂單」「出貨多久」等時，不因已在待人工就跳過，必須讓 AI 跑查單工具，禁止再直接轉人工 */
-      const isOrderInquiry = ORDER_LOOKUP_PATTERNS.test((userMessage || "").trim()) || /我要查訂單|查訂單|想查訂單|要查單|幫我查訂單/i.test((userMessage || "").trim());
       if (isLinkAsk) {
         storage.updateContactHumanFlag(contact.id, 0);
         storage.updateContactStatus(contact.id, "ai_handling");
         broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-      } else if (isOrderInquiry) {
-        /** 放行：本輪做查單，不跳過；state resolver 會將本輪視為 order_lookup、needs_human 不沿用 */
-        console.log(`[Gate] Contact ${contact.id} needs_human=1 但本輪為查單意圖，放行執行查單`);
       } else {
-        console.log(`[AI Mute] Contact ${contact.id} needs_human=1, AI 靜音中 - 跳過`);
+        /** 徹底封殺 Handoff Loop：needs_human=1 時僅允許 link 請求恢復 AI；其餘只存訊息、不喚醒 LLM、不送任何轉接罐頭句 */
+        console.log(`[AI Mute] Contact ${contact.id} needs_human=1, AI 靜音中 - 跳過（僅存訊息）`);
         storage.createAiLog({
           contact_id: contact.id,
           brand_id: effectiveBrandIdForLog || undefined,
@@ -4174,7 +4184,7 @@ ${contextStr}
         if (activeCtx?.one_page_summary && isOrderFollowUp) {
           systemPrompt += "\n\n【當前訂單上下文】此對話已成功對到一筆訂單，以下為完整資訊。本輪請**直接依此回答**，勿再問訂單編號或商品+手機，勿呼叫 lookup_order_by_id / lookup_order_by_product_and_phone，勿呼叫 transfer_to_human。\n\n" + activeCtx.one_page_summary + "\n\n若客人問到貨/出貨/付款/取消，皆依上列狀態回答；若無法給確切到貨日，就說明目前狀態與預計時程即可。**客人只問單一重點（如「有出貨嗎」「什麼時候到」「付款成功了嗎」）時，只回答該重點即可，勿每輪重貼完整訂單摘要。**";
         }
-        systemPrompt += "\n\n【本輪 查單】本輪只做查單。底線：只接受兩種輸入—① 訂單編號 或 ② 產品名稱＋手機；不得問其他欄位（購買頁面、收件資料、官方通路等）。用一兩句自然承接後再引導其中一種即可，不要列成選單或問卷。回覆簡短（約 90～140 字）。同一句或同輪已取得訂單編號或產品+手機即不得再重問。若客人**剛在上一則已提供**手機或訂單編號，直接使用、勿再請客人「確認手機／單號對嗎」；查詢失敗或逾時時可重試或僅補問**尚未提供**的資訊（如下單日期），勿重複問已給過的欄位。";
+        systemPrompt += "\n\n【本輪 查單】本輪只做查單。底線：只接受兩種輸入—① 訂單編號 或 ② 產品名稱＋手機；不得問其他欄位（購買頁面、收件資料、官方通路等）。用一兩句自然承接後再引導其中一種即可，不要列成選單或問卷。回覆簡短（約 90～140 字）。同一句或同輪已取得訂單編號或產品+手機即不得再重問。若客人**剛在上一則已提供**手機或訂單編號，直接使用、勿再請客人「確認手機／單號對嗎」；查詢失敗或逾時時可重試或僅補問**尚未提供**的資訊（如下單日期），勿重複問已給過的欄位。【缺參數時禁止轉人工】若客人只給了商品名稱（例如「天鷹包」）尚未給手機，或只給了部分資訊，**禁止**呼叫 transfer_to_human；你**必須**友善追問缺少的項目（例如：「好的，請提供您購買天鷹包時留的手機號碼喔！」），湊齊後再查詢。";
         systemPrompt += "\n\n【已有訂單且客戶想等】若近期對話中你已提到某筆訂單編號（如 ESC20895）且已說明狀態／備註加急，客戶回「想等」「願意等」時，**禁止**再問「您這筆買的是什麼商品」「請貼商品名稱或訂單截圖」；直接回覆已備註加急、出貨會通知即可，勿再補問任何查單欄位。";
         systemPrompt += "\n\n【一頁式訂單：完整貼給客戶】訂單查詢工具回傳 **one_page_summary**（單筆）或 **one_page_full**（多筆）時，你**必須在回覆中直接把該內容完整貼給客戶**，不要摘要、不要只列單號。內容包含：訂單編號、收件人姓名、聯絡電話、下單時間、付款方式、金額、配送方式、物流單號、收件地址、訂單內容／商品、訂單狀態等，有幾筆就全部貼（多筆時每筆之間用 --- 分隔）。貼完後若客戶再問出貨、付款、物流等，**從你已貼給他的訂單資訊裡回覆**即可，勿再重複查單或只說「請稍等」；僅當客戶問的是「新訂單」或「另一筆」時才再呼叫查詢。";
         systemPrompt += "\n\n【多筆訂單必須全部列出】當訂單查詢工具回傳多筆（total > 1 或 orders 陣列多於一筆）時，你**必須在回覆中逐筆列出每一筆**（單號、日期、金額、狀態），不可只列一筆、不可省略、不可只說「共 N 筆」而不列出。若工具回傳有 one_page_full、formatted_list 或 note 內含清單，請以 one_page_full 為優先，完整貼上。";
@@ -4829,10 +4839,11 @@ ${contextStr}
               await pushLineMessage(contact.platform_user_id, [{ type: "text", text: handoffText }], channelToken);
             }
           } else {
-            /** 恢復 AI 後第一句：即使 DB 仍為 needs_human=1，若本則為明確查單意圖仍進 AI 流程。只要偵測到像訂單編號（含 DEN65234、DEN 65234）或查單關鍵字都進 AI 查單。 */
+            /** 徹底封殺 Handoff Loop：待人工／needs_human 時僅存訊息、不喚醒 AI；僅「連結請求」可恢復 AI 並進流程 */
             const trimmedText = (text || "").trim();
-            const isOrderLookupMsg = ORDER_LOOKUP_PATTERNS.test(trimmedText) || /我要查訂單|查訂單|想查訂單|要查單|幫我查訂單/i.test(trimmedText) || looksLikeOrderNumber(trimmedText);
-            const shouldInvokeAi = !contactAfterProfile.needs_human || isOrderLookupMsg;
+            const inHandoffState = !!(contactAfterProfile.needs_human || contactAfterProfile.status === "awaiting_human" || contactAfterProfile.status === "high_risk");
+            const allowOnlyLinkRestore = inHandoffState && (isLinkRequestMessage(trimmedText) || isLinkRequestCorrectionMessage(trimmedText));
+            const shouldInvokeAi = !inHandoffState || allowOnlyLinkRestore;
             if (shouldInvokeAi) {
               const aiEnabled = matchedChannel ? matchedChannel.is_ai_enabled : 0;
               if (!aiEnabled) {
@@ -5233,10 +5244,11 @@ ${contextStr}
                   );
                 }
               } else {
-                /** 恢復 AI 後第一句：若本則為明確查單意圖仍進 AI 流程，與 LINE 一致；像訂單編號的內容也視為查單 */
+                /** 徹底封殺 Handoff Loop：待人工／needs_human 時僅存訊息、不喚醒 AI；僅「連結請求」可恢復 AI */
                 const trimmedTextFb = (text || "").trim();
-                const isOrderLookupMsgFb = ORDER_LOOKUP_PATTERNS.test(trimmedTextFb) || /我要查訂單|查訂單|想查訂單|要查單|幫我查訂單/i.test(trimmedTextFb) || looksLikeOrderNumber(trimmedTextFb);
-                const shouldInvokeAiFb = !contact.needs_human || isOrderLookupMsgFb;
+                const inHandoffStateFb = !!(contact.needs_human || contact.status === "awaiting_human" || contact.status === "high_risk");
+                const allowOnlyLinkRestoreFb = inHandoffStateFb && (isLinkRequestMessage(trimmedTextFb) || isLinkRequestCorrectionMessage(trimmedTextFb));
+                const shouldInvokeAiFb = !inHandoffStateFb || allowOnlyLinkRestoreFb;
                 if (shouldInvokeAiFb) {
                   const fbAiEnabled = matchedChannel ? (matchedChannel.is_ai_enabled === 1) : false;
                   if (!fbAiEnabled) {
@@ -5411,7 +5423,7 @@ ${contextStr}
       type: "function",
       function: {
         name: "transfer_to_human",
-        description: "僅在以下六種情況可呼叫：explicit_human_request（顧客明確要求真人）、legal_or_reputation_threat（投訴/法務/公開風險）、payment_or_order_risk（金流/訂單爭議）、policy_exception（規則外/例外需人工）、repeat_unresolved（AI 已處理一輪仍無法解決）、return_stage_3_insist（退換貨明確堅持退款/退貨）。呼叫前先依系統規則盡量收一次必要資訊，並用自然語氣告知將安排真人接手。不得僅因提到退貨、退款、久候、缺貨、取消、查單就呼叫。勿因顧客僅發送「在嗎」「太誇張了」「等一下」「哈囉」等招呼或一般情緒詞就呼叫；僅在顧客明確要求轉真人/人工/主管或符合上述六種情況時呼叫。",
+        description: "僅在客戶明確要求找真人、客訴、或多次追問仍無效時才使用；禁止因為初期缺乏查詢參數（例如只有商品名沒有電話）就輕易放棄。可呼叫的六種情況：explicit_human_request（顧客明確要求真人）、legal_or_reputation_threat（投訴/法務/公開風險）、payment_or_order_risk（金流/訂單爭議）、policy_exception（規則外/例外需人工）、repeat_unresolved（AI 已多次追問仍無法取得必要資訊或無法解決）、return_stage_3_insist（退換貨明確堅持退款/退貨）。呼叫前須先依系統規則追問缺少的查單參數（訂單編號或商品+手機），不得僅因提到退貨、退款、久候、缺貨、取消、查單就呼叫。勿因顧客僅發送「在嗎」「太誇張了」「哈囉」或只回覆商品名/短句就呼叫。",
         parameters: {
           type: "object",
           properties: {
