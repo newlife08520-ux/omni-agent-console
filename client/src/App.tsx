@@ -1,4 +1,4 @@
-import React from "react";
+import React, { Suspense, lazy } from "react";
 import { Switch, Route, Link, useLocation } from "wouter";
 import { queryClient, getQueryFn } from "./lib/queryClient";
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
@@ -8,15 +8,16 @@ import { AppSidebar } from "@/components/app-sidebar";
 import { BrandProvider } from "@/lib/brand-context";
 import { ChatViewProvider } from "@/lib/chat-view-context";
 import LoginPage from "@/pages/login";
-import ChatPage from "@/pages/chat";
-import CommentCenterPage from "./pages/comment-center";
-import SettingsPage from "@/pages/settings";
-import BrandsChannelsPage from "@/pages/brands-channels";
-import KnowledgePage from "@/pages/knowledge";
-import TeamPage from "@/pages/team";
-import AnalyticsPage from "@/pages/analytics";
-import PerformancePage from "@/pages/performance";
 import NotFound from "@/pages/not-found";
+
+const ChatPage = lazy(() => import("@/pages/chat").then((m) => ({ default: m.default })));
+const CommentCenterPage = lazy(() => import("./pages/comment-center").then((m) => ({ default: m.default })));
+const SettingsPage = lazy(() => import("@/pages/settings").then((m) => ({ default: m.default })));
+const BrandsChannelsPage = lazy(() => import("@/pages/brands-channels").then((m) => ({ default: m.default })));
+const KnowledgePage = lazy(() => import("@/pages/knowledge").then((m) => ({ default: m.default })));
+const TeamPage = lazy(() => import("@/pages/team").then((m) => ({ default: m.default })));
+const AnalyticsPage = lazy(() => import("@/pages/analytics").then((m) => ({ default: m.default })));
+const PerformancePage = lazy(() => import("@/pages/performance").then((m) => ({ default: m.default })));
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { LogOut, ShieldAlert, RefreshCw, Building2, Settings, Bell, Eye } from "lucide-react";
@@ -56,6 +57,41 @@ class AppErrorBoundary extends React.Component<
             <p className="text-sm text-stone-500 mt-2">{msg}</p>
             <Button className="mt-6" onClick={() => window.location.reload()} data-testid="button-reload">
               <RefreshCw className="w-4 h-4 mr-2" />
+              重新整理
+            </Button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+/** 包住登入後主畫面，用於定位白屏是否發生在此子樹（sidebar / main / Route）。定義於 AuthenticatedApp 之前以避免 bundler 重排導致 TDZ。 */
+class AuthenticatedAppErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean; error: unknown }
+> {
+  state = { hasError: false, error: undefined as unknown };
+
+  static getDerivedStateFromError(error: unknown) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: unknown, info: React.ErrorInfo) {
+    console.error("[AuthenticatedAppErrorBoundary] 錯誤發生在登入後主畫面（sidebar/main/Route）:", error);
+    if (info?.componentStack) console.error("[AuthenticatedAppErrorBoundary] componentStack:", info.componentStack);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      const msg = this.state.error instanceof Error ? this.state.error.message : String(this.state.error);
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-[#faf9f5] p-4">
+          <div className="text-center max-w-md">
+            <h2 className="text-lg font-semibold text-red-600">主畫面載入錯誤</h2>
+            <p className="text-sm text-stone-500 mt-2">{msg}</p>
+            <Button className="mt-4" onClick={() => window.location.reload()} data-testid="button-reload-auth">
               重新整理
             </Button>
           </div>
@@ -266,18 +302,20 @@ function AuthenticatedApp({ user }: { user: AuthUser }) {
             userRole={user.role}
           />
           <main className="flex-1 overflow-auto">
-            <Switch>
-              <GuardedRoute path="/" component={ChatPage} userRole={user.role} />
-              <GuardedRoute path="/comment-center" component={CommentCenterRedirect} userRole={user.role} />
-              <GuardedRoute path="/comment-center/:tab" component={CommentCenterPage} userRole={user.role} />
-              <GuardedRoute path="/settings/brands-channels" component={BrandsChannelsPage} userRole={user.role} />
-              <GuardedRoute path="/settings" component={SettingsPage} userRole={user.role} />
-              <GuardedRoute path="/knowledge" component={KnowledgePage} userRole={user.role} />
-              <GuardedRoute path="/team" component={TeamPage} userRole={user.role} />
-              <GuardedRoute path="/analytics" component={AnalyticsPage} userRole={user.role} />
-              <GuardedRoute path="/performance" component={PerformancePage} userRole={user.role} />
-              <Route component={NotFound} />
-            </Switch>
+            <Suspense fallback={<div className="flex items-center justify-center p-8"><div className="w-6 h-6 border-2 border-stone-300 border-t-emerald-500 rounded-full animate-spin" /></div>}>
+              <Switch>
+                <GuardedRoute path="/" component={ChatPage} userRole={user.role} />
+                <GuardedRoute path="/comment-center" component={CommentCenterRedirect} userRole={user.role} />
+                <GuardedRoute path="/comment-center/:tab" component={CommentCenterPage} userRole={user.role} />
+                <GuardedRoute path="/settings/brands-channels" component={BrandsChannelsPage} userRole={user.role} />
+                <GuardedRoute path="/settings" component={SettingsPage} userRole={user.role} />
+                <GuardedRoute path="/knowledge" component={KnowledgePage} userRole={user.role} />
+                <GuardedRoute path="/team" component={TeamPage} userRole={user.role} />
+                <GuardedRoute path="/analytics" component={AnalyticsPage} userRole={user.role} />
+                <GuardedRoute path="/performance" component={PerformancePage} userRole={user.role} />
+                <Route component={NotFound} />
+              </Switch>
+            </Suspense>
           </main>
         </div>
       </div>
@@ -285,41 +323,6 @@ function AuthenticatedApp({ user }: { user: AuthUser }) {
       </ChatViewProvider>
     </BrandProvider>
   );
-}
-
-/** 包住登入後主畫面，用於定位白屏是否發生在此子樹（sidebar / main / Route） */
-class AuthenticatedAppErrorBoundary extends React.Component<
-  { children: React.ReactNode },
-  { hasError: boolean; error: unknown }
-> {
-  state = { hasError: false, error: undefined as unknown };
-
-  static getDerivedStateFromError(error: unknown) {
-    return { hasError: true, error };
-  }
-
-  componentDidCatch(error: unknown, info: React.ErrorInfo) {
-    console.error("[AuthenticatedAppErrorBoundary] 錯誤發生在登入後主畫面（sidebar/main/Route）:", error);
-    if (info?.componentStack) console.error("[AuthenticatedAppErrorBoundary] componentStack:", info.componentStack);
-  }
-
-  render() {
-    if (this.state.hasError) {
-      const msg = this.state.error instanceof Error ? this.state.error.message : String(this.state.error);
-      return (
-        <div className="min-h-screen flex items-center justify-center bg-[#faf9f5] p-4">
-          <div className="text-center max-w-md">
-            <h2 className="text-lg font-semibold text-red-600">主畫面載入錯誤</h2>
-            <p className="text-sm text-stone-500 mt-2">{msg}</p>
-            <Button className="mt-4" onClick={() => window.location.reload()} data-testid="button-reload-auth">
-              重新整理
-            </Button>
-          </div>
-        </div>
-      );
-    }
-    return this.props.children;
-  }
 }
 
 function AppContent() {
