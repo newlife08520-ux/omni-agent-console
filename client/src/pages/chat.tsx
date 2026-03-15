@@ -1188,6 +1188,25 @@ export default function ChatPage() {
     }
   };
 
+  const { data: contactDetail } = useQuery<Contact & { ai_suggestions?: string | null; brand_name?: string }>({
+    queryKey: ["/api/contacts", selectedId ?? 0, "detail"],
+    queryFn: async () => {
+      const res = await fetch(`/api/contacts/${selectedId}`, { credentials: "include" });
+      if (!res.ok) throw new Error(String(res.status));
+      return res.json();
+    },
+    enabled: !!selectedId,
+  });
+  /** 從左側列表或由搜尋/連結開啟：列表僅顯示最近 100 筆，搜尋點入的聯絡人可能不在列表中，用 detail API 補上。必須在 handleStatusChange 等 useCallback 之前宣告，避免 TDZ。 */
+  const effectiveSelectedContact: (ContactWithPreview | (Contact & { brand_name?: string })) | undefined = selectedContact ?? (contactDetail as (Contact & { brand_name?: string }) | undefined);
+  const aiSuggestions = (() => {
+    try {
+      const raw = contactDetail?.ai_suggestions;
+      if (typeof raw !== "string" || !raw) return null;
+      return JSON.parse(raw) as { issue_type?: string; status?: string; priority?: string; tags?: string[] };
+    } catch { return null; }
+  })();
+
   const handleStatusChange = useCallback(async (status: string) => {
     if (!selectedId) return;
     try {
@@ -1262,25 +1281,6 @@ export default function ChatPage() {
     queryFn: () => apiRequest("GET", `/api/contacts/${selectedId}/assignment`) as Promise<any>,
     enabled: !!selectedId,
   });
-
-  const { data: contactDetail } = useQuery<Contact & { ai_suggestions?: string | null; brand_name?: string }>({
-    queryKey: ["/api/contacts", selectedId ?? 0, "detail"],
-    queryFn: async () => {
-      const res = await fetch(`/api/contacts/${selectedId}`, { credentials: "include" });
-      if (!res.ok) throw new Error(String(res.status));
-      return res.json();
-    },
-    enabled: !!selectedId,
-  });
-  /** 從左側列表或由搜尋/連結開啟：列表僅顯示最近 100 筆，搜尋點入的聯絡人可能不在列表中，用 detail API 補上 */
-  const effectiveSelectedContact: (ContactWithPreview | (Contact & { brand_name?: string })) | undefined = selectedContact ?? (contactDetail as (Contact & { brand_name?: string }) | undefined);
-  const aiSuggestions = (() => {
-    try {
-      const raw = contactDetail?.ai_suggestions;
-      if (typeof raw !== "string" || !raw) return null;
-      return JSON.parse(raw) as { issue_type?: string; status?: string; priority?: string; tags?: string[] };
-    } catch { return null; }
-  })();
 
   const handleUnassign = async () => {
     if (!selectedId) return;
