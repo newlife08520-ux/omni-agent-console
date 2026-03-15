@@ -485,28 +485,14 @@ export class SQLiteStorage implements IStorage {
       query += " LIMIT " + Math.min(Math.floor(limit), 2000);
       if (offset != null && offset > 0) query += " OFFSET " + Math.floor(offset);
     }
-    const contacts = db.prepare(query).all(...params) as (Contact & { brand_name?: string; channel_name?: string; assigned_agent_name?: string; assigned_agent_avatar_url?: string | null })[];
+    const contacts = db.prepare(query).all(...params) as (Contact & { brand_name?: string; channel_name?: string; assigned_agent_name?: string; assigned_agent_avatar_url?: string | null; last_message_content?: string | null; last_message_sender_type?: string | null })[];
     const t1 = Date.now();
-    const contactIds = contacts.map((c) => c.id);
-    const lastMessageByContact = new Map<number, { content: string; sender_type: string }>();
-    if (contactIds.length > 0) {
-      const placeholders = contactIds.map(() => "?").join(",");
-      const lastRows = db.prepare(`
-        SELECT m.contact_id, m.content, m.sender_type
-        FROM messages m
-        INNER JOIN (SELECT contact_id, MAX(id) AS max_id FROM messages WHERE contact_id IN (${placeholders}) GROUP BY contact_id) t
-        ON m.contact_id = t.contact_id AND m.id = t.max_id
-      `).all(...contactIds) as { contact_id: number; content: string; sender_type: string }[];
-      for (const row of lastRows) lastMessageByContact.set(row.contact_id, { content: row.content, sender_type: row.sender_type });
-    }
-    const t2 = Date.now();
     const withPreview = contacts.map((c) => {
-      const lastRow = lastMessageByContact.get(c.id);
-      const rawType = lastRow?.sender_type;
+      const rawType = (c as any).last_message_sender_type;
       const senderType = (rawType != null && ["user", "ai", "admin", "system"].includes(String(rawType).toLowerCase()))
         ? (String(rawType).toLowerCase() as ContactWithPreview["last_message_sender_type"])
         : undefined;
-      return { ...c, last_message: lastRow?.content || "", last_message_sender_type: senderType };
+      return { ...c, last_message: (c as any).last_message_content ?? "", last_message_sender_type: senderType ?? undefined };
     });
     const agentId = assignedToUserId ?? agentIdForFlags;
     if (agentId != null && withPreview.length > 0) {
@@ -514,13 +500,13 @@ export class SQLiteStorage implements IStorage {
       const t3 = Date.now();
       const total = Date.now() - t0;
       if (total > 2000) {
-        console.warn(`[contacts] getContacts slow: total=${total}ms db=${t1 - t0}ms lastMsg=${t2 - t1}ms flags=${t3 - t2}ms n=${contacts.length}`);
+        console.warn(`[contacts] getContacts slow: total=${total}ms db=${t1 - t0}ms flags=${t3 - t1}ms n=${contacts.length}`);
       }
       return withPreview.map((c) => ({ ...c, my_flag: flags[c.id] ?? null }));
     }
     const total = Date.now() - t0;
     if (total > 2000) {
-      console.warn(`[contacts] getContacts slow: total=${total}ms db=${t1 - t0}ms lastMsg=${t2 - t1}ms n=${contacts.length}`);
+      console.warn(`[contacts] getContacts slow: total=${total}ms db=${t1 - t0}ms n=${contacts.length}`);
     }
     return withPreview;
   }
@@ -638,7 +624,7 @@ export class SQLiteStorage implements IStorage {
   createMessage(contactId: number, platform: string, senderType: string, content: string, messageType: string = "text", imageUrl: string | null = null): Message {
     const now = new Date().toISOString().replace("T", " ").substring(0, 19);
     const result = db.prepare("INSERT INTO messages (contact_id, platform, sender_type, content, message_type, image_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(contactId, platform, senderType, content, messageType, imageUrl, now);
-    db.prepare("UPDATE contacts SET last_message_at = ? WHERE id = ?").run(now, contactId);
+    db.prepare("UPDATE contacts SET last_message_at = ?, last_message_content = ?, last_message_sender_type = ? WHERE id = ?").run(now, content, senderType, contactId);
     return { id: Number(result.lastInsertRowid), contact_id: contactId, platform, sender_type: senderType as any, content, message_type: messageType as any, image_url: imageUrl, created_at: now };
   }
 
@@ -1380,10 +1366,14 @@ export class SQLiteStorage implements IStorage {
   getAgentContactFlags(agentId: number, contactIds: number[]): Record<number, "later" | "tracking"> {
     const out: Record<number, "later" | "tracking"> = {};
     if (contactIds.length === 0) return out;
-    const placeholders = contactIds.map(() => "?").join(",");
-    const rows = db.prepare(`SELECT contact_id, flag FROM agent_contact_flags WHERE agent_id = ? AND contact_id IN (${placeholders})`).all(agentId, ...contactIds) as { contact_id: number; flag: string }[];
-    for (const r of rows) {
-      if (r.flag === "later" || r.flag === "tracking") out[r.contact_id] = r.flag;
+    const CHUNK_SIZE = 500;
+    for (let i = 0; i < contactIds.length; i += CHUNK_SIZE) {
+      const chunk = contactIds.slice(i, i + CHUNK_SIZE);
+      const placeholders = chunk.map(() => "?").join(",");
+      const rows = db.prepare(`SELECT contact_id, flag FROM agent_contact_flags WHERE agent_id = ? AND contact_id IN (${placeholders})`).all(agentId, ...chunk) as { contact_id: number; flag: string }[];
+      for (const r of rows) {
+        if (r.flag === "later" || r.flag === "tracking") out[r.contact_id] = r.flag;
+      }
     }
     return out;
   }

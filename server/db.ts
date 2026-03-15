@@ -157,18 +157,36 @@ export function initDatabase() {
   migrateConversationStateFields();
 }
 
-/** 常用查詢欄位索引，避免資料量成長後掃全表 */
+/** 常用查詢欄位索引，避免資料量成長後掃全表；MAX(id) GROUP BY 等 Stats 依賴複合索引避免 Full Table Scan */
 function ensurePerformanceIndexes() {
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_contact_id ON messages(contact_id);`);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_contact_created ON messages(contact_id, created_at DESC);`);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_contact_id_desc ON messages(contact_id, id DESC);`);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_brand_id ON contacts(brand_id);`);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_assigned_agent_id ON contacts(assigned_agent_id);`);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_last_message_at ON contacts(last_message_at DESC);`);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_platform_user ON contacts(platform, platform_user_id);`);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_status ON contacts(status);`);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_ai_logs_contact_id ON ai_logs(contact_id);`);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_ai_logs_created_at ON ai_logs(created_at DESC);`);
+  const run = (sql: string) => {
+    try {
+      db.exec(sql);
+    } catch (e) {
+      console.warn("[DB] Index creation skipped:", (e as Error).message, sql.slice(0, 60) + "...");
+    }
+  };
+
+  // 極速複合索引（解決 getContacts / Stats 中 MAX(id) GROUP BY 等 Full Table Scan）
+  run(`CREATE INDEX IF NOT EXISTS idx_messages_contact_id_id ON messages(contact_id, id DESC);`);
+  run(`CREATE INDEX IF NOT EXISTS idx_messages_sender_created ON messages(sender_type, created_at DESC);`);
+  run(`CREATE INDEX IF NOT EXISTS idx_contacts_brand_status ON contacts(brand_id, status);`);
+  run(`CREATE INDEX IF NOT EXISTS idx_contacts_assigned_agent ON contacts(assigned_agent_id);`);
+  run(`CREATE INDEX IF NOT EXISTS idx_contacts_last_message_at ON contacts(last_message_at DESC);`);
+
+  run(`CREATE INDEX IF NOT EXISTS idx_messages_contact_id ON messages(contact_id);`);
+  run(`CREATE INDEX IF NOT EXISTS idx_messages_contact_created ON messages(contact_id, created_at DESC);`);
+  run(`CREATE INDEX IF NOT EXISTS idx_messages_contact_id_desc ON messages(contact_id, id DESC);`);
+  run(`CREATE INDEX IF NOT EXISTS idx_contacts_brand_id ON contacts(brand_id);`);
+  run(`CREATE INDEX IF NOT EXISTS idx_contacts_assigned_agent_id ON contacts(assigned_agent_id);`);
+  run(`CREATE INDEX IF NOT EXISTS idx_contacts_platform_user ON contacts(platform, platform_user_id);`);
+  run(`CREATE INDEX IF NOT EXISTS idx_contacts_status ON contacts(status);`);
+  run(`CREATE INDEX IF NOT EXISTS idx_ai_logs_contact_id ON ai_logs(contact_id);`);
+  run(`CREATE INDEX IF NOT EXISTS idx_ai_logs_created_at ON ai_logs(created_at DESC);`);
+
+  // 反正規化：contacts 快取最後一則訊息內容與發送者類型，消除 getContacts 的 JOIN/MAX(id) 瓶頸
+  run("ALTER TABLE contacts ADD COLUMN last_message_content TEXT;");
+  run("ALTER TABLE contacts ADD COLUMN last_message_sender_type TEXT;");
 }
 
 /** 緊急止血：後台關鍵字強制縮為僅四項，移除招呼/情緒詞。每次啟動時若現有值與目標不同則覆寫。 */
