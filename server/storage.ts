@@ -422,23 +422,6 @@ export class SQLiteStorage implements IStorage {
   }
 
   async updateChannel(id: number, data: Partial<Omit<Channel, "id" | "created_at">>): Promise<boolean> {
-    const client = getRedisClient();
-    if (client) {
-      const ok = await redisBC.updateChannel(client, id, data);
-      if (ok) {
-        const fields: string[] = [];
-        const values: any[] = [];
-        for (const [key, val] of Object.entries(data)) {
-          fields.push(`${key} = ?`);
-          values.push(val);
-        }
-        if (fields.length > 0) {
-          values.push(id);
-          try { db.prepare(`UPDATE channels SET ${fields.join(", ")} WHERE id = ?`).run(...values); } catch (_e) { /* ignore */ }
-        }
-      }
-      return ok;
-    }
     const fields: string[] = [];
     const values: any[] = [];
     for (const [key, val] of Object.entries(data)) {
@@ -447,8 +430,21 @@ export class SQLiteStorage implements IStorage {
     }
     if (fields.length === 0) return false;
     values.push(id);
-    const result = db.prepare(`UPDATE channels SET ${fields.join(", ")} WHERE id = ?`).run(...values);
-    return result.changes > 0;
+    const runSqlite = () => {
+      const result = db.prepare(`UPDATE channels SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+      return result.changes > 0;
+    };
+    const client = getRedisClient();
+    if (client) {
+      const ok = await redisBC.updateChannel(client, id, data);
+      if (ok) {
+        try { runSqlite(); } catch (_e) { /* ignore */ }
+        return true;
+      }
+      // Redis 無此 id（例如僅存在 SQLite 或 Redis 曾清空）時仍更新 SQLite，避免 PUT 回 404
+      return runSqlite();
+    }
+    return runSqlite();
   }
 
   async deleteChannel(id: number): Promise<boolean> {
