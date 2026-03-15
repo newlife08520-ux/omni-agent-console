@@ -1,3 +1,9 @@
+/**
+ * 共用型別與常數定義（最底層，無依賴）。
+ * ⚠️ 禁止在此檔案內 import 任何模組（含 "@shared/schema" 自體引用、
+ *    @shared/tag-aggregation-engine、@shared/scale-score-engine 等業務邏輯）。
+ * 同檔案內的型別／常數請直接使用名稱，勿 import 自己。
+ */
 export type UserRole = "super_admin" | "marketing_manager" | "cs_agent";
 export type ChannelPlatform = "line" | "messenger";
 

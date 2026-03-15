@@ -10,6 +10,7 @@
     "dev": "cross-env NODE_ENV=development tsx server/index.ts",
     "dev:worker": "cross-env NODE_ENV=development tsx server/workers/ai-reply.worker.ts",
     "build": "tsx script/build.ts",
+    "preview": "vite preview --config vite.config.ts",
     "start": "cross-env NODE_ENV=production node dist/index.cjs",
     "start:worker": "cross-env NODE_ENV=production node dist/workers/ai-reply.worker.cjs",
     "check": "tsc",

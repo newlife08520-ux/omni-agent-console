@@ -17,6 +17,7 @@ export default defineConfig({
     outDir: path.resolve(import.meta.dirname, "dist/public"),
     emptyOutDir: true,
     chunkSizeWarningLimit: 1500,
+    minify: false, // 暫時關閉壓縮，讓 TDZ 錯誤時真實變數名稱現形（除錯用，修復後可改回 true）
     rollupOptions: {
       output: {
         manualChunks(id) {

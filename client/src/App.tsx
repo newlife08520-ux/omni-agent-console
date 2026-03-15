@@ -8,9 +8,9 @@ import { AppSidebar } from "@/components/app-sidebar";
 import { BrandProvider } from "@/lib/brand-context";
 import { ChatViewProvider } from "@/lib/chat-view-context";
 import LoginPage from "@/pages/login";
+import ChatPage from "@/pages/chat";
 import NotFound from "@/pages/not-found";
 
-const ChatPage = lazy(() => import("@/pages/chat").then((m) => ({ default: m.default })));
 const CommentCenterPage = lazy(() => import("./pages/comment-center").then((m) => ({ default: m.default })));
 const SettingsPage = lazy(() => import("@/pages/settings").then((m) => ({ default: m.default })));
 const BrandsChannelsPage = lazy(() => import("@/pages/brands-channels").then((m) => ({ default: m.default })));
