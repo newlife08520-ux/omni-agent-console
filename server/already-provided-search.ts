@@ -146,7 +146,7 @@ export async function searchOrderInfoThreeLayers(
   contactId: number,
   recentMessages: MessageLike[],
   options: {
-    imageFileToDataUri: (pathOrUrl: string) => string | null;
+    imageFileToDataUri: (pathOrUrl: string) => Promise<string | null>;
     openai: OpenAI | null;
   }
 ): Promise<ThreeLayerResult | null> {
@@ -161,7 +161,7 @@ export async function searchOrderInfoThreeLayers(
     .reverse()
     .find((m) => m.sender_type === "user" && m.message_type === "image" && m.image_url);
   if (lastImageMsg?.image_url && options.openai) {
-    const dataUri = options.imageFileToDataUri(lastImageMsg.image_url);
+    const dataUri = await options.imageFileToDataUri(lastImageMsg.image_url);
     if (dataUri) {
       const layer2 = await extractOrderInfoFromImage(options.openai, dataUri);
       if (layer2.orderId || layer2.phone) {

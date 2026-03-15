@@ -3352,11 +3352,11 @@ export async function registerRoutes(
     }
   }
 
-  function imageFileToDataUri(imageFilePath: string): string | null {
+  async function imageFileToDataUri(imageFilePath: string): Promise<string | null> {
     try {
       const absPath = path.join(getDataDir(), imageFilePath.startsWith("/") ? imageFilePath.slice(1) : imageFilePath);
       if (!fs.existsSync(absPath)) return null;
-      const imageBuffer = fs.readFileSync(absPath);
+      const imageBuffer = await fs.promises.readFile(absPath);
       const ext = path.extname(absPath).toLowerCase();
       const mimeType = ext === ".png" ? "image/png" : ext === ".gif" ? "image/gif" : ext === ".webp" ? "image/webp" : "image/jpeg";
       return `data:${mimeType};base64,${imageBuffer.toString("base64")}`;
@@ -3384,7 +3384,7 @@ export async function registerRoutes(
     if (!apiKey?.trim()) {
       return { reply: SHORT_IMAGE_FALLBACK, usedFallback: true };
     }
-    const dataUri = imageFileToDataUri(imageFilePath);
+    const dataUri = await imageFileToDataUri(imageFilePath);
     if (!dataUri) {
       return { reply: SHORT_IMAGE_FALLBACK, usedFallback: true };
     }
@@ -3529,7 +3529,7 @@ ${contextStr}
     if (!apiKey || apiKey.trim() === "") return;
     const contactPlatform = platform || "line";
     try {
-      const currentImageDataUri = imageFileToDataUri(imageFilePath);
+      const currentImageDataUri = await imageFileToDataUri(imageFilePath);
       if (!currentImageDataUri) {
         console.error("Cannot read image file for AI analysis:", imageFilePath);
         return;
@@ -3547,7 +3547,7 @@ ${contextStr}
       for (const msg of recentMessages) {
         if (msg.sender_type === "user") {
           if (msg.message_type === "image" && msg.image_url) {
-            const msgDataUri = imageFileToDataUri(msg.image_url);
+            const msgDataUri = await imageFileToDataUri(msg.image_url);
             if (msgDataUri) {
               if (msg.image_url === imageFilePath || msg.image_url.endsWith(imageFilePath.split("/").pop() || "")) {
                 currentImageIncluded = true;
@@ -4182,20 +4182,15 @@ ${contextStr}
           (msgTrim.length <= 10 && /^[好謝收解了]+$/.test(msgTrim))
         );
         if (activeCtx?.one_page_summary && isOrderFollowUp) {
-          systemPrompt += "\n\n【當前訂單上下文】此對話已成功對到一筆訂單，以下為完整資訊。本輪請**直接依此回答**，勿再問訂單編號或商品+手機，勿呼叫 lookup_order_by_id / lookup_order_by_product_and_phone，勿呼叫 transfer_to_human。\n\n" + activeCtx.one_page_summary + "\n\n若客人問到貨/出貨/付款/取消，皆依上列狀態回答；若無法給確切到貨日，就說明目前狀態與預計時程即可。**客人只問單一重點（如「有出貨嗎」「什麼時候到」「付款成功了嗎」）時，只回答該重點即可，勿每輪重貼完整訂單摘要。**";
+          systemPrompt += "\n\n【當前訂單】以下為已對到的訂單資訊，本輪請直接依此回答。\n\n" + activeCtx.one_page_summary;
         }
-        systemPrompt += "\n\n【本輪 查單】本輪只做查單。底線：只接受兩種輸入—① 訂單編號 或 ② 產品名稱＋手機；不得問其他欄位（購買頁面、收件資料、官方通路等）。用一兩句自然承接後再引導其中一種即可，不要列成選單或問卷。回覆簡短（約 90～140 字）。同一句或同輪已取得訂單編號或產品+手機即不得再重問。若客人**剛在上一則已提供**手機或訂單編號，直接使用、勿再請客人「確認手機／單號對嗎」；查詢失敗或逾時時可重試或僅補問**尚未提供**的資訊（如下單日期），勿重複問已給過的欄位。【缺參數時禁止轉人工】若客人只給了商品名稱（例如「天鷹包」）尚未給手機，或只給了部分資訊，**禁止**呼叫 transfer_to_human；你**必須**友善追問缺少的項目（例如：「好的，請提供您購買天鷹包時留的手機號碼喔！」），湊齊後再查詢。";
-        systemPrompt += "\n\n【已有訂單且客戶想等】若近期對話中你已提到某筆訂單編號（如 ESC20895）且已說明狀態／備註加急，客戶回「想等」「願意等」時，**禁止**再問「您這筆買的是什麼商品」「請貼商品名稱或訂單截圖」；直接回覆已備註加急、出貨會通知即可，勿再補問任何查單欄位。";
-        systemPrompt += "\n\n【一頁式訂單：完整貼給客戶】訂單查詢工具回傳 **one_page_summary**（單筆）或 **one_page_full**（多筆）時，你**必須在回覆中直接把該內容完整貼給客戶**，不要摘要、不要只列單號。內容包含：訂單編號、收件人姓名、聯絡電話、下單時間、付款方式、金額、配送方式、物流單號、收件地址、訂單內容／商品、訂單狀態等，有幾筆就全部貼（多筆時每筆之間用 --- 分隔）。貼完後若客戶再問出貨、付款、物流等，**從你已貼給他的訂單資訊裡回覆**即可，勿再重複查單或只說「請稍等」；僅當客戶問的是「新訂單」或「另一筆」時才再呼叫查詢。";
-        systemPrompt += "\n\n【多筆訂單必須全部列出】當訂單查詢工具回傳多筆（total > 1 或 orders 陣列多於一筆）時，你**必須在回覆中逐筆列出每一筆**（單號、日期、金額、狀態），不可只列一筆、不可省略、不可只說「共 N 筆」而不列出。若工具回傳有 one_page_full、formatted_list 或 note 內含清單，請以 one_page_full 為優先，完整貼上。";
-        systemPrompt += "\n\n【客戶說要查訂單時禁止先轉人工】當客戶說「我要查訂單」「查訂單」「現在出貨多久」「想查單」等時，**禁止**回覆「目前客服午休／忙碌，先幫您轉接真人」或呼叫 transfer_to_human。你**必須**先引導訂單編號或商品+手機，並呼叫訂單查詢工具；僅在查詢後仍無結果、且客戶明確要求轉專人時才可轉。";
-        systemPrompt += "\n\n【客戶提供訂單編號時先查單、不轉人工】當客戶貼出訂單編號（例如要確認配送方式、出貨、付款時），你**必須先呼叫 lookup_order_by_id** 取得該筆訂單的 shipping_method、payment_method、address 等完整資訊，並依結果如實回覆（有宅配/超商就說，沒有就說目前沒有顯示）。**不得**未查就先轉人工；僅在查詢後仍無法取得該筆資料、且客戶明確要求轉專人時才轉。";
-        systemPrompt += "\n\n【金額與收件資訊】訂單查詢工具回傳的 order 若含有 amount、address、buyer_phone、shipping_method，**可直接依此回覆**客人（如付款金額、收件地址、配送方式／超商門市）。有資料就依資料回答，勿說「沒辦法在聊天視窗直接調出」；僅在工具確實未回傳該欄位時才說明需由專人協助確認。若 orders 陣列中每筆有 shipping_method，請依該欄位說明宅配或超商。";
-        systemPrompt += "\n\n【宅配 vs 便利商店】order 的 shipping_method 若有回傳，請依內容如實說明是「宅配」或「超商取貨／便利商店」。便利商店包含：全家、7-11、萊爾富、OK 等。若內容含宅配、黑貓、新竹、大榮等可說宅配；若含超商、門市、取貨、全家、7-11、萊爾富等可說超商取貨。勿自行猜測。";
-        systemPrompt += "\n\n【地址與門市】訂單回傳若有「收件地址」或「取貨門市／收件地址」，**必須明確告知客人**：宅配時說「您的宅配地址是：xxx」、超商取貨時說「您的取貨門市是：xxx」（或貼上完整門市名稱／地址）。有資料就照資料回答；若欄位為空（例如未完成付款、門市尚未成立），則如實說明「目前訂單資料中收件地址／取貨門市尚未帶出，可能因付款未完成或訂單尚未成立」並可建議完成付款或聯繫專人。";
-        systemPrompt += "\n\n【如實回報、禁止推給介面】回覆時以「這筆訂單」為主語：工具有回傳的欄位（狀態、金額、付款方式、payment_interpretation、物流單號等）就**照實說**；若某欄位工具**沒回傳**（例如沒有物流單號、沒有付款方式），就說「這筆訂單目前沒有物流單號」或「這筆訂單目前沒有顯示付款方式，可請專人協助確認」。**禁止**說「我這邊畫面沒有顯示」「我沒辦法判斷」「系統沒有顯示」「我這邊目前沒有…欄位」等以機器人自身或介面為主的說法；只描述訂單查到的狀態即可。";
-        systemPrompt += "\n\n【付款與出貨】訂單查詢工具回傳中若含有 payment_interpretation 欄位，請嚴格依該說明向客人解釋付款與出貨關係（貨到付款不需等付款即可出貨、信用卡/LINE Pay 已進入出貨流程視為已付、轉帳/超商需等入帳等）。勿自行推測「要先付款才能出貨」以免誤導。";
-        systemPrompt += "\n\n【問「什麼時候到貨／出貨」禁止直接轉人工】當客戶問「什麼時候到貨」「什麼時候出貨」「重點是什麼時候出貨」「何時會到」等時，**禁止**回覆「這邊先幫您轉接真人專員」或呼叫 transfer_to_human。你**必須**：① 若對話中已有該筆訂單資訊，依訂單狀態、出貨時間(shipped_at)、物流單號回覆；若工具有回傳 shipped_at 就照實說已出貨／預計送達；② 若尚無訂單或訂單無出貨時間，先引導訂單編號或商品+手機並查詢，再依查詢結果說明狀態或「通常約 7–20 工作天」；③ 僅在查詢後仍無法取得該筆、且客戶**明確要求轉專人**時才可轉。不得僅因「無法給出確切到貨日」就轉人工。";
+        systemPrompt += `\n\n<ORDER_LOOKUP_RULES>
+目標：引導客戶提供「訂單編號」或「商品+手機」來查單。缺參數時友善追問，湊齊再查。
+呈現：若工具回傳訂單資訊，必須直接將內容自然且完整地貼給客戶，多筆則逐筆列出。
+誠實：依據工具回傳的真實資料回覆，有什麼說什麼，不要推卸給系統介面沒顯示。
+自主權：客戶問到貨/出貨時間，請依訂單狀態回答。若查無訂單，溫和請客戶確認號碼，絕對不要輕易呼叫轉人工。
+收尾：問題解決後，自然結束對話，不要無故追問。
+</ORDER_LOOKUP_RULES>`;
       }
       /** 對話收尾：由你判斷「感覺能收尾了」就自然收尾，不限於客人說好的/謝謝。任何情況只要話題已解決、客人無新問題、或明顯在道別，就簡短結束，勿再開新題、勿追問。 */
       systemPrompt += "\n\n【收尾判斷】由你**自己判斷**何時可以收尾。只要感覺這輪能結束了（例如：問題已回答完、客人表示收到/謝謝/好的、或對話已告一段落），就**自然收尾**：用一句簡短回覆即可，**不要**再主動問新問題、不要給多個選項、不要追問。不限於客人是否說「好的」「謝謝」；任何情況只要判斷能收尾就收尾。";
@@ -4272,7 +4267,7 @@ ${contextStr}
       for (const msg of recentMessages) {
         if (msg.sender_type === "user") {
           if (msg.message_type === "image" && msg.image_url) {
-            const msgDataUri = imageFileToDataUri(msg.image_url);
+            const msgDataUri = await imageFileToDataUri(msg.image_url);
             if (msgDataUri) {
               chatMessages.push({ role: "user", content: [
                 { type: "text", text: msg.content || "客戶傳送了圖片" },
@@ -4292,8 +4287,8 @@ ${contextStr}
       const hasImageAssets = storage.getImageAssets(effectiveBrandId || undefined).length > 0;
       const allTools = [...orderLookupTools, ...humanHandoffTools, ...(hasImageAssets ? imageTools : [])];
 
-      const AI_TIMEOUT_MS = 15000;
-      const TOOL_TIMEOUT_MS = 12000;
+      const AI_TIMEOUT_MS = 45000;
+      const TOOL_TIMEOUT_MS = 25000;
 
       const streamAbortController = new AbortController();
       const streamTimeout = setTimeout(() => streamAbortController.abort(), AI_TIMEOUT_MS);
@@ -4456,43 +4451,7 @@ ${contextStr}
           }
         }
 
-        if (orderLookupFailed >= 2 && !transferTriggered) {
-          console.log(`[AI Risk] 多次查單失敗(${orderLookupFailed}次)，自動升級為待人工`);
-          storage.updateContactStatus(contact.id, "awaiting_human");
-          storage.updateContactHumanFlag(contact.id, 1);
-          storage.createCaseNotification(contact.id, "in_app");
-          storage.updateContactAssignmentStatus(contact.id, "waiting_human");
-          const assignedOrder = assignment.assignCase(contact.id);
-          if (assignedOrder == null && assignment.isAllAgentsUnavailable()) {
-            storage.updateContactNeedsAssignment(contact.id, 1);
-            const tags = JSON.parse(contact.tags || "[]");
-            if (!tags.includes("午休待處理")) storage.updateContactTags(contact.id, [...tags, "午休待處理"]);
-            const reason = assignment.getUnavailableReason();
-            storage.createMessage(contact.id, contact.platform, "system", getTransferUnavailableSystemMessage(reason));
-          }
-          transferTriggered = true;
-          transferReason = `多次查單失敗(${orderLookupFailed}次)`;
-          storage.createSystemAlert({ alert_type: "transfer", details: transferReason, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
-        }
-
-        if (loopCount >= maxToolLoops && !transferTriggered) {
-          console.log(`[AI Risk] 達到最大工具呼叫次數(${maxToolLoops})，標記待人工`);
-          storage.updateContactStatus(contact.id, "awaiting_human");
-          storage.updateContactHumanFlag(contact.id, 1);
-          storage.createCaseNotification(contact.id, "in_app");
-          storage.updateContactAssignmentStatus(contact.id, "waiting_human");
-          const assignedLoop = assignment.assignCase(contact.id);
-          if (assignedLoop == null && assignment.isAllAgentsUnavailable()) {
-            storage.updateContactNeedsAssignment(contact.id, 1);
-            const tags = JSON.parse(contact.tags || "[]");
-            if (!tags.includes("午休待處理")) storage.updateContactTags(contact.id, [...tags, "午休待處理"]);
-            const reason = assignment.getUnavailableReason();
-            storage.createMessage(contact.id, contact.platform, "system", getTransferUnavailableSystemMessage(reason));
-          }
-          transferTriggered = true;
-          transferReason = `AI 多輪工具呼叫未能解決(${loopCount}輪)`;
-          storage.createSystemAlert({ alert_type: "transfer", details: transferReason, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
-        }
+        /** 判斷權完全交還 LLM：不再因 loopCount/orderLookupFailed 強制轉人工 */
 
         const freshContact = storage.getContact(contact.id);
         if (freshContact?.needs_human) break;
@@ -5423,7 +5382,7 @@ ${contextStr}
       type: "function",
       function: {
         name: "transfer_to_human",
-        description: "僅在客戶明確要求找真人、客訴、或多次追問仍無效時才使用；禁止因為初期缺乏查詢參數（例如只有商品名沒有電話）就輕易放棄。可呼叫的六種情況：explicit_human_request（顧客明確要求真人）、legal_or_reputation_threat（投訴/法務/公開風險）、payment_or_order_risk（金流/訂單爭議）、policy_exception（規則外/例外需人工）、repeat_unresolved（AI 已多次追問仍無法取得必要資訊或無法解決）、return_stage_3_insist（退換貨明確堅持退款/退貨）。呼叫前須先依系統規則追問缺少的查單參數（訂單編號或商品+手機），不得僅因提到退貨、退款、久候、缺貨、取消、查單就呼叫。勿因顧客僅發送「在嗎」「太誇張了」「哈囉」或只回覆商品名/短句就呼叫。",
+        description: "將對話轉交給真人客服。當客戶明確強烈要求找真人、客訴，或你已多次嘗試索取資訊仍無法解決時使用。初期缺乏參數請引導補充，切勿輕易呼叫。",
         parameters: {
           type: "object",
           properties: {

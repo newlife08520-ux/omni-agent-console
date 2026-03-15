@@ -33,31 +33,33 @@ function normalizeForCompare(s: string): string {
 
 /**
  * 緊急止血：改為「真正重複兩次以上」才升級。討同一種資料的句型需出現至少 3 次才轉人工。
+ * 放寬：僅看「最近 5 則 AI 回覆」，不跨時段翻舊帳。
  */
 function sameDataAskedTwice(recentMessages: MessageLike[]): boolean {
-  const aiContents = recentMessages
+  const recentAi = recentMessages
     .filter((m) => m.sender_type === "ai" && m.content)
     .map((m) => (m.content || "").trim())
-    .filter(Boolean);
-  const askCount = aiContents.filter((c) => ASK_ORDER_PHONE_PATTERNS.test(c)).length;
+    .filter(Boolean)
+    .slice(-5);
+  const askCount = recentAi.filter((c) => ASK_ORDER_PHONE_PATTERNS.test(c)).length;
   return askCount >= 3;
 }
 
 /**
  * 檢查最近兩則 AI 回覆是否高度相似（同一種模板重複）。
+ * 放寬：刪除 slice(0,50) 比對，僅「字數夠長且完全一模一樣」才算重複，避免禮貌開場白被誤殺。
  */
 function sameTemplateRepeatedTwice(recentMessages: MessageLike[]): boolean {
   const aiContents = recentMessages
     .filter((m) => m.sender_type === "ai" && m.content)
     .map((m) => (m.content || "").trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .slice(-5);
   if (aiContents.length < 2) return false;
   const last = normalizeForCompare(aiContents[aiContents.length - 1]);
   const prev = normalizeForCompare(aiContents[aiContents.length - 2]);
   if (last.length < 20 || prev.length < 20) return false;
-  if (last === prev) return true;
-  if (last.slice(0, 50) === prev.slice(0, 50)) return true;
-  return false;
+  return last === prev;
 }
 
 /**
