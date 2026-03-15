@@ -39,6 +39,9 @@ import multer from "multer";
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
+import { addAiReplyJob, enqueueDebouncedAiReply } from "./queue/ai-reply.queue";
+import { handleLineWebhook } from "./controllers/line-webhook.controller";
+import { handleFacebookWebhook, handleFacebookVerify, type FacebookWebhookDeps } from "./controllers/facebook-webhook.controller";
 
 function fixMulterFilename(originalname: string): string {
   try {
@@ -4627,681 +4630,72 @@ ${contextStr}
     }
   }
 
-  app.post("/api/webhook/line", async (req, res) => {
-    try {
-    console.log("===== [LINE WEBHOOK START] =====");
-    console.log("[WEBHOOK] destination:", req.body?.destination);
-    console.log("[WEBHOOK] events count:", req.body?.events?.length || 0);
 
-    const signature = req.headers["x-line-signature"] as string | undefined;
-    const destination = req.body?.destination as string | undefined;
-    const destinationTrimmed = (destination ?? "").trim();
-    if (destination) console.log("[WEBHOOK] destination (trimmed):", JSON.stringify(destinationTrimmed));
-
-    let channelToken: string | null = null;
-    let channelSecretVal: string | null = null;
-    let matchedChannel: import("@shared/schema").ChannelWithBrand | undefined;
-    let matchedBrandId: number | undefined;
-
-    if (destination) {
-      console.log("[WEBHOOK] destination（本則訊息來自的 LINE 機器人）:", destination);
-      matchedChannel = storage.getChannelByBotId(destinationTrimmed || destination);
-      if (matchedChannel) {
-        channelToken = matchedChannel.access_token || null;
-        channelSecretVal = matchedChannel.channel_secret || null;
-        matchedBrandId = matchedChannel.brand_id;
-        console.log("[WEBHOOK] MATCH FOUND — channel_id:", (matchedChannel as any).id, "渠道:", matchedChannel.channel_name, "品牌:", matchedChannel.brand_name, "is_ai_enabled:", matchedChannel.is_ai_enabled ?? 0);
-      } else {
-        const allChannels = storage.getChannels();
-        console.log("[WEBHOOK] NO MATCH：本則 destination 與下列任一渠道的 Bot ID 均不符");
-        allChannels.forEach((c: any) => {
-          console.log("[WEBHOOK]   渠道 channel_id=" + c.id + " | 名稱=" + (c.channel_name || "") + " | bot_id=" + (c.bot_id || "(空)"));
-        });
-        console.log("[WEBHOOK] 請對照上方：要收「本則訊息」的 LINE 機器人，請到後台編輯「該渠道」(channel_id)，將 Bot ID 設為本則 destination:", destination, "勿與其他渠道（如私藏生活、AQUILA 等）混用；每個機器人 destination 不同。");
-        console.log("[WEBHOOK] 不 fallback，無法確認渠道時不進行自動回覆（fail-closed）");
-      }
-    } else {
-      console.log("[WEBHOOK] No destination field in webhook body");
-      console.log("[WEBHOOK] 無 destination，視為未匹配 channel，不自動回覆（fail-closed）");
+  app.post("/internal/run-ai-reply", (req, res) => {
+    const secret = req.headers["x-internal-secret"];
+    if (secret !== process.env.INTERNAL_API_SECRET) {
+      return res.status(403).json({ message: "Forbidden" });
     }
-
-    // 僅在「已匹配到渠道、但該渠道未填 channel_secret」時才用全域 secret；NO MATCH 時不用 global 驗簽，避免多租戶下用錯機器人的 secret
-    if (!channelSecretVal && matchedChannel) {
-      channelSecretVal = storage.getSetting("line_channel_secret");
-      console.log("[WEBHOOK] Using global channel_secret (matched channel had none), exists:", !!channelSecretVal);
-    } else if (!channelSecretVal && !matchedChannel) {
-      console.log("[WEBHOOK] NO MATCH — 不使用 global channel_secret 驗簽（fail-closed），避免用錯機器人 secret");
+    const { contactId, message, channelToken, matchedBrandId, platform } = req.body || {};
+    if (!contactId || message == null) {
+      return res.status(400).json({ message: "contactId and message required" });
     }
-    // SaaS 多租戶：禁止用全域 Token 作為 LINE API 的 fallback，僅使用 matchedChannel.access_token
-    if (!channelToken) {
-      console.log("[WEBHOOK] 無匹配渠道 Token，後續 Profile/Media/Reply 將不使用全域 Token（fail-closed）。請到後台「渠道」為該 LINE 機器人填寫 access_token（見 docs/LINE-渠道-Token-串接說明.md）");
+    const contact = storage.getContact(Number(contactId));
+    if (!contact) {
+      return res.status(404).json({ message: "contact not found" });
     }
-
-    console.log("[WEBHOOK] Token available:", !!channelToken, "Secret available:", !!channelSecretVal);
-
-    if (channelSecretVal && signature && req.rawBody) {
-      try {
-        const rawBody = Buffer.isBuffer(req.rawBody) ? req.rawBody : Buffer.from(req.rawBody as string);
-        const hash = crypto.createHmac("SHA256", channelSecretVal).update(rawBody).digest("base64");
-        if (hash !== signature) {
-          console.log("[WEBHOOK] SIGNATURE MISMATCH - rejecting request. Expected:", hash, "Got:", signature);
-          storage.createSystemAlert({ alert_type: "webhook_sig_fail", details: "LINE signature mismatch", brand_id: matchedBrandId || undefined });
-          return res.status(403).json({ message: "Invalid signature" });
-        }
-        console.log("[WEBHOOK] Signature verified OK");
-      } catch (sigErr: any) {
-        console.log("[WEBHOOK] Signature check error:", sigErr.message);
-        storage.createSystemAlert({ alert_type: "webhook_sig_fail", details: `LINE sig error: ${sigErr.message}`, brand_id: matchedBrandId || undefined });
-        return res.status(403).json({ message: "Signature verification failed" });
-      }
-    } else if (channelSecretVal && !signature) {
-      console.log("[WEBHOOK] Missing x-line-signature header - rejecting");
-      storage.createSystemAlert({ alert_type: "webhook_sig_fail", details: "LINE missing signature header", brand_id: matchedBrandId || undefined });
-      return res.status(403).json({ message: "Missing signature" });
-    } else {
-      console.log("[WEBHOOK] Skipping signature check - no channel_secret configured");
-    }
-
-    res.status(200).json({ success: true });
-    console.log("[WEBHOOK] Sent 200 OK to LINE (ACK < 2s), processing events async...");
-
-    const humanKeywordsSetting = storage.getSetting("human_transfer_keywords");
-    /** 緊急止血：僅保留明確要真人／主管，不含招呼與情緒詞。後台可覆寫此設定。 */
-    const HUMAN_KEYWORDS = humanKeywordsSetting
-      ? humanKeywordsSetting.split(",").map((k) => k.trim()).filter(Boolean)
-      : ["我要轉人工", "轉人工", "找真人客服", "找主管"];
-
-    /** 取得 LINE 大頭照／姓名並寫回聯絡人；有 pictureUrl 時也會更新（保留原 display_name），確保新渠道／品牌也能顯示頭貼與姓名 */
-    async function fetchAndUpdateLineProfile(userId: string, contactId: number, token: string | null, channelIdForLog?: number | null) {
-      if (!token || (token && token.trim() === "") || userId === "unknown") {
-        const hint = channelIdForLog == null
-          ? "本則 destination 未對到任何渠道或對到的渠道未填 Token。日誌上方 [WEBHOOK] NO MATCH 會列出各渠道 channel_id／名稱／bot_id，請對照後將「要收此機器人」的渠道 Bot ID 設為該 destination 並填寫 Token（勿與他渠道混用）。"
-          : "請到後台 設定→品牌與渠道，找到 channel_id=" + channelIdForLog + " 的渠道並填寫 Channel Access Token。";
-        console.error("[WEBHOOK] Token 防呆：access_token 為空或未定義，跳過 Get Profile 請求 — userId:", userId, "contactId:", contactId, "channelId:", channelIdForLog ?? "unknown", "→", hint);
-        return;
-      }
-      try {
-        const profileRes = await fetch(`https://api.line.me/v2/bot/profile/${userId}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (profileRes.ok) {
-          const profile = await profileRes.json() as { displayName?: string; pictureUrl?: string };
-          const hasName = !!profile.displayName;
-          const hasAvatar = !!profile.pictureUrl;
-          if (hasName || hasAvatar) {
-            const contact = storage.getContact(contactId);
-            const displayName = profile.displayName || (contact?.display_name ?? "LINE用戶");
-            const avatarUrl = profile.pictureUrl ?? contact?.avatar_url ?? null;
-            storage.updateContactProfile(contactId, displayName, avatarUrl);
-            console.log("[WEBHOOK] Profile updated:", displayName, avatarUrl ? "(has avatar)" : "(no avatar)");
-          }
-        } else {
-          const errText = await profileRes.text().catch(() => "");
-          console.error("[LINE API Error] Channel ID:", channelIdForLog ?? "unknown", "Status:", profileRes.status, errText);
-          console.error("[WEBHOOK] Profile fetch failed:", profileRes.status, errText);
-        }
-      } catch (err: any) {
-        const msg = err?.message ?? String(err);
-        const cause = err?.cause != null ? (err.cause?.message ?? String(err.cause)) : "";
-        const stack = err?.stack ?? "";
-        console.error("[WEBHOOK] fetchAndUpdateLineProfile catch — error.message:", msg, "error.cause:", cause, "channelId:", channelIdForLog ?? "unknown", "userId:", userId);
-        if (stack) console.error("[WEBHOOK] fetchAndUpdateLineProfile stack:", stack);
-      }
-    }
-
-    const GHOST_REPLY_TOKEN = "00000000000000000000000000000000";
-    const GHOST_USER_ID = "Udeadbeefdeadbeefdeadbeefdeadbeef";
-
-    const events = req.body?.events || [];
-    (async () => {
-    for (const event of events) {
-      if (event.replyToken === GHOST_REPLY_TOKEN || event.source?.userId === GHOST_USER_ID) {
-        console.log("[WEBHOOK] Skipping ghost/verification event");
-        continue;
-      }
-
-      const webhookEventId = event.webhookEventId || event.timestamp?.toString();
-      if (webhookEventId && storage.isEventProcessed(webhookEventId)) {
-        console.log("[WEBHOOK] Skipping duplicate event:", webhookEventId);
-        storage.createSystemAlert({ alert_type: "dedupe_hit", details: `LINE event ${webhookEventId}`, brand_id: matchedBrandId || undefined });
-        continue;
-      }
-      if (webhookEventId) {
-        storage.markEventProcessed(webhookEventId);
-      }
-
-      try {
-        console.log("[WEBHOOK] Processing event:", event.type, event.message?.type || "", "from:", event.source?.userId || "unknown");
-        if (event.type === "message" && event.message?.type === "text") {
-          const userId = event.source?.userId || "unknown";
-          const text = event.message.text;
-          console.log("[WEBHOOK] Text message from", userId, ":", text.substring(0, 50));
-          const contact = storage.getOrCreateContact("line", userId, "LINE用戶", matchedBrandId, matchedChannel?.id);
-          if (contact.display_name === "LINE用戶" || !contact.avatar_url) {
-            await fetchAndUpdateLineProfile(userId, contact.id, channelToken, matchedChannel?.id);
-          }
-          const contactAfterProfile = storage.getContact(contact.id) ?? contact;
-          console.log("[WEBHOOK] Contact id:", contactAfterProfile.id, "brand_id:", contactAfterProfile.brand_id, "needs_human:", contactAfterProfile.needs_human);
-          const userMsg = storage.createMessage(contactAfterProfile.id, "line", "user", text);
-          console.log("[WEBHOOK] Message saved id:", userMsg.id);
-          broadcastSSE("new_message", { contact_id: contact.id, message: userMsg, brand_id: matchedBrandId || contact.brand_id });
-          broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
-          const needsHuman = HUMAN_KEYWORDS.some((kw) => text.includes(kw));
-          if (needsHuman) {
-            console.log("[WEBHOOK] needs_human=1 source=webhook_keyword msg=" + (text || "").slice(0, 80));
-            storage.updateContactHumanFlag(contact.id, 1);
-            const handoffText = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, assignment.getUnavailableReason());
-            const aiMsg = storage.createMessage(contact.id, "line", "ai", handoffText);
-            broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: matchedBrandId || contact.brand_id });
-            broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
-            if (channelToken) {
-              await pushLineMessage(contact.platform_user_id, [{ type: "text", text: handoffText }], channelToken);
-            }
-          } else {
-            /** 徹底封殺 Handoff Loop：待人工／needs_human 時僅存訊息、不喚醒 AI；僅「連結請求」可恢復 AI 並進流程 */
-            const trimmedText = (text || "").trim();
-            const inHandoffState = !!(contactAfterProfile.needs_human || contactAfterProfile.status === "awaiting_human" || contactAfterProfile.status === "high_risk");
-            const allowOnlyLinkRestore = inHandoffState && (isLinkRequestMessage(trimmedText) || isLinkRequestCorrectionMessage(trimmedText));
-            const shouldInvokeAi = !inHandoffState || allowOnlyLinkRestore;
-            if (shouldInvokeAi) {
-              const aiEnabled = matchedChannel ? matchedChannel.is_ai_enabled : 0;
-              if (!aiEnabled) {
-                if (!matchedChannel) console.log("[WEBHOOK] 無匹配 channel，跳過文字自動回覆（fail-closed）");
-                else console.log("[WEBHOOK] AI 已關閉 (channel:", matchedChannel.channel_name, ", is_ai_enabled=", matchedChannel.is_ai_enabled, ") - 跳過自動回覆");
-              } else {
-                console.log("[WEBHOOK] AI 已啟用，準備文字自動回覆 — channel:", matchedChannel?.channel_name);
-                const testMode = storage.getSetting("test_mode");
-                if (testMode === "true") {
-                  storage.createMessage(contact.id, "line", "ai", `[測試模式] 收到您的訊息：「${text}」。`);
-                } else {
-                  debounceTextMessage(contact.id, text, (mergedText) =>
-                    withContactLock(contact.id, () =>
-                      autoReplyWithAI(contact, mergedText, channelToken, matchedBrandId)
-                    )
-                  );
-                }
-              }
-            }
-          }
-        } else if (event.type === "postback") {
-          const data = event.postback?.data || "";
-          const params = new URLSearchParams(data);
-          const postbackAction = params.get("action");
-          if (postbackAction === "rate" || postbackAction === "rate_ai") {
-            const ticketId = parseInt(params.get("ticket_id") || "0");
-            const score = parseInt(params.get("score") || "0");
-            if (ticketId > 0 && score >= 1 && score <= 5) {
-              const contactForRating = storage.getContact(ticketId);
-              const isAi = postbackAction === "rate_ai";
-              const alreadyRated = contactForRating && (isAi ? contactForRating.ai_rating != null : contactForRating.cs_rating != null);
-              if (alreadyRated) {
-                replyToLine(event.replyToken, [
-                  { type: "text", text: "您已評過分囉～感謝您的回饋！每則評價僅能提交一次。" },
-                ], channelToken);
-              } else {
-                if (isAi) {
-                  storage.updateContactAiRating(ticketId, score);
-                  storage.createMessage(ticketId, "line", "system", `(系統提示) 客戶 AI 客服評分：${"⭐".repeat(score)}（${score} 分）`);
-                } else {
-                  storage.updateContactRating(ticketId, score);
-                  storage.createMessage(ticketId, "line", "system", `(系統提示) 客戶真人客服評分：${"⭐".repeat(score)}（${score} 分）`);
-                }
-                const typeLabel = isAi ? "AI 客服" : "真人客服";
-                replyToLine(event.replyToken, [
-                  { type: "text", text: `已收到您對${typeLabel}的 ${"⭐".repeat(score)} 評分，感謝您的寶貴意見！祝您有美好的一天。` },
-                ], channelToken);
-                broadcastSSE("contacts_updated", { contact_id: ticketId });
-              }
-            }
-          }
-        } else if (event.type === "follow" || event.type === "unfollow" || event.type === "join" || event.type === "leave" || event.type === "memberJoined" || event.type === "memberLeft") {
-          // silently ignore lifecycle events
-        } else if (event.type === "message" && event.message?.type === "image") {
-          const userId = event.source?.userId || "unknown";
-          const contact = storage.getOrCreateContact("line", userId, "LINE用戶", matchedBrandId, matchedChannel?.id);
-          if (contact.display_name === "LINE用戶" || !contact.avatar_url) {
-            await fetchAndUpdateLineProfile(userId, contact.id, channelToken, matchedChannel?.id);
-          }
-          const messageId = event.message.id;
-          const imageUrl = await downloadLineContent(messageId, ".jpg", channelToken, matchedChannel?.id);
-          if (imageUrl) {
-            const imgMsg = storage.createMessage(contact.id, "line", "user", "[圖片訊息]", "image", imageUrl);
-            broadcastSSE("new_message", { contact_id: contact.id, message: imgMsg, brand_id: matchedBrandId || contact.brand_id });
-            broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
-            const aiEnabledImg = matchedChannel ? matchedChannel.is_ai_enabled : 0;
-            if (!matchedChannel && !contact.needs_human) console.log("[WEBHOOK] 無匹配 channel，跳過圖片自動回覆（fail-closed）");
-            if (!contact.needs_human && aiEnabledImg) {
-              const visionResult = await handleImageVisionFirst(imageUrl, contact.id);
-              const replyText = visionResult.reply;
-              const aiMsg = storage.createMessage(contact.id, "line", "ai", replyText);
-              broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: matchedBrandId || contact.brand_id });
-              broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
-              await pushLineMessage(contact.platform_user_id, [{ type: "text", text: replyText }], channelToken);
-              const recentMsgsForEscalate = storage.getMessages(contact.id).slice(-8);
-              const escalate = shouldEscalateImageSupplement(recentMsgsForEscalate);
-              if (escalate) {
-                storage.updateContactStatus(contact.id, "awaiting_human");
-                storage.updateContactHumanFlag(contact.id, 1);
-                storage.createCaseNotification(contact.id, "in_app");
-                broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
-              }
-              storage.createAiLog({
-                contact_id: contact.id,
-                message_id: aiMsg.id,
-                brand_id: matchedBrandId || contact.brand_id || undefined,
-                prompt_summary: "[圖片訊息]",
-                knowledge_hits: [],
-                tools_called: ["image_vision_first"],
-                transfer_triggered: escalate,
-                transfer_reason: escalate ? "連續無效圖片補充升級人工" : undefined,
-                result_summary: `image_vision_first | intent=${visionResult.intent ?? "—"} | ${visionResult.usedFallback ? "fallback" : "direct"}`,
-                token_usage: 0,
-                model: "gpt-4o",
-                response_time_ms: 0,
-                reply_source: "image_vision_first",
-                used_llm: 1,
-                plan_mode: null,
-                reason_if_bypassed: visionResult.usedFallback ? "image_low_confidence_fallback" : undefined,
-              });
-            }
-          } else {
-            storage.createMessage(contact.id, "line", "user", "[圖片訊息] (下載失敗)");
-          }
-        } else if (event.type === "message" && event.message?.type === "video") {
-          const userId = event.source?.userId || "unknown";
-          const contact = storage.getOrCreateContact("line", userId, "LINE用戶", matchedBrandId, matchedChannel?.id);
-          if (contact.display_name === "LINE用戶" || !contact.avatar_url) {
-            await fetchAndUpdateLineProfile(userId, contact.id, channelToken, matchedChannel?.id);
-          }
-          const messageId = event.message.id;
-          const videoUrl = await downloadLineContent(messageId, ".mp4", channelToken, matchedChannel?.id);
-          if (videoUrl) {
-            console.log("[影片處理成功]:", videoUrl);
-            const vidMsg = storage.createMessage(contact.id, "line", "user", "[影片訊息]", "video", videoUrl);
-            broadcastSSE("new_message", { contact_id: contact.id, message: vidMsg, brand_id: matchedBrandId || contact.brand_id });
-            broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
-          } else {
-            console.log("[影片處理失敗]: messageId:", messageId);
-            storage.createMessage(contact.id, "line", "user", "[影片訊息] (下載失敗)");
-          }
-          const aiEnabledVid = matchedChannel ? matchedChannel.is_ai_enabled : 0;
-          if (contact.needs_human) {
-            console.log("[WEBHOOK] 案件已轉人工(needs_human=1)，跳過影片固定回覆 contact_id=", contact.id);
-          } else if (!aiEnabledVid) {
-            if (!matchedChannel) console.log("[WEBHOOK] 無匹配 channel，跳過影片固定回覆（fail-closed）");
-            else console.log("[WEBHOOK] AI 已關閉 (channel:", matchedChannel.channel_name, ") - 跳過影片回覆");
-          } else {
-            storage.createMessage(contact.id, "line", "ai", "(AI 系統提示) 已收到您的影片，將為您轉交專人檢視。");
-            storage.updateContactHumanFlag(contact.id, 1);
-            await pushLineMessage(contact.platform_user_id, [{ type: "text", text: "已收到您的影片，將為您轉交專人檢視。" }], channelToken);
-          }
-        } else if (event.type === "message" && event.message?.type === "sticker") {
-          const userId = event.source?.userId || "unknown";
-          const contact = storage.getOrCreateContact("line", userId, "LINE用戶", matchedBrandId, matchedChannel?.id);
-          if (contact.display_name === "LINE用戶" || !contact.avatar_url) {
-            await fetchAndUpdateLineProfile(userId, contact.id, channelToken, matchedChannel?.id);
-          }
-          const stickerId = (event.message as { stickerId?: string; sticker_id?: string }).stickerId
-            ?? (event.message as { stickerId?: string; sticker_id?: string }).sticker_id;
-          if (stickerId) {
-            const stickerImageUrl = `https://stickershop.line-scdn.net/stickershop/v1/sticker/${stickerId}/android/sticker.png`;
-            const stickerMsg = storage.createMessage(contact.id, "line", "user", "[貼圖]", "image", stickerImageUrl);
-            broadcastSSE("new_message", { contact_id: contact.id, message: stickerMsg, brand_id: matchedBrandId || contact.brand_id });
-            broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
-          } else {
-            const fallbackMsg = storage.createMessage(contact.id, "line", "user", "[貼圖訊息]");
-            broadcastSSE("new_message", { contact_id: contact.id, message: fallbackMsg, brand_id: matchedBrandId || contact.brand_id });
-            broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
-          }
-        } else if (event.type === "message" && event.message?.type !== "text") {
-          const userId = event.source?.userId || "unknown";
-          const contact = storage.getOrCreateContact("line", userId, "LINE用戶", matchedBrandId, matchedChannel?.id);
-          if (contact.display_name === "LINE用戶" || !contact.avatar_url) {
-            await fetchAndUpdateLineProfile(userId, contact.id, channelToken, matchedChannel?.id);
-          }
-          const msgType = event.message?.type || "unknown";
-          storage.createMessage(contact.id, "line", "user", `[${msgType === "audio" ? "音訊" : msgType === "location" ? "位置" : msgType === "file" ? "檔案" : msgType}訊息]`);
-        }
-      } catch (err) {
-        console.error("Webhook event processing error:", err);
-      }
-
-    }
-    console.log("[WEBHOOK] All events processed");
-    })().catch(err => console.error("[WEBHOOK] Async event processing error:", err));
-    } catch (outerErr) {
-      console.error("[WEBHOOK] FATAL ERROR in webhook handler:", outerErr);
-      if (!res.headersSent) res.status(200).json({ success: true });
-    }
+    autoReplyWithAI(
+      contact, String(message), channelToken ?? undefined,
+      matchedBrandId != null ? Number(matchedBrandId) : undefined,
+      platform ? String(platform) : undefined
+    )
+      .then(() => res.status(200).json({ ok: true }))
+      .catch((err) => {
+        console.error("[internal/run-ai-reply]", err);
+        res.status(500).json({ message: err?.message || "Internal Server Error" });
+      });
   });
 
-  /** 使用 Page Access Token 向 Graph API 取得 FB 用戶姓名與頭像，並更新聯絡人 */
-  async function fetchAndUpdateFBProfile(psid: string, contactId: number, pageAccessToken: string | null) {
-    if (!pageAccessToken || !psid) return;
-    try {
-      const url = `https://graph.facebook.com/v19.0/${encodeURIComponent(psid)}?fields=first_name,last_name,profile_pic&access_token=${encodeURIComponent(pageAccessToken)}`;
-      const res = await fetch(url);
-      if (!res.ok) {
-        console.log("[FB Webhook] Graph API profile 失敗:", res.status);
-        return;
-      }
-      const profile = await res.json() as { first_name?: string; last_name?: string; profile_pic?: string | { data?: { url?: string } } };
-      const firstName = profile.first_name || "";
-      const lastName = profile.last_name || "";
-      const fullName = [firstName, lastName].filter(Boolean).join(" ").trim() || null;
-      let picUrl: string | null = null;
-      if (typeof profile.profile_pic === "string") picUrl = profile.profile_pic;
-      else if (profile.profile_pic?.data?.url) picUrl = profile.profile_pic.data.url;
-      if (fullName || picUrl) {
-        const contact = storage.getContact(contactId);
-        const displayName = fullName || (contact?.display_name ?? "FB用戶");
-        storage.updateContactProfile(contactId, displayName, picUrl);
-        console.log("[FB Webhook] Profile 已更新:", displayName, picUrl ? "(有頭像)" : "");
-      }
-    } catch (err: any) {
-      console.log("[FB Webhook] Profile 取得錯誤:", err?.message);
-    }
-  }
+  const fbWebhookDeps = {
+    storage,
+    broadcastSSE,
+    sendFBMessage,
+    downloadExternalImage,
+    handleImageVisionFirst,
+    enqueueDebouncedAiReply: process.env.REDIS_URL ? enqueueDebouncedAiReply : undefined,
+    debounceTextMessage,
+    addAiReplyJob,
+    getHandoffReplyForCustomer,
+    HANDOFF_MANDATORY_OPENING,
+    SHORT_IMAGE_FALLBACK,
+    getUnavailableReason: () => assignment.getUnavailableReason(),
+    resolveCommentMetadata,
+    metaCommentsStorage,
+    runAutoExecution,
+    FB_VERIFY_TOKEN,
+  };
 
-  app.get("/api/webhook/facebook", (req, res) => {
-    const mode = req.query["hub.mode"];
-    const token = req.query["hub.verify_token"];
-    const challenge = req.query["hub.challenge"];
-    if (mode === "subscribe" && token === FB_VERIFY_TOKEN) {
-      console.log("[FB Webhook] 驗證成功");
-      return res.status(200).send(challenge);
-    }
-    return res.status(403).json({ message: "驗證失敗" });
+  app.post("/api/webhook/line", (req, res) => {
+    handleLineWebhook(req, res, {
+      storage,
+      broadcastSSE,
+      pushLineMessage,
+      replyToLine,
+      downloadLineContent,
+      debounceTextMessage,
+      addAiReplyJob,
+      enqueueDebouncedAiReply: process.env.REDIS_URL ? enqueueDebouncedAiReply : undefined,
+      autoReplyWithAI,
+      handleImageVisionFirst,
+      getHandoffReplyForCustomer,
+      HANDOFF_MANDATORY_OPENING,
+      getUnavailableReason: () => assignment.getUnavailableReason(),
+    });
   });
 
-  app.post("/api/webhook/facebook", (req, res) => {
-    const body = req.body;
-    if (body.object !== "page") {
-      console.log("[FB Webhook] 404 原因：非 page 事件，收到 object=", body?.object ?? "(空)", "body 鍵:", body && typeof body === "object" ? Object.keys(body) : typeof body);
-      return res.status(404).json({ message: "Not a page event" });
-    }
+  app.get("/api/webhook/facebook", (req, res) => handleFacebookVerify(req, res, fbWebhookDeps));
+  app.post("/api/webhook/facebook", (req, res) => handleFacebookWebhook(req, res, fbWebhookDeps));
 
-    console.log("🔥🔥🔥 [FB RAW WEBHOOK]:", JSON.stringify(req.body, null, 2));
-
-    const fbAppSecret = storage.getSetting("fb_app_secret");
-    if (fbAppSecret && req.rawBody) {
-      const fbSignature = req.headers["x-hub-signature-256"] as string | undefined;
-      if (!fbSignature) {
-        console.log("[FB Webhook] Missing x-hub-signature-256 header - rejecting");
-        return res.status(403).json({ message: "Missing signature" });
-      }
-      try {
-        const rawBody = Buffer.isBuffer(req.rawBody) ? req.rawBody : Buffer.from(req.rawBody as string);
-        const expectedSig = "sha256=" + crypto.createHmac("sha256", fbAppSecret).update(rawBody).digest("hex");
-        if (expectedSig !== fbSignature) {
-          console.log("[FB Webhook] SIGNATURE MISMATCH - rejecting");
-          storage.createSystemAlert({ alert_type: "webhook_sig_fail", details: "FB signature mismatch" });
-          return res.status(403).json({ message: "Invalid signature" });
-        }
-        console.log("[FB Webhook] Signature verified OK");
-      } catch (sigErr: any) {
-        console.log("[FB Webhook] Signature check error:", sigErr.message);
-        storage.createSystemAlert({ alert_type: "webhook_sig_fail", details: `FB sig error: ${sigErr.message}` });
-        return res.status(403).json({ message: "Signature verification failed" });
-      }
-    }
-
-    res.status(200).send("EVENT_RECEIVED");
-    console.log("[FB Webhook] Sent 200 OK (ACK < 2s), processing events async...");
-
-    const humanKeywordsSetting2 = storage.getSetting("human_transfer_keywords");
-    const HUMAN_KW2 = humanKeywordsSetting2
-      ? humanKeywordsSetting2.split(",").map((k: string) => k.trim()).filter(Boolean)
-      : ["真人客服", "轉人工", "找主管", "不要機器人", "人工客服", "真人處理"];
-
-    async function fetchAndUpdateFBProfile(psid: string, contactId: number, pageAccessToken: string | null, brandId?: number | null) {
-      if (!pageAccessToken || !psid) return;
-      try {
-        const url = `https://graph.facebook.com/v19.0/${encodeURIComponent(psid)}?fields=first_name,last_name,name,picture.type(large)&access_token=${encodeURIComponent(pageAccessToken)}`;
-        const profileRes = await fetch(url);
-        const bodyText = await profileRes.text();
-        if (profileRes.ok) {
-          const profile = JSON.parse(bodyText) as {
-            first_name?: string;
-            last_name?: string;
-            name?: string;
-            picture?: { data?: { url?: string } };
-          };
-          const fullName = [profile.first_name, profile.last_name].filter(Boolean).join(" ").trim()
-            || (typeof profile.name === "string" ? profile.name.trim() : undefined);
-          const avatarUrl = profile.picture?.data?.url || null;
-          if (fullName || avatarUrl) {
-            storage.updateContactProfile(contactId, fullName || "FB用戶", avatarUrl);
-            broadcastSSE("contacts_updated", { brand_id: brandId ?? undefined });
-            console.log("[FB Webhook] Profile updated:", fullName || "(name unchanged)", avatarUrl ? "(has avatar)" : "(no avatar)");
-          } else {
-            console.log("[FB Webhook] Profile response had no name/picture:", bodyText.slice(0, 200));
-          }
-        } else {
-          console.log("[FB Webhook] Profile fetch failed:", profileRes.status, bodyText.slice(0, 300));
-        }
-      } catch (err: any) {
-        console.log("[FB Webhook] Profile fetch error:", err?.message);
-      }
-    }
-
-    (async () => {
-    const entries = body.entry || [];
-    if (entries.length === 0) {
-      console.log("[FB Webhook] body.entry 為空陣列，無 entry 可處理");
-    }
-    for (const entry of entries) {
-      const pageId = entry.id;
-      const matchedChannel = storage.getChannelByBotId(pageId);
-      const matchedBrandId = matchedChannel?.brand_id;
-
-      const hasMessaging = (entry.messaging || []).length > 0;
-      const hasChanges = (entry.changes || []).length > 0;
-      if (hasChanges) {
-        console.log(`[FB Webhook] entry 含 changes (feed/留言)，數量: ${(entry.changes || []).length}, pageId: ${pageId}`);
-      }
-      if (!hasMessaging && !hasChanges) {
-        console.log(`[FB Webhook] entry 無 messaging 也無 changes，略過 pageId: ${pageId}`);
-      }
-
-      if (matchedChannel) {
-        console.log(`[FB Webhook] 動態路由 → 品牌: ${matchedChannel.brand_name}, 頻道: ${matchedChannel.channel_name}`);
-      } else {
-        console.log(`[FB Webhook] 未匹配頻道，Page ID: ${pageId}`);
-      }
-
-      for (const messagingEvent of entry.messaging || []) {
-        const senderId = messagingEvent.sender?.id;
-        if (!senderId || senderId === pageId) continue;
-
-        const msgMid = messagingEvent.message?.mid || messagingEvent.postback?.mid || "";
-        const eventId = `fb_${messagingEvent.timestamp}_${senderId}_${msgMid}`;
-        if (storage.isEventProcessed(eventId)) {
-          storage.createSystemAlert({ alert_type: "dedupe_hit", details: `FB event ${eventId}`, brand_id: matchedBrandId || undefined });
-          continue;
-        }
-        storage.markEventProcessed(eventId);
-
-        try {
-          if (messagingEvent.message) {
-            const text = messagingEvent.message.text || "";
-            const displayName = `FB用戶_${senderId.substring(0, 6)}`;
-            const contact = storage.getOrCreateContact("messenger", senderId, displayName, matchedBrandId, matchedChannel?.id);
-            if (matchedChannel?.access_token && (contact.display_name === displayName || (contact.display_name || "").startsWith("FB用戶_"))) {
-              fetchAndUpdateFBProfile(senderId, contact.id, matchedChannel.access_token, matchedBrandId).catch(() => {});
-            }
-
-            if (messagingEvent.message.attachments) {
-              for (const att of messagingEvent.message.attachments) {
-                if (att.type === "image" && att.payload?.url) {
-                  const localImageUrl = await downloadExternalImage(att.payload.url);
-                  const finalUrl = localImageUrl || att.payload.url;
-                  const imgMsg = storage.createMessage(contact.id, "messenger", "user", "[圖片訊息]", "image", finalUrl);
-                  broadcastSSE("new_message", { contact_id: contact.id, message: imgMsg, brand_id: matchedBrandId || contact.brand_id });
-                  const fbAiEnabledImg = matchedChannel ? (matchedChannel.is_ai_enabled === 1) : false;
-                  if (!contact.needs_human && fbAiEnabledImg && matchedChannel?.access_token) {
-                    const visionResult = localImageUrl
-                      ? await handleImageVisionFirst(localImageUrl, contact.id)
-                      : { reply: SHORT_IMAGE_FALLBACK, usedFallback: true as const };
-                    const replyText = visionResult.reply;
-                    const aiMsg = storage.createMessage(contact.id, "messenger", "ai", replyText);
-                    broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: matchedBrandId || contact.brand_id });
-                    broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
-                    sendFBMessage(matchedChannel.access_token, senderId, replyText).catch(err =>
-                      console.error("[FB Webhook] 圖片回覆失敗:", err)
-                    );
-                    const recentMsgsForEscalate = storage.getMessages(contact.id).slice(-8);
-                    const escalate = shouldEscalateImageSupplement(recentMsgsForEscalate);
-                    if (escalate) {
-                      storage.updateContactStatus(contact.id, "awaiting_human");
-                      storage.updateContactHumanFlag(contact.id, 1);
-                      storage.createCaseNotification(contact.id, "in_app");
-                      broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
-                    }
-                    storage.createAiLog({
-                      contact_id: contact.id,
-                      message_id: aiMsg.id,
-                      brand_id: matchedBrandId || contact.brand_id || undefined,
-                      prompt_summary: "[圖片訊息]",
-                      knowledge_hits: [],
-                      tools_called: ["image_vision_first"],
-                      transfer_triggered: escalate,
-                      transfer_reason: escalate ? "連續無效圖片補充升級人工" : undefined,
-                      result_summary: `image_vision_first | intent=${visionResult.intent ?? "—"} | ${visionResult.usedFallback ? "fallback" : "direct"}`,
-                      token_usage: 0,
-                      model: "gpt-4o",
-                      response_time_ms: 0,
-                      reply_source: "image_vision_first",
-                      used_llm: 1,
-                      plan_mode: null,
-                      reason_if_bypassed: visionResult.usedFallback ? "image_low_confidence_fallback" : undefined,
-                    });
-                  }
-                } else {
-                  storage.createMessage(contact.id, "messenger", "user", `[${att.type || "附件"}]`);
-                }
-              }
-              broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
-            }
-
-            if (text) {
-              const userMsg = storage.createMessage(contact.id, "messenger", "user", text);
-              broadcastSSE("new_message", { contact_id: contact.id, message: userMsg, brand_id: matchedBrandId || contact.brand_id });
-              broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
-
-              const needsHuman2 = HUMAN_KW2.some((kw: string) => text.includes(kw));
-              if (needsHuman2) {
-                console.log("[FB WEBHOOK] needs_human=1 source=webhook_keyword msg=" + (text || "").slice(0, 80));
-                storage.updateContactHumanFlag(contact.id, 1);
-                const handoffTextFb = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, assignment.getUnavailableReason());
-                const aiMsg2 = storage.createMessage(contact.id, "messenger", "ai", handoffTextFb);
-                broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg2, brand_id: matchedBrandId || contact.brand_id });
-                broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
-                if (matchedChannel?.access_token) {
-                  sendFBMessage(matchedChannel.access_token, senderId, handoffTextFb).catch(err =>
-                    console.error("[FB Webhook] 轉人工回覆失敗:", err)
-                  );
-                }
-              } else {
-                /** 徹底封殺 Handoff Loop：待人工／needs_human 時僅存訊息、不喚醒 AI；僅「連結請求」可恢復 AI */
-                const trimmedTextFb = (text || "").trim();
-                const inHandoffStateFb = !!(contact.needs_human || contact.status === "awaiting_human" || contact.status === "high_risk");
-                const allowOnlyLinkRestoreFb = inHandoffStateFb && (isLinkRequestMessage(trimmedTextFb) || isLinkRequestCorrectionMessage(trimmedTextFb));
-                const shouldInvokeAiFb = !inHandoffStateFb || allowOnlyLinkRestoreFb;
-                if (shouldInvokeAiFb) {
-                  const fbAiEnabled = matchedChannel ? (matchedChannel.is_ai_enabled === 1) : false;
-                  if (!fbAiEnabled) {
-                    console.log("[FB WEBHOOK] AI 已關閉 (channel:", matchedChannel?.channel_name, ") - 跳過自動回覆");
-                  } else {
-                    const testMode = storage.getSetting("test_mode");
-                    if (testMode !== "true" && matchedChannel?.access_token) {
-                      debounceTextMessage(contact.id, text, (mergedText) =>
-                        withContactLock(contact.id, () =>
-                          autoReplyWithAI(contact, mergedText, matchedChannel!.access_token, matchedBrandId, "messenger")
-                        )
-                      );
-                    }
-                  }
-                }
-              }
-            }
-          }
-
-          if (messagingEvent.postback) {
-            const text = messagingEvent.postback.title || messagingEvent.postback.payload || "[Postback]";
-            const displayName = `FB用戶_${senderId.substring(0, 6)}`;
-            const contact = storage.getOrCreateContact("messenger", senderId, displayName, matchedBrandId, matchedChannel?.id);
-            if (matchedChannel?.access_token && (contact.display_name === displayName || (contact.display_name || "").startsWith("FB用戶_"))) {
-              fetchAndUpdateFBProfile(senderId, contact.id, matchedChannel.access_token, matchedBrandId).catch(() => {});
-            }
-            const pbMsg = storage.createMessage(contact.id, "messenger", "user", text);
-            broadcastSSE("new_message", { contact_id: contact.id, message: pbMsg, brand_id: matchedBrandId || contact.brand_id });
-            broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
-          }
-        } catch (err) {
-          console.error("[FB Webhook] 事件處理錯誤:", err);
-        }
-      }
-
-      for (const change of entry.changes || []) {
-        if (change.field !== "feed") continue;
-        const value = change.value;
-        if (!value || value.verb !== "add") continue;
-        if (value.item != null && value.item !== "comment") continue;
-        const commentId = value.comment_id || value.id;
-        if (!commentId) continue;
-        const eventId = `fb_comment_${pageId}_${commentId}_${value.created_time || Date.now()}`;
-        if (storage.isEventProcessed(eventId)) {
-          console.log("[FB Webhook] 重複留言事件已略過:", commentId);
-          continue;
-        }
-        storage.markEventProcessed(eventId);
-        try {
-          const from = value.from || {};
-          const recipient = value.recipient || {};
-          const message = (value.message != null && value.message !== "") ? String(value.message) : "";
-          const postId = value.post_id != null ? String(value.post_id) : "";
-          const parentId = value.parent_id || null;
-          const createdTime = value.created_time != null ? new Date(value.created_time * 1000).toISOString() : new Date().toISOString();
-          const commenterName = typeof from.name === "string" ? from.name : (from.id ? `用戶_${String(from.id).slice(0, 8)}` : "未知");
-          const commenterId = from.id != null ? String(from.id) : null;
-          const pageName = typeof recipient.name === "string" ? recipient.name : (pageId || "粉專");
-          const rawPayload = JSON.stringify(value);
-          const resolved = resolveCommentMetadata({
-            brand_id: matchedBrandId ?? null,
-            page_id: pageId,
-            post_id: postId,
-            post_name: null,
-            message,
-            is_sensitive_or_complaint: false,
-          });
-          const row = metaCommentsStorage.createMetaComment({
-            brand_id: matchedBrandId ?? null,
-            page_id: pageId,
-            page_name: pageName,
-            post_id: postId,
-            post_name: null,
-            comment_id: String(commentId),
-            commenter_id: commenterId,
-            commenter_name: commenterName,
-            message: message || "(空)",
-            is_simulated: 0,
-            raw_webhook_payload: rawPayload,
-            ...resolved,
-          });
-          metaCommentsStorage.updateMetaComment(row.id, { created_at: createdTime });
-          console.log("[FB Webhook] 公開留言已寫入 meta_comments id=%s comment_id=%s", row.id, commentId);
-          broadcastSSE("meta_comments_updated", { brand_id: matchedBrandId ?? undefined });
-          setImmediate(() => {
-            runAutoExecution(row.id).catch((e: any) => console.error("[FB Webhook] runAutoExecution error:", e?.message));
-          });
-        } catch (err: any) {
-          console.error("[FB Webhook] 公開留言寫入失敗:", err?.message, value?.comment_id);
-        }
-      }
-    }
-    })().catch(err => console.error("[FB Webhook] Async processing error:", err));
-  });
 
   const orderLookupTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     {

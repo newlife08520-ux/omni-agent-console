@@ -149,6 +149,8 @@ export function initDatabase() {
   migrateMetaCommentPhase2();
   migrateMetaCommentPhase3();
   migrateAgentBrandAssignments();
+  migrateContactsLastMessageDenormalization();
+  migrateAiReplyDeliveries();
   ensurePerformanceIndexes();
   seedMockData();
   migrateRemoveOldHandoffAndReturnRules();
@@ -157,7 +159,94 @@ export function initDatabase() {
   migrateConversationStateFields();
 }
 
-/** 常用查詢欄位索引，避免資料量成長後掃全表；MAX(id) GROUP BY 等 Stats 依賴複合索引避免 Full Table Scan */
+/** 反正規化 migration：contacts 快取最後一則訊息 + 排序用 effective_case_priority。僅做 schema 與 backfill，索引在 ensurePerformanceIndexes。 */
+function migrateContactsLastMessageDenormalization() {
+  const contactCols = db.prepare("PRAGMA table_info(contacts)").all() as { name: string }[];
+  const contactColNames = contactCols.map((c) => c.name);
+
+  if (!contactColNames.includes("last_message_content")) {
+    db.exec("ALTER TABLE contacts ADD COLUMN last_message_content TEXT;");
+    console.log("[DB Migration] contacts 已新增 last_message_content");
+  }
+  if (!contactColNames.includes("last_message_sender_type")) {
+    db.exec("ALTER TABLE contacts ADD COLUMN last_message_sender_type TEXT;");
+    console.log("[DB Migration] contacts 已新增 last_message_sender_type");
+  }
+  if (!contactColNames.includes("effective_case_priority")) {
+    db.exec("ALTER TABLE contacts ADD COLUMN effective_case_priority INTEGER DEFAULT 999;");
+    console.log("[DB Migration] contacts 已新增 effective_case_priority (DEFAULT 999)");
+  }
+
+  // Backfill last_message_content / last_message_sender_type 來自 messages 最後一則
+  const hasContent = (db.prepare("PRAGMA table_info(contacts)").all() as { name: string }[]).map((c) => c.name).includes("last_message_content");
+  if (hasContent) {
+    const needBackfill = db.prepare(
+      "SELECT 1 FROM contacts c WHERE c.last_message_content IS NULL AND EXISTS (SELECT 1 FROM messages m WHERE m.contact_id = c.id) LIMIT 1"
+    ).get();
+    if (needBackfill) {
+      db.exec(`
+        UPDATE contacts SET
+          last_message_content = (SELECT m.content FROM messages m WHERE m.contact_id = contacts.id ORDER BY m.id DESC LIMIT 1),
+          last_message_sender_type = (SELECT m.sender_type FROM messages m WHERE m.contact_id = contacts.id ORDER BY m.id DESC LIMIT 1)
+        WHERE last_message_content IS NULL AND id IN (SELECT DISTINCT contact_id FROM messages)
+      `);
+      console.log("[DB Migration] contacts last_message_content/sender_type backfill 完成");
+    }
+  }
+
+  // Backfill effective_case_priority = COALESCE(case_priority, 999)
+  const hasEff = (db.prepare("PRAGMA table_info(contacts)").all() as { name: string }[]).map((c) => c.name).includes("effective_case_priority");
+  if (hasEff) {
+    db.exec("UPDATE contacts SET effective_case_priority = COALESCE(case_priority, 999) WHERE effective_case_priority IS NULL");
+    console.log("[DB Migration] contacts effective_case_priority backfill 完成");
+  }
+}
+
+/** AI 回覆冪等：以 batch delivery_key（sha1 of sorted event ids）追蹤已送出批次，避免 retry 重複發送 */
+function migrateAiReplyDeliveries() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ai_reply_deliveries (
+      delivery_key TEXT PRIMARY KEY,
+      platform TEXT NOT NULL,
+      contact_id INTEGER NOT NULL,
+      batch_event_ids TEXT NOT NULL DEFAULT '[]',
+      merged_text TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      last_error TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      sent_at TEXT,
+      FOREIGN KEY (contact_id) REFERENCES contacts(id)
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_ai_reply_deliveries_contact ON ai_reply_deliveries(contact_id);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_ai_reply_deliveries_status ON ai_reply_deliveries(status);`);
+
+  const cols = (db.prepare("PRAGMA table_info(ai_reply_deliveries)").all() as { name: string }[]).map(c => c.name);
+  if (cols.includes("inbound_event_id") && !cols.includes("delivery_key")) {
+    db.exec("DROP TABLE ai_reply_deliveries;");
+    db.exec(`
+      CREATE TABLE ai_reply_deliveries (
+        delivery_key TEXT PRIMARY KEY,
+        platform TEXT NOT NULL,
+        contact_id INTEGER NOT NULL,
+        batch_event_ids TEXT NOT NULL DEFAULT '[]',
+        merged_text TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        last_error TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        sent_at TEXT,
+        FOREIGN KEY (contact_id) REFERENCES contacts(id)
+      )
+    `);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_ai_reply_deliveries_contact ON ai_reply_deliveries(contact_id);`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_ai_reply_deliveries_status ON ai_reply_deliveries(status);`);
+    console.log("[DB Migration] ai_reply_deliveries 已升級為 batch delivery_key 版本");
+  }
+}
+
+/** 僅建立索引，不混 schema 變更。重複索引已移除（見註解）。 */
 function ensurePerformanceIndexes() {
   const run = (sql: string) => {
     try {
@@ -167,26 +256,34 @@ function ensurePerformanceIndexes() {
     }
   };
 
-  // 極速複合索引（解決 getContacts / Stats 中 MAX(id) GROUP BY 等 Full Table Scan）
+  // 五顆必做
   run(`CREATE INDEX IF NOT EXISTS idx_messages_contact_id_id ON messages(contact_id, id DESC);`);
   run(`CREATE INDEX IF NOT EXISTS idx_messages_sender_created ON messages(sender_type, created_at DESC);`);
   run(`CREATE INDEX IF NOT EXISTS idx_contacts_brand_status ON contacts(brand_id, status);`);
   run(`CREATE INDEX IF NOT EXISTS idx_contacts_assigned_agent ON contacts(assigned_agent_id);`);
   run(`CREATE INDEX IF NOT EXISTS idx_contacts_last_message_at ON contacts(last_message_at DESC);`);
 
-  run(`CREATE INDEX IF NOT EXISTS idx_messages_contact_id ON messages(contact_id);`);
   run(`CREATE INDEX IF NOT EXISTS idx_messages_contact_created ON messages(contact_id, created_at DESC);`);
-  run(`CREATE INDEX IF NOT EXISTS idx_messages_contact_id_desc ON messages(contact_id, id DESC);`);
   run(`CREATE INDEX IF NOT EXISTS idx_contacts_brand_id ON contacts(brand_id);`);
-  run(`CREATE INDEX IF NOT EXISTS idx_contacts_assigned_agent_id ON contacts(assigned_agent_id);`);
   run(`CREATE INDEX IF NOT EXISTS idx_contacts_platform_user ON contacts(platform, platform_user_id);`);
   run(`CREATE INDEX IF NOT EXISTS idx_contacts_status ON contacts(status);`);
   run(`CREATE INDEX IF NOT EXISTS idx_ai_logs_contact_id ON ai_logs(contact_id);`);
   run(`CREATE INDEX IF NOT EXISTS idx_ai_logs_created_at ON ai_logs(created_at DESC);`);
+  run(`CREATE INDEX IF NOT EXISTS idx_contacts_brand_status_last_message_at ON contacts(brand_id, status, last_message_at DESC);`);
 
-  // 反正規化：contacts 快取最後一則訊息內容與發送者類型，消除 getContacts 的 JOIN/MAX(id) 瓶頸
-  run("ALTER TABLE contacts ADD COLUMN last_message_content TEXT;");
-  run("ALTER TABLE contacts ADD COLUMN last_message_sender_type TEXT;");
+  // 移除重複索引（若存在）
+  try {
+    db.exec("DROP INDEX IF EXISTS idx_messages_contact_id_desc;");
+    db.exec("DROP INDEX IF EXISTS idx_contacts_assigned_agent_id;");
+    db.exec("DROP INDEX IF EXISTS idx_messages_contact_id;");
+    db.exec("DROP INDEX IF EXISTS idx_contacts_list_order;");
+  } catch (_e) {}
+  // getContacts 排序覆蓋：ORDER BY is_pinned DESC, effective_case_priority ASC, last_message_at DESC
+  run(`CREATE INDEX IF NOT EXISTS idx_contacts_list_order ON contacts(is_pinned DESC, effective_case_priority ASC, last_message_at DESC);`);
+  // 有 WHERE brand_id 時同時覆蓋篩選與排序，避免 USE TEMP B-TREE
+  run(`CREATE INDEX IF NOT EXISTS idx_contacts_brand_list_order ON contacts(brand_id, is_pinned DESC, effective_case_priority ASC, last_message_at DESC);`);
+
+  console.log("[DB] ensurePerformanceIndexes() 已執行（僅索引，無 schema）");
 }
 
 /** 緊急止血：後台關鍵字強制縮為僅四項，移除招呼/情緒詞。每次啟動時若現有值與目標不同則覆寫。 */

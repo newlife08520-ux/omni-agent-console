@@ -151,6 +151,14 @@ export interface IStorage {
   updateUserLastActive(userId: number): void;
   getAgentContactFlags(agentId: number, contactIds: number[]): Record<number, "later" | "tracking">;
   setAgentContactFlag(agentId: number, contactId: number, flag: "later" | "tracking" | null): void;
+  /** 冪等：以 delivery_key 檢查該批次是否已送出 */
+  isAiReplyDeliverySent(deliveryKey: string): boolean;
+  /** 冪等：建立 pending 記錄（worker claim 時呼叫），若已存在回傳 false */
+  createAiReplyDeliveryIfMissing(deliveryKey: string, platform: string, contactId: number, batchEventIds: string[], mergedText: string): boolean;
+  /** 冪等：標記為已送出 */
+  markAiReplyDeliverySent(deliveryKey: string): void;
+  /** 冪等：標記為失敗 */
+  markAiReplyDeliveryFailed(deliveryKey: string, error: string): void;
   updateContactLastHumanReply(contactId: number): void;
   incrementContactReassignCount(contactId: number): void;
   updateContactAssignmentStatus(contactId: number, status: string): void;
@@ -480,7 +488,7 @@ export class SQLiteStorage implements IStorage {
       params.push(assignedToUserId);
     }
     if (conditions.length) query += " WHERE " + conditions.join(" AND ");
-    query += " ORDER BY c.is_pinned DESC, (CASE WHEN c.case_priority IS NULL THEN 999 ELSE c.case_priority END) ASC, c.last_message_at DESC";
+    query += " ORDER BY c.is_pinned DESC, c.effective_case_priority ASC, c.last_message_at DESC";
     if (limit != null && limit > 0) {
       query += " LIMIT " + Math.min(Math.floor(limit), 2000);
       if (offset != null && offset > 0) query += " OFFSET " + Math.floor(offset);
@@ -1288,7 +1296,8 @@ export class SQLiteStorage implements IStorage {
   }
 
   updateContactCasePriority(contactId: number, priority: number | null): void {
-    db.prepare("UPDATE contacts SET case_priority = ? WHERE id = ?").run(priority, contactId);
+    const effective = priority ?? 999;
+    db.prepare("UPDATE contacts SET case_priority = ?, effective_case_priority = ? WHERE id = ?").run(priority, effective, contactId);
   }
 
   updateContactClosed(contactId: number, closedByAgentId: number, closeReason?: string | null): void {
@@ -1385,6 +1394,33 @@ export class SQLiteStorage implements IStorage {
     } else {
       db.prepare("INSERT INTO agent_contact_flags (agent_id, contact_id, flag, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(agent_id, contact_id) DO UPDATE SET flag = ?, updated_at = ?").run(agentId, contactId, flag, now, flag, now);
     }
+  }
+
+  isAiReplyDeliverySent(deliveryKey: string): boolean {
+    const row = db.prepare("SELECT status FROM ai_reply_deliveries WHERE delivery_key = ? LIMIT 1").get(deliveryKey) as { status: string } | undefined;
+    return row?.status === "sent";
+  }
+
+  createAiReplyDeliveryIfMissing(deliveryKey: string, platform: string, contactId: number, batchEventIds: string[], mergedText: string): boolean {
+    try {
+      const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+      db.prepare(
+        "INSERT OR IGNORE INTO ai_reply_deliveries (delivery_key, platform, contact_id, batch_event_ids, merged_text, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)"
+      ).run(deliveryKey, platform, contactId, JSON.stringify(batchEventIds), mergedText, now, now);
+      return true;
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  markAiReplyDeliverySent(deliveryKey: string): void {
+    const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+    db.prepare("UPDATE ai_reply_deliveries SET status = 'sent', sent_at = ?, updated_at = ? WHERE delivery_key = ?").run(now, now, deliveryKey);
+  }
+
+  markAiReplyDeliveryFailed(deliveryKey: string, error: string): void {
+    const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+    db.prepare("UPDATE ai_reply_deliveries SET status = 'failed', last_error = ?, updated_at = ? WHERE delivery_key = ?").run(error.slice(0, 500), now, deliveryKey);
   }
 
   updateUserAvatar(userId: number, avatarUrl: string | null): void {
