@@ -35,6 +35,9 @@ const CASE_PRIORITY_OPTIONS: { value: string; label: string }[] = [
   { value: "5", label: "最低" },
 ];
 
+/** 穩定空陣列參考，避免 contacts/messages 為空時每次 render 產生新 [] 導致依賴的 useEffect 瘋狂觸發 */
+const EMPTY_ARRAY: readonly unknown[] = [];
+
 /** 全站統一狀態語意色：紅=超時/高風險、橘=待處理、藍=已分配、綠=已回覆/正常、灰=待分配/離線 */
 const STATUS_SEMANTIC = {
   danger: { bg: "bg-red-100 text-red-700 border-red-200", dot: "bg-red-500" },
@@ -170,10 +173,10 @@ function ThrottledContent({ content, throttleMs = 80 }: { content: string; throt
 
 /** 單一訊息氣泡：用 memo + 自訂 areEqual，只有 content/資料變動時才 re-render，避免整串歷史一起重繪 */
 function areEqualMessageBubble(
-  prev: { msg: Message; showDate: boolean; onPreviewImage: (url: string) => void },
-  next: { msg: Message; showDate: boolean; onPreviewImage: (url: string) => void },
+  prev: { msg: Message; showDate: boolean; onPreviewImage: (url: string) => void; isStreaming?: boolean },
+  next: { msg: Message; showDate: boolean; onPreviewImage: (url: string) => void; isStreaming?: boolean },
 ): boolean {
-  if (prev.msg.id !== next.msg.id || prev.showDate !== next.showDate) return false;
+  if (prev.msg.id !== next.msg.id || prev.showDate !== next.showDate || prev.isStreaming !== next.isStreaming) return false;
   const p = prev.msg;
   const n = next.msg;
   return (
@@ -189,10 +192,12 @@ const MessageBubble = React.memo(function MessageBubble({
   msg,
   showDate,
   onPreviewImage,
+  isStreaming,
 }: {
   msg: Message;
   showDate: boolean;
   onPreviewImage: (url: string) => void;
+  isStreaming?: boolean;
 }) {
   if (msg.sender_type === "system") {
     return (
@@ -237,7 +242,7 @@ const MessageBubble = React.memo(function MessageBubble({
                   : msg.sender_type === "ai" ? "rounded-br-md border border-emerald-100"
                   : "rounded-br-md"
               }`}>
-                <img src={msg.image_url} alt="附件圖片" className="max-w-full max-h-[280px] object-contain cursor-pointer rounded-2xl hover:opacity-90 transition-opacity" onClick={() => onPreviewImage(msg.image_url!)} data-testid={`image-message-${msg.id}`} />
+                <img src={msg.image_url} alt="附件圖片" className="max-w-full max-h-[280px] object-contain cursor-pointer rounded-2xl hover:opacity-90 transition-opacity" loading="lazy" decoding="async" onClick={() => onPreviewImage(msg.image_url!)} data-testid={`image-message-${msg.id}`} />
               </div>
             ) : msg.message_type === "video" && msg.image_url ? (
               <div className={`rounded-2xl overflow-hidden shadow-sm ${
@@ -279,7 +284,7 @@ const MessageBubble = React.memo(function MessageBubble({
                     : msg.sender_type === "ai" ? "bg-emerald-50 text-emerald-900 rounded-br-md border border-emerald-100"
                     : "bg-amber-600 text-white rounded-br-md"
                 }`}>
-                  <ThrottledContent content={msg.content} throttleMs={80} />
+                  {isStreaming ? <ThrottledContent content={msg.content ?? ""} throttleMs={80} /> : <>{msg.content}</>}
                 </div>
               );
             })()}
@@ -461,6 +466,9 @@ function contactListItemPropsAreEqual(prev: ContactListItemProps, next: ContactL
   if (a.status !== b.status) return false;
   if (a.my_flag !== b.my_flag) return false;
   if ((a.vip_level ?? 0) !== (b.vip_level ?? 0)) return false;
+  if ((a as any).case_priority !== (b as any).case_priority) return false;
+  if ((a as any).is_urgent !== (b as any).is_urgent) return false;
+  if ((a as any).is_overdue !== (b as any).is_overdue) return false;
   return true;
 }
 const ContactListItem = React.memo(function ContactListItem({ contact, isSelected, currentUserId, onSelect, onPin, onMouseEnter }: ContactListItemProps) {
@@ -573,7 +581,13 @@ export default function ChatPage() {
     queryFn: getQueryFn({ on401: "returnNull" }),
   });
   const apiTagShortcuts = Array.isArray(apiTagShortcutsRaw) ? apiTagShortcutsRaw : [];
-  const shortcutTagNames = apiTagShortcuts.length > 0 ? apiTagShortcuts.sort((a, b) => (a?.order ?? 0) - (b?.order ?? 0)).map((t) => t?.name ?? "").filter(Boolean) : [...DEFAULT_TAGS, ...customTags];
+  /** 不突變 React Query 快取：用 [...apiTagShortcuts].sort()，並 useMemo 避免每 render 重算 */
+  const shortcutTagNames = useMemo(
+    () => (apiTagShortcuts.length > 0
+      ? [...apiTagShortcuts].sort((a, b) => (a?.order ?? 0) - (b?.order ?? 0)).map((t) => t?.name ?? "").filter(Boolean)
+      : [...DEFAULT_TAGS, ...customTags]),
+    [apiTagShortcuts, customTags]
+  );
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [showQuickReplies, setShowQuickReplies] = useState(false);
   const [rightTab, setRightTab] = useState("info");
@@ -693,7 +707,6 @@ export default function ChatPage() {
           sseConnectedRef.current = true;
           setSseConnected(true);
           retryCount = 0;
-          console.log("[SSE] Connected successfully");
         });
         es.addEventListener("message_chunk", (e) => {
           try {
@@ -709,7 +722,6 @@ export default function ChatPage() {
           try {
             const data = JSON.parse(e.data) as { contact_id?: number };
             const contactId = data?.contact_id;
-            console.log("[SSE] new_message received, contact:", contactId);
             setStreamingContent((prev) => {
               const next = { ...prev };
               if (contactId != null) delete next[contactId];
@@ -720,25 +732,15 @@ export default function ChatPage() {
             if (contactId != null) q.invalidateQueries({ queryKey: ["/api/contacts", contactId, "messages"] });
             q.invalidateQueries({ queryKey: ["/api/manager-stats"], exact: false });
             q.invalidateQueries({ queryKey: ["/api/agent-stats/me"] });
-            /** 立即 refetch 避免「過陣子才出來」：明明沒幾筆卻找不到、等一會才出現 */
-            q.refetchQueries({ queryKey: ["/api/contacts"], exact: false }).catch(() => {});
-            if (contactId != null) q.refetchQueries({ queryKey: ["/api/contacts", contactId, "messages"] }).catch(() => {});
-            q.refetchQueries({ queryKey: ["/api/manager-stats"], exact: false }).catch(() => {});
-            q.refetchQueries({ queryKey: ["/api/agent-stats/me"] }).catch(() => {});
           } catch (err) {
             console.error("[SSE] Error parsing new_message:", err);
           }
         });
         es.addEventListener("contacts_updated", () => {
-          console.log("[SSE] contacts_updated received");
           const q = queryClientRef.current;
           q.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
           q.invalidateQueries({ queryKey: ["/api/manager-stats"], exact: false });
           q.invalidateQueries({ queryKey: ["/api/agent-stats/me"] });
-          /** 立即 refetch 讓新對話／更新馬上出現在列表，不要過陣子才出來 */
-          q.refetchQueries({ queryKey: ["/api/contacts"], exact: false }).catch(() => {});
-          q.refetchQueries({ queryKey: ["/api/manager-stats"], exact: false }).catch(() => {});
-          q.refetchQueries({ queryKey: ["/api/agent-stats/me"] }).catch(() => {});
         });
         es.onerror = (err) => {
           console.error("[SSE] Connection error, retry #" + retryCount, err);
@@ -787,13 +789,13 @@ export default function ChatPage() {
     /** 切換品牌時不沿用上一筆資料，強制等新列表載入，避免「沒切過去」的錯覺 */
     placeholderData: undefined,
   });
-  const contacts = Array.isArray(contactsRaw) ? contactsRaw : [];
+  const contacts = Array.isArray(contactsRaw) ? contactsRaw : (EMPTY_ARRAY as (ContactWithPreview & { is_urgent?: boolean; is_overdue?: boolean })[]);
 
   const { data: messagesRaw, isLoading: messagesLoading, isFetching: messagesFetching } = useQuery<Message[]>({
     queryKey: ["/api/contacts", selectedId, "messages"],
     queryFn: async () => {
       if (!selectedId) return [];
-      const res = await fetch(`/api/contacts/${selectedId}/messages`, {
+      const res = await fetch(`/api/contacts/${selectedId}/messages?limit=50`, {
         credentials: "include",
         headers: { "Cache-Control": "no-cache", "Pragma": "no-cache" },
       });
@@ -804,8 +806,9 @@ export default function ChatPage() {
     enabled: !!selectedId,
     refetchInterval: 10000,
     staleTime: 5 * 60 * 1000,
+    /** 效能護城河：不沿用 keepPreviousData，切換聯絡人時立即清空，搭配右側 key={selectedId} 消滅殘影 */
   });
-  const messages = Array.isArray(messagesRaw) ? messagesRaw : [];
+  const messages = Array.isArray(messagesRaw) ? messagesRaw : (EMPTY_ARRAY as Message[]);
 
   /** 滑過聯絡人時預先拉取訊息，點開時常已就緒（秒開）。僅依賴 queryClient 以穩定引用，避免 3000+ 聯絡人一併 re-render */
   const prefetchMessagesForContact = useCallback(
@@ -814,7 +817,7 @@ export default function ChatPage() {
       queryClient.prefetchQuery({
         queryKey: ["/api/contacts", contactId, "messages"],
         queryFn: async () => {
-          const res = await fetch(`/api/contacts/${contactId}/messages`, {
+          const res = await fetch(`/api/contacts/${contactId}/messages?limit=50`, {
             credentials: "include",
             headers: { "Cache-Control": "no-cache", "Pragma": "no-cache" },
           });
@@ -929,9 +932,6 @@ export default function ChatPage() {
 
   const displayMessagesLength = displayMessages?.length ?? 0;
 
-  if (typeof import.meta !== "undefined" && import.meta.env?.PROD) {
-    console.log("[ChatPage] render", { contactsLen: (contacts ?? []).length, displayMessagesLen: (displayMessages ?? []).length, selectedId, hasMessagesArray: Array.isArray(messages) });
-  }
 
   const loadOlderMessages = useCallback(async () => {
     if (!selectedId || loadingOlder || !hasMoreOlder) return;
@@ -1040,35 +1040,38 @@ export default function ChatPage() {
   /** 待我回覆：我的案件 + 輪到我回覆（分配給我 + 最後一則為客戶 + 未結案） */
   const needMyReply = (c: ContactWithPreview) => isMine(c) && needReply(c);
 
-  const filteredContacts = contactsSafe
-    .filter((c) => (c.display_name ?? "").toLowerCase().includes(searchQuery.toLowerCase()))
-    .filter((c) => platformFilter === "all" || c.platform === platformFilter)
-    .filter((c) => {
-      if (viewMode === "my") return isMine(c) && !["closed", "resolved"].includes(c.status);
-      if (viewMode === "pending") return needMyReply(c);
-      if (viewMode === "high_risk") return isUrgent(c) && !["closed", "resolved"].includes(c.status);
-      if (viewMode === "tracking") return isMine(c) && (c as ContactWithPreview).my_flag === "tracking" && !["closed", "resolved"].includes(c.status);
-      if (viewMode === "overdue") return isOverdue(c) && !["closed", "resolved"].includes(c.status);
-      if (viewMode === "unassigned") return isUnassigned(c);
-      return true;
-    })
-    .sort((a, b) => {
-      const ac = a as ContactWithPreview & { is_urgent?: boolean };
-      const bc = b as ContactWithPreview & { is_urgent?: boolean };
-      const aUrgent = isUrgent(ac);
-      const bUrgent = isUrgent(bc);
-      if (aUrgent !== bUrgent) return aUrgent ? -1 : 1;
-      const aOverdue = isOverdue(a);
-      const bOverdue = isOverdue(b);
-      if (aOverdue !== bOverdue) return aOverdue ? -1 : 1;
-      const aUnassigned = isUnassigned(a);
-      const bUnassigned = isUnassigned(b);
-      if (aUnassigned !== bUnassigned) return aUnassigned ? -1 : 1;
-      if ((a.vip_level ?? 0) !== (b.vip_level ?? 0)) return (b.vip_level ?? 0) - (a.vip_level ?? 0);
-      const aAt = a.last_message_at || "";
-      const bAt = b.last_message_at || "";
-      return bAt.localeCompare(aAt);
-    });
+  /** 效能護城河：filter + sort 僅在依賴變動時執行，避免 messageInput/streamingContent 等高頻 re-render 時對 3000 筆執行 filter+sort+數萬次 Date 解析 */
+  const filteredContacts = useMemo(() => {
+    return contactsSafe
+      .filter((c) => (c.display_name ?? "").toLowerCase().includes(searchQuery.toLowerCase()))
+      .filter((c) => platformFilter === "all" || c.platform === platformFilter)
+      .filter((c) => {
+        if (viewMode === "my") return isMine(c) && !["closed", "resolved"].includes(c.status);
+        if (viewMode === "pending") return needMyReply(c);
+        if (viewMode === "high_risk") return isUrgent(c) && !["closed", "resolved"].includes(c.status);
+        if (viewMode === "tracking") return isMine(c) && (c as ContactWithPreview).my_flag === "tracking" && !["closed", "resolved"].includes(c.status);
+        if (viewMode === "overdue") return isOverdue(c) && !["closed", "resolved"].includes(c.status);
+        if (viewMode === "unassigned") return isUnassigned(c);
+        return true;
+      })
+      .sort((a, b) => {
+        const ac = a as ContactWithPreview & { is_urgent?: boolean };
+        const bc = b as ContactWithPreview & { is_urgent?: boolean };
+        const aUrgent = isUrgent(ac);
+        const bUrgent = isUrgent(bc);
+        if (aUrgent !== bUrgent) return aUrgent ? -1 : 1;
+        const aOverdue = isOverdue(a);
+        const bOverdue = isOverdue(b);
+        if (aOverdue !== bOverdue) return aOverdue ? -1 : 1;
+        const aUnassigned = isUnassigned(a);
+        const bUnassigned = isUnassigned(b);
+        if (aUnassigned !== bUnassigned) return aUnassigned ? -1 : 1;
+        if ((a.vip_level ?? 0) !== (b.vip_level ?? 0)) return (b.vip_level ?? 0) - (a.vip_level ?? 0);
+        const aAt = a.last_message_at || "";
+        const bAt = b.last_message_at || "";
+        return bAt.localeCompare(aAt);
+      });
+  }, [contactsSafe, searchQuery, platformFilter, viewMode, authUser?.user?.id]);
 
   /** 虛擬滾動：只渲染可見約十幾筆，破千聯絡人也不卡。count 防禦避免 undefined.length 主畫面崩潰 */
   const listScrollRef = useRef<HTMLDivElement>(null);
@@ -1081,7 +1084,7 @@ export default function ChatPage() {
   });
 
   /** 切換篩選後若目前選中的聯絡人不在結果內：改選第一筆或清空；但若為搜尋點入的對話則保留選取，避免「點開後馬上被換掉」 */
-  const filteredIdsKey = contactListSafe.map((c) => c.id).join(",");
+  const filteredIdsKey = useMemo(() => contactListSafe.map((c) => c.id).join(","), [contactListSafe]);
   useEffect(() => {
     const ids = filteredIdsKey ? filteredIdsKey.split(",").map(Number) : [];
     const inList = selectedId != null && ids.includes(selectedId);
@@ -1185,7 +1188,7 @@ export default function ChatPage() {
     }
   };
 
-  const handleStatusChange = async (status: string) => {
+  const handleStatusChange = useCallback(async (status: string) => {
     if (!selectedId) return;
     try {
       await apiRequest("PUT", `/api/contacts/${selectedId}/status`, { status });
@@ -1195,9 +1198,9 @@ export default function ChatPage() {
         toast({ title: "已標記為已解決", description: "系統將自動發送滿意度調查卡片給客戶" });
       }
     } catch (_e) { toast({ title: "操作失敗", variant: "destructive" }); }
-  };
+  }, [selectedId, queryClient, invalidateContactsAndStats, effectiveSelectedContact?.platform]);
 
-  const handleCasePriorityChange = async (value: string) => {
+  const handleCasePriorityChange = useCallback(async (value: string) => {
     if (!selectedId) return;
     const priority = value === "none" ? null : parseInt(value, 10);
     try {
@@ -1207,7 +1210,7 @@ export default function ChatPage() {
       queryClient.invalidateQueries({ queryKey: ["/api/contacts", selectedId, "detail"] });
       toast({ title: "已更新優先級" });
     } catch (_e) { toast({ title: "更新優先級失敗", variant: "destructive" }); }
-  };
+  }, [selectedId, selectedBrandId, queryClient, invalidateContactsAndStats]);
 
   const isManager = authUser?.user?.role === "super_admin" || authUser?.user?.role === "marketing_manager";
   const isCsAgent = authUser?.user?.role === "cs_agent";
@@ -1748,15 +1751,15 @@ export default function ChatPage() {
   const getInitials = (name: string | undefined | null): string => (name != null && String(name).trim() ? String(name).trim().slice(0, 1).toUpperCase() : "?");
   const avatarColors = ["bg-emerald-500", "bg-amber-500", "bg-violet-500", "bg-sky-500", "bg-rose-400", "bg-teal-500", "bg-orange-400"];
   const getAvatarColor = (id: number) => avatarColors[id % avatarColors.length];
-  const contactTags = (() => {
-    if (!effectiveSelectedContact) return [];
+  const contactTags = useMemo(() => {
+    if (!effectiveSelectedContact?.tags) return [];
     try {
-      const v = JSON.parse(effectiveSelectedContact.tags || "[]");
+      const v = JSON.parse(effectiveSelectedContact.tags);
       return Array.isArray(v) ? v : [];
     } catch {
       return [];
     }
-  })();
+  }, [effectiveSelectedContact?.tags]);
   const getStatusSemantic = (c: ContactWithPreview): keyof typeof STATUS_SEMANTIC => {
     if (["closed", "resolved"].includes(c.status)) return "muted";
     if (isUrgent(c) || (c as ContactWithPreview).reassign_count > 0) return "danger";
@@ -2272,6 +2275,7 @@ export default function ChatPage() {
                           }}
                           showDate={false}
                           onPreviewImage={setPreviewImage}
+                          isStreaming
                         />
                       ) : null}
                       <div ref={messagesEndRef} />

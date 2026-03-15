@@ -32,9 +32,6 @@ export function BrandProvider({ children }: { children: React.ReactNode }) {
     queryFn: getQueryFn({ on401: "returnNull" }),
   });
   const brands = Array.isArray(brandsRaw) ? brandsRaw : [];
-  if (typeof import.meta !== "undefined" && import.meta.env?.PROD && brandsRaw !== undefined) {
-    console.log("[BrandProvider] brands", { len: brands.length, isArray: Array.isArray(brandsRaw), rawType: typeof brandsRaw });
-  }
   const { data: channelsRaw, isLoading: channelsLoading } = useQuery<Channel[]>({
     queryKey: ["/api/brands", selectedBrandId, "channels"],
     queryFn: async () => {
