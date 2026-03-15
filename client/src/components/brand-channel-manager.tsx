@@ -332,8 +332,17 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
         toast({ title: editingChannel ? "渠道已更新" : "渠道已建立" });
       }
       setShowChannelDialog(false);
-    } catch (_e) {
-      toast({ title: "操作失敗", variant: "destructive" });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const jsonMatch = msg.match(/\d+:\s*(\{[\s\S]*\})/);
+      let description: string | undefined;
+      if (jsonMatch) {
+        try {
+          const obj = JSON.parse(jsonMatch[1]) as { message?: string };
+          description = obj.message;
+        } catch {}
+      }
+      toast({ title: "操作失敗", description: description || msg.slice(0, 120), variant: "destructive" });
     } finally {
       setChannelSaving(false);
     }

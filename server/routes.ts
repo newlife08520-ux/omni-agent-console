@@ -2283,7 +2283,8 @@ export async function registerRoutes(
     if (access_token !== undefined) {
       const existing = storage.getChannel(id);
       const isLine = (platform ?? existing?.platform) === "line";
-      if (isLine && access_token) {
+      const tokenChanged = !existing || (String(access_token || "").trim() !== String(existing.access_token || "").trim());
+      if (isLine && access_token && tokenChanged) {
         const valid = await validateLineAccessToken(String(access_token));
         if (!valid) {
           return res.status(400).json({ message: "LINE Token 無效或已過期，請重新確認" });
