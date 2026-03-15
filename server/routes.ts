@@ -2616,8 +2616,10 @@ export async function registerRoutes(
     const assignedToUserId = assignedToMe && userId ? userId : undefined;
     const agentIdForFlags = userId ?? undefined;
     const limitParam = req.query.limit != null ? parseInt(String(req.query.limit), 10) : undefined;
+    const offsetParam = req.query.offset != null ? parseInt(String(req.query.offset), 10) : undefined;
     const limit = (limitParam > 0 && limitParam <= 500) ? limitParam : 100;
-    let contacts = storage.getContacts(brandId, assignedToUserId, agentIdForFlags, limit);
+    const offset = (offsetParam != null && offsetParam >= 0) ? offsetParam : 0;
+    let contacts = storage.getContacts(brandId, assignedToUserId, agentIdForFlags, limit, offset);
     const afterGet = Date.now();
     if (needReplyFirst) {
       contacts = [...contacts].sort((a, b) => {
@@ -6547,57 +6549,19 @@ ${contextStr}
     const me = members.find((m) => m.id === userId);
     const isOnline = (me as any)?.is_online ?? 0;
     const isAvailable = (me as any)?.is_available ?? 1;
-    const contacts = storage.getContacts(undefined, userId, userId) as any[];
-    const today = new Date().toISOString().slice(0, 10);
-    let pendingReply = 0;
-    let urgent = 0;
-    let overdue = 0;
-    let tracking = 0;
-    let closedToday = 0;
-    for (const c of contacts) {
-      if (["closed", "resolved"].includes(c.status)) {
-        if (c.closed_at && String(c.closed_at).slice(0, 10) === today && c.closed_by_agent_id === userId) closedToday++;
-        continue;
-      }
-      if (String(c.last_message_sender_type || "").toLowerCase() === "user") pendingReply++;
-      if (isUrgentContact(c)) urgent++;
-      if (isOverdueContact(c)) overdue++;
-      if (c.my_flag === "tracking") tracking++;
-    }
-    return res.json({ my_cases: openCases, pending_reply: pendingReply, urgent, overdue, tracking, closed_today: closedToday, open_cases_count: openCases, max_active_conversations: maxActive, is_online: isOnline, is_available: isAvailable });
+    const counts = storage.getAgentStatsCounts(userId);
+    return res.json({ my_cases: openCases, pending_reply: counts.pending_reply, urgent: counts.urgent_simple, overdue: counts.overdue, tracking: counts.tracking, closed_today: counts.closed_today, open_cases_count: openCases, max_active_conversations: maxActive, is_online: isOnline, is_available: isAvailable });
   });
 
   app.get("/api/manager-stats", authMiddleware, (req: any, res) => {
     if (!isSupervisor(req)) return res.json({ today_new: 0, unassigned: 0, urgent: 0, overdue: 0, closed_today: 0, vip_unhandled: 0, team: [] });
     const brandId = req.query.brand_id ? parseInt(String(req.query.brand_id)) : undefined;
-    const allContacts = storage.getContacts(brandId) as any[];
-    const today = new Date().toISOString().slice(0, 10);
-    let todayNew = 0;
-    let unassigned = 0;
-    let urgent = 0;
-    let overdue = 0;
-    let closedToday = 0;
-    let vipUnhandled = 0;
-    for (const c of allContacts) {
-      if (c.created_at && String(c.created_at).slice(0, 10) === today) todayNew++;
-      if (!c.assigned_agent_id && c.needs_human === 1) unassigned++;
-      if (!["closed", "resolved"].includes(c.status)) {
-        if (isUrgentContact(c)) urgent++;
-        if (isOverdueContact(c)) overdue++;
-        if (c.vip_level > 0 && String(c.last_message_sender_type || "").toLowerCase() === "user") vipUnhandled++;
-      }
-      if (["closed", "resolved"].includes(c.status) && c.closed_at && String(c.closed_at).slice(0, 10) === today) closedToday++;
-    }
+    const counts = storage.getManagerStatsCounts(brandId);
     const agents = storage.getTeamMembers().filter((m) => m.role === "cs_agent");
     const team = agents.map((m) => {
       const st = storage.getAgentStatus(m.id);
       const openCases = storage.getOpenCasesCountForAgent(m.id);
-      const agentContacts = storage.getContacts(brandId, m.id) as any[];
-      let pendingReply = 0;
-      for (const c of agentContacts) {
-        if (["closed", "resolved"].includes(c.status)) continue;
-        if (String(c.last_message_sender_type || "").toLowerCase() === "user") pendingReply++;
-      }
+      const pendingReply = storage.getAgentPendingReplyCount(m.id);
       return {
         id: m.id,
         display_name: m.display_name,
@@ -6608,7 +6572,7 @@ ${contextStr}
         pending_reply: pendingReply,
       };
     });
-    return res.json({ today_new: todayNew, unassigned, urgent, overdue, closed_today: closedToday, vip_unhandled: vipUnhandled, team });
+    return res.json({ today_new: counts.today_new, unassigned: counts.unassigned, urgent: counts.urgent_simple, overdue: counts.overdue, closed_today: counts.closed_today, vip_unhandled: counts.vip_unhandled, team });
   });
 
   app.put("/api/agent-status/me", authMiddleware, (req: any, res) => {

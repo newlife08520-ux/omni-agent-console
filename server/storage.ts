@@ -31,7 +31,7 @@ export interface IStorage {
   createChannel(brandId: number, platform: string, channelName: string, botId?: string, accessToken?: string, channelSecret?: string): Promise<Channel>;
   updateChannel(id: number, data: Partial<Omit<Channel, "id" | "created_at">>): Promise<boolean>;
   deleteChannel(id: number): Promise<boolean>;
-  getContacts(brandId?: number, assignedToUserId?: number, agentIdForFlags?: number, limit?: number): ContactWithPreview[];
+  getContacts(brandId?: number, assignedToUserId?: number, agentIdForFlags?: number, limit?: number, offset?: number): ContactWithPreview[];
   getContact(id: number): Contact | undefined;
   updateContactHumanFlag(id: number, needsHuman: number): void;
   updateContactStatus(id: number, status: string): void;
@@ -131,6 +131,12 @@ export interface IStorage {
   createAssignmentRecord(contactId: number, assignedToAgentId: number, assignedByAgentId: number | null, reassignedFromAgentId: number | null, note: string | null): AssignmentRecord;
   updateContactAssignment(contactId: number, assignedAgentId: number | null, firstAssignedAt?: string): void;
   getOpenCasesCountForAgent(agentId: number): number;
+  /** 主管戰情：僅用 COUNT 查詢，不載入全表。用於 /api/manager-stats。 */
+  getManagerStatsCounts(brandId?: number): { today_new: number; unassigned: number; closed_today: number; overdue: number; urgent_simple: number; vip_unhandled: number };
+  /** 客服個人戰情：僅用 COUNT，不載入全表。用於 /api/agent-stats/me。 */
+  getAgentStatsCounts(agentId: number): { pending_reply: number; closed_today: number; overdue: number; tracking: number; urgent_simple: number };
+  /** 單一客服的「待回覆」數（最後一則為 user 且未結案）。用於 manager-stats 的 team[].pending_reply。 */
+  getAgentPendingReplyCount(agentId: number): number;
   incrementAgentTodayAssigned(agentId: number): void;
   resetAgentDailyCountsIfNewDay(): void;
   updateContactIntentLevel(contactId: number, level: string | null): void;
@@ -460,7 +466,7 @@ export class SQLiteStorage implements IStorage {
     return result.changes > 0;
   }
 
-  getContacts(brandId?: number, assignedToUserId?: number, agentIdForFlags?: number, limit?: number): ContactWithPreview[] {
+  getContacts(brandId?: number, assignedToUserId?: number, agentIdForFlags?: number, limit?: number, offset?: number): ContactWithPreview[] {
     const t0 = Date.now();
     let query = "SELECT c.*, b.name as brand_name, ch.channel_name, u.display_name as assigned_agent_name, u.avatar_url as assigned_agent_avatar_url FROM contacts c LEFT JOIN brands b ON c.brand_id = b.id LEFT JOIN channels ch ON c.channel_id = ch.id LEFT JOIN users u ON c.assigned_agent_id = u.id";
     const params: any[] = [];
@@ -477,6 +483,7 @@ export class SQLiteStorage implements IStorage {
     query += " ORDER BY c.is_pinned DESC, (CASE WHEN c.case_priority IS NULL THEN 999 ELSE c.case_priority END) ASC, c.last_message_at DESC";
     if (limit != null && limit > 0) {
       query += " LIMIT " + Math.min(Math.floor(limit), 2000);
+      if (offset != null && offset > 0) query += " OFFSET " + Math.floor(offset);
     }
     const contacts = db.prepare(query).all(...params) as (Contact & { brand_name?: string; channel_name?: string; assigned_agent_name?: string; assigned_agent_avatar_url?: string | null })[];
     const t1 = Date.now();
@@ -1196,6 +1203,79 @@ export class SQLiteStorage implements IStorage {
       "SELECT COUNT(*) as count FROM contacts WHERE assigned_agent_id = ? AND status NOT IN ('closed', 'resolved')"
     ).get(agentId) as { count: number } | undefined;
     return row?.count ?? 0;
+  }
+
+  /** 最後一則訊息的 sender_type：用於 overdue / pending_reply / vip_unhandled 的 COUNT。 */
+  private static lastMessageSenderSubquery(): string {
+    return `(SELECT m.sender_type FROM messages m INNER JOIN (SELECT contact_id, MAX(id) AS mid FROM messages GROUP BY contact_id) t ON m.contact_id = t.contact_id AND m.id = t.mid WHERE m.contact_id = c.id)`;
+  }
+
+  getManagerStatsCounts(brandId?: number): { today_new: number; unassigned: number; closed_today: number; overdue: number; urgent_simple: number; vip_unhandled: number } {
+    const today = new Date().toISOString().slice(0, 10);
+    const brandCond = brandId != null ? " c.brand_id = ? " : " 1=1 ";
+    const params = brandId != null ? [brandId] : [];
+    const todayNewRow = db.prepare(
+      `SELECT COUNT(*) as c FROM contacts c WHERE ${brandCond} AND date(c.created_at) = ?`
+    ).get(...params, today) as { c: number };
+    const unassignedRow = db.prepare(
+      `SELECT COUNT(*) as c FROM contacts c WHERE ${brandCond} AND c.needs_human = 1 AND (c.assigned_agent_id IS NULL OR c.assigned_agent_id = 0)`
+    ).get(...params) as { c: number };
+    const closedTodayRow = db.prepare(
+      `SELECT COUNT(*) as c FROM contacts c WHERE ${brandCond} AND c.status IN ('closed','resolved') AND c.closed_at IS NOT NULL AND date(c.closed_at) = ?`
+    ).get(...params, today) as { c: number };
+    const lastSender = SQLiteStorage.lastMessageSenderSubquery();
+    const overdueRow = db.prepare(
+      `SELECT COUNT(*) as c FROM contacts c WHERE ${brandCond} AND c.status NOT IN ('closed','resolved') AND c.last_message_at IS NOT NULL AND datetime(c.last_message_at) <= datetime('now','-1 hour') AND LOWER(${lastSender}) = 'user'`
+    ).get(...params) as { c: number };
+    const urgentRow = db.prepare(
+      `SELECT COUNT(*) as c FROM contacts c WHERE ${brandCond} AND c.status NOT IN ('closed','resolved') AND (c.status = 'high_risk' OR (c.case_priority IS NOT NULL AND c.case_priority <= 2))`
+    ).get(...params) as { c: number };
+    const vipRow = db.prepare(
+      `SELECT COUNT(*) as c FROM contacts c WHERE ${brandCond} AND c.status NOT IN ('closed','resolved') AND c.vip_level > 0 AND LOWER(${lastSender}) = 'user'`
+    ).get(...params) as { c: number };
+    return {
+      today_new: todayNewRow?.c ?? 0,
+      unassigned: unassignedRow?.c ?? 0,
+      closed_today: closedTodayRow?.c ?? 0,
+      overdue: overdueRow?.c ?? 0,
+      urgent_simple: urgentRow?.c ?? 0,
+      vip_unhandled: vipRow?.c ?? 0,
+    };
+  }
+
+  getAgentStatsCounts(agentId: number): { pending_reply: number; closed_today: number; overdue: number; tracking: number; urgent_simple: number } {
+    const today = new Date().toISOString().slice(0, 10);
+    const lastSender = SQLiteStorage.lastMessageSenderSubquery();
+    const pendingRow = db.prepare(
+      `SELECT COUNT(*) as c FROM contacts c WHERE c.assigned_agent_id = ? AND c.status NOT IN ('closed','resolved') AND LOWER(${lastSender}) = 'user'`
+    ).get(agentId) as { c: number };
+    const closedTodayRow = db.prepare(
+      "SELECT COUNT(*) as c FROM contacts WHERE assigned_agent_id = ? AND status IN ('closed','resolved') AND closed_at IS NOT NULL AND date(closed_at) = ?"
+    ).get(agentId, today) as { c: number };
+    const overdueRow = db.prepare(
+      `SELECT COUNT(*) as c FROM contacts c WHERE c.assigned_agent_id = ? AND c.status NOT IN ('closed','resolved') AND c.last_message_at IS NOT NULL AND datetime(c.last_message_at) <= datetime('now','-1 hour') AND LOWER(${lastSender}) = 'user'`
+    ).get(agentId) as { c: number };
+    const trackingRow = db.prepare(
+      "SELECT COUNT(*) as c FROM agent_contact_flags WHERE agent_id = ? AND flag = 'tracking'"
+    ).get(agentId) as { c: number };
+    const urgentRow = db.prepare(
+      "SELECT COUNT(*) as c FROM contacts WHERE assigned_agent_id = ? AND status NOT IN ('closed','resolved') AND (status = 'high_risk' OR (case_priority IS NOT NULL AND case_priority <= 2))"
+    ).get(agentId) as { c: number };
+    return {
+      pending_reply: pendingRow?.c ?? 0,
+      closed_today: closedTodayRow?.c ?? 0,
+      overdue: overdueRow?.c ?? 0,
+      tracking: trackingRow?.c ?? 0,
+      urgent_simple: urgentRow?.c ?? 0,
+    };
+  }
+
+  getAgentPendingReplyCount(agentId: number): number {
+    const lastSender = SQLiteStorage.lastMessageSenderSubquery();
+    const row = db.prepare(
+      `SELECT COUNT(*) as c FROM contacts c WHERE c.assigned_agent_id = ? AND c.status NOT IN ('closed','resolved') AND LOWER(${lastSender}) = 'user'`
+    ).get(agentId) as { c: number };
+    return row?.c ?? 0;
   }
 
   incrementAgentTodayAssigned(agentId: number): void {

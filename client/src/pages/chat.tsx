@@ -756,8 +756,8 @@ export default function ChatPage() {
       const data = await res.json();
       return Array.isArray(data) ? data : [];
     },
-    refetchInterval: 5000,
-    refetchIntervalInBackground: true,
+    refetchInterval: 20000,
+    refetchIntervalInBackground: false,
     staleTime: 15000,
     /** 切換品牌時不沿用上一筆資料，強制等新列表載入，避免「沒切過去」的錯覺 */
     placeholderData: undefined,
