@@ -18,16 +18,30 @@ export const HANDOFF_OPTIONAL_ORDER_HINT = "若方便，也可先提供訂單編
 /** 轉人工時若為午休／下班／非客服時段，程式層硬規則：必須在回覆中明確告知客戶（不依賴 prompt） */
 export const HANDOFF_OFF_HOURS_SUFFIX = "目前人工客服不在線，之後才會由真人客服回覆。";
 
+/** 全員忙碌／暫停時也需告知客戶，避免誤以為有人正在看 */
+export const HANDOFF_ALL_PAUSED_SUFFIX = "目前客服暫時無法即時回覆，您的需求已記錄，會盡快由專人處理。";
+
+/** 週休二日：專屬文案，避免週末被誤判為午休或全員忙碌 */
+export const HANDOFF_WEEKEND_SUFFIX = "目前為假日非服務時間，您的需求已記錄，我們將於下個工作日為您處理，請稍候。";
+
 /**
  * 依是否為非客服時段，回傳要送給客戶的完整 handoff 文案（程式層硬規則）。
- * 午休或下班時一律在主要轉接句後加上「目前人工客服不在線，之後才會由真人客服回覆。」
+ * 週末：加「目前為假日非服務時間…下個工作日為您處理。」
+ * 午休或下班時：加「目前人工客服不在線，之後才會由真人客服回覆。」
+ * 全員忙碌／暫停時：加「目前客服暫時無法即時回覆…」
  */
 export function getHandoffReplyForCustomer(
   baseReply: string,
-  unavailableReason: "lunch" | "after_hours" | "all_paused" | null
+  unavailableReason: "weekend" | "lunch" | "after_hours" | "all_paused" | null
 ): string {
+  if (unavailableReason === "weekend") {
+    return baseReply + "\n" + HANDOFF_WEEKEND_SUFFIX;
+  }
   if (unavailableReason === "lunch" || unavailableReason === "after_hours") {
     return baseReply + "\n" + HANDOFF_OFF_HOURS_SUFFIX;
+  }
+  if (unavailableReason === "all_paused") {
+    return baseReply + "\n" + HANDOFF_ALL_PAUSED_SUFFIX;
   }
   return baseReply;
 }

@@ -181,26 +181,33 @@ export function closeCase(contactId: number, closedByAgentId: number): void {
   syncAgentOpenCases(closedByAgentId);
 }
 
-/** 無人可接時的原因：午休中 / 已下班 / 全員暫停（供 AI 顯示不同提示） */
-export function getUnavailableReason(): "lunch" | "after_hours" | "all_paused" | null {
+/** 取得目前「客服時區」的星期幾（0=日、6=六），與上下班判斷一致，避免週末誤判為午休/全員忙碌 */
+function getDayOfWeekInScheduleTz(): number {
+  const s = new Date().toLocaleString("sv-SE", { timeZone: SCHEDULE_TIMEZONE });
+  const datePart = s.slice(0, 10);
+  const d = new Date(datePart + "T12:00:00+08:00");
+  return d.getDay();
+}
+
+/** 無人可接時的原因：週休二日 / 午休中 / 已下班 / 全員暫停（供 AI 顯示不同提示） */
+export function getUnavailableReason(): "weekend" | "lunch" | "after_hours" | "all_paused" | null {
   const members = storage.getTeamMembers().filter((m) => m.role === "cs_agent");
   if (members.length === 0) return null;
+  const day = getDayOfWeekInScheduleTz();
+  if (day === 0 || day === 6) return "weekend";
   const global = storage.getGlobalSchedule();
   const nowMinutes = getNowMinutesInScheduleTz();
   const workEnd = parseTimeToMinutes(global.work_end_time);
   const lunchStart = parseTimeToMinutes(global.lunch_start_time);
   const lunchEnd = parseTimeToMinutes(global.lunch_end_time);
   if (nowMinutes >= workEnd) return "after_hours";
-  if (nowMinutes >= lunchStart && nowMinutes < lunchEnd) {
-    const anyInLunch = members.some((m) => {
-      const status = storage.getAgentStatus(m.id);
-      const start = parseTimeToMinutes(status?.lunch_start_time || global.lunch_start_time);
-      const end = parseTimeToMinutes(status?.lunch_end_time || global.lunch_end_time);
-      return nowMinutes >= start && nowMinutes < end;
-    });
-    if (anyInLunch && getEligibleAgents().length === 0) return "lunch";
+  const workStart = parseTimeToMinutes(global.work_start_time);
+  if (nowMinutes < workStart) return "after_hours";
+  const eligibleCount = getEligibleAgents().length;
+  if (eligibleCount === 0) {
+    if (nowMinutes >= lunchStart && nowMinutes < lunchEnd) return "lunch";
+    return "all_paused";
   }
-  if (getEligibleAgents().length === 0) return "all_paused";
   return null;
 }
 

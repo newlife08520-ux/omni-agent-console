@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "react";
-import { useQuery, useQueryClient, keepPreviousData } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -431,11 +431,27 @@ type ContactListItemProps = {
   onPin: (id: number, isPinned: boolean) => void;
   onMouseEnter: (id: number) => void;
 };
+
+/** 僅比對 ContactListItem 實際用於渲染的欄位，避免因 contact 物件 reference 或 callback 變動導致 3000 筆全重繪 */
 function contactListItemPropsAreEqual(prev: ContactListItemProps, next: ContactListItemProps): boolean {
   if (prev.contact.id !== next.contact.id) return false;
-  if (prev.contact !== next.contact) return false;
   if (prev.isSelected !== next.isSelected) return false;
   if (prev.currentUserId !== next.currentUserId) return false;
+  const a = prev.contact;
+  const b = next.contact;
+  if (a.display_name !== b.display_name) return false;
+  if (a.avatar_url !== b.avatar_url) return false;
+  if (a.is_pinned !== b.is_pinned) return false;
+  if (a.platform !== b.platform) return false;
+  if (a.last_message_at !== b.last_message_at) return false;
+  if (a.last_message !== b.last_message) return false;
+  if (a.last_message_sender_type !== b.last_message_sender_type) return false;
+  if (a.needs_human !== b.needs_human) return false;
+  if (a.assigned_agent_name !== b.assigned_agent_name) return false;
+  if (a.assigned_agent_id !== b.assigned_agent_id) return false;
+  if (a.status !== b.status) return false;
+  if (a.my_flag !== b.my_flag) return false;
+  if ((a.vip_level ?? 0) !== (b.vip_level ?? 0)) return false;
   return true;
 }
 const ContactListItem = React.memo(function ContactListItem({ contact, isSelected, currentUserId, onSelect, onPin, onMouseEnter }: ContactListItemProps) {
@@ -779,7 +795,6 @@ export default function ChatPage() {
     enabled: !!selectedId,
     refetchInterval: 10000,
     staleTime: 5 * 60 * 1000,
-    placeholderData: keepPreviousData,
   });
   const messages = Array.isArray(messagesRaw) ? messagesRaw : [];
 
@@ -1929,7 +1944,7 @@ export default function ChatPage() {
             </div>
           </div>
         ) : (
-          <>
+          <div key={selectedId} className="flex flex-1 flex-col min-h-0 min-w-0">
             {selectedId != null && !contactListSafe.some((c) => c.id === selectedId) && (
               <div className="px-4 py-2 bg-amber-50 border-b border-amber-100 flex items-center justify-between gap-2">
                 <span className="text-xs text-amber-800">此對話未顯示於左側列表（由搜尋開啟或為較早對話，列表僅顯示最近 300 筆）</span>
@@ -2667,7 +2682,7 @@ export default function ChatPage() {
                 <p className="text-[10px] text-stone-400 text-center mt-2">以管理員身分發送訊息 · 可複製貼上文字與圖片，或拖曳上傳、點擊 📎 附件</p>
               </div>
             </div>
-          </>
+          </div>
         )}
       </div>
 

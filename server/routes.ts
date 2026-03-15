@@ -382,11 +382,13 @@ async function getEnrichedSystemPrompt(
 --- 人工客服服務時段（僅影響真人回覆，你 AI 24 小時在線）---
 人工客服可接案時段：上班 ${schedule.work_start_time}–${schedule.work_end_time}，午休 ${schedule.lunch_start_time}–${schedule.lunch_end_time}，下班 ${schedule.work_end_time} 後無人接案。
 當你要呼叫 transfer_to_human 時：若目前是午休或已下班，請在回覆中主動告知客人「目前是午休／已超過服務時間，轉人工可能暫時沒人即時回覆，需求會先記錄，專人會在午休後／上班後盡快處理，請稍候。」不要假裝有人正在看。`;
-  const nowStatusHint = unavailableReason === "lunch"
-    ? `【目前狀態】現在為午休時段（${schedule.lunch_start_time}–${schedule.lunch_end_time}），若轉人工請主動提醒客人稍後由專人回覆。`
-    : unavailableReason === "after_hours"
-      ? `【目前狀態】目前已超過人工服務時間（${schedule.work_end_time} 後），若轉人工請主動提醒客人需求已記錄，上班後會處理。`
-      : "";
+  const nowStatusHint = unavailableReason === "weekend"
+    ? "【目前狀態】現在為週休二日非服務時間，若轉人工請主動提醒客人需求已記錄，下個工作日會處理。"
+    : unavailableReason === "lunch"
+      ? `【目前狀態】現在為午休時段（${schedule.lunch_start_time}–${schedule.lunch_end_time}），若轉人工請主動提醒客人稍後由專人回覆。`
+      : unavailableReason === "after_hours"
+        ? `【目前狀態】目前已超過人工服務時間（${schedule.work_end_time} 後），若轉人工請主動提醒客人需求已記錄，上班後會處理。`
+        : "";
   const humanHoursBlockWithStatus = humanHoursBlock + (nowStatusHint ? "\n" + nowStatusHint : "");
 
   return basePrompt + brandBlock + toneBlock + handoffBlock + humanHoursBlockWithStatus + catalogBlock + knowledgeBlock + imageBlock;
@@ -438,9 +440,10 @@ function maskSensitiveInfo(text: string): string {
   return result;
 }
 
-/** 依目前人工服務時段設定，回傳轉人工無人可接時的系統提示（午休／下班／全員忙碌） */
-function getTransferUnavailableSystemMessage(reason: "lunch" | "after_hours" | "all_paused" | null): string {
+/** 依目前人工服務時段設定，回傳轉人工無人可接時的系統提示（週末／午休／下班／全員忙碌） */
+function getTransferUnavailableSystemMessage(reason: "weekend" | "lunch" | "after_hours" | "all_paused" | null): string {
   const schedule = storage.getGlobalSchedule();
+  if (reason === "weekend") return "目前為假日非服務時間，您的需求我已先幫您記錄，我們將於下個工作日儘快為您處理，請您稍等唷。";
   if (reason === "lunch") return `目前客服同仁正在午休時段（${schedule.lunch_start_time}–${schedule.lunch_end_time}），我先幫您記錄需求，專人會在午休後盡快為您確認與回覆唷。`;
   if (reason === "after_hours") return "目前已超過客服服務時間，您的需求我已先幫您記錄，專人將於上班時段儘快為您處理，請您稍等唷。";
   return "目前人工客服暫時忙碌中，已幫您排入待處理清單，上班後會依序回覆。";
