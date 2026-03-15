@@ -45,6 +45,8 @@ export function runIdleCloseJob(storage: IStorage, idleHours: number = IDLE_HOUR
   for (const c of contacts) {
     if (c.status === "closed" || c.status === "resolved") continue;
     if (c.status === "awaiting_human" || c.status === "high_risk") continue;
+    /** 待分配（需人工但尚未指派）：不自動結案，留給主管分配或手動結案，避免品牌案件全變成已結案 */
+    if (c.needs_human === 1 && !(c as any).assigned_agent_id) continue;
     const lastAt = c.last_message_at;
     if (!lastAt) continue;
     const lastUserAt = new Date(String(lastAt).replace(" ", "T"));

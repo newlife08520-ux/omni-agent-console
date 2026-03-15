@@ -3944,6 +3944,16 @@ ${contextStr}
       const isReturnFirstRound = (freshContact as any).return_stage == null || (freshContact as any).return_stage === 0;
       const plan = buildReplyPlan({ state, returnFormUrl, isReturnFirstRound });
 
+      // Bypass：查單中用戶僅回商品名/短補件時，不因尷尬轉人工，讓 AI 繼續處理（不改底層 awkward-repeat-handoff 邏輯）
+      const ASK_ORDER_PHONE_FOR_BYPASS = /請提供訂單編號|訂單編號|請提供.*手機|請.*手機號碼|請提供.*商品|商品名稱|下單手機|收件人|請提供.*資訊/i;
+      function isUserProvidingOrderDetails(lastAiMessage: string | null | undefined, currentUserMessage: string): boolean {
+        if (!lastAiMessage || !ASK_ORDER_PHONE_FOR_BYPASS.test(lastAiMessage)) return false;
+        const trimmed = (currentUserMessage || "").trim();
+        if (trimmed.length >= 15) return false;
+        if (isHumanRequestMessage(trimmed)) return false;
+        return true;
+      }
+
       // 尷尬／重複轉人工：同一種資料重問兩次、同一模板重複、用戶說已給過但 AI 答錯、類別跳錯 → 直接轉人工
       const awkwardCheck = shouldHandoffDueToAwkwardOrRepeat({
         userMessage,
@@ -3957,7 +3967,7 @@ ${contextStr}
         ((userMessage || "").trim().length <= 10 && /^[好謝收解了]+$/.test((userMessage || "").trim()))
       );
       const skipAwkwardHandoffDueToActiveOrder = !!(isOrderFollowUpForBypass && activeCtxForBypass?.one_page_summary);
-      if (awkwardCheck.shouldHandoff && !skipAwkwardHandoffDueToActiveOrder) {
+      if (awkwardCheck.shouldHandoff && !skipAwkwardHandoffDueToActiveOrder && !isUserProvidingOrderDetails(lastAiMsg?.content ?? null, userMessage || "")) {
         console.log("[Webhook AI] needs_human=1 source=awkward_repeat reason=" + (awkwardCheck.reason ?? "unknown") + " msg=" + (userMessage || "").slice(0, 60));
         storage.updateContactConversationFields(contact.id, { product_scope_locked: null, customer_goal_locked: null });
         storage.updateContactHumanFlag(contact.id, 1);

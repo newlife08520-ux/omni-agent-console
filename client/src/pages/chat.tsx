@@ -2296,8 +2296,14 @@ export default function ChatPage() {
                             );
                           })() : (
                             <div className="flex items-center justify-between gap-2">
-                              <p className="text-sm text-stone-500">待分配</p>
-                              {isManager && <Button size="sm" variant="default" className="h-7 text-xs" onClick={() => setShowAssignDialog(true)} data-testid="button-assign-from-panel">指派</Button>}
+                              {["closed", "resolved"].includes(effectiveSelectedContact?.status ?? "") ? (
+                                <p className="text-sm text-stone-400">—</p>
+                              ) : (
+                                <>
+                                  <p className="text-sm text-stone-500">待分配</p>
+                                  {isManager && <Button size="sm" variant="default" className="h-7 text-xs" onClick={() => setShowAssignDialog(true)} data-testid="button-assign-from-panel">指派</Button>}
+                                </>
+                              )}
                             </div>
                           )}
                         </CardContent>
