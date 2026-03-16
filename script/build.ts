@@ -55,6 +55,7 @@ async function buildAll() {
       "process.env.NODE_ENV": '"production"',
     },
     minify: true,
+    charset: "utf8",
     external: externals,
     logLevel: "info",
   });

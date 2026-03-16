@@ -453,11 +453,32 @@ function getTransferUnavailableSystemMessage(reason: "weekend" | "lunch" | "afte
   return "????????????????????????????????";
 }
 
-/** Phase 2????????????? product_scope_locked?? bag/sweet? */
+/** Phase 2 ?????? product_scope_locked ?????? bag/sweet????????????? ? ?? Regex ?? */
+const BAG_KEYWORDS = ["\u5305", "\u5305\u5305", "\u6258\u7279\u5305", "\u624b\u63d0\u5305", "\u80a9\u80cc\u5305", "\u5f8c\u80cc\u5305", "\u5074\u80cc\u5305"];
+const SWEET_KEYWORDS = ["\u751c", "\u751c\u9ede", "\u7cd6", "\u7cd6\u679c", "\u5de7\u514b\u529b", "\u86cb\u7cd5", "\u990a\u4e7e"];
+/** ??/????????????????? ? ?? Regex ?? */
+const CVS_SHIPPING_KEYWORDS = ["\u5b85\u9148", "\u8d85\u5546", "\u9580\u5e02", "7-11", "7-ELEVEN", "\u5168\u5bb6", "OK", "\u840a\u723e\u5bcc"];
+const PAYMENT_FAIL_STATUS_KW = ["\u5931\u6557", "\u672a\u6210\u529f", "\u4ed8\u6b3e\u5931\u6557"];
+const PAYMENT_FAIL_METHOD_KW = ["\u5931\u6557", "\u672a\u4ed8"];
+const PAYMENT_SUCCESS_STATUS_KW = ["\u5df2\u78ba\u8a8d", "\u5f85\u51fa\u8ca8", "\u5df2\u51fa\u8ca8", "\u5df2\u5b8c\u6210"];
+const PAYMENT_PENDING_STATUS_KW = ["\u5f85\u4ed8\u6b3e", "\u672a\u4ed8\u6b3e", "\u78ba\u8a8d\u4e2d", "\u65b0\u8a02\u55ae"];
+/** AI ?????????order/phone/product?????????? Regex ?? */
+const ASK_ORDER_PHONE_FOR_BYPASS_KW = ["\u8acb\u63d0\u4f9b\u8a02\u55ae\u7de8\u865f", "\u8a02\u55ae\u7de8\u865f", "\u8acb\u63d0\u4f9b", "\u624b\u6a5f\u865f\u78bc", "\u5546\u54c1\u540d\u7a31", "\u4e0b\u8a02\u624b\u6a5f", "\u6536\u4ef6\u4eba", "\u8acb\u63d0\u4f9b\u8cc3\u8a0a"];
+/** ??/??/????????????????????? */
+const ORDER_FOLLOWUP_KW = ["\u8a02\u55ae\u7de8\u865f", "\u55ae\u865f", "\u7de8\u865f", "\u51fa\u8ca8", "\u7269\u6d41", "\u67e5\u8a62", "\u5230\u8ca8", "\u4ec0\u9ebc\u6642\u5019", "\u51e1\u5929", "\u6536\u5230"];
+const FULFILLMENT_SHIPPED_KW = ["\u5df2\u51fa\u8ca8", "\u5df2\u9001\u9054"];
+const FULFILLMENT_PENDING_SHIP_KW = ["\u65b0\u8a02\u55ae", "\u5f85\u51fa\u8ca8", "\u8655\u7406\u4e2d"];
+const FULFILLMENT_CANCELED_KW = ["\u5df2\u53d6\u6d88"];
+const FULFILLMENT_PROCESSING_KW = ["\u5df2\u78ba\u8a8d", "\u5f85\u51fa\u8ca8", "\u51fa\u8ca8\u4e2d"];
+const FULFILLMENT_NEW_KW = ["\u65b0\u8a02\u55ae"];
+function looksLikeOrderIdInput(s: string): boolean {
+  const t = (s || "").trim();
+  return t.length <= 10 && t.length >= 1 && /^[0-9A-Za-z\-]+$/.test(t);
+}
 function getProductScopeFromMessage(text: string): "bag" | "sweet" | null {
   const t = (text || "").trim();
-  if (/??|???|????|???|??|???|??/i.test(t)) return "bag";
-  if (/??|???|??|??|??|??/i.test(t)) return "sweet";
+  if (BAG_KEYWORDS.some((k) => t.includes(k))) return "bag";
+  if (SWEET_KEYWORDS.some((k) => t.includes(k))) return "sweet";
   return null;
 }
 
@@ -2610,22 +2631,29 @@ export async function registerRoutes(
     return Date.now() - t > OVERDUE_MS;
   };
 
-  /** AI ????????????? issue_type / status / priority???????????? */
+  /** AI ??????????? issue_type / status / priority????????????? ? ?? Regex ?? */
+  const RETURN_REFUND_KW = ["\u9000", "\u63db", "\u9000\u6b3e", "\u9000\u8ca8"];
+  const COMPLAINT_KW = ["\u5ba2\u8a34", "\u62b1\u6028", "\u6295\u8a34", "\u7533\u8a34"];
+  const ORDER_MODIFY_KW = ["\u8a02\u55ae", "\u4fee\u6539", "\u6539\u55ae", "\u51fa\u8ca8", "\u5ef6\u907a", "\u53d6\u6d88"];
+  const ORDER_INQUIRY_KW = ["\u8a02\u55ae", "\u67e5\u8a62", "\u51fa\u8ca8", "\u7269\u6d41"];
+  const PRODUCT_CONSULT_KW = ["\u5546\u54c1", "\u5c3a\u5bf8", "\u898f\u683c", "\u6210\u5206", "\u8b0e\u8a62"];
+  const URGENT_TAG_KW = ["\u7dca\u6025", "\u52a0\u6025", "\u6025\u4ef6", "\u512a\u5148", "\u76e1\u5feb"];
+  const PRIORITY_HIGH_KW = ["\u9ad8", "\u7dca\u6025", "\u52a0\u6025", "\u6025", "\u512a\u5148"];
   function suggestAiFromMessages(contactId: number): { issue_type?: string; status?: string; priority?: string; tags?: string[] } {
     const messages = storage.getMessages(contactId, { limit: 20 });
     const text = messages.filter((m) => m.sender_type === "user").map((m) => m.content || "").join(" ");
-    const lower = text.toLowerCase();
     const suggestions: { issue_type?: string; status?: string; priority?: string; tags?: string[] } = {};
-    if (/\b(??|??|????|??)\b/.test(text)) { suggestions.issue_type = "return_refund"; (suggestions.tags = suggestions.tags || []).push("??"); }
-    else if (/\b(??|??|??|??)\b/.test(text)) { suggestions.issue_type = "complaint"; (suggestions.tags = suggestions.tags || []).push("??"); }
-    else if (/\b(??|??|??|??|???|??)\b/.test(text)) { suggestions.issue_type = "order_modify"; (suggestions.tags = suggestions.tags || []).push("????"); }
-    else if (/\b(??|??|??|??)\b/.test(text)) { suggestions.issue_type = "order_inquiry"; }
-    else if (/\b(??|??|??|??|???)\b/.test(text)) { suggestions.issue_type = "product_consult"; (suggestions.tags = suggestions.tags || []).push("????"); }
-    if (/\b(???|???|??|??|??)\b/.test(text)) (suggestions.tags = suggestions.tags || []).push("?????");
-    if (/\b(??|??|??|???|?|??)\b/.test(text) || (suggestions.issue_type === "complaint" || suggestions.issue_type === "return_refund")) suggestions.priority = "????";
+    const has = (kws: string[]) => kws.some((k) => text.includes(k));
+    if (has(RETURN_REFUND_KW)) { suggestions.issue_type = "return_refund"; (suggestions.tags = suggestions.tags || []).push("\u9000\u63db"); }
+    else if (has(COMPLAINT_KW)) { suggestions.issue_type = "complaint"; (suggestions.tags = suggestions.tags || []).push("\u5ba2\u8a34"); }
+    else if (has(ORDER_MODIFY_KW)) { suggestions.issue_type = "order_modify"; (suggestions.tags = suggestions.tags || []).push("\u8a02\u55ae\u4fee\u6539"); }
+    else if (has(ORDER_INQUIRY_KW)) { suggestions.issue_type = "order_inquiry"; }
+    else if (has(PRODUCT_CONSULT_KW)) { suggestions.issue_type = "product_consult"; (suggestions.tags = suggestions.tags || []).push("\u5546\u54c1\u8b0e\u8a62"); }
+    if (has(URGENT_TAG_KW)) (suggestions.tags = suggestions.tags || []).push("\u7dca\u6025");
+    if (has(PRIORITY_HIGH_KW) || suggestions.issue_type === "complaint" || suggestions.issue_type === "return_refund") suggestions.priority = "\u9ad8";
     const lastMsg = messages[messages.length - 1];
-    if (lastMsg?.sender_type === "user") suggestions.status = "???";
-    else if (lastMsg?.sender_type === "admin" || lastMsg?.sender_type === "ai") suggestions.status = "?????";
+    if (lastMsg?.sender_type === "user") suggestions.status = "\u5f85\u56de\u8986";
+    else if (lastMsg?.sender_type === "admin" || lastMsg?.sender_type === "ai") suggestions.status = "\u5df2\u56de\u8986";
     return suggestions;
   }
 
@@ -3430,7 +3458,7 @@ export async function registerRoutes(
             if (order.final_total_order_amount != null) lines.push(`???$${Number(order.final_total_order_amount).toLocaleString()}`);
             if (order.shipping_method) lines.push(`?????${order.shipping_method}`);
             if (order.tracking_number) lines.push(`?????${order.tracking_number}`);
-            const isCvs = /??|??|??|7-11|???|OK|??/i.test(order.shipping_method || "");
+            const isCvs = CVS_SHIPPING_KEYWORDS.some((k) => (order.shipping_method || "").toLowerCase().includes(k.toLowerCase()));
             if (order.address) lines.push(isCvs ? `??????????${order.address}` : `?????${order.address}`);
             if (order.product_list) lines.push(`????????${order.product_list}`);
             lines.push(`?????${statusLabel}`);
@@ -3438,9 +3466,9 @@ export async function registerRoutes(
             const one_page_summary = lines.join("\n");
             const now = new Date().toISOString().replace("T", " ").substring(0, 19);
             let payment_status: "success" | "pending" | "failed" | "unknown" = "unknown";
-            if (/??|???|?????/i.test(statusLabel) || (order.prepaid === false && !order.paid_at && !/????|??/i.test(order.payment_method || ""))) payment_status = "failed";
-            else if (order.prepaid === true || order.paid_at || /???|???|???|???/i.test(statusLabel)) payment_status = "success";
-            else if (/???|???|???|???/i.test(statusLabel)) payment_status = "pending";
+            if (PAYMENT_FAIL_STATUS_KW.some((k) => statusLabel.includes(k)) || (order.prepaid === false && !order.paid_at && !PAYMENT_FAIL_METHOD_KW.some((k) => (order.payment_method || "").includes(k)))) payment_status = "failed";
+            else if (order.prepaid === true || order.paid_at || PAYMENT_SUCCESS_STATUS_KW.some((k) => statusLabel.includes(k))) payment_status = "success";
+            else if (PAYMENT_PENDING_STATUS_KW.some((k) => statusLabel.includes(k))) payment_status = "pending";
             storage.linkOrderForContact(contactId, order.global_order_id, "ai_lookup");
             storage.setActiveOrderContext(contactId, {
               order_id: order.global_order_id,
@@ -3977,10 +4005,8 @@ ${contextStr}
       const isReturnFirstRound = (freshContact as any).return_stage == null || (freshContact as any).return_stage === 0;
       const plan = buildReplyPlan({ state, returnFormUrl, isReturnFirstRound });
 
-      // Bypass???????????/?????????????? AI ????????? awkward-repeat-handoff ???
-      const ASK_ORDER_PHONE_FOR_BYPASS = /???????|????|???.*??|?.*????|???.*??|????|????|???|???.*??/i;
       function isUserProvidingOrderDetails(lastAiMessage: string | null | undefined, currentUserMessage: string): boolean {
-        if (!lastAiMessage || !ASK_ORDER_PHONE_FOR_BYPASS.test(lastAiMessage)) return false;
+        if (!lastAiMessage || !ASK_ORDER_PHONE_FOR_BYPASS_KW.some((k) => lastAiMessage.includes(k))) return false;
         const trimmed = (currentUserMessage || "").trim();
         if (trimmed.length >= 15) return false;
         if (isHumanRequestMessage(trimmed)) return false;
@@ -3996,8 +4022,8 @@ ${contextStr}
       // ?????????????????????????????/??????
       const activeCtxForBypass = plan.mode === "order_lookup" ? storage.getActiveOrderContext(contact.id) : null;
       const isOrderFollowUpForBypass = activeCtxForBypass && (
-        /??????|??????|?????|??????|??????|?????|??|??|??|??|???????|????/.test((userMessage || "").trim()) ||
-        ((userMessage || "").trim().length <= 10 && /^[?????]+$/.test((userMessage || "").trim()))
+        ORDER_FOLLOWUP_KW.some((k) => (userMessage || "").trim().includes(k)) ||
+        looksLikeOrderIdInput((userMessage || "").trim())
       );
       const skipAwkwardHandoffDueToActiveOrder = !!(isOrderFollowUpForBypass && activeCtxForBypass?.one_page_summary);
       if (awkwardCheck.shouldHandoff && !skipAwkwardHandoffDueToActiveOrder && !isUserProvidingOrderDetails(lastAiMsg?.content ?? null, userMessage || "")) {
@@ -4192,12 +4218,13 @@ ${contextStr}
       if (plan.mode === "order_lookup") {
         const activeCtx = storage.getActiveOrderContext(contact.id);
         const msgTrim = (userMessage || "").trim();
-        if (activeCtx && /???|???|??|????|???|?????|????/.test(msgTrim)) {
+        const CLEAR_ACTIVE_ORDER_KW = ["\u4e0d\u67e5\u4e86", "\u4e0d\u8981\u4e86", "\u53d6\u6d88", "\u7d50\u6848", "\u6c92\u6709\u4e86", "\u5b8c\u6210", "\u8a2d\u8b8a"];
+        if (activeCtx && CLEAR_ACTIVE_ORDER_KW.some((k) => msgTrim.includes(k))) {
           storage.clearActiveOrderContext(contact.id);
         }
         const isOrderFollowUp = activeCtx && (
-          /??????|??????|?????|??????|??????|?????|??|??|??|??|???????|????/.test(msgTrim) ||
-          (msgTrim.length <= 10 && /^[?????]+$/.test(msgTrim))
+          ORDER_FOLLOWUP_KW.some((k) => msgTrim.includes(k)) ||
+          looksLikeOrderIdInput(msgTrim)
         );
         if (activeCtx?.one_page_summary && isOrderFollowUp) {
           systemPrompt += "\n\n????????????????????????????\n\n" + activeCtx.one_page_summary;
@@ -4918,7 +4945,7 @@ ${contextStr}
       if (o.amount != null) lines.push(`???$${Number(o.amount).toLocaleString()}`);
       if (o.shipping_method) lines.push(`?????${o.shipping_method}`);
       if (o.tracking_number) lines.push(`?????${o.tracking_number}`);
-      const isCvs = /??|??|??|7-11|7-ELEVEN|???|OK|??/i.test(o.shipping_method || "");
+      const isCvs = CVS_SHIPPING_KEYWORDS.some((k) => (o.shipping_method || "").toLowerCase().includes(k.toLowerCase()));
       if (o.address) lines.push(isCvs ? `??????????${o.address}` : `?????${o.address}`);
       if (o.product_list) lines.push(`????????${o.product_list}`);
       if (o.status) lines.push(`?????${o.status}`);
@@ -4936,17 +4963,17 @@ ${contextStr}
     ): import("@shared/schema").ActiveOrderContext {
       const now = new Date().toISOString().replace("T", " ").substring(0, 19);
       let payment_status: "success" | "pending" | "failed" | "unknown" = "unknown";
-      if (/??|???|?????|?????/i.test(statusLabel) || (order.prepaid === false && order.paid_at == null && !/????|??/i.test(order.payment_method || ""))) payment_status = "failed";
-      else if (order.prepaid === true || order.paid_at || /???|???|???|???/i.test(statusLabel)) payment_status = "success";
-      else if (/???|???|???|???/i.test(statusLabel)) payment_status = "pending";
+      if (PAYMENT_FAIL_STATUS_KW.some((k) => statusLabel.includes(k)) || (order.prepaid === false && order.paid_at == null && !PAYMENT_FAIL_METHOD_KW.some((k) => (order.payment_method || "").includes(k)))) payment_status = "failed";
+      else if (order.prepaid === true || order.paid_at || PAYMENT_SUCCESS_STATUS_KW.some((k) => statusLabel.includes(k))) payment_status = "success";
+      else if (PAYMENT_PENDING_STATUS_KW.some((k) => statusLabel.includes(k))) payment_status = "pending";
       let fulfillment_status = statusLabel;
-      if (/???|???/i.test(statusLabel)) fulfillment_status = "???";
-      else if (/???|??|???/i.test(statusLabel)) fulfillment_status = "???";
-      else if (/???|???|??/i.test(statusLabel)) fulfillment_status = "???";
-      else if (/???|???/i.test(statusLabel)) fulfillment_status = "???";
-      else if (/??/i.test(statusLabel)) fulfillment_status = "???";
-      else if (payment_status === "failed") fulfillment_status = "????";
-      else if (payment_status === "pending") fulfillment_status = "???";
+      if (FULFILLMENT_SHIPPED_KW.some((k) => statusLabel.includes(k))) fulfillment_status = "\u5df2\u51fa\u8ca8";
+      else if (FULFILLMENT_PENDING_SHIP_KW.some((k) => statusLabel.includes(k))) fulfillment_status = "\u5f85\u51fa\u8ca8";
+      else if (FULFILLMENT_CANCELED_KW.some((k) => statusLabel.includes(k))) fulfillment_status = "\u5df2\u53d6\u6d88";
+      else if (FULFILLMENT_PROCESSING_KW.some((k) => statusLabel.includes(k))) fulfillment_status = "\u8655\u7406\u4e2d";
+      else if (FULFILLMENT_NEW_KW.some((k) => statusLabel.includes(k))) fulfillment_status = "\u65b0\u8a02\u55ae";
+      else if (payment_status === "failed") fulfillment_status = "\u4ed8\u6b3e\u5931\u6557";
+      else if (payment_status === "pending") fulfillment_status = "\u5f85\u4ed8\u6b3e";
       return {
         order_id: order.global_order_id,
         matched_by: matchedBy,
