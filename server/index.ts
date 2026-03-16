@@ -31,6 +31,7 @@ app.use(
 
 app.use(express.urlencoded({ extended: false }));
 
+// 若未來加入 compression 中介層，請排除 GET /api/events，否則 SSE 串流可能被壓縮導致代理層 ERR_HTTP2_PROTOCOL_ERROR 或連線中斷。
 app.use("/api", (_req, res, next) => {
   res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
   res.set("Pragma", "no-cache");

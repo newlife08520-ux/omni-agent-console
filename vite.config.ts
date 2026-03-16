@@ -17,7 +17,6 @@ export default defineConfig({
     outDir: path.resolve(import.meta.dirname, "dist/public"),
     emptyOutDir: true,
     chunkSizeWarningLimit: 1500,
-    minify: false, // 👈 【架構師新增】暫時關閉程式碼壓縮，讓真實變數名稱現形！
     rollupOptions: {
       output: {
         manualChunks(id) {

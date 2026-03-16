@@ -173,10 +173,10 @@ function ThrottledContent({ content, throttleMs = 80 }: { content: string; throt
 
 /** 單一訊息氣泡：用 memo + 自訂 areEqual，只有 content/資料變動時才 re-render，避免整串歷史一起重繪 */
 function areEqualMessageBubble(
-  prev: { msg: Message; showDate: boolean; onPreviewImage: (url: string) => void; isStreaming?: boolean },
-  next: { msg: Message; showDate: boolean; onPreviewImage: (url: string) => void; isStreaming?: boolean },
+  prev: { msg: Message; showDate: boolean; onPreviewImage: (url: string) => void; isStreaming?: boolean; userAvatarUrl?: string | null },
+  next: { msg: Message; showDate: boolean; onPreviewImage: (url: string) => void; isStreaming?: boolean; userAvatarUrl?: string | null },
 ): boolean {
-  if (prev.msg.id !== next.msg.id || prev.showDate !== next.showDate || prev.isStreaming !== next.isStreaming) return false;
+  if (prev.msg.id !== next.msg.id || prev.showDate !== next.showDate || prev.isStreaming !== next.isStreaming || (prev.userAvatarUrl ?? "") !== (next.userAvatarUrl ?? "")) return false;
   const p = prev.msg;
   const n = next.msg;
   return (
@@ -188,16 +188,30 @@ function areEqualMessageBubble(
   );
 }
 
+/** 是否為 24h 閒置結案時系統自動發送的結案語（非一般 AI 回覆） */
+function isIdleClosingMessage(content: string | null | undefined): boolean {
+  if (!content || typeof content !== "string") return false;
+  const s = content.trim();
+  return (
+    s.startsWith("先幫您整理到這邊唷") ||
+    s.startsWith("這邊先幫您保留到這裡唷") ||
+    s.startsWith("目前先幫您暫時整理到這邊")
+  );
+}
+
 const MessageBubble = React.memo(function MessageBubble({
   msg,
   showDate,
   onPreviewImage,
   isStreaming,
+  userAvatarUrl,
 }: {
   msg: Message;
   showDate: boolean;
   onPreviewImage: (url: string) => void;
   isStreaming?: boolean;
+  /** 當前聯絡人大頭照，用於客戶訊息左側頭像 */
+  userAvatarUrl?: string | null;
 }) {
   if (msg.sender_type === "system") {
     return (
@@ -228,7 +242,10 @@ const MessageBubble = React.memo(function MessageBubble({
         <div className={`flex items-end gap-2 max-w-[70%] ${msg.sender_type === "user" ? "flex-row" : "flex-row-reverse"}`}>
           <div className="shrink-0 mb-1">
             {msg.sender_type === "user" ? (
-              <Avatar className="w-7 h-7"><AvatarFallback className="bg-stone-200 text-stone-500 text-xs"><User className="w-3.5 h-3.5" /></AvatarFallback></Avatar>
+              <Avatar className="w-7 h-7">
+                {userAvatarUrl ? <AvatarImage src={userAvatarUrl} alt="" /> : null}
+                <AvatarFallback className="bg-stone-200 text-stone-500 text-xs"><User className="w-3.5 h-3.5" /></AvatarFallback>
+              </Avatar>
             ) : msg.sender_type === "ai" ? (
               <Avatar className="w-7 h-7"><AvatarFallback className="bg-emerald-100 text-emerald-600 text-xs"><Bot className="w-3.5 h-3.5" /></AvatarFallback></Avatar>
             ) : (
@@ -236,6 +253,9 @@ const MessageBubble = React.memo(function MessageBubble({
             )}
           </div>
           <div>
+            {msg.sender_type === "ai" && isIdleClosingMessage(msg.content) && (
+              <div className="text-[10px] text-stone-400 mb-0.5 text-right">系統自動結案語</div>
+            )}
             {msg.message_type === "image" && msg.image_url ? (
               <div className={`rounded-2xl overflow-hidden shadow-sm ${
                 msg.sender_type === "user" ? "rounded-bl-md border border-stone-100"
@@ -693,12 +713,96 @@ export default function ChatPage() {
     el.style.height = `${h}px`;
   }, [messageInput]);
 
-  // SSE：僅在 mount 時綁定一次，deps=[] 避免點擊聯絡人重選時重複註冊造成「影分身」與死循環。
-  // 內部只用 queryClientRef.current，絕不把 selectedId 等會變動的狀態放入 deps。cleanup 必須 close source。
+  // SSE：僅在 mount 時綁定一次。Railway 等環境下 EventSource 易觸發 ERR_HTTP2_PROTOCOL_ERROR，
+  // 故先試 EventSource，失敗則試一次 fetch 串流；最多重試 5 次後改為僅輪詢，避免 Console 洗版。
   useEffect(() => {
     let es: EventSource | null = null;
+    let fetchAbort: AbortController | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout>;
     let retryCount = 0;
+    let fetchTried = false;
+    const MAX_RETRIES = 5;
+
+    function dispatchNewMessage(data: { contact_id?: number }) {
+      const contactId = data?.contact_id;
+      setStreamingContent((prev) => {
+        const next = { ...prev };
+        if (contactId != null) delete next[contactId];
+        return next;
+      });
+      const q = queryClientRef.current;
+      q.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
+      if (contactId != null) q.invalidateQueries({ queryKey: ["/api/contacts", contactId, "messages"] });
+      q.invalidateQueries({ queryKey: ["/api/manager-stats"], exact: false });
+      q.invalidateQueries({ queryKey: ["/api/agent-stats/me"] });
+    }
+    function dispatchContactsUpdated() {
+      queryClientRef.current.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
+      queryClientRef.current.invalidateQueries({ queryKey: ["/api/manager-stats"], exact: false });
+      queryClientRef.current.invalidateQueries({ queryKey: ["/api/agent-stats/me"] });
+    }
+
+    function connectViaFetch() {
+      fetchAbort = new AbortController();
+      fetch("/api/events", { credentials: "include", signal: fetchAbort.signal })
+        .then((res) => {
+          if (!res.ok || !res.body) throw new Error("SSE fetch failed");
+          const reader = res.body.getReader();
+          const dec = new TextDecoder();
+          let buf = "";
+          function pump(): Promise<void> {
+            return reader.read().then(({ done, value }) => {
+              if (done) {
+                sseConnectedRef.current = false;
+                setSseConnected(false);
+                return;
+              }
+              buf += dec.decode(value, { stream: true });
+              const lines = buf.split("\n");
+              buf = lines.pop() ?? "";
+              let eventType = "";
+              for (const line of lines) {
+                if (line.startsWith("event:")) eventType = line.slice(6).trim();
+                else if (line.startsWith("data:") && eventType) {
+                  const data = line.slice(5).trim();
+                  if (eventType === "connected") {
+                    sseConnectedRef.current = true;
+                    setSseConnected(true);
+                    retryCount = 0;
+                  } else if (eventType === "new_message") {
+                    try {
+                      dispatchNewMessage(JSON.parse(data));
+                    } catch (_e) {}
+                  } else if (eventType === "message_chunk") {
+                    try {
+                      const parsed = JSON.parse(data) as { contact_id?: number; chunk?: string };
+                      if (parsed.contact_id != null && typeof parsed.chunk === "string") {
+                        setStreamingContent((prev) => ({ ...prev, [parsed.contact_id!]: (prev[parsed.contact_id!] ?? "") + parsed.chunk }));
+                      }
+                    } catch (_e) {}
+                  } else if (eventType === "contacts_updated") dispatchContactsUpdated();
+                  eventType = "";
+                }
+              }
+              return pump();
+            });
+          }
+          return pump();
+        })
+        .catch((err) => {
+          if (err?.name === "AbortError") return;
+          sseConnectedRef.current = false;
+          setSseConnected(false);
+          retryCount++;
+          if (retryCount <= 2) console.warn("[SSE] fetch 串流連線失敗（可能為 HTTP/2 環境）:", err?.message || err);
+          if (retryCount < MAX_RETRIES) {
+            const delay = Math.min(2000 * Math.pow(2, Math.min(retryCount, 5)), 30000);
+            reconnectTimer = setTimeout(connect, delay);
+          } else {
+            console.warn("[SSE] 即時連線多次失敗，已改為每 5 秒輪詢更新，不再重試。重新整理頁面可再嘗試。");
+          }
+        });
+    }
 
     function connect() {
       try {
@@ -720,46 +824,46 @@ export default function ChatPage() {
         });
         es.addEventListener("new_message", (e) => {
           try {
-            const data = JSON.parse(e.data) as { contact_id?: number };
-            const contactId = data?.contact_id;
-            setStreamingContent((prev) => {
-              const next = { ...prev };
-              if (contactId != null) delete next[contactId];
-              return next;
-            });
-            const q = queryClientRef.current;
-            q.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
-            if (contactId != null) q.invalidateQueries({ queryKey: ["/api/contacts", contactId, "messages"] });
-            q.invalidateQueries({ queryKey: ["/api/manager-stats"], exact: false });
-            q.invalidateQueries({ queryKey: ["/api/agent-stats/me"] });
+            dispatchNewMessage(JSON.parse(e.data) as { contact_id?: number });
           } catch (err) {
             console.error("[SSE] Error parsing new_message:", err);
           }
         });
-        es.addEventListener("contacts_updated", () => {
-          const q = queryClientRef.current;
-          q.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
-          q.invalidateQueries({ queryKey: ["/api/manager-stats"], exact: false });
-          q.invalidateQueries({ queryKey: ["/api/agent-stats/me"] });
-        });
-        es.onerror = (err) => {
-          console.error("[SSE] Connection error, retry #" + retryCount, err);
+        es.addEventListener("contacts_updated", () => dispatchContactsUpdated());
+        es.onerror = () => {
           sseConnectedRef.current = false;
           setSseConnected(false);
           es?.close();
+          es = null;
+          if (retryCount <= 2) console.warn("[SSE] EventSource 連線錯誤（retry #" + retryCount + "），可能為 ERR_HTTP2_PROTOCOL_ERROR");
+          if (!fetchTried) {
+            fetchTried = true;
+            connectViaFetch();
+            return;
+          }
           retryCount++;
-          const delay = Math.min(3000 * retryCount, 15000);
+          if (retryCount >= MAX_RETRIES) {
+            console.warn("[SSE] 即時連線多次失敗，已改為每 5 秒輪詢更新，不再重試。重新整理頁面可再嘗試。");
+            return;
+          }
+          const delay = Math.min(2000 * Math.pow(2, Math.min(retryCount, 5)), 30000);
           reconnectTimer = setTimeout(connect, delay);
         };
       } catch (err) {
-        console.error("[SSE] Failed to create EventSource:", err);
-        reconnectTimer = setTimeout(connect, 5000);
+        if (retryCount <= 2) console.warn("[SSE] EventSource 建立失敗:", err);
+        retryCount++;
+        if (retryCount >= MAX_RETRIES) {
+          console.warn("[SSE] 即時連線多次失敗，已改為每 5 秒輪詢更新，不再重試。");
+          return;
+        }
+        reconnectTimer = setTimeout(connect, Math.min(2000 * Math.pow(2, retryCount), 30000));
       }
     }
 
     connect();
     return () => {
       es?.close();
+      fetchAbort?.abort();
       clearTimeout(reconnectTimer);
       sseConnectedRef.current = false;
       setSseConnected(false);
@@ -783,8 +887,8 @@ export default function ChatPage() {
       const data = await res.json();
       return Array.isArray(data) ? data : [];
     },
-    refetchInterval: 20000,
-    refetchIntervalInBackground: false,
+    refetchInterval: sseConnected ? 20000 : 5000,
+    refetchIntervalInBackground: !sseConnected,
     staleTime: 15000,
     /** 切換品牌時不沿用上一筆資料，強制等新列表載入，避免「沒切過去」的錯覺 */
     placeholderData: undefined,
@@ -804,7 +908,8 @@ export default function ChatPage() {
       return Array.isArray(data) ? data : [];
     },
     enabled: !!selectedId,
-    refetchInterval: 10000,
+    refetchInterval: sseConnected ? 10000 : 5000,
+    refetchIntervalInBackground: !sseConnected,
     staleTime: 5 * 60 * 1000,
     /** 效能護城河：不沿用 keepPreviousData，切換聯絡人時立即清空，搭配右側 key={selectedId} 消滅殘影 */
   });
@@ -1197,8 +1302,12 @@ export default function ChatPage() {
     },
     enabled: !!selectedId,
   });
-  /** 從左側列表或由搜尋/連結開啟：列表僅顯示最近 100 筆，搜尋點入的聯絡人可能不在列表中，用 detail API 補上。必須在 handleStatusChange 等 useCallback 之前宣告，避免 TDZ。 */
-  const effectiveSelectedContact: (ContactWithPreview | (Contact & { brand_name?: string })) | undefined = selectedContact ?? (contactDetail as (Contact & { brand_name?: string }) | undefined);
+  /** 從左側列表或由搜尋/連結開啟：列表僅顯示最近 100 筆，搜尋點入的聯絡人可能不在列表中，用 detail API 補上。用 useMemo 避免 bundler 重排後 TDZ。 */
+  const effectiveSelectedContact = useMemo(
+    (): (ContactWithPreview | (Contact & { brand_name?: string })) | undefined =>
+      selectedContact ?? (contactDetail as (Contact & { brand_name?: string }) | undefined),
+    [selectedContact, contactDetail],
+  );
   const aiSuggestions = (() => {
     try {
       const raw = contactDetail?.ai_suggestions;
@@ -1797,7 +1906,7 @@ export default function ChatPage() {
     <div className="flex h-full bg-[#faf9f5] relative" data-testid="chat-page">
       {!sseConnected && (
         <div className="absolute top-0 left-0 right-0 z-50 bg-amber-500 text-white text-center text-sm py-2 px-4 flex items-center justify-center gap-3">
-          <span>即時更新已中斷，新訊息可能不會自動出現</span>
+          <span>即時連線已中斷（可能為網路或 HTTP/2 環境限制），已改為每 5 秒定期更新列表與訊息</span>
           <button type="button" onClick={() => window.location.reload()} className="underline font-medium hover:no-underline">重新整理頁面</button>
         </div>
       )}
@@ -2257,6 +2366,7 @@ export default function ChatPage() {
                             msg={msg}
                             showDate={showDate}
                             onPreviewImage={setPreviewImage}
+                            userAvatarUrl={effectiveSelectedContact?.avatar_url ?? undefined}
                           />
                         );
                       })}

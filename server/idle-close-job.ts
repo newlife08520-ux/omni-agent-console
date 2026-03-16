@@ -2,8 +2,11 @@
  * 24 小時閒置結案：客戶最後一則訊息後 24 小時未回覆則走結案流程。
  * 排除：已轉人工(awaiting_human)、高風險(high_risk)。
  * 結案分流：一般諮詢 / 待補單號 / 退換貨待填表 / 已轉人工不關閉。
+ *
+ * 僅在「上班時段」執行：假日、下班後、午休不跑閒置結案，避免「假日沒人回 → 被迫結案」。
  */
 import type { IStorage } from "./storage";
+import { getUnavailableReason } from "./assignment";
 
 const IDLE_HOURS_DEFAULT = 24;
 const MS_PER_HOUR = 60 * 60 * 1000;
@@ -38,6 +41,11 @@ function getScenario(contact: any, lastUserAt: Date): IdleCloseScenario {
 }
 
 export function runIdleCloseJob(storage: IStorage, idleHours: number = IDLE_HOURS_DEFAULT): IdleCloseResult[] {
+  const reason = getUnavailableReason();
+  if (reason === "weekend" || reason === "after_hours") {
+    return [];
+  }
+
   const cutoffTime = Date.now() - idleHours * MS_PER_HOUR;
   const results: IdleCloseResult[] = [];
 

@@ -63,7 +63,8 @@ LINE 送來的 body 裡有一個 **`destination`**，代表「收到訊息的 Ch
 
 - 打開瀏覽器 **開發者工具 → Console**，發一則訊息後應看到：  
   `[SSE] new_message received, contact: xxx`
-- 若看到 **`[SSE] Connection error`** 或一直重連，代表 SSE 沒連上，新訊息要等**下次輪詢**（約 5～10 秒）或**重整頁面**才會出現。
+- 若看到 **`[SSE] Connection error`** 或 **`ERR_HTTP2_PROTOCOL_ERROR /api/events`**（常見於 Railway 等 HTTP/2 代理環境），代表 SSE 沒連上；此時系統會**自動改為每 5 秒輪詢**，新訊息仍會出現，只是略慢。詳見 **`docs/RAILWAY_SSE_HTTP2.md`**。
+- 亦可手動**重整頁面**重新建立 SSE 連線。
 
 ---
 
