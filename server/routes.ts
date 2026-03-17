@@ -3515,19 +3515,19 @@ export async function registerRoutes(
             const order = result.orders[0];
             const statusLabel = getUnifiedStatusLabel(order.status, result.source);
             const lines: string[] = [];
-            if (order.global_order_id) lines.push(`?????${order.global_order_id}`);
-            if (order.buyer_name) lines.push(`??????${order.buyer_name}`);
-            if (order.buyer_phone) lines.push(`?????${order.buyer_phone}`);
-            if (order.created_at) lines.push(`?????${order.created_at}`);
-            if (order.payment_method) lines.push(`?????${order.payment_method}`);
-            if (order.final_total_order_amount != null) lines.push(`???$${Number(order.final_total_order_amount).toLocaleString()}`);
-            if (order.shipping_method) lines.push(`?????${order.shipping_method}`);
-            if (order.tracking_number) lines.push(`?????${order.tracking_number}`);
+            if (order.global_order_id) lines.push(`訂單編號：${order.global_order_id}`);
+            if (order.buyer_name) lines.push(`收件人：${order.buyer_name}`);
+            if (order.buyer_phone) lines.push(`電話：${order.buyer_phone}`);
+            if (order.created_at) lines.push(`下單時間：${order.created_at}`);
+            lines.push(`付款方式：${(order.payment_method || "").trim() || "（此筆訂單系統未回傳）"}`);
+            if (order.final_total_order_amount != null) lines.push(`金額：$${Number(order.final_total_order_amount).toLocaleString()}`);
+            lines.push(`配送方式：${(order.shipping_method || "").trim() || "（此筆訂單系統未回傳）"}`);
+            if (order.tracking_number) lines.push(`物流單號：${order.tracking_number}`);
             const isCvs = CVS_SHIPPING_KEYWORDS.some((k) => (order.shipping_method || "").toLowerCase().includes(k.toLowerCase()));
-            if (order.address) lines.push(isCvs ? `??????????${order.address}` : `?????${order.address}`);
-            if (order.product_list) lines.push(`????????${order.product_list}`);
-            lines.push(`?????${statusLabel}`);
-            if (order.shipped_at) lines.push(`?????${order.shipped_at}`);
+            if (order.address) lines.push(isCvs ? `門市地址：${order.address}` : `地址：${order.address}`);
+            if (order.product_list) lines.push(`商品明細：${order.product_list}`);
+            lines.push(`狀態：${statusLabel}`);
+            if (order.shipped_at) lines.push(`出貨時間：${order.shipped_at}`);
             const one_page_summary = lines.join("\n");
             const now = new Date().toISOString().replace("T", " ").substring(0, 19);
             let payment_status: "success" | "pending" | "failed" | "unknown" = "unknown";
@@ -3553,7 +3553,7 @@ export async function registerRoutes(
               one_page_summary,
               source: result.source as import("@shared/schema").OrderSource,
             });
-            return { reply: "?????????????????\n\n" + one_page_summary, usedFallback: false, intent: IMAGE_INTENT_ORDER };
+            return { reply: "已查到訂單，摘要如下：\n\n" + one_page_summary, usedFallback: false, intent: IMAGE_INTENT_ORDER };
           }
         }
       }
@@ -4285,14 +4285,12 @@ ${contextStr}
           looksLikeOrderIdInput(msgTrim)
         );
         if (activeCtx?.one_page_summary && isOrderFollowUp) {
-          systemPrompt += "\n\n????????????????????????????\n\n" + activeCtx.one_page_summary;
+          systemPrompt += "\n\n【目前已查到的訂單摘要，回覆時可引用】\n\n" + activeCtx.one_page_summary;
         }
         systemPrompt += `\n\n<ORDER_LOOKUP_RULES>
-???????????????????+?????????????????????
-???????????????????????????????????????
-?????????????????????????????????????
-?????????/??????????????????????????????????????????
-???????????????????????
+- 工具回傳多筆訂單（total > 1）時，必須將 one_page_full 的內容完整逐筆呈現給客戶，不可只列一筆或只列簡表。
+- 工具回傳一筆訂單時，將 one_page_summary 或 one_page_full 完整回覆給客戶（含訂單編號、姓名、電話、下單時間、付款方式、配送方式、金額、狀態等）。
+- 勿要求客戶重複提供已提供過的訂單編號或手機、商品名稱。
 </ORDER_LOOKUP_RULES>`;
       }
       /** 依品牌/渠道設定與對話狀態決定是否允許 AI 回覆或強制轉人工 */
@@ -5039,19 +5037,19 @@ ${contextStr}
     /** 依對話內容與既有狀態決定是否允許 AI 回覆或需轉人工 */
     function formatOrderOnePage(o: { order_id?: string; buyer_name?: string; buyer_phone?: string; created_at?: string; payment_method?: string; amount?: number; shipping_method?: string; tracking_number?: string; address?: string; product_list?: string; status?: string; shipped_at?: string }): string {
       const lines: string[] = [];
-      if (o.order_id) lines.push(`?????${o.order_id}`);
-      if (o.buyer_name) lines.push(`??????${o.buyer_name}`);
-      if (o.buyer_phone) lines.push(`?????${o.buyer_phone}`);
-      if (o.created_at) lines.push(`?????${o.created_at}`);
-      if (o.payment_method) lines.push(`?????${o.payment_method}`);
-      if (o.amount != null) lines.push(`???$${Number(o.amount).toLocaleString()}`);
-      if (o.shipping_method) lines.push(`?????${o.shipping_method}`);
-      if (o.tracking_number) lines.push(`?????${o.tracking_number}`);
+      if (o.order_id) lines.push(`訂單編號：${o.order_id}`);
+      if (o.buyer_name) lines.push(`收件人：${o.buyer_name}`);
+      if (o.buyer_phone) lines.push(`電話：${o.buyer_phone}`);
+      if (o.created_at) lines.push(`下單時間：${o.created_at}`);
+      lines.push(`付款方式：${(o.payment_method || "").trim() || "（此筆訂單系統未回傳）"}`);
+      if (o.amount != null) lines.push(`金額：$${Number(o.amount).toLocaleString()}`);
+      lines.push(`配送方式：${(o.shipping_method || "").trim() || "（此筆訂單系統未回傳）"}`);
+      if (o.tracking_number) lines.push(`物流單號：${o.tracking_number}`);
       const isCvs = CVS_SHIPPING_KEYWORDS.some((k) => (o.shipping_method || "").toLowerCase().includes(k.toLowerCase()));
-      if (o.address) lines.push(isCvs ? `??????????${o.address}` : `?????${o.address}`);
-      if (o.product_list) lines.push(`????????${o.product_list}`);
-      if (o.status) lines.push(`?????${o.status}`);
-      if (o.shipped_at) lines.push(`?????${o.shipped_at}`);
+      if (o.address) lines.push(isCvs ? `門市地址：${o.address}` : `地址：${o.address}`);
+      if (o.product_list) lines.push(`商品明細：${o.product_list}`);
+      if (o.status) lines.push(`狀態：${o.status}`);
+      if (o.shipped_at) lines.push(`出貨時間：${o.shipped_at}`);
       return lines.join("\n");
     }
 
@@ -5371,7 +5369,7 @@ ${contextStr}
         const onePageBlocks = orderSummaries.map(o => formatOrderOnePage(o));
         const one_page_full = onePageBlocks.join("\n\n---\n\n");
         const multiOrderNote = uniqueOrders.length > 1
-          ? `???????+???? ${uniqueOrders.length} ????????????????????????????????\n${formattedList}\n??????????????????????????`
+          ? `【重要】以下共 ${uniqueOrders.length} 筆訂單。回覆時必須逐筆列出每筆的完整資訊（訂單編號、姓名、下單日期、金額、狀態、付款方式、配送方式等），不可只列一筆。請直接將下方 one_page_full 的內容完整呈現給客戶。\n簡表：\n${formattedList}`
           : undefined;
         if (context?.contactId && uniqueOrders.length === 1) {
           const o0 = uniqueOrders[0];
@@ -5483,7 +5481,7 @@ ${contextStr}
         const onePageBlocks = orderSummaries.map(o => formatOrderOnePage(o));
         const one_page_full = onePageBlocks.join("\n\n---\n\n");
         const multiOrderNote = matched.length > 1
-          ? `??????????????????? ${matched.length} ????????????????????????????????\n${dateFormattedList}\n??????????????????????????`
+          ? `【重要】以下共 ${matched.length} 筆訂單。回覆時必須逐筆列出每筆的完整資訊（訂單編號、姓名、下單日期、金額、狀態、付款方式、配送方式等），不可只列一筆。請直接將下方 one_page_full 的內容完整呈現給客戶。\n簡表：\n${dateFormattedList}`
           : undefined;
         return JSON.stringify({ success: true, found: true, total: matched.length, orders: orderSummaries, truncated, note: multiOrderNote, formatted_list: matched.length > 1 ? dateFormattedList : undefined, one_page_summary: matched.length === 1 ? onePageBlocks[0] : undefined, one_page_full });
       }
