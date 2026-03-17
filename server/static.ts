@@ -3,11 +3,21 @@ import fs from "fs";
 import path from "path";
 
 export function serveStatic(app: Express) {
-  const distPath = path.resolve(__dirname, "public");
+  // 支援 bundled 後 __dirname 在 dist/，或從專案根目錄執行 node dist/index.cjs 時用 cwd
+  let distPath = path.resolve(__dirname, "public");
   if (!fs.existsSync(distPath)) {
-    throw new Error(
-      `Could not find the build directory: ${distPath}, make sure to build the client first`,
-    );
+    const fallback = path.resolve(process.cwd(), "dist", "public");
+    if (fs.existsSync(fallback)) {
+      distPath = fallback;
+      console.log("[server] serveStatic 使用 fallback 路徑:", distPath);
+    } else {
+      console.error("[server] 找不到前端 build 目錄。嘗試過:", path.resolve(__dirname, "public"), "與", fallback);
+      throw new Error(
+        `Could not find the build directory. Tried: ${distPath}, ${fallback}. Make sure to run client build first (e.g. vite build).`,
+      );
+    }
+  } else {
+    console.log("[server] serveStatic 路徑:", distPath);
   }
 
   // 明確處理根路徑，確保首頁一定能開（優先於 static，避免行為差異）

@@ -93,6 +93,11 @@ app.use((req, res, next) => {
       console.warn("[server] 使用預設 /data。若未在 Railway 掛載 Volume 至 /data，重啟或重新部署後品牌/渠道等資料會遺失，請見 docs/RAILWAY_PERSISTENT_STORAGE.md");
     }
 
+    // production 時先掛載靜態檔（/、/assets/*），避免 /assets/* 被 session、SSE 等中間件阻塞導致 pending
+    if (process.env.NODE_ENV === "production") {
+      serveStatic(app);
+    }
+
     let store: session.Store | undefined;
 
     if (redisUrl) {
@@ -148,12 +153,11 @@ app.use((req, res, next) => {
       return res.status(status).json({ message });
     });
 
-    if (process.env.NODE_ENV === "production") {
-      serveStatic(app);
-    } else {
+    if (process.env.NODE_ENV !== "production") {
       const { setupVite } = await import("./vite");
       await setupVite(httpServer, app);
     }
+    // production 時靜態檔已在上面先掛載
 
     const port = parseInt(process.env.PORT || "8080", 10);
 

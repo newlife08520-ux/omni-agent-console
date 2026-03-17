@@ -2151,13 +2151,13 @@ export default function ChatPage() {
                     </Button>
                   </>
                 )}
-                {effectiveSelectedContact?.assigned_agent_name ? (
+                {(effectiveSelectedContact as ContactWithPreview)?.assigned_agent_name ? (
                   <span className="text-[11px] font-medium text-stone-700 flex items-center gap-1.5">
                     <Avatar className="w-4 h-4 shrink-0">
-                      {(effectiveSelectedContact as ContactWithPreview).assigned_agent_avatar_url && <AvatarImage src={(effectiveSelectedContact as ContactWithPreview).assigned_agent_avatar_url} alt={effectiveSelectedContact.assigned_agent_name} />}
-                      <AvatarFallback className="bg-violet-100 text-violet-700 text-[10px]">{getInitials(effectiveSelectedContact?.assigned_agent_name)}</AvatarFallback>
+                      {(effectiveSelectedContact as ContactWithPreview).assigned_agent_avatar_url && <AvatarImage src={(effectiveSelectedContact as ContactWithPreview).assigned_agent_avatar_url!} alt={(effectiveSelectedContact as ContactWithPreview).assigned_agent_name ?? ""} />}
+                      <AvatarFallback className="bg-violet-100 text-violet-700 text-[10px]">{getInitials((effectiveSelectedContact as ContactWithPreview)?.assigned_agent_name)}</AvatarFallback>
                     </Avatar>
-                    已分配：{effectiveSelectedContact.assigned_agent_name}
+                    已分配：{(effectiveSelectedContact as ContactWithPreview).assigned_agent_name}
                   </span>
                 ) : effectiveSelectedContact?.needs_human === 1 ? (
                   <span className="text-[11px] text-amber-600">待分配</span>
