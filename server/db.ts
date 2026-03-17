@@ -177,8 +177,11 @@ function assertRequiredSchema(): void {
     throw new Error(`[DB] Schema 不完整，缺少表: ${missing.join(", ")}。請確認 migration 已執行。path=${dbPath}`);
   }
   const schemaRow = db.prepare("SELECT value FROM schema_info WHERE key = 'schema_version'").get() as { value: string } | undefined;
-  if (!schemaRow?.value) {
-    throw new Error(`[DB] schema_info.current_version 缺失。path=${dbPath}`);
+  if (schemaRow === undefined || schemaRow === null) {
+    throw new Error(`[DB] schema_info 表內缺少 key='schema_version' 的紀錄。請確認 migration 已執行。path=${dbPath}`);
+  }
+  if (schemaRow.value == null || String(schemaRow.value).trim() === "") {
+    throw new Error(`[DB] schema_info 表內 schema_version 的值為空。path=${dbPath}`);
   }
 }
 

@@ -170,30 +170,30 @@ const avatarUpload = multer({
   limits: { fileSize: 5 * 1024 * 1024 },
 });
 
-/** Phase 1 ??/???????????? legal_risk ? high_risk_short_circuit */
+/** Phase 1 法律/公關風險關鍵字，命中則走 legal_risk → high_risk_short_circuit */
 const LEGAL_RISK_KEYWORDS = [
-  "??", "??", "??", "???", "???", "??", "??", "??", "??",
-  "??", "??", "????", "??", "??", "??", "??", "??",
+  "提告", "投訴", "檢舉", "消保官", "消基會", "律師", "法院", "法務", "詐騙",
+  "備案", "報警", "再不處理", "公開", "發文", "媒體", "爆料", "消保",
 ];
 
-/** Phase 1 ???/??????? frustrated_only ?? high_risk */
+/** Phase 1 僅抱怨/情緒關鍵字，走 frustrated_only 不升 high_risk */
 const FRUSTRATED_ONLY_KEYWORDS = [
-  "??", "??", "??", "??", "??", "?", "???", "??",
+  "很爛", "生氣", "失望", "不爽", "火大", "扯", "爛透了", "誇張",
 ];
 
-const RETURN_REFUND_KEYWORDS = ["??", "??", "??", "??", "????", "???", "??"];
+const RETURN_REFUND_KEYWORDS = ["退貨", "退款", "退費", "換貨", "取消訂單", "不要了", "想退"];
 
 const ISSUE_TYPE_KEYWORDS: Record<IssueType, string[]> = {
-  order_inquiry: ["??", "??", "??", "??", "??", "??", "??", "??", "??", "??"],
-  product_consult: ["??", "??", "??", "??", "???", "??", "??", "??", "??", "??"],
-  return_refund: ["??", "??", "??", "??", "????", "???", "??", "???"],
-  complaint: ["??", "??", "??", "??", "??", "?", "??"],
-  order_modify: ["??", "????", "???", "???", "???"],
-  general: ["??", "??", "??", "??", "??"],
+  order_inquiry: ["訂單", "查詢", "出貨", "物流", "到貨", "單號", "編號", "進度", "哪裡", "何時"],
+  product_consult: ["商品", "規格", "尺寸", "顏色", "怎麼用", "使用", "保固", "庫存", "有貨", "預購"],
+  return_refund: ["退貨", "退款", "退費", "換貨", "取消訂單", "不要了", "想退", "鑑賞期"],
+  complaint: ["投訴", "抱怨", "不滿", "客訴", "申訴", "爛", "誇張"],
+  order_modify: ["改單", "修改訂單", "改地址", "改時間", "改收件"],
+  general: ["請問", "想問", "謝謝", "再見", "你好"],
   other: [],
 };
 
-/** Phase 1 ???????legal_risk > frustrated_only > none */
+/** Phase 1 依關鍵字判斷：legal_risk > frustrated_only > none */
 function detectHighRisk(text: string): { level: "legal_risk" | "frustrated_only" | "none"; reasons: string[] } {
   const reasons: string[] = [];
   for (const kw of LEGAL_RISK_KEYWORDS) {
@@ -244,7 +244,7 @@ async function getEnrichedSystemPrompt(
 const contactProcessingLocks = new Map<number, Promise<void>>();
 
 const messageDebounceBuffers = new Map<number, { texts: string[]; timer: ReturnType<typeof setTimeout>; resolve: () => void }>();
-/** ???????????????????????????????1.2 ??????????? */
+/** 合併短時間內多則文字訊息，避免重複觸發；約 1.2 秒內合併一次送出 */
 const DEBOUNCE_MS = 1200;
 
 function debounceTextMessage(
@@ -291,27 +291,27 @@ function maskSensitiveInfo(text: string): string {
   return result;
 }
 
-/** ????????????????????????? */
+/** 轉接專人暫不可用時的系統提示（依原因回傳對應文案） */
 function getTransferUnavailableSystemMessage(reason: "weekend" | "lunch" | "after_hours" | "all_paused" | null): string {
   const schedule = storage.getGlobalSchedule();
-  if (reason === "weekend") return "????????????????????????????";
-  if (reason === "lunch") return `????????${schedule.lunch_start_time}?${schedule.lunch_end_time}????????????`;
-  if (reason === "after_hours") return "??????????????????????";
-  return "???????????????????????";
+  if (reason === "weekend") return "目前為週末或非服務日，專人將於上班時間為您服務，請稍候。";
+  if (reason === "lunch") return `目前為午休時段（${schedule.lunch_start_time}～${schedule.lunch_end_time}），專人將盡快為您服務。`;
+  if (reason === "after_hours") return "目前為非服務時段，專人將於上班時間為您服務。";
+  return "目前暫無法即時轉接專人，請稍後再試或留下訊息。";
 }
 
-/** Phase 2 ???????product_scope_locked ?? bag/sweet ???? Regex ?? */
+/** Phase 2 商品範圍鎖定用：命中 bag/sweet 關鍵字時 product_scope_locked，下方為 Unicode 關鍵字 */
 const BAG_KEYWORDS = ["\u5305", "\u5305\u5305", "\u6258\u7279\u5305", "\u624b\u63d0\u5305", "\u80a9\u80cc\u5305", "\u5f8c\u80cc\u5305", "\u5074\u80cc\u5305"];
 const SWEET_KEYWORDS = ["\u751c", "\u751c\u9ede", "\u7cd6", "\u7cd6\u679c", "\u5de7\u514b\u529b", "\u86cb\u7cd5", "\u990a\u4e7e"];
-/** ??/??/??????????? Regex ?? */
+/** 宅配/超商/門市關鍵字（Regex 比對用） */
 const CVS_SHIPPING_KEYWORDS = ["\u5b85\u9148", "\u8d85\u5546", "\u9580\u5e02", "7-11", "7-ELEVEN", "\u5168\u5bb6", "OK", "\u840a\u723e\u5bcc"];
 const PAYMENT_FAIL_STATUS_KW = ["\u5931\u6557", "\u672a\u6210\u529f", "\u4ed8\u6b3e\u5931\u6557"];
 const PAYMENT_FAIL_METHOD_KW = ["\u5931\u6557", "\u672a\u4ed8"];
 const PAYMENT_SUCCESS_STATUS_KW = ["\u5df2\u78ba\u8a8d", "\u5f85\u51fa\u8ca8", "\u5df2\u51fa\u8ca8", "\u5df2\u5b8c\u6210"];
 const PAYMENT_PENDING_STATUS_KW = ["\u5f85\u4ed8\u6b3e", "\u672a\u4ed8\u6b3e", "\u78ba\u8a8d\u4e2d", "\u65b0\u8a02\u55ae"];
-/** AI ????????? order/phone/product ???????? Regex */
+/** AI 需跳過查單時機：詢問訂單/電話/商品等關鍵字（Regex 比對用） */
 const ASK_ORDER_PHONE_FOR_BYPASS_KW = ["\u8acb\u63d0\u4f9b\u8a02\u55ae\u7de8\u865f", "\u8a02\u55ae\u7de8\u865f", "\u8acb\u63d0\u4f9b", "\u624b\u6a5f\u865f\u78bc", "\u5546\u54c1\u540d\u7a31", "\u4e0b\u8a02\u624b\u6a5f", "\u6536\u4ef6\u4eba", "\u8acb\u63d0\u4f9b\u8cc3\u8a0a"];
-/** ??/??/??/???????? */
+/** 訂單/單號/編號/出貨/物流/到貨等後續追蹤關鍵字 */
 const ORDER_FOLLOWUP_KW = ["\u8a02\u55ae\u7de8\u865f", "\u55ae\u865f", "\u7de8\u865f", "\u51fa\u8ca8", "\u7269\u6d41", "\u67e5\u8a62", "\u5230\u8ca8", "\u4ec0\u9ebc\u6642\u5019", "\u51e1\u5929", "\u6536\u5230"];
 const FULFILLMENT_SHIPPED_KW = ["\u5df2\u51fa\u8ca8", "\u5df2\u9001\u9054"];
 const FULFILLMENT_PENDING_SHIP_KW = ["\u65b0\u8a02\u55ae", "\u5f85\u51fa\u8ca8", "\u8655\u7406\u4e2d"];
@@ -335,7 +335,7 @@ async function withContactLock<T>(contactId: number, fn: () => Promise<T>): Prom
   const lockPromise = new Promise<void>(r => { resolve = r; });
   contactProcessingLocks.set(contactId, lockPromise);
   if (existing) {
-    /** ?? contact ??????? 25 ????? AI ???? */
+    /** 同一 contact 已有處理中時，最多等 25 秒再讓 AI 回覆 */
     const timeout = new Promise<void>(r => setTimeout(r, 25000));
     await Promise.race([existing, timeout]);
   }
@@ -363,7 +363,7 @@ function broadcastSSE(eventType: string, data: any) {
   }
 }
 
-/** ? stream chunk ? delta ????? message??? content + tool_calls ??? */
+/** 將 stream chunk 的 delta 合併進前一則 message（content 與 tool_calls 累加） */
 function mergeStreamDelta(
   prev: OpenAI.Chat.Completions.ChatCompletionMessage,
   delta: OpenAI.Chat.Completions.ChatCompletionChunk.Choice.Delta
@@ -391,8 +391,8 @@ function mergeStreamDelta(
 }
 
 /**
- * ?? OpenAI ?????????? content delta ? broadcast message_chunk?
- * ???????????????? message?content ? tool_calls??
+ * 呼叫 OpenAI stream API，將 content delta 即時 broadcast 為 message_chunk，
+ * 最後合併為完整 message（content 與 tool_calls）。
  */
 async function runOpenAIStream(
   openai: OpenAI,
@@ -419,7 +419,7 @@ async function runOpenAIStream(
 
 const FB_VERIFY_TOKEN = process.env.FB_VERIFY_TOKEN || "omnichannel_fb_verify_2024";
 
-/** ???? :id ???????????? null??????? 400 ??????? */
+/** 解析路由 :id 參數為數字；無效或空則回 null（呼叫端回 400） */
 function parseIdParam(value: string | undefined): number | null {
   if (value == null || value === "") return null;
   const n = parseInt(value, 10);
@@ -427,7 +427,7 @@ function parseIdParam(value: string | undefined): number | null {
   return n;
 }
 
-/** @deprecated ??? resolveOpenAIModel from ./openai-model */
+/** @deprecated 請改用 resolveOpenAIModel from ./openai-model */
 function getOpenAIModel(): string {
   return resolveOpenAIModel();
 }
@@ -437,8 +437,8 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
 
-  // ?????????fetchPages/refreshPagesCache?????????? 500MB RAM ????????
-  // ?????? ENABLE_SYNC=true ???????????????????????????????????
+  // 定時呼叫 fetchPages/refreshPagesCache 會佔用約 500MB RAM，僅在 ENABLE_SYNC=true 時啟用
+  // 未設 ENABLE_SYNC 時不跑定時同步，請依需求設定 ENABLE_SYNC=true
   if (process.env.ENABLE_SYNC === "true") {
     setTimeout(() => {
       refreshPagesCache(getSuperLandingConfig()).catch(() => {});
@@ -448,10 +448,10 @@ export async function registerRoutes(
       refreshPagesCache(freshConfig).catch(() => {});
     }, 60 * 60 * 1000);
   } else {
-    console.log("[server] ENABLE_SYNC ??? true??????????/????????? ENABLE_SYNC=true ???");
+    console.log("[server] ENABLE_SYNC 非 true，不啟動定時同步；若需同步請設 ENABLE_SYNC=true");
   }
 
-  // ????????????? Railway / ????????????
+  // 健康檢查（Railway 等平台會輪詢）
   app.get("/api/health", (_req, res) => {
     res.json({ ok: true });
   });
@@ -882,7 +882,7 @@ export async function registerRoutes(
     return res.json(getGuardStats());
   });
 
-  /** ????? deploy ??????????? */
+  /** 版本與 deploy 用：回傳 version / commit / startTime */
   app.get("/api/version", (_req, res) => {
     const startTime = (globalThis as any).__serverStartTime ?? null;
     res.json({
@@ -911,7 +911,7 @@ export async function registerRoutes(
     if (!key) return res.status(400).json({ message: "key is required" });
     const sensitiveKeys = ["openai_api_key", "line_channel_secret", "line_channel_access_token", "superlanding_merchant_no", "superlanding_access_key"];
     if (sensitiveKeys.includes(key)) {
-      if (req.session?.userRole !== "super_admin") return res.status(403).json({ message: "????????? API ??" });
+      if (req.session?.userRole !== "super_admin") return res.status(403).json({ message: "????? super_admin ???API Key ??" });
     } else {
       if (!["super_admin", "marketing_manager"].includes(req.session?.userRole)) return res.status(403).json({ message: "????" });
     }
@@ -925,7 +925,7 @@ export async function registerRoutes(
       if (type === "openai") {
         const apiKey = storage.getSetting("openai_api_key");
         if (!apiKey || apiKey.trim() === "") {
-          return res.json({ success: false, message: "???? OpenAI API ??" });
+          return res.json({ success: false, message: "???? OpenAI API Key" });
         }
         const openai = new OpenAI({ apiKey });
         await openai.chat.completions.create({
@@ -933,7 +933,7 @@ export async function registerRoutes(
           messages: [{ role: "user", content: "hi" }],
           max_completion_tokens: 5,
         });
-        return res.json({ success: true, message: `OpenAI ???? (??: ${getOpenAIModel()})` });
+        return res.json({ success: true, message: `OpenAI ???????: ${getOpenAIModel()}?` });
       }
 
       if (type === "line") {
@@ -956,23 +956,23 @@ export async function registerRoutes(
         const merchantNo = storage.getSetting("superlanding_merchant_no");
         const accessKey = storage.getSetting("superlanding_access_key");
         if (!merchantNo || !accessKey) {
-          return res.json({ success: false, message: "???????? merchant_no ? access_key" });
+          return res.json({ success: false, message: "??? SuperLanding merchant_no ? access_key" });
         }
         const slUrl = `https://api.super-landing.com/orders.json?merchant_no=${encodeURIComponent(merchantNo)}&access_key=${encodeURIComponent(accessKey)}&per_page=1`;
         try {
           const slRes = await fetch(slUrl, { headers: { Accept: "application/json" } });
           if (slRes.ok) {
-            return res.json({ success: true, message: "??????????????????" });
+            return res.json({ success: true, message: "SuperLanding ????" });
           }
           const errText = await slRes.text().catch(() => "");
-          return res.json({ success: false, message: `???????? (HTTP ${slRes.status})?${errText || "??????????? merchant_no ? access_key ????"}` });
+          return res.json({ success: false, message: `SuperLanding ???? (HTTP ${slRes.status})?${errText || "??? merchant_no ? access_key ????"}` });
         } catch (fetchErr: any) {
-          const detail = fetchErr?.cause?.code || fetchErr?.code || fetchErr?.message || "??????";
-          return res.json({ success: false, message: `???????????????${detail}` });
+          const detail = fetchErr?.cause?.code || fetchErr?.code || fetchErr?.message || "????";
+          return res.json({ success: false, message: `SuperLanding ?????${detail}` });
         }
       }
 
-      return res.json({ success: false, message: `???????: ${type}` });
+      return res.json({ success: false, message: `????????: ${type}` });
     } catch (err: any) {
       const msg = err?.message || "????";
       return res.json({ success: false, message: `??????: ${msg}` });
@@ -1062,7 +1062,7 @@ export async function registerRoutes(
     const id = parseInt(req.params.id);
     if (Number.isNaN(id)) return res.status(400).json({ message: "??? ID" });
     const row = riskRules.getRiskRule(id);
-    if (!row) return res.status(404).json({ message: "?????" });
+    if (!row) return res.status(404).json({ message: "???????" });
     return res.json(row);
   });
   app.post("/api/meta-comment-risk-rules", authMiddleware, (req: any, res) => {
@@ -1114,7 +1114,7 @@ export async function registerRoutes(
     const id = parseInt(req.params.id);
     if (Number.isNaN(id)) return res.status(400).json({ message: "??? ID" });
     const ok = riskRules.deleteRiskRule(id);
-    if (!ok) return res.status(404).json({ message: "?????" });
+    if (!ok) return res.status(404).json({ message: "???????" });
     return res.json({ success: true });
   });
   app.post("/api/meta-comments/test-rules", authMiddleware, (req: any, res) => {
@@ -1166,7 +1166,7 @@ export async function registerRoutes(
     const id = parseInt(req.params.id);
     if (Number.isNaN(id)) return res.status(400).json({ message: "??? ID" });
     const row = metaCommentsStorage.getMetaComment(id);
-    if (!row) return res.status(404).json({ message: "?????" });
+    if (!row) return res.status(404).json({ message: "???????" });
     let brandName: string | null = null;
     if (row.brand_id != null) brandName = storage.getBrand(row.brand_id)?.name ?? null;
     if (brandName == null && row.page_id) {
@@ -1181,9 +1181,9 @@ export async function registerRoutes(
     const id = parseInt(req.params.id);
     if (Number.isNaN(id)) return res.status(400).json({ message: "??? ID" });
     const row = metaCommentsStorage.getMetaComment(id);
-    if (!row) return res.status(404).json({ message: "?????" });
+    if (!row) return res.status(404).json({ message: "???????" });
     const current = row.main_status || computeMainStatus(row);
-    if (current !== "gray_area") return res.status(400).json({ message: "???????????" });
+    if (current !== "gray_area") return res.status(400).json({ message: "????????????" });
     metaCommentsStorage.updateMetaComment(id, { main_status: "completed" });
     return res.json({ success: true, main_status: "completed" });
   });
@@ -1225,7 +1225,7 @@ export async function registerRoutes(
       return res.json(row);
     } catch (e: any) {
       console.error("[meta-comments] simulate-webhook ??:", e?.message);
-      if (e.message?.includes("UNIQUE")) return res.status(400).json({ message: "??? ID ???" });
+      if (e.message?.includes("UNIQUE")) return res.status(400).json({ message: "? ID ???" });
       return res.status(500).json({ message: e?.message || "????" });
     }
   });
@@ -1291,7 +1291,7 @@ export async function registerRoutes(
     if (Number.isNaN(mappingId)) return res.status(400).json({ message: "??? mapping_id" });
     const mappings = metaCommentsStorage.getMetaPostMappings();
     const mapping = mappings.find((m) => m.id === mappingId);
-    if (!mapping) return res.status(404).json({ message: "??????" });
+    if (!mapping) return res.status(404).json({ message: "?????? mapping" });
     const commentId = `sim_mapping_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     try {
       const resolved = resolveCommentMetadata({
@@ -1299,7 +1299,7 @@ export async function registerRoutes(
         page_id: mapping.page_id || "page_demo",
         post_id: mapping.post_id,
         post_name: mapping.post_name || "????",
-        message: "????????",
+        message: "???????",
       });
       const row = metaCommentsStorage.createMetaComment({
         brand_id: mapping.brand_id,
@@ -1309,7 +1309,7 @@ export async function registerRoutes(
         post_name: mapping.post_name || "????",
         comment_id: commentId,
         commenter_name: "????",
-        message: "????????",
+        message: "???????",
         is_simulated: 1,
         ...resolved,
       });
@@ -1355,7 +1355,7 @@ export async function registerRoutes(
       });
       return res.json(row);
     } catch (e: any) {
-      if (e.message?.includes("UNIQUE")) return res.status(400).json({ message: "??? ID ???" });
+      if (e.message?.includes("UNIQUE")) return res.status(400).json({ message: "? ID ???" });
       return res.status(500).json({ message: e?.message || "????" });
     }
   });
@@ -1363,7 +1363,7 @@ export async function registerRoutes(
     const id = parseInt(req.params.id);
     if (Number.isNaN(id)) return res.status(400).json({ message: "??? ID" });
     const row = metaCommentsStorage.getMetaComment(id);
-    if (!row) return res.status(404).json({ message: "?????" });
+    if (!row) return res.status(404).json({ message: "???????" });
     const body = req.body || {};
     metaCommentsStorage.updateMetaComment(id, {
       replied_at: body.replied_at !== undefined ? body.replied_at : undefined,
@@ -1397,7 +1397,7 @@ export async function registerRoutes(
     const id = parseInt(req.params.id);
     if (Number.isNaN(id)) return res.status(400).json({ message: "??? ID" });
     const comment = metaCommentsStorage.getMetaComment(id);
-    if (!comment) return res.status(404).json({ message: "?????" });
+    if (!comment) return res.status(404).json({ message: "???????" });
     const { agent_id, agent_name, agent_avatar_url } = req.body || {};
     if (agent_id == null) return res.status(400).json({ message: "??????" });
     const now = new Date().toISOString();
@@ -1415,7 +1415,7 @@ export async function registerRoutes(
     const id = parseInt(req.params.id);
     if (Number.isNaN(id)) return res.status(400).json({ message: "??? ID" });
     const comment = metaCommentsStorage.getMetaComment(id);
-    if (!comment) return res.status(404).json({ message: "?????" });
+    if (!comment) return res.status(404).json({ message: "???????" });
     metaCommentsStorage.updateMetaComment(id, {
       assigned_agent_id: null,
       assigned_agent_name: null,
@@ -1429,9 +1429,9 @@ export async function registerRoutes(
     const id = parseInt(req.params.id);
     if (Number.isNaN(id)) return res.status(400).json({ message: "??? ID" });
     const comment = metaCommentsStorage.getMetaComment(id);
-    if (!comment) return res.status(404).json({ message: "?????" });
+    if (!comment) return res.status(404).json({ message: "???????" });
     const openaiKey = storage.getSetting("openai_api_key");
-    if (!openaiKey) return res.status(400).json({ message: "???? OpenAI API ??" });
+    if (!openaiKey) return res.status(400).json({ message: "???? OpenAI API Key" });
     const model = resolveOpenAIModel();
     const INTENTS = "product_inquiry, price_inquiry, where_to_buy, ingredient_effect, activity_engage, dm_guide, complaint, refund_after_sale, spam_competitor";
 
@@ -1820,7 +1820,7 @@ export async function registerRoutes(
     return res.json(list);
   });
 
-  /** Meta ??????????? Meta ?????????????? User Access Token? */
+  /** Meta 批次：以 Meta 使用者 Access Token 取得可用的粉絲專頁列表 */
   app.post("/api/meta/batch/available-pages", authMiddleware, superAdminOnly, async (req: any, res) => {
     const { user_access_token } = req.body || {};
     if (!user_access_token || typeof user_access_token !== "string") {
@@ -1841,11 +1841,11 @@ export async function registerRoutes(
       }));
       return res.json({ pages });
     } catch (e: any) {
-      return res.status(500).json({ message: "????????", detail: e?.message });
+      return res.status(500).json({ message: "???????", detail: e?.message });
     }
   });
 
-  /** Meta ??????????????????? channel + meta_page_settings??? AI ???????????? */
+  /** Meta 批次匯入：建立 channel 與 meta_page_settings，供 AI 留言回覆使用 */
   app.post("/api/meta/batch/import", authMiddleware, superAdminOnly, async (req: any, res) => {
     const { brand_id: brandId, pages: pagesInput } = req.body || {};
     const bid = brandId != null ? parseInt(String(brandId), 10) : NaN;
@@ -1853,7 +1853,7 @@ export async function registerRoutes(
       return res.status(400).json({ message: "?????? brand_id" });
     }
     const brand = storage.getBrand(bid);
-    if (!brand) return res.status(404).json({ message: "?????" });
+    if (!brand) return res.status(404).json({ message: "???????" });
     if (!Array.isArray(pagesInput) || pagesInput.length === 0) {
       return res.status(400).json({ message: "??? pages ????????" });
     }
@@ -2010,7 +2010,7 @@ export async function registerRoutes(
     const id = parseInt(req.params.id);
     if (Number.isNaN(id)) return res.status(400).json({ message: "??? ID" });
     const existing = metaCommentsStorage.getMetaCommentRule(id);
-    if (!existing) return res.status(404).json({ message: "?????" });
+    if (!existing) return res.status(404).json({ message: "???????" });
     const body = req.body || {};
     metaCommentsStorage.updateMetaCommentRule(id, {
       brand_id: body.brand_id !== undefined ? body.brand_id : undefined,
@@ -2037,7 +2037,7 @@ export async function registerRoutes(
     const id = parseInt(req.params.id);
     if (Number.isNaN(id)) return res.status(400).json({ message: "??? ID" });
     const comment = metaCommentsStorage.getMetaComment(id);
-    if (!comment) return res.status(404).json({ message: "?????" });
+    if (!comment) return res.status(404).json({ message: "???????" });
     const resolved = resolveCommentMetadata({
       brand_id: comment.brand_id,
       page_id: comment.page_id,
@@ -2062,7 +2062,7 @@ export async function registerRoutes(
     const id = parseInt(req.params.id);
     if (Number.isNaN(id)) return res.status(400).json({ message: "??? ID" });
     const comment = metaCommentsStorage.getMetaComment(id);
-    if (!comment) return res.status(404).json({ message: "?????" });
+    if (!comment) return res.status(404).json({ message: "???????" });
     const message = (req.body?.message as string)?.trim();
     if (!message) return res.status(400).json({ message: "??? message??????" });
     const channel = storage.getChannelByBotId(comment.page_id);
@@ -2112,7 +2112,7 @@ export async function registerRoutes(
       executor: "user",
     });
     return res.status(502).json({
-      message: "????????",
+      message: "???????",
       error: result.error,
       platform_code: result.platform_code,
     });
@@ -2122,7 +2122,7 @@ export async function registerRoutes(
     const id = parseInt(req.params.id);
     if (Number.isNaN(id)) return res.status(400).json({ message: "??? ID" });
     const comment = metaCommentsStorage.getMetaComment(id);
-    if (!comment) return res.status(404).json({ message: "?????" });
+    if (!comment) return res.status(404).json({ message: "???????" });
     const channel = storage.getChannelByBotId(comment.page_id);
     if (!channel?.access_token) {
       const errMsg = "?????? Page access token";
@@ -2163,7 +2163,7 @@ export async function registerRoutes(
       executor: "user",
     });
     return res.status(502).json({
-      message: "????????",
+      message: "???????",
       error: result.error,
       platform_code: result.platform_code,
     });
@@ -2178,14 +2178,14 @@ export async function registerRoutes(
     const id = parseInt(req.params.id);
     if (Number.isNaN(id)) return res.status(400).json({ message: "??? ID" });
     const row = metaCommentsStorage.getMetaPageSettings(id);
-    if (!row) return res.status(404).json({ message: "??????" });
+    if (!row) return res.status(404).json({ message: "?????? mapping" });
     return res.json(row);
   });
   app.get("/api/meta-page-settings/by-page/:pageId", authMiddleware, (req: any, res) => {
     const pageId = String(req.params.pageId || "");
     if (!pageId) return res.status(400).json({ message: "??? page_id" });
     const row = metaCommentsStorage.getMetaPageSettingsByPageId(pageId);
-    if (!row) return res.status(404).json({ message: "????????" });
+    if (!row) return res.status(404).json({ message: "???????" });
     return res.json(row);
   });
   app.post("/api/meta-page-settings", authMiddleware, (req: any, res) => {
@@ -2217,7 +2217,7 @@ export async function registerRoutes(
     const id = parseInt(req.params.id);
     if (Number.isNaN(id)) return res.status(400).json({ message: "??? ID" });
     const existing = metaCommentsStorage.getMetaPageSettings(id);
-    if (!existing) return res.status(404).json({ message: "??????" });
+    if (!existing) return res.status(404).json({ message: "?????? mapping" });
     const body = req.body || {};
     metaCommentsStorage.updateMetaPageSettings(id, {
       page_name: body.page_name !== undefined ? body.page_name : undefined,
@@ -2275,7 +2275,7 @@ export async function registerRoutes(
     const id = parseIdParam(req.params.id);
     if (id === null) return res.status(400).json({ message: "??? ID" });
     const brand = storage.getBrand(id);
-    if (!brand) return res.status(404).json({ message: "?????" });
+    if (!brand) return res.status(404).json({ message: "???????" });
     return res.json(brand);
   });
 
@@ -2312,14 +2312,14 @@ export async function registerRoutes(
     if (return_form_url !== undefined) data.return_form_url = return_form_url;
     if (shopline_store_domain !== undefined) data.shopline_store_domain = shopline_store_domain;
     if (shopline_api_token !== undefined) data.shopline_api_token = shopline_api_token;
-    if (!(await storage.updateBrand(id, data))) return res.status(404).json({ message: "?????" });
+    if (!(await storage.updateBrand(id, data))) return res.status(404).json({ message: "???????" });
     return res.json({ success: true });
   });
 
   app.delete("/api/brands/:id", authMiddleware, managerOrAbove, async (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) return res.status(400).json({ message: "??? ID" });
-    if (!(await storage.deleteBrand(id))) return res.status(404).json({ message: "?????" });
+    if (!(await storage.deleteBrand(id))) return res.status(404).json({ message: "???????" });
     return res.json({ success: true });
   });
 
@@ -2334,7 +2334,7 @@ export async function registerRoutes(
     const brandId = parseIdParam(req.params.id);
     if (brandId === null) return res.status(400).json({ message: "??? ID" });
     const brand = storage.getBrand(brandId);
-    if (!brand) return res.status(404).json({ message: "?????" });
+    if (!brand) return res.status(404).json({ message: "???????" });
     const agents = storage.getBrandAssignedAgents(brandId);
     return res.json(agents);
   });
@@ -2344,7 +2344,7 @@ export async function registerRoutes(
     return res.json(channels);
   });
 
-  /** ??????????????? LINE access_token ???? */
+  /** 以 LINE API 驗證 access_token 是否有效 */
   async function validateLineAccessToken(token: string): Promise<boolean> {
     const t = (token || "").trim();
     if (!t) return false;
@@ -2398,18 +2398,18 @@ export async function registerRoutes(
         }
       }
     }
-    if (!(await storage.updateChannel(id, data))) return res.status(404).json({ message: "?????" });
+    if (!(await storage.updateChannel(id, data))) return res.status(404).json({ message: "???????" });
     return res.json({ success: true });
   });
 
   app.delete("/api/channels/:id", authMiddleware, managerOrAbove, async (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) return res.status(400).json({ message: "??? ID" });
-    if (!(await storage.deleteChannel(id))) return res.status(404).json({ message: "?????" });
+    if (!(await storage.deleteChannel(id))) return res.status(404).json({ message: "???????" });
     return res.json({ success: true });
   });
 
-  /** ???????????? Token ?? LINE API???? DB??? bot_id ????? LINE ??? userId ??? */
+  /** 驗證 LINE Channel Access Token，呼叫 LINE API 取得 bot 資訊與 DB 比對 bot_id；Webhook 需填 LINE 後台之 userId */
   app.post("/api/channels/verify-line", authMiddleware, managerOrAbove, async (req, res) => {
     const { access_token, bot_id: formBotId } = req.body || {};
     if (!access_token || typeof access_token !== "string" || !access_token.trim()) {
@@ -2442,7 +2442,7 @@ export async function registerRoutes(
     }
   });
 
-  /** ??????????????????????????? LINE ???????????? */
+  /** 依渠道將聯絡人重新歸屬至指定品牌（LINE 渠道搬家等情境） */
   app.post("/api/admin/contacts/reassign-by-channel", authMiddleware, managerOrAbove, async (req, res) => {
     const channelId = req.body?.channel_id != null ? parseInt(String(req.body.channel_id), 10) : null;
     const brandId = req.body?.brand_id != null ? parseInt(String(req.body.brand_id), 10) : null;
@@ -2450,9 +2450,9 @@ export async function registerRoutes(
       return res.status(400).json({ message: "??? channel_id ? brand_id" });
     }
     const channel = storage.getChannel(channelId);
-    if (!channel) return res.status(404).json({ message: "?????" });
+    if (!channel) return res.status(404).json({ message: "???????" });
     const brand = storage.getBrand(brandId);
-    if (!brand) return res.status(404).json({ message: "?????" });
+    if (!brand) return res.status(404).json({ message: "???????" });
     const updated = storage.reassignContactsByChannel(channelId, brandId);
     return res.json({ success: true, updated, message: `?? ${updated} ????????${brand.name}?` });
   });
@@ -2461,7 +2461,7 @@ export async function registerRoutes(
     const id = parseIdParam(req.params.id);
     if (id === null) return res.status(400).json({ message: "??? ID" });
     const brand = storage.getBrand(id);
-    if (!brand) return res.status(404).json({ message: "?????" });
+    if (!brand) return res.status(404).json({ message: "???????" });
     const merchantNo = brand.superlanding_merchant_no || storage.getSetting("superlanding_merchant_no") || "";
     const accessKey = brand.superlanding_access_key || storage.getSetting("superlanding_access_key") || "";
     if (!merchantNo || !accessKey) {
@@ -2487,7 +2487,7 @@ export async function registerRoutes(
     const id = parseIdParam(req.params.id);
     if (id === null) return res.status(400).json({ message: "??? ID" });
     const brand = storage.getBrand(id);
-    if (!brand) return res.status(404).json({ message: "?????" });
+    if (!brand) return res.status(404).json({ message: "???????" });
     const apiToken = (brand.shopline_api_token || "").trim();
     if (!apiToken) {
       return res.json({ success: false, message: "??????? SHOPLINE API Token" });
@@ -2590,7 +2590,7 @@ export async function registerRoutes(
     const id = parseIdParam(req.params.id);
     if (id === null) return res.status(400).json({ message: "??? ID" });
     const channel = storage.getChannel(id);
-    if (!channel) return res.status(404).json({ message: "?????" });
+    if (!channel) return res.status(404).json({ message: "???????" });
     if (channel.platform === "line") {
       if (!channel.access_token) return res.json({ success: false, message: "???? Access Token" });
       try {
@@ -2639,12 +2639,12 @@ export async function registerRoutes(
     return res.json({ success: false, message: `???? ${channel.platform} ????` });
   });
 
-  /** ? FB ???? feed?????????????? Webhook?? Page Access Token ? pages_manage_metadata */
+  /** 訂閱 FB 粉絲專頁 feed：需 Webhook 與 Page Access Token，權限需含 pages_manage_metadata */
   app.post("/api/channels/:id/subscribe-feed", authMiddleware, managerOrAbove, async (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) return res.status(400).json({ message: "??? ID" });
     const channel = storage.getChannel(id);
-    if (!channel) return res.status(404).json({ message: "?????" });
+    if (!channel) return res.status(404).json({ message: "???????" });
     if (channel.platform !== "messenger") return res.status(400).json({ message: "??? Facebook Messenger ??" });
     const pageId = (channel.bot_id || "").trim();
     const token = (channel.access_token || "").trim();
@@ -2668,8 +2668,8 @@ export async function registerRoutes(
     }
   });
 
-  /** ????????????????UI ????????? status/case_priority? */
-  const URGENT_TAGS = ["??", "??", "???", "????"];
+  /** 緊急/逾期標記用於 UI 排序與 status/case_priority 建議 */
+  const URGENT_TAGS = ["緊急", "加急", "急件", "優先"];
   const OVERDUE_MS = 60 * 60 * 1000;
   const isUrgentContact = (c: any): boolean => {
     if (["closed", "resolved"].includes(c.status)) return false;
@@ -2695,7 +2695,7 @@ export async function registerRoutes(
     return Date.now() - t > OVERDUE_MS;
   };
 
-  /** AI ??????????? issue_type / status / priority????????????? ? ?? Regex ?? */
+  /** AI 建議用：依關鍵字建議 issue_type / status / priority（下方為 Unicode 關鍵字） */
   const RETURN_REFUND_KW = ["\u9000", "\u63db", "\u9000\u6b3e", "\u9000\u8ca8"];
   const COMPLAINT_KW = ["\u5ba2\u8a34", "\u62b1\u6028", "\u6295\u8a34", "\u7533\u8a34"];
   const ORDER_MODIFY_KW = ["\u8a02\u55ae", "\u4fee\u6539", "\u6539\u55ae", "\u51fa\u8ca8", "\u5ef6\u907a", "\u53d6\u6d88"];
@@ -2768,7 +2768,7 @@ export async function registerRoutes(
     const id = parseIdParam(req.params.id);
     if (id === null) return res.status(400).json({ message: "??? ID" });
     const contact = storage.getContact(id) as any;
-    if (!contact) return res.status(404).json({ message: "??????" });
+    if (!contact) return res.status(404).json({ message: "?????? mapping" });
     // GET ????????????? DB ??? SSE??????????????????????
     // AI ???? Webhook ???????????????????
     if (!contact.ai_suggestions && (contact as any).ai_suggestions === undefined) contact.ai_suggestions = null;
@@ -2849,7 +2849,7 @@ export async function registerRoutes(
     };
   }
 
-  /** ???????????? LINE Token??? fallback ??? .env Token??????? */
+  /** 依 contact 的 channel/brand 取得 LINE Token；無則 fallback 至 .env 或全域設定 */
   function getLineTokenForContact(contact: { channel_id?: number | null; brand_id?: number | null }): string | null {
     if (contact.channel_id) {
       const channel = storage.getChannel(contact.channel_id);
@@ -2987,7 +2987,7 @@ export async function registerRoutes(
     if (contactId === null) return res.status(400).json({ message: "??? ID" });
     const { reason } = req.body;
     const contact = storage.getContact(contactId);
-    if (!contact) return res.status(404).json({ message: "??????" });
+    if (!contact) return res.status(404).json({ message: "?????? mapping" });
     const transferReason = (reason || "???????") as string;
     applyHandoff({ contactId, reason: "explicit_human_request", source: "api_transfer_human", brandId: contact.brand_id ?? undefined });
     const assignedAgentId = assignment.assignCase(contactId);
@@ -3010,12 +3010,12 @@ export async function registerRoutes(
     const contactId = parseIdParam(req.params.id);
     if (contactId === null) return res.status(400).json({ message: "??? ID" });
     const contact = storage.getContact(contactId);
-    if (!contact) return res.status(404).json({ message: "??????" });
+    if (!contact) return res.status(404).json({ message: "?????? mapping" });
     storage.updateContactStatus(contactId, "ai_handling");
     storage.updateContactHumanFlag(contactId, 0);
     storage.clearAiMuted(contactId);
     storage.resetConsecutiveTimeouts(contactId);
-    /** ???? AI ? ????????????????????????? AI ????????? */
+    /** 重置為 AI 可處理狀態：清空 product_scope_locked、customer_goal_locked、human_reason 等，讓 AI 重新判斷 */
     storage.updateContactConversationFields(contactId, {
       product_scope_locked: null,
       customer_goal_locked: null,
@@ -3040,7 +3040,7 @@ export async function registerRoutes(
     if (id === null) return res.status(400).json({ message: "??? ID" });
     const ratingType = (req.body?.type === "ai" ? "ai" : "human") as "human" | "ai";
     const contact = storage.getContact(id);
-    if (!contact) return res.status(404).json({ message: "??????" });
+    if (!contact) return res.status(404).json({ message: "?????? mapping" });
     if (contact.platform !== "line") {
       return res.status(400).json({ message: "??? LINE ??" });
     }
@@ -3117,7 +3117,7 @@ export async function registerRoutes(
     const { content, message_type, image_url } = req.body;
     if (!content && !image_url) return res.status(400).json({ message: "content or image_url is required" });
     const contact = storage.getContact(contactId);
-    if (!contact) return res.status(404).json({ message: "??????" });
+    if (!contact) return res.status(404).json({ message: "?????? mapping" });
     const msgType = message_type || "text";
     const message = storage.createMessage(contactId, contact.platform, "admin", content || "", msgType, image_url || null);
     storage.updateContactLastHumanReply(contactId);
@@ -3172,7 +3172,7 @@ export async function registerRoutes(
     const contactId = parseIdParam(req.params.id);
     if (contactId === null) return res.status(400).json({ message: "??? ID" });
     const contact = storage.getContact(contactId);
-    if (!contact) return res.status(404).json({ message: "??????" });
+    if (!contact) return res.status(404).json({ message: "?????? mapping" });
     const config = getSuperLandingConfig(contact.brand_id || undefined);
     if (!config.merchantNo || !config.accessKey) {
       return res.json({ orders: [], error: "not_configured", message: "???????? API ??" });
@@ -3197,7 +3197,7 @@ export async function registerRoutes(
     const orderId = (req.body?.order_id as string)?.trim();
     if (!orderId) return res.status(400).json({ message: "??? order_id" });
     const contact = storage.getContact(contactId);
-    if (!contact) return res.status(404).json({ message: "??????" });
+    if (!contact) return res.status(404).json({ message: "?????? mapping" });
     try {
       db.prepare(
         "INSERT OR IGNORE INTO contact_order_links (contact_id, global_order_id, source) VALUES (?, ?, 'manual')"
@@ -3213,7 +3213,7 @@ export async function registerRoutes(
     const contactId = parseIdParam(req.params.id);
     if (contactId === null) return res.status(400).json({ message: "??? ID" });
     const contact = storage.getContact(contactId);
-    if (!contact) return res.status(404).json({ message: "??????" });
+    if (!contact) return res.status(404).json({ message: "?????? mapping" });
     const rows = db.prepare("SELECT global_order_id FROM contact_order_links WHERE contact_id = ? ORDER BY created_at DESC")
       .all(contactId) as { global_order_id: string }[];
     return res.json({ order_ids: rows.map((r) => r.global_order_id) });
@@ -3223,7 +3223,7 @@ export async function registerRoutes(
     const contactId = parseIdParam(req.params.id);
     if (contactId === null) return res.status(400).json({ message: "??? ID" });
     const contact = storage.getContact(contactId);
-    if (!contact) return res.status(404).json({ message: "??????" });
+    if (!contact) return res.status(404).json({ message: "?????? mapping" });
     const ctx = storage.getActiveOrderContext(contactId);
     return res.json(ctx ? { active_order: ctx } : { active_order: null });
   });
@@ -3476,7 +3476,7 @@ export async function registerRoutes(
     }
   }
 
-  /** ???????? vision-first ??? log */
+  /** 視覺優先流程：紀錄 vision-first 相關 log */
   const IMAGE_INTENT_ORDER = "order_screenshot";
   const IMAGE_INTENT_PRODUCT_ISSUE = "product_issue_defect";
   const IMAGE_INTENT_PRODUCT_PAGE = "product_page_size";
@@ -3501,7 +3501,7 @@ export async function registerRoutes(
     }
     const contact = storage.getContact(contactId);
     const brandId = contact?.brand_id;
-    /** ?? order_id ???? vision ?????????????????? active_order_context?????/ECPay ??????? */
+    /** 若無 order_id 則以 vision 辨識結果或既有 active_order_context 補齊（含 ECPay 等） */
     try {
       const openaiForImage = new OpenAI({ apiKey: apiKey.trim() });
       const extracted = await extractOrderInfoFromImage(openaiForImage, dataUri);
@@ -3857,7 +3857,7 @@ ${contextStr}
         storage.updateContactStatus(contact.id, "ai_handling");
         broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
       } else {
-        /** ???? Handoff Loop?needs_human=1 ???? link ???? AI??????????? LLM?????????? */
+        /** 避免 Handoff Loop：needs_human=1 時不再給 link 讓 AI 回；由 LLM 決定是否結束或轉人工 */
         console.log(`[AI Mute] Contact ${contact.id} needs_human=1, AI ??? - ????????`);
         storage.createAiLog({
           contact_id: contact.id,
@@ -4295,7 +4295,7 @@ ${contextStr}
 ???????????????????????
 </ORDER_LOOKUP_RULES>`;
       }
-      /** ???????????????????????????????/????????????????????????????????????????????? */
+      /** 依品牌/渠道設定與對話狀態決定是否允許 AI 回覆或強制轉人工 */
       systemPrompt += "\n\n????????**????**??????????????????????????????????/??/??????????????**????**???????????**??**?????????????????????????????????????????????????????";
       // Mode-specific forbidden content???/??/handoff/order_lookup ?????????????????????
       if (isModeNoPromo(plan.mode)) {
@@ -4548,7 +4548,7 @@ ${contextStr}
           }
         }
 
-        /** ??????? LLM???? loopCount/orderLookupFailed ????? */
+        /** 防呆：LLM 回覆前檢查 loopCount/orderLookupFailed 等，避免重複查單迴圈 */
 
         const freshContact = storage.getContact(contact.id);
         if (freshContact?.needs_human) break;
@@ -4596,7 +4596,7 @@ ${contextStr}
       storage.resetConsecutiveTimeouts(contact.id);
 
       const finalContact = storage.getContact(contact.id);
-      /** ???????? AI ??????????? needs_human ???????? */
+      /** 若 AI 回覆內容或後處理判定 needs_human，則寫入並轉人工 */
       const shouldSkipPostHandoff = state && isAiHandlableIntent(state.primary_intent);
       if (!shouldSkipPostHandoff && (finalContact?.needs_human || storage.isAiMuted(contact.id) || finalContact?.status === "awaiting_human" || finalContact?.status === "high_risk")) {
         console.log(`[Webhook AI] ???????????? handoff ????? (needs_human=${finalContact?.needs_human}, status=${finalContact?.status})`);
@@ -5036,7 +5036,7 @@ ${contextStr}
       return JSON.stringify({ success: false, error: "?????????? API ???????? SHOPLINE??????????????? ? ??????? API ???" });
     }
 
-    /** ??????????????????????????????????????????????????????????????? */
+    /** 依對話內容與既有狀態決定是否允許 AI 回覆或需轉人工 */
     function formatOrderOnePage(o: { order_id?: string; buyer_name?: string; buyer_phone?: string; created_at?: string; payment_method?: string; amount?: number; shipping_method?: string; tracking_number?: string; address?: string; product_list?: string; status?: string; shipped_at?: string }): string {
       const lines: string[] = [];
       if (o.order_id) lines.push(`?????${o.order_id}`);
@@ -5055,7 +5055,7 @@ ${contextStr}
       return lines.join("\n");
     }
 
-    /** ??????? ActiveOrderContext???????????????? */
+    /** 建立或更新 ActiveOrderContext，供後續查單/出貨流程使用 */
     function buildActiveOrderContext(
       order: import("@shared/schema").OrderInfo,
       source: string,
@@ -5783,7 +5783,7 @@ ${contextStr}
       }
     }
 
-    return res.status(400).json({ message: "????????" });
+    return res.status(400).json({ message: "???????" });
   });
 
   app.get("/api/knowledge-files", authMiddleware, (_req, res) => {
@@ -5826,7 +5826,7 @@ ${contextStr}
       const filePath = path.join(uploadDir, file.filename);
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     }
-    if (!storage.deleteKnowledgeFile(id)) return res.status(404).json({ message: "?????" });
+    if (!storage.deleteKnowledgeFile(id)) return res.status(404).json({ message: "???????" });
     return res.json({ success: true });
   });
 
@@ -5855,7 +5855,7 @@ ${contextStr}
     if (display_name !== undefined) data.display_name = display_name;
     if (description !== undefined) data.description = description;
     if (keywords !== undefined) data.keywords = keywords;
-    if (!storage.updateImageAsset(id, data)) return res.status(404).json({ message: "?????" });
+    if (!storage.updateImageAsset(id, data)) return res.status(404).json({ message: "???????" });
     return res.json({ success: true });
   });
 
@@ -5867,14 +5867,14 @@ ${contextStr}
       const filePath = path.join(imageAssetsDir, asset.filename);
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     }
-    if (!storage.deleteImageAsset(id)) return res.status(404).json({ message: "?????" });
+    if (!storage.deleteImageAsset(id)) return res.status(404).json({ message: "???????" });
     return res.json({ success: true });
   });
 
   app.get("/api/image-assets/file/:filename", (req, res) => {
     const filename = req.params.filename;
     const filePath = path.join(imageAssetsDir, filename);
-    if (!fs.existsSync(filePath)) return res.status(404).json({ message: "?????" });
+    if (!fs.existsSync(filePath)) return res.status(404).json({ message: "???????" });
     res.sendFile(filePath);
   });
 
@@ -5885,7 +5885,7 @@ ${contextStr}
   app.post("/api/team", authMiddleware, superAdminOnly, (req, res) => {
     const { username, password, display_name, role } = req.body;
     if (!username || !password || !display_name) {
-      return res.status(400).json({ message: "????????" });
+      return res.status(400).json({ message: "???????" });
     }
     if (!["super_admin", "marketing_manager", "cs_agent"].includes(role)) {
       return res.status(400).json({ message: "????? super_admin, marketing_manager ? cs_agent" });
@@ -5908,7 +5908,7 @@ ${contextStr}
     if (!display_name) return res.status(400).json({ message: "?????" });
     if (!["super_admin", "marketing_manager", "cs_agent"].includes(role)) return res.status(400).json({ message: "????" });
     if (!storage.updateUser(id, display_name, role, password || undefined)) {
-      return res.status(404).json({ message: "?????" });
+      return res.status(404).json({ message: "???????" });
     }
     return res.json({ success: true });
   });
@@ -5918,9 +5918,9 @@ ${contextStr}
     if (id === null) return res.status(400).json({ message: "??? ID" });
     const s = (req as any).session;
     if (id === s.userId) {
-      return res.status(400).json({ message: "???????????" });
+      return res.status(400).json({ message: "????????????" });
     }
-    if (!storage.deleteUser(id)) return res.status(404).json({ message: "?????" });
+    if (!storage.deleteUser(id)) return res.status(404).json({ message: "???????" });
     return res.json({ success: true });
   });
 
@@ -5932,7 +5932,7 @@ ${contextStr}
     const isSupervisor = role === "super_admin" || role === "marketing_manager";
     if (userId !== me && !isSupervisor) return res.status(403).json({ message: "????????????" });
     const user = storage.getUserById(userId);
-    if (!user) return res.status(404).json({ message: "?????" });
+    if (!user) return res.status(404).json({ message: "???????" });
     const assignments = storage.getAgentBrandAssignments(userId);
     return res.json(assignments);
   });
@@ -5943,7 +5943,7 @@ ${contextStr}
     const { assignments } = req.body || {};
     if (!Array.isArray(assignments)) return res.status(400).json({ message: "??? assignments ??" });
     const user = storage.getUserById(userId);
-    if (!user) return res.status(404).json({ message: "?????" });
+    if (!user) return res.status(404).json({ message: "???????" });
     const normalized = assignments.map((a: any) => {
       const brand_id = typeof a.brand_id === "number" ? a.brand_id : parseInt(String(a.brand_id), 10);
       const role: import("@shared/schema").AgentBrandRole = a.role === "backup" ? "backup" : "primary";
@@ -6115,7 +6115,7 @@ ${contextStr}
     const contactId = parseIdParam(req.params.id);
     if (contactId === null) return res.status(400).json({ message: "??? ID" });
     const contact = storage.getContact(contactId);
-    if (!contact) return res.status(404).json({ message: "??????" });
+    if (!contact) return res.status(404).json({ message: "?????? mapping" });
     const byUserId = req.session?.userId;
     if (!byUserId) return res.status(401).json({ message: "???" });
     const rawAgentId = req.body?.agent_id ?? req.get("x-assign-agent-id");
@@ -6178,13 +6178,13 @@ ${contextStr}
     const contactId = parseIdParam(req.params.id);
     if (contactId === null) return res.status(400).json({ message: "??? ID" });
     const contact = storage.getContact(contactId);
-    if (!contact) return res.status(404).json({ message: "??????" });
+    if (!contact) return res.status(404).json({ message: "?????? mapping" });
     const byUserId = req.session?.userId;
     if (!byUserId) return res.status(401).json({ message: "???" });
     const isManager = (req.session?.userRole ?? req.session?.role) === "super_admin" || (req.session?.userRole ?? req.session?.role) === "marketing_manager";
     if (!isManager) return res.status(403).json({ message: "?????????" });
     const ok = assignment.unassignCase(contactId, byUserId);
-    if (!ok) return res.status(404).json({ message: "?????" });
+    if (!ok) return res.status(404).json({ message: "???????" });
     broadcastSSE("contacts_updated", { contact_id: contactId });
     const updated = storage.getContact(contactId);
     return res.json({
@@ -6206,7 +6206,7 @@ ${contextStr}
     const contactId = parseIdParam(req.params.id);
     if (contactId === null) return res.status(400).json({ message: "??? ID" });
     const contact = storage.getContact(contactId);
-    if (!contact) return res.status(404).json({ message: "??????" });
+    if (!contact) return res.status(404).json({ message: "?????? mapping" });
     const assignedTo = contact.assigned_agent_id ? storage.getUserById(contact.assigned_agent_id) : null;
     return res.json({
       assigned_to_user_id: contact.assigned_agent_id,
@@ -6233,7 +6233,7 @@ ${contextStr}
     if (!byAgentId) return res.status(401).json({ message: "???" });
     try {
       const ok = assignment.reassignCase(contactId, newAgentId, byAgentId, note || null);
-      if (!ok) return res.status(404).json({ message: "?????" });
+      if (!ok) return res.status(404).json({ message: "???????" });
       broadcastSSE("contacts_updated", { contact_id: contactId });
       const updated = storage.getContact(contactId);
       const assignedTo = updated?.assigned_agent_id ? storage.getUserById(updated.assigned_agent_id) : null;
@@ -6792,7 +6792,7 @@ ${contextStr}
     const { keyword, pitch, url } = req.body;
     if (!keyword) return res.status(400).json({ message: "??????" });
     if (!storage.updateMarketingRule(id, keyword, pitch || "", url || "")) {
-      return res.status(404).json({ message: "?????" });
+      return res.status(404).json({ message: "???????" });
     }
     return res.json({ success: true });
   });
@@ -6800,7 +6800,7 @@ ${contextStr}
   app.delete("/api/marketing-rules/:id", authMiddleware, managerOrAbove, (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) return res.status(400).json({ message: "??? ID" });
-    if (!storage.deleteMarketingRule(id)) return res.status(404).json({ message: "?????" });
+    if (!storage.deleteMarketingRule(id)) return res.status(404).json({ message: "???????" });
     return res.json({ success: true });
   });
 
