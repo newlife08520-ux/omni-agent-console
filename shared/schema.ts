@@ -624,11 +624,14 @@ export interface MetaComment {
   matched_risk_rule_id: number | null;
   /** 命中的規則桶：whitelist / direct_hide / hide_and_route / route_only / gray_area */
   matched_rule_bucket: string | null;
+  /** 卡住時真正原因，供 API 原樣回傳：no_page_settings | no_channel_token | auto_reply_disabled 等 */
+  blocked_reason: string | null;
 }
 
 /** Phase 3：案件主狀態（含灰區、純隱藏完成） */
 export type MetaCommentMainStatus =
   | "unhandled"      // 未處理
+  | "pending_config" // 尚無頁面設定，補好後可重跑
   | "pending_send"   // 待送出
   | "auto_replied"   // 已自動回覆
   | "human_replied" // 已人工回覆

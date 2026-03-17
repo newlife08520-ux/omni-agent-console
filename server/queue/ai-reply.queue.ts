@@ -23,6 +23,9 @@ const DEBOUNCE_MS = 1200;
 const LOCK_TTL_MS = 120_000;
 const LOCK_KEY_PREFIX = "lock:ai-reply:";
 const PENDING_KEY_PREFIX = "ai-reply:pending:";
+/** Worker 心跳 key，供 /api/debug/runtime 判斷 worker 是否活著 */
+export const WORKER_HEARTBEAT_KEY = "omni:worker:heartbeat";
+export const WORKER_HEARTBEAT_TTL_S = 60;
 const PENDING_KEY_TTL_S = 300;
 const MAX_PENDING_ITEMS = 50;
 
@@ -67,14 +70,14 @@ export function getAiReplyQueue(): Queue<AiReplyJobData> {
   if (!queue) {
     producerConn = getProducerConnection();
     queue = new Queue<AiReplyJobData>(QUEUE_NAME, {
-      connection: producerConn,
+      connection: producerConn as import("bullmq").ConnectionOptions,
       defaultJobOptions: {
         removeOnComplete: { count: 1000 },
         removeOnFail: { count: 500 },
         attempts: 3,
         backoff: { type: "exponential", delay: 2000 },
       },
-    });
+    }) as Queue<AiReplyJobData>;
   }
   return queue;
 }
@@ -96,6 +99,73 @@ export function computeDeliveryKey(platform: string, contactId: number, eventIds
   const sorted = [...eventIds].sort();
   const raw = `${platform}:${contactId}:${sorted.join(",")}`;
   return crypto.createHash("sha1").update(raw).digest("hex");
+}
+
+/** 逾此秒數視為 worker 已死，enqueue 時可記錄 blocked:worker_unavailable */
+export const WORKER_HEARTBEAT_DEAD_THRESHOLD_S = 90;
+
+/**
+ * 查詢 worker heartbeat 狀態（供 enqueue 前判斷是否記錄 blocked:worker_unavailable）。
+ * 若未啟用 Redis 或無法讀取則回傳 null。
+ */
+export async function getWorkerHeartbeatStatus(): Promise<{ alive: boolean; ageSec: number | null } | null> {
+  if (!process.env.REDIS_URL?.trim()) return null;
+  try {
+    const { getRedisClient } = await import("../redis-client");
+    const redis = getRedisClient();
+    const raw = redis ? await redis.get(WORKER_HEARTBEAT_KEY) : null;
+    if (!raw) {
+      if (!redis) {
+        const conn = getProducerConnection();
+        const fallbackRaw = await conn.get(WORKER_HEARTBEAT_KEY);
+        if (!fallbackRaw) return { alive: false, ageSec: null };
+        return parseHeartbeatRaw(fallbackRaw);
+      }
+      return { alive: false, ageSec: null };
+    }
+    return parseHeartbeatRaw(raw);
+  } catch {
+    return { alive: false, ageSec: null };
+  }
+}
+
+function parseHeartbeatRaw(raw: string): { alive: boolean; ageSec: number | null } {
+  try {
+    const data = JSON.parse(raw) as { timestamp?: number };
+    const ts = data?.timestamp;
+    if (typeof ts !== "number") return { alive: false, ageSec: null };
+    const ageSec = Math.round((Date.now() - ts) / 1000);
+    const alive = ageSec <= WORKER_HEARTBEAT_DEAD_THRESHOLD_S;
+    return { alive, ageSec };
+  } catch {
+    return { alive: false, ageSec: null };
+  }
+}
+
+/**
+ * 取得 BullMQ queue 計數（供 /api/debug/runtime）。
+ * 若未啟用 Redis 或 queue 未初始化則回傳 null。
+ */
+export async function getQueueJobCounts(): Promise<{
+  waiting: number;
+  active: number;
+  delayed: number;
+  failed: number;
+} | null> {
+  if (!process.env.REDIS_URL?.trim()) return null;
+  try {
+    const q = getAiReplyQueue();
+    const counts = await q.getJobCounts("wait", "active", "delayed", "failed");
+    const c = counts as Record<string, number | undefined>;
+    return {
+      waiting: c.wait ?? c.waiting ?? 0,
+      active: c.active ?? 0,
+      delayed: c.delayed ?? 0,
+      failed: c.failed ?? 0,
+    };
+  } catch {
+    return null;
+  }
 }
 
 // ─── Producer API ───────────────────────────────────────────
@@ -194,7 +264,7 @@ export function startAiReplyWorker(processor: AiReplyJobProcessor): Worker<AiRep
     QUEUE_NAME,
     async (job) => await processor(job),
     {
-      connection: workerConn,
+      connection: workerConn as import("bullmq").ConnectionOptions,
       concurrency: AI_REPLY_CONCURRENCY,
       limiter: { max: AI_REPLY_CONCURRENCY, duration: 1000 },
     }

@@ -1,6 +1,6 @@
 import { build as esbuild } from "esbuild";
 import { build as viteBuild } from "vite";
-import { rm, readFile, writeFile } from "fs/promises";
+import { rm, readFile, writeFile, mkdir } from "fs/promises";
 import path from "path";
 
 // server deps to bundle to reduce openat(2) syscalls
@@ -45,20 +45,25 @@ async function buildAll() {
   ];
   const externals = allDeps.filter((dep) => !allowlist.includes(dep));
 
-  await esbuild({
-    entryPoints: ["server/index.ts"],
-    platform: "node",
-    bundle: true,
-    format: "cjs",
-    outfile: "dist/index.cjs",
-    define: {
-      "process.env.NODE_ENV": '"production"',
-    },
-    minify: true,
-    charset: "utf8",
-    external: externals,
-    logLevel: "info",
-  });
+  async function buildServerEntry(entry: string, outfile: string): Promise<void> {
+    await esbuild({
+      entryPoints: [entry],
+      platform: "node",
+      bundle: true,
+      format: "cjs",
+      outfile,
+      define: { "process.env.NODE_ENV": '"production"' },
+      minify: true,
+      charset: "utf8",
+      external: externals,
+      logLevel: "info",
+    });
+  }
+
+  await buildServerEntry("server/index.ts", "dist/index.cjs");
+  await mkdir("dist/workers", { recursive: true });
+  await buildServerEntry("server/workers/ai-reply.worker.ts", "dist/workers/ai-reply.worker.cjs");
+  console.log("[build] worker built: dist/workers/ai-reply.worker.cjs");
 
   const commit =
     process.env.RAILWAY_GIT_COMMIT_SHA ||

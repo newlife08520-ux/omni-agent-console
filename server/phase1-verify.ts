@@ -225,34 +225,34 @@ ok("E2E D. 我給過了 + 近期文字有單號 → Layer 1 命中", layer1Found
 
 // E. return/cancel 場景不得混入商品知識
 const e2eE = runPostGenerationGuard("先填退貨表單。這款高密度泡附著很熱銷，推薦您下次再買。", "return_form_first", null);
-ok("E2E E. return 回覆含商品知識/推薦 → 違規", !e2eE.pass && e2eE.reason?.includes("mode_forbidden"));
+ok("E2E E. return 回覆含商品知識/推薦 → 違規", Boolean(!e2eE.pass && e2eE.reason?.includes("mode_forbidden")));
 
 // --- Knowledge Gating / Post-Generation Guard 驗收（Hotfix 規格 6）---
 // A. 清潔用品訂單問出貨 → 回覆不得含甜點較快
 const guardA = runPostGenerationGuard("您的訂單甜點較快會出貨喔", "order_lookup", "cleaning");
-ok("KG-A. 清潔 scope 回覆含甜點較快 → 違規", !guardA.pass && guardA.reason?.includes("category_mismatch"));
+ok("KG-A. 清潔 scope 回覆含甜點較快 → 違規", !guardA.pass && (guardA.reason?.includes("category_mismatch") ?? false));
 
 // B/C. 客戶說退貨/取消 → 回覆不得含商品賣點/價格組合/推薦
 const guardB = runPostGenerationGuard("先填表單。這款高密度泡附著很熱銷喔", "return_form_first", null);
-ok("KG-B. return mode 回覆含賣點/熱銷 → 違規", !guardB.pass && guardB.reason?.includes("mode_forbidden"));
+ok("KG-B. return mode 回覆含賣點/熱銷 → 違規", Boolean(!guardB.pass && guardB.reason?.includes("mode_forbidden")));
 
 const guardC = runPostGenerationGuard("了解，推薦您先查訂單再取消", "order_lookup", null);
-ok("KG-C. order_lookup 回覆含推薦 → 違規", !guardC.pass && guardC.reason?.includes("mode_forbidden"));
+ok("KG-C. order_lookup 回覆含推薦 → 違規", Boolean(!guardC.pass && guardC.reason?.includes("mode_forbidden")));
 
 // D. 包包客戶 → 回覆不得提甜點
 const guardD = runPostGenerationGuard("您的包包訂單約 7–20 工作天；甜點通常比較快", "order_lookup", "bag");
-ok("KG-D. bag scope 回覆含甜點 → 違規", !guardD.pass && guardD.reason?.includes("category_mismatch"));
+ok("KG-D. bag scope 回覆含甜點 → 違規", Boolean(!guardD.pass && guardD.reason?.includes("category_mismatch")));
 
 // E. 甜點客戶才允許講甜點較快（非甜點不得出現；甜點出現時 guard 不因品類擋）
 const guardE = runPostGenerationGuard("甜點通常較快，約 3 天內出貨", "order_lookup", "sweet");
-ok("KG-E. sweet scope 回覆含甜點較快 → 通過", guardE.pass);
+ok("KG-E. sweet scope 回覆含甜點較快 → 通過", guardE.pass === true);
 
 // F. return/cancel/handoff/order_lookup 回覆含 promo/upsell → 驗收 fail
 ok("KG-F. handoff 屬 no-promo mode", isModeNoPromo("handoff"));
 ok("KG-F. return_form_first 屬 no-promo mode", isModeNoPromo("return_form_first"));
 ok("KG-F. order_lookup 屬 no-promo mode", isModeNoPromo("order_lookup"));
 const guardF = runPostGenerationGuard("這邊幫您備註加急。限時優惠組合價要參考嗎？", "aftersales_comfort_first", null);
-ok("KG-F. aftersales 回覆含優惠/組合價 → 違規", !guardF.pass);
+ok("KG-F. aftersales 回覆含優惠/組合價 → 違規", guardF.pass === false);
 
 // --- Hotfix 驗收 A～J ---
 // A. 輸入 ESC20855 + 0922316609 → 視為已給完整資料

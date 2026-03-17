@@ -157,6 +157,42 @@ export function initDatabase() {
   migrateBleedHumanTransferKeywords();
   migrateTightenHumanTransferKeywords();
   migrateConversationStateFields();
+
+  db.exec(`CREATE TABLE IF NOT EXISTS schema_info (key TEXT PRIMARY KEY, value TEXT)`);
+  db.prepare("INSERT OR REPLACE INTO schema_info (key, value) VALUES ('schema_version', ?)").run("1");
+  const schemaRow = db.prepare("SELECT value FROM schema_info WHERE key = 'schema_version'").get() as { value: string } | undefined;
+  console.log("[DB] path =", dbPath, "schema_version =", schemaRow?.value ?? "?");
+  assertRequiredSchema();
+}
+
+const REQUIRED_TABLES = [
+  "channels", "contacts", "messages", "system_alerts", "ai_logs", "ai_reply_deliveries",
+  "meta_comments", "meta_page_settings", "schema_info", "brands", "users", "settings",
+];
+
+function assertRequiredSchema(): void {
+  const existing = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((r) => r.name);
+  const missing = REQUIRED_TABLES.filter((t) => !existing.includes(t));
+  if (missing.length > 0) {
+    throw new Error(`[DB] Schema 不完整，缺少表: ${missing.join(", ")}。請確認 migration 已執行。path=${dbPath}`);
+  }
+  const schemaRow = db.prepare("SELECT value FROM schema_info WHERE key = 'schema_version'").get() as { value: string } | undefined;
+  if (!schemaRow?.value) {
+    throw new Error(`[DB] schema_info.current_version 缺失。path=${dbPath}`);
+  }
+}
+
+export function getSchemaVersion(): string {
+  try {
+    const row = db.prepare("SELECT value FROM schema_info WHERE key = 'schema_version'").get() as { value: string } | undefined;
+    return row?.value ?? "?";
+  } catch {
+    return "?";
+  }
+}
+
+export function getDbPath(): string {
+  return dbPath;
 }
 
 /** 反正規化 migration：contacts 快取最後一則訊息 + 排序用 effective_case_priority。僅做 schema 與 backfill，索引在 ensurePerformanceIndexes。 */
@@ -447,6 +483,10 @@ function migrateMetaCommentPhase3() {
   if (!commentCols.includes("auto_execution_run_at")) {
     db.exec("ALTER TABLE meta_comments ADD COLUMN auto_execution_run_at TEXT");
     console.log("[DB Migration] meta_comments 已新增 auto_execution_run_at");
+  }
+  if (!commentCols.includes("blocked_reason")) {
+    db.exec("ALTER TABLE meta_comments ADD COLUMN blocked_reason TEXT");
+    console.log("[DB Migration] meta_comments 已新增 blocked_reason");
   }
 }
 

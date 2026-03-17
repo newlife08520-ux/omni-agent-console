@@ -358,7 +358,7 @@ export function createMetaComment(data: {
 }): MetaComment {
   const now = new Date().toISOString();
   const isSimulated = data.is_simulated ? 1 : 0;
-  const hasRaw = db.prepare("PRAGMA table_info(meta_comments)").all().some((c: { name: string }) => c.name === "raw_webhook_payload");
+  const hasRaw = (db.prepare("PRAGMA table_info(meta_comments)").all() as { name: string }[]).some((c) => c.name === "raw_webhook_payload");
   const cols = hasRaw
     ? "brand_id, page_id, page_name, post_id, post_name, comment_id, commenter_id, commenter_name, message, created_at, ai_intent, issue_type, priority, ai_suggest_hide, ai_suggest_human, reply_first, reply_second, is_simulated, post_display_name, detected_post_title_source, detected_product_name, detected_product_source, target_line_type, target_line_value, raw_webhook_payload"
     : "brand_id, page_id, page_name, post_id, post_name, comment_id, commenter_id, commenter_name, message, created_at, ai_intent, issue_type, priority, ai_suggest_hide, ai_suggest_human, reply_first, reply_second, is_simulated, post_display_name, detected_post_title_source, detected_product_name, detected_product_source, target_line_type, target_line_value";
@@ -441,6 +441,7 @@ export function updateMetaComment(id: number, data: Partial<{
   auto_execution_run_at: string | null;
   matched_risk_rule_id: number | null;
   matched_rule_bucket: string | null;
+  blocked_reason: string | null;
 }>): boolean {
   const cols: string[] = [];
   const vals: unknown[] = [];
@@ -486,6 +487,7 @@ export function updateMetaComment(id: number, data: Partial<{
   if (data.auto_execution_run_at !== undefined) { cols.push("auto_execution_run_at = ?"); vals.push(data.auto_execution_run_at); }
   if (data.matched_risk_rule_id !== undefined) { cols.push("matched_risk_rule_id = ?"); vals.push(data.matched_risk_rule_id); }
   if (data.matched_rule_bucket !== undefined) { cols.push("matched_rule_bucket = ?"); vals.push(data.matched_rule_bucket); }
+  if (data.blocked_reason !== undefined) { cols.push("blocked_reason = ?"); vals.push(data.blocked_reason); }
   if (cols.length === 0) return true;
   vals.push(id);
   db.prepare(`UPDATE meta_comments SET ${cols.join(", ")} WHERE id = ?`).run(...vals);

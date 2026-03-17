@@ -14,6 +14,7 @@
  *   若需擴展，增加 instance 數量，總並發 = instance 數 × concurrency。
  *   但因 Redis lock per-contact，同一 contact 不會並行。
  */
+import os from "os";
 import { storage } from "../storage";
 import {
   startAiReplyWorker,
@@ -22,6 +23,8 @@ import {
   rescheduleIfPending,
   acquireLock,
   releaseLock,
+  WORKER_HEARTBEAT_KEY,
+  WORKER_HEARTBEAT_TTL_S,
 } from "../queue/ai-reply.queue";
 
 const INTERNAL_API_URL = (process.env.INTERNAL_API_URL || "http://localhost:8080").replace(/\/$/, "");
@@ -111,6 +114,21 @@ function main() {
       await rescheduleIfPending(redis, platform, contactId);
     }
   });
+
+  const redis = getWorkerRedis();
+  if (redis) {
+    const writeHeartbeat = () => {
+      const payload = JSON.stringify({
+        worker_id: `pid:${process.pid}`,
+        timestamp: Date.now(),
+        pid: process.pid,
+        hostname: os.hostname(),
+      });
+      redis.set(WORKER_HEARTBEAT_KEY, payload, "EX", WORKER_HEARTBEAT_TTL_S).catch((err) => console.error("[Worker] heartbeat write failed:", err?.message));
+    };
+    writeHeartbeat();
+    setInterval(writeHeartbeat, 30_000);
+  }
 
   console.log("[Worker] ai-reply worker running.");
   console.log("[Worker] INTERNAL_API_URL:", INTERNAL_API_URL);

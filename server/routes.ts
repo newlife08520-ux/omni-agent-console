@@ -24,7 +24,7 @@ import { searchOrderInfoThreeLayers, searchOrderInfoInRecentMessages, extractOrd
 import { shouldHandoffDueToAwkwardOrRepeat } from "./awkward-repeat-handoff";
 import { isRatingEligible } from "./rating-eligibility";
 import db from "./db";
-import { fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, fetchPages, lookupOrdersByPageAndPhone, ensurePagesCacheLoaded, refreshPagesCache, getCachedPages, getCachedPagesAge, buildProductCatalogPrompt } from "./superlanding";
+import { fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, fetchPages, lookupOrdersByPageAndPhone, ensurePagesCacheLoaded, refreshPagesCache, getCachedPages, getCachedPagesAge, buildProductCatalogPrompt, getSuperLandingConfig } from "./superlanding";
 import type { SuperLandingConfig } from "./superlanding";
 import type { OrderInfo, Contact, ContactStatus, IssueType, MetaCommentTemplate, MetaComment } from "@shared/schema";
 import { unifiedLookupById, unifiedLookupByProductAndPhone, unifiedLookupByDateAndContact, getUnifiedStatusLabel, getPaymentInterpretationForAI, shouldPreferShoplineLookup } from "./order-service";
@@ -39,9 +39,14 @@ import multer from "multer";
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
-import { addAiReplyJob, enqueueDebouncedAiReply } from "./queue/ai-reply.queue";
+import { addAiReplyJob, enqueueDebouncedAiReply, WORKER_HEARTBEAT_KEY, getWorkerHeartbeatStatus, getQueueJobCounts } from "./queue/ai-reply.queue";
+import { getRedisClient } from "./redis-client";
+import { recordAutoReplyBlocked } from "./auto-reply-blocked";
 import { handleLineWebhook } from "./controllers/line-webhook.controller";
 import { handleFacebookWebhook, handleFacebookVerify, type FacebookWebhookDeps } from "./controllers/facebook-webhook.controller";
+import { applyHandoff, normalizeHandoffReason } from "./services/handoff";
+import { assembleEnrichedSystemPrompt } from "./services/prompt-builder";
+import { resolveOpenAIModel } from "./openai-model";
 
 function fixMulterFilename(originalname: string): string {
   try {
@@ -165,31 +170,30 @@ const avatarUpload = multer({
   limits: { fileSize: 5 * 1024 * 1024 },
 });
 
-/** Phase 1??????????? ? ???????????????? */
+/** Phase 1 ??/???????????? legal_risk ? high_risk_short_circuit */
 const LEGAL_RISK_KEYWORDS = [
-  "??", "??", "??", "?????", "???", "??", "??", "??", "???",
-  "??", "??", "??", "??", "???", "??", "??", "???", "???",
-  "??", "??", "??",
-];
-/** Phase 1?????????????????????? high_risk_short_circuit */
-const FRUSTRATED_ONLY_KEYWORDS = [
-  "?", "??", "??", "??", "??", "?", "??", "??", "??",
-  "??", "??", "??", "????", "????", "??", "??", "??", "??",
+  "??", "??", "??", "???", "???", "??", "??", "??", "??",
+  "??", "??", "????", "??", "??", "??", "??", "??",
 ];
 
-const RETURN_REFUND_KEYWORDS = ["??", "??", "??", "??", "??", "????", "???"];
+/** Phase 1 ???/??????? frustrated_only ?? high_risk */
+const FRUSTRATED_ONLY_KEYWORDS = [
+  "??", "??", "??", "??", "??", "?", "???", "??",
+];
+
+const RETURN_REFUND_KEYWORDS = ["??", "??", "??", "??", "????", "???", "??"];
 
 const ISSUE_TYPE_KEYWORDS: Record<IssueType, string[]> = {
-  order_inquiry: ["??", "??", "??", "??", "??", "??", "??", "??"],
-  product_consult: ["??", "??", "??", "??", "??", "??", "??", "??", "??", "???"],
-  return_refund: ["??", "??", "??", "??", "??", "??", "??", "??"],
-  complaint: ["??", "??", "??", "??", "??", "??", "??"],
-  order_modify: ["??", "???", "???", "???", "??"],
-  general: ["????", "??", "??", "??", "??"],
+  order_inquiry: ["??", "??", "??", "??", "??", "??", "??", "??", "??", "??"],
+  product_consult: ["??", "??", "??", "??", "???", "??", "??", "??", "??", "??"],
+  return_refund: ["??", "??", "??", "??", "????", "???", "??", "???"],
+  complaint: ["??", "??", "??", "??", "??", "?", "??"],
+  order_modify: ["??", "????", "???", "???", "???"],
+  general: ["??", "??", "??", "??", "??"],
   other: [],
 };
 
-/** Phase 1???? legal_risk??????frustrated_only??????none */
+/** Phase 1 ???????legal_risk > frustrated_only > none */
 function detectHighRisk(text: string): { level: "legal_risk" | "frustrated_only" | "none"; reasons: string[] } {
   const reasons: string[] = [];
   for (const kw of LEGAL_RISK_KEYWORDS) {
@@ -228,175 +232,14 @@ function detectReturnRefund(text: string): boolean {
   return RETURN_REFUND_KEYWORDS.some(kw => text.includes(kw));
 }
 
-function getSuperLandingConfig(brandId?: number): SuperLandingConfig {
-  if (brandId) {
-    const brand = storage.getBrand(brandId);
-    if (brand && brand.superlanding_merchant_no && brand.superlanding_access_key) {
-      return {
-        merchantNo: brand.superlanding_merchant_no,
-        accessKey: brand.superlanding_access_key,
-      };
-    }
-  }
-  return {
-    merchantNo: storage.getSetting("superlanding_merchant_no") || "",
-    accessKey: storage.getSetting("superlanding_access_key") || "",
-  };
-}
-
-function buildKnowledgeBlock(brandId?: number): string {
-  const files = storage.getKnowledgeFiles(brandId);
-  const filesWithContent = files.filter(f => f.content && f.content.trim().length > 0);
-  if (filesWithContent.length === 0) return "";
-  const maxTotalChars = 80000;
-  let totalChars = 0;
-  const blocks: string[] = [];
-  for (const f of filesWithContent) {
-    const content = f.content!;
-    if (totalChars + content.length > maxTotalChars) {
-      const remaining = maxTotalChars - totalChars;
-      if (remaining > 500) {
-        blocks.push(`[????: ${f.original_name}]\n${content.substring(0, remaining)}\n[?????]`);
-      }
-      break;
-    }
-    blocks.push(`[????: ${f.original_name}]\n${content}`);
-    totalChars += content.length;
-  }
-  return "\n\n--- ????? ---\n" + blocks.join("\n\n");
-}
-
-/** ???????? Chain-of-Thought ?????????????????? */
-const IMAGE_PRECISION_COT_BLOCK = `
-
---- ???????????????---
-??????????????????????????????????
-
-?????????????????????????????????????????????T?????????????????????????????????
-
-?????????????????????????????????????????????????????????????????????
-
-????????????????????????????????????????????????????? name?description ? keywords ??????????????????????????????????????????????
-
-?????????????????????? A ?????????? B ?????????????????????????????????????????????? send_image_to_customer?????? name??????? name ????
-`;
-
-function buildImageAssetCatalog(brandId?: number): string {
-  const assets = storage.getImageAssets(brandId);
-  if (assets.length === 0) return "";
-  const lines = assets.map((a, i) => {
-    const name = a.display_name || a.original_name || "";
-    const desc = (a.description || "").trim();
-    const kw = (a.keywords || "").trim();
-    const parts = [`#${i + 1} name: ${name}`];
-    if (desc) parts.push(`description: ${desc}`);
-    if (kw) parts.push(`keywords: ${kw}`);
-    return parts.join(" ");
-  });
-  return "\n\n--- ????? ---\n??????????????????????????????????????????????????????? send_image_to_customer?????? name?\n??????? name / description / keywords ?????????????\n" + lines.join("\n");
-}
-
-/** ?? system prompt ????????? mode????? gating????????? sweet ???? */
 async function getEnrichedSystemPrompt(
   brandId?: number,
   context?: { productScope?: string | null; planMode?: ReplyPlanMode }
 ): Promise<string> {
-  const basePrompt = storage.getSetting("system_prompt") || "????????????";
-  let brandBlock = "";
-  if (brandId) {
-    const brand = storage.getBrand(brandId);
-    if (brand?.system_prompt) {
-      brandBlock = "\n\n--- ?????? ---\n" + brand.system_prompt;
-    }
-  }
-  const config = getSuperLandingConfig(brandId);
-  const pages = await ensurePagesCacheLoaded(config);
-  const catalogBlock = buildProductCatalogPrompt(pages);
-  const knowledgeBlock = buildKnowledgeBlock(brandId);
-  const imageCatalog = buildImageAssetCatalog(brandId);
-  const imageBlock = imageCatalog ? IMAGE_PRECISION_COT_BLOCK + imageCatalog : "";
-
-  /** ??????????????????????? guard ?? */
-  const toneBlock = `
-
---- ??????????????????---
-??????????????????????????????????????????????????????
-??????????????????????????????/??????????????? guard????????????????????????????????????????`;
-
-  let returnFormUrl = "https://www.lovethelife.shop/returns";
-  if (brandId) {
-    const brandData = storage.getBrand(brandId);
-    if (brandData?.return_form_url) returnFormUrl = brandData.return_form_url;
-  }
-
-  // Knowledge gating????????? productScope === "sweet" ?????????????????
-  const isSweet = context?.productScope === "sweet";
-  const isNonSweetLocked = context?.productScope && context.productScope !== "sweet";
-  let shippingLogicBlock: string;
-  if (isSweet) {
-    shippingLogicBlock = `- ??????????? 3 ??????? 3 ??????????????????????????????????????????????????? 7?20 ????????????????
-- ???????????? 7?20 ????????????????????????????????????? 7?20 ????????????????????????????????????????????????`;
-  } else if (isNonSweetLocked) {
-    shippingLogicBlock = `- ?????????????????????? 7?20 ?????????????????????????????????????????????3 ????????????????????????????????????`;
-  } else {
-    shippingLogicBlock = `- ????????????????????? 7?20 ?????????????????????????? 3 ????????????????????????????????
-- ???????????? 7?20 ????????????????????????????`;
-  }
-
-  const handoffBlock = `
-
---- ??????????????????????---
-????????????????????????????????????????????????????????????????????????????????????????????
-
-???????????
-` + shippingLogicBlock + `
-
-??????????????????????????
-??????????????????????????????????????????????**????**???????????? handoff????????????**????**?????????????????????????????????????????????????????????????????????????????????**???????**?????**???????**???????
-- ????????????????????????????????
-- ????????????? ?????? ?????????????????????????????????????
-- ???????????????????????????????????????????????????????????????????????
-- ???????????????? 3 ?????? 7?20 ???????????????????????
-- ?????????????????????????????????????????????????????
-- ??????????????????????????????????**???**????????????????**??????????? XXX ??????????**??????????????????????**????**????????????????
-- **?????????????**?????**??????????????????**??????????????????**????**????????????????????????????????????????????????????????
-
-??????????????
-- ????????????????????????????????????????? 7?20 ???????????????????????????????
-- ????????????????????????????????????????????????????????????${returnFormUrl}?????????
-- ???????????????????????????????????????????????????
-
-???????
-??????????????????????????????????????????????????????????????????????AI ?????????????????
-??????????????????????????????????????????????????????
-?????????????????????????????????????**?????????**??????**????**??????????????????????? transfer_to_human?**??**????????????????????????????????????????????????????????????**??**???????????????????????????????? transfer_to_human????????????
-
-???????
-- ???????????????????????????????????????????????????????????????????????????????????????????
-- ???????????????????????????????????????????????????????????????????????????????????????????????????????
-
---- AI ???? ---
-?????????????? AI????????????????????????? transfer_to_human?
-?????? found=false ??????????????????????????`;
-
-  const schedule = storage.getGlobalSchedule();
-  const unavailableReason = assignment.getUnavailableReason();
-  const humanHoursBlock = `
-
---- ?????????????????? AI 24 ?????---
-???????????? ${schedule.work_start_time}?${schedule.work_end_time}??? ${schedule.lunch_start_time}?${schedule.lunch_end_time}??? ${schedule.work_end_time} ??????
-????? transfer_to_human ???????????????????????????????????????????????????????????????????????????????????????????`;
-  const nowStatusHint = unavailableReason === "weekend"
-    ? "?????????????????????????????????????????????"
-    : unavailableReason === "lunch"
-      ? `??????????????${schedule.lunch_start_time}?${schedule.lunch_end_time}?????????????????????`
-      : unavailableReason === "after_hours"
-        ? `??????????????????${schedule.work_end_time} ???????????????????????????`
-        : "";
-  const humanHoursBlockWithStatus = humanHoursBlock + (nowStatusHint ? "\n" + nowStatusHint : "");
-
-  return basePrompt + brandBlock + toneBlock + handoffBlock + humanHoursBlockWithStatus + catalogBlock + knowledgeBlock + imageBlock;
+  const result = await assembleEnrichedSystemPrompt(brandId, { productScope: context?.productScope, planMode: context?.planMode });
+  return result.full_prompt;
 }
+
 
 const contactProcessingLocks = new Map<number, Promise<void>>();
 
@@ -407,8 +250,12 @@ const DEBOUNCE_MS = 1200;
 function debounceTextMessage(
   contactId: number,
   text: string,
-  processCallback: (mergedText: string) => Promise<void>
+  processCallback: (mergedText: string) => void | Promise<void>
 ): void {
+  const run = (merged: string) => {
+    const result = processCallback(merged);
+    if (result && typeof result.then === "function") result.catch((err: unknown) => console.error("[Debounce] callback error:", err));
+  };
   const existing = messageDebounceBuffers.get(contactId);
   if (existing) {
     existing.texts.push(text);
@@ -416,7 +263,7 @@ function debounceTextMessage(
     existing.timer = setTimeout(() => {
       const merged = existing.texts.join("\n");
       messageDebounceBuffers.delete(contactId);
-      processCallback(merged).catch((err) => console.error("[Debounce] callback error:", err));
+      run(merged);
     }, DEBOUNCE_MS);
   } else {
     const timer = setTimeout(() => {
@@ -424,7 +271,7 @@ function debounceTextMessage(
       if (!buf) return;
       const merged = buf.texts.join("\n");
       messageDebounceBuffers.delete(contactId);
-      processCallback(merged).catch((err) => console.error("[Debounce] callback error:", err));
+      run(merged);
     }, DEBOUNCE_MS);
     messageDebounceBuffers.set(contactId, { texts: [text], timer, resolve: () => {} });
   }
@@ -444,27 +291,27 @@ function maskSensitiveInfo(text: string): string {
   return result;
 }
 
-/** ?????????????????????????????????????????? */
+/** ????????????????????????? */
 function getTransferUnavailableSystemMessage(reason: "weekend" | "lunch" | "after_hours" | "all_paused" | null): string {
   const schedule = storage.getGlobalSchedule();
-  if (reason === "weekend") return "?????????????????????????????????????????????";
-  if (reason === "lunch") return `?????????????${schedule.lunch_start_time}?${schedule.lunch_end_time}?????????????????????????????`;
-  if (reason === "after_hours") return "?????????????????????????????????????????????";
-  return "????????????????????????????????";
+  if (reason === "weekend") return "????????????????????????????";
+  if (reason === "lunch") return `????????${schedule.lunch_start_time}?${schedule.lunch_end_time}????????????`;
+  if (reason === "after_hours") return "??????????????????????";
+  return "???????????????????????";
 }
 
-/** Phase 2 ?????? product_scope_locked ?????? bag/sweet????????????? ? ?? Regex ?? */
+/** Phase 2 ???????product_scope_locked ?? bag/sweet ???? Regex ?? */
 const BAG_KEYWORDS = ["\u5305", "\u5305\u5305", "\u6258\u7279\u5305", "\u624b\u63d0\u5305", "\u80a9\u80cc\u5305", "\u5f8c\u80cc\u5305", "\u5074\u80cc\u5305"];
 const SWEET_KEYWORDS = ["\u751c", "\u751c\u9ede", "\u7cd6", "\u7cd6\u679c", "\u5de7\u514b\u529b", "\u86cb\u7cd5", "\u990a\u4e7e"];
-/** ??/????????????????? ? ?? Regex ?? */
+/** ??/??/??????????? Regex ?? */
 const CVS_SHIPPING_KEYWORDS = ["\u5b85\u9148", "\u8d85\u5546", "\u9580\u5e02", "7-11", "7-ELEVEN", "\u5168\u5bb6", "OK", "\u840a\u723e\u5bcc"];
 const PAYMENT_FAIL_STATUS_KW = ["\u5931\u6557", "\u672a\u6210\u529f", "\u4ed8\u6b3e\u5931\u6557"];
 const PAYMENT_FAIL_METHOD_KW = ["\u5931\u6557", "\u672a\u4ed8"];
 const PAYMENT_SUCCESS_STATUS_KW = ["\u5df2\u78ba\u8a8d", "\u5f85\u51fa\u8ca8", "\u5df2\u51fa\u8ca8", "\u5df2\u5b8c\u6210"];
 const PAYMENT_PENDING_STATUS_KW = ["\u5f85\u4ed8\u6b3e", "\u672a\u4ed8\u6b3e", "\u78ba\u8a8d\u4e2d", "\u65b0\u8a02\u55ae"];
-/** AI ?????????order/phone/product?????????? Regex ?? */
+/** AI ????????? order/phone/product ???????? Regex */
 const ASK_ORDER_PHONE_FOR_BYPASS_KW = ["\u8acb\u63d0\u4f9b\u8a02\u55ae\u7de8\u865f", "\u8a02\u55ae\u7de8\u865f", "\u8acb\u63d0\u4f9b", "\u624b\u6a5f\u865f\u78bc", "\u5546\u54c1\u540d\u7a31", "\u4e0b\u8a02\u624b\u6a5f", "\u6536\u4ef6\u4eba", "\u8acb\u63d0\u4f9b\u8cc3\u8a0a"];
-/** ??/??/????????????????????? */
+/** ??/??/??/???????? */
 const ORDER_FOLLOWUP_KW = ["\u8a02\u55ae\u7de8\u865f", "\u55ae\u865f", "\u7de8\u865f", "\u51fa\u8ca8", "\u7269\u6d41", "\u67e5\u8a62", "\u5230\u8ca8", "\u4ec0\u9ebc\u6642\u5019", "\u51e1\u5929", "\u6536\u5230"];
 const FULFILLMENT_SHIPPED_KW = ["\u5df2\u51fa\u8ca8", "\u5df2\u9001\u9054"];
 const FULFILLMENT_PENDING_SHIP_KW = ["\u65b0\u8a02\u55ae", "\u5f85\u51fa\u8ca8", "\u8655\u7406\u4e2d"];
@@ -488,7 +335,7 @@ async function withContactLock<T>(contactId: number, fn: () => Promise<T>): Prom
   const lockPromise = new Promise<void>(r => { resolve = r; });
   contactProcessingLocks.set(contactId, lockPromise);
   if (existing) {
-    /** ??? AI ????? 25 ???????????????????????????? */
+    /** ?? contact ??????? 25 ????? AI ???? */
     const timeout = new Promise<void>(r => setTimeout(r, 25000));
     await Promise.race([existing, timeout]);
   }
@@ -533,8 +380,9 @@ function mergeStreamDelta(
       const t = arr[i];
       if (d.id != null) (t as any).id = d.id;
       if (d.function != null) {
-        if (d.function.name != null) t.function.name = (t.function.name || "") + d.function.name;
-        if (d.function.arguments != null) t.function.arguments = (t.function.arguments || "") + d.function.arguments;
+        const fn = (t as { function?: { name?: string; arguments?: string } }).function;
+        if (fn && d.function.name != null) fn.name = (fn.name || "") + d.function.name;
+        if (fn && d.function.arguments != null) fn.arguments = (fn.arguments || "") + d.function.arguments;
       }
     }
     out.tool_calls = arr;
@@ -557,7 +405,7 @@ async function runOpenAIStream(
     { ...params, stream: true },
     { signal: signal as any }
   );
-  let message: OpenAI.Chat.Completions.ChatCompletionMessage = { role: "assistant", content: "" };
+  let message: OpenAI.Chat.Completions.ChatCompletionMessage = { role: "assistant", content: "", refusal: null };
   for await (const chunk of stream) {
     const choice = chunk.choices?.[0];
     if (!choice?.delta) continue;
@@ -579,8 +427,9 @@ function parseIdParam(value: string | undefined): number | null {
   return n;
 }
 
+/** @deprecated ??? resolveOpenAIModel from ./openai-model */
 function getOpenAIModel(): string {
-  return process.env.OPENAI_MODEL || storage.getSetting("openai_model") || "gpt-5.2";
+  return resolveOpenAIModel();
 }
 
 export async function registerRoutes(
@@ -627,10 +476,18 @@ export async function registerRoutes(
       const globalToken = storage.getSetting("line_channel_access_token");
       const globalSecret = storage.getSetting("line_channel_secret");
       const testMode = storage.getSetting("test_mode");
+      const metaPagesList = metaCommentsStorage.getMetaPageSettingsList();
       return res.json({
         timestamp: new Date().toISOString(),
         code_version: "v4-bulletproof",
         test_mode: testMode,
+        redis_enabled: !!process.env.REDIS_URL?.trim(),
+        internal_api_secret_configured: !!process.env.INTERNAL_API_SECRET?.trim(),
+        worker_mode_expected: !!process.env.REDIS_URL?.trim(),
+        meta_page_settings_summary: {
+          total: metaPagesList.length,
+          page_ids: metaPagesList.map((p: { page_id: string }) => p.page_id),
+        },
         brands: allBrands.map(b => ({ id: b.id, name: b.name, slug: b.slug })),
         channels: allChannels.map(c => ({
           id: c.id,
@@ -642,6 +499,7 @@ export async function registerRoutes(
           has_token: !!(c.access_token),
           has_secret: !!(c.channel_secret),
           is_active: c.is_active,
+          is_ai_enabled: c.is_ai_enabled,
         })),
         global_settings: {
           has_token: !!globalToken,
@@ -649,6 +507,188 @@ export async function registerRoutes(
         },
         total_contacts: contactCount,
         recent_contacts: recentContacts,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/debug/runtime", async (_req, res) => {
+    try {
+      const testMode = storage.getSetting("test_mode");
+      const allChannels = storage.getChannels();
+      const metaPagesList = metaCommentsStorage.getMetaPageSettingsList();
+      let channelActivity: Record<number, { last_inbound_at: string | null; last_outbound_at: string | null }> = {};
+      try {
+        const rows = db.prepare(`
+          SELECT c.channel_id,
+            MAX(CASE WHEN m.sender_type = 'user' THEN m.created_at END) AS last_inbound_at,
+            MAX(CASE WHEN m.sender_type IN ('ai','admin') THEN m.created_at END) AS last_outbound_at
+          FROM messages m
+          JOIN contacts c ON m.contact_id = c.id
+          WHERE c.channel_id IS NOT NULL
+          GROUP BY c.channel_id
+        `).all() as { channel_id: number; last_inbound_at: string | null; last_outbound_at: string | null }[];
+        for (const r of rows) {
+          channelActivity[r.channel_id] = { last_inbound_at: r.last_inbound_at ?? null, last_outbound_at: r.last_outbound_at ?? null };
+        }
+      } catch (_e) {}
+      const channels = allChannels.map(c => {
+        const act = channelActivity[c.id];
+        return {
+          id: c.id,
+          brand_id: c.brand_id,
+          brand_name: c.brand_name,
+          platform: c.platform,
+          channel_name: c.channel_name,
+          bot_id: c.bot_id || "(EMPTY)",
+          is_active: c.is_active,
+          is_ai_enabled: c.is_ai_enabled,
+          has_token: !!(c.access_token?.trim()),
+          has_secret: !!(c.channel_secret?.trim()),
+          last_inbound_at: act?.last_inbound_at ?? null,
+          last_outbound_at: act?.last_outbound_at ?? null,
+        };
+      });
+      const meta_pages = metaPagesList.map((p: { id: number; page_id: string; page_name: string | null; brand_id: number; auto_reply_enabled: number; auto_hide_sensitive: number; auto_route_line_enabled: number }) => ({
+        id: p.id,
+        page_id: p.page_id,
+        page_name: p.page_name,
+        brand_id: p.brand_id,
+        auto_reply_enabled: p.auto_reply_enabled,
+        auto_hide_sensitive: p.auto_hide_sensitive,
+        auto_route_line_enabled: p.auto_route_line_enabled,
+        has_channel_token: !!allChannels.find(ch => ch.bot_id === p.page_id)?.access_token?.trim(),
+      }));
+      const redisEnabled = !!process.env.REDIS_URL?.trim();
+      let worker_alive = false;
+      let worker_last_seen_at: string | null = null;
+      let worker_heartbeat_age_sec: number | null = null;
+      const redis = getRedisClient();
+      if (redis && redisEnabled) {
+        try {
+          const raw = await redis.get(WORKER_HEARTBEAT_KEY);
+          if (raw) {
+            const data = JSON.parse(raw) as { timestamp?: number };
+            const ts = data?.timestamp;
+            if (typeof ts === "number") {
+              worker_alive = true;
+              worker_last_seen_at = new Date(ts).toISOString();
+              worker_heartbeat_age_sec = Math.round((Date.now() - ts) / 1000);
+            }
+          }
+        } catch (_e) {}
+      }
+      const queue_mode = redisEnabled ? "redis_worker" : "inline";
+      const degraded_mode = redisEnabled && !worker_alive;
+      let queue_waiting_count: number | null = null;
+      let queue_active_count: number | null = null;
+      let queue_delayed_count: number | null = null;
+      let queue_failed_count: number | null = null;
+      const queueCounts = await getQueueJobCounts();
+      if (queueCounts) {
+        queue_waiting_count = queueCounts.waiting;
+        queue_active_count = queueCounts.active;
+        queue_delayed_count = queueCounts.delayed;
+        queue_failed_count = queueCounts.failed;
+      }
+      let last_blocked_reason: string | null = null;
+      let last_blocked_at: string | null = null;
+      let last_successful_ai_reply_at: string | null = null;
+      try {
+        const blockedRow = db.prepare("SELECT details, created_at FROM system_alerts WHERE alert_type = 'auto_reply_blocked' ORDER BY created_at DESC LIMIT 1").get() as { details?: string; created_at?: string } | undefined;
+        if (blockedRow?.details != null) {
+          last_blocked_reason = blockedRow.details.split(/\s/)[0] ?? null;
+          last_blocked_at = blockedRow.created_at ?? null;
+        }
+        const sentRow = db.prepare("SELECT MAX(sent_at) AS t FROM ai_reply_deliveries WHERE status = 'sent' AND sent_at IS NOT NULL").get() as { t: string | null } | undefined;
+        if (sentRow?.t) last_successful_ai_reply_at = sentRow.t;
+      } catch (_e) {}
+      return res.json({
+        timestamp: new Date().toISOString(),
+        node_env: process.env.NODE_ENV ?? "development",
+        test_mode: testMode,
+        redis_enabled: redisEnabled,
+        internal_api_secret_configured: !!process.env.INTERNAL_API_SECRET?.trim(),
+        internal_api_url: process.env.INTERNAL_API_URL ? "(set)" : "",
+        worker_mode_expected: redisEnabled,
+        worker_alive,
+        worker_last_seen_at,
+        worker_heartbeat_age_sec,
+        queue_mode,
+        degraded_mode,
+        queue_waiting_count,
+        queue_active_count,
+        queue_delayed_count,
+        queue_failed_count,
+        last_blocked_reason,
+        last_blocked_at,
+        last_successful_ai_reply_at,
+        channels,
+        meta_pages,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/debug/handoff-alerts", (req: any, res) => {
+    try {
+      const reason = req.query.reason as string | undefined;
+      const source = req.query.source as string | undefined;
+      const contact_id = req.query.contact_id != null ? parseInt(String(req.query.contact_id)) : undefined;
+      const since = req.query.since as string | undefined;
+      const until = req.query.until as string | undefined;
+      let rows = db.prepare("SELECT id, contact_id, brand_id, details, created_at FROM system_alerts WHERE alert_type = 'transfer' ORDER BY created_at DESC LIMIT 500").all() as { id: number; contact_id: number | null; brand_id: number | null; details: string; created_at: string }[];
+      if (contact_id != null) rows = rows.filter(r => r.contact_id === contact_id);
+      if (since) rows = rows.filter(r => r.created_at >= since);
+      if (until) rows = rows.filter(r => r.created_at <= until);
+      const parsed = rows.map(r => {
+        let payload: { source?: string; reason?: string; reason_detail?: string | null; contact_id?: number; previous_status?: string | null; next_status?: string } = {};
+        try {
+          payload = JSON.parse(r.details) as typeof payload;
+        } catch (_e) {}
+        return {
+          id: r.id,
+          contact_id: r.contact_id,
+          brand_id: r.brand_id,
+          created_at: r.created_at,
+          source: payload.source ?? null,
+          reason: payload.reason ?? null,
+          reason_detail: payload.reason_detail ?? null,
+          previous_status: payload.previous_status ?? null,
+          next_status: payload.next_status ?? null,
+        };
+      });
+      let filtered = parsed;
+      if (reason) filtered = filtered.filter(p => p.reason === reason);
+      if (source) filtered = filtered.filter(p => p.source === source);
+      return res.json({ handoff_alerts: filtered });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/debug/prompt-preview", async (req: any, res) => {
+    try {
+      const brandId = req.query.brandId != null ? parseInt(String(req.query.brandId)) : undefined;
+      const result = await assembleEnrichedSystemPrompt(brandId);
+      const { full_prompt, sections: sectionsMeta, includes } = result;
+      return res.json({
+        brand_id: brandId ?? null,
+        model: resolveOpenAIModel(),
+        full_prompt,
+        total_prompt_length: full_prompt.length,
+        sections: sectionsMeta.map(s => ({ key: s.key, title: s.title, length: s.length })),
+        includes: {
+          catalog: includes.catalog,
+          knowledge: includes.knowledge,
+          image: includes.image,
+          global_policy: includes.global_policy,
+          brand_persona: includes.brand_persona,
+          human_hours: includes.human_hours,
+          flow_principles: includes.flow_principles,
+        },
       });
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
@@ -757,17 +797,17 @@ export async function registerRoutes(
 
   const authMiddleware = (req: any, res: any, next: any) => {
     if (req.session?.authenticated === true) return next();
-    return res.status(401).json({ message: "???" });
+    return res.status(401).json({ message: "????" });
   };
 
   const superAdminOnly = (req: any, res: any, next: any) => {
     if (req.session?.userRole === "super_admin") return next();
-    return res.status(403).json({ message: "??????????????" });
+    return res.status(403).json({ message: "???????" });
   };
 
   const managerOrAbove = (req: any, res: any, next: any) => {
     if (["super_admin", "marketing_manager"].includes(req.session?.userRole)) return next();
-    return res.status(403).json({ message: "???????????????" });
+    return res.status(403).json({ message: "??????????" });
   };
 
   app.post("/api/admin/refresh-profiles", authMiddleware, superAdminOnly, async (_req, res) => {
@@ -956,7 +996,8 @@ export async function registerRoutes(
         if (pageSettings?.brand_id != null) brandName = storage.getBrand(pageSettings.brand_id)?.name ?? null;
       }
       const mainStatus = c.main_status || computeMainStatus(c);
-      return { ...c, brand_name: brandName ?? null, main_status: mainStatus };
+      const blocked_reason = c.blocked_reason ?? undefined;
+      return { ...c, brand_name: brandName ?? null, main_status: mainStatus, blocked_reason };
     });
     res.setHeader("Content-Type", "application/json");
     return res.json(enriched);
@@ -1133,7 +1174,8 @@ export async function registerRoutes(
       if (pageSettings?.brand_id != null) brandName = storage.getBrand(pageSettings.brand_id)?.name ?? null;
     }
     const mainStatus = row.main_status || computeMainStatus(row);
-    return res.json({ ...row, brand_name: brandName ?? null, main_status: mainStatus });
+    const blocked_reason = row.blocked_reason ?? undefined;
+    return res.json({ ...row, brand_name: brandName ?? null, main_status: mainStatus, blocked_reason });
   });
   app.post("/api/meta-comments/:id/mark-gray-reviewed", authMiddleware, (req: any, res) => {
     const id = parseInt(req.params.id);
@@ -1390,7 +1432,7 @@ export async function registerRoutes(
     if (!comment) return res.status(404).json({ message: "?????" });
     const openaiKey = storage.getSetting("openai_api_key");
     if (!openaiKey) return res.status(400).json({ message: "???? OpenAI API ??" });
-    const model = process.env.OPENAI_MODEL || storage.getSetting("openai_model") || "gpt-4o-mini";
+    const model = resolveOpenAIModel();
     const INTENTS = "product_inquiry, price_inquiry, where_to_buy, ingredient_effect, activity_engage, dm_guide, complaint, refund_after_sale, spam_competitor";
 
     try {
@@ -1815,7 +1857,17 @@ export async function registerRoutes(
     if (!Array.isArray(pagesInput) || pagesInput.length === 0) {
       return res.status(400).json({ message: "??? pages ????????" });
     }
-    const results: { page_id: string; page_name: string; channel_id?: number; settings_id?: number; error?: string }[] = [];
+    const results: {
+      page_id: string;
+      page_name: string;
+      channel_id?: number;
+      settings_id?: number;
+      error?: string;
+      message?: string;
+      ai_enabled?: number;
+      page_settings_created?: boolean;
+      next_steps?: string[];
+    }[] = [];
     for (const p of pagesInput) {
       const page_id = p?.page_id != null ? String(p.page_id) : "";
       const page_name = p?.page_name != null ? String(p.page_name) : page_id || "???";
@@ -1826,7 +1878,7 @@ export async function registerRoutes(
       }
       const existing = metaCommentsStorage.getMetaPageSettingsByPageId(page_id);
       if (existing) {
-        results.push({ page_id, page_name, error: "??????" });
+        results.push({ page_id, page_name, error: "? page ????" });
         continue;
       }
       try {
@@ -1840,7 +1892,19 @@ export async function registerRoutes(
           auto_hide_sensitive: 0,
           auto_route_line_enabled: 0,
         });
-        results.push({ page_id, page_name, channel_id: channel.id, settings_id: settings.id });
+        results.push({
+          page_id,
+          page_name,
+          channel_id: channel.id,
+          settings_id: settings.id,
+          message: "Messenger ???????????AI ????????????????????????",
+          ai_enabled: 0,
+          page_settings_created: true,
+          next_steps: [
+            "????????????????? AI?",
+            "?????? / ?????????????????????????",
+          ],
+        });
       } catch (err: any) {
         results.push({ page_id, page_name, error: err?.message || "????" });
       }
@@ -2667,8 +2731,8 @@ export async function registerRoutes(
     const agentIdForFlags = userId ?? undefined;
     const limitParam = req.query.limit != null ? parseInt(String(req.query.limit), 10) : undefined;
     const offsetParam = req.query.offset != null ? parseInt(String(req.query.offset), 10) : undefined;
-    const limit = (limitParam > 0 && limitParam <= 500) ? limitParam : 100;
-    const offset = (offsetParam != null && offsetParam >= 0) ? offsetParam : 0;
+    const limit = (limitParam != null && limitParam > 0 && limitParam <= 500) ? limitParam : 100;
+    const offset = (offsetParam != null && offsetParam >= 0) ? offsetParam : 0 as number;
     let contacts = storage.getContacts(brandId, assignedToUserId, agentIdForFlags, limit, offset);
     const afterGet = Date.now();
     if (needReplyFirst) {
@@ -2714,7 +2778,12 @@ export async function registerRoutes(
   app.put("/api/contacts/:id/human", authMiddleware, (req, res) => {
     const id = parseIdParam(req.params.id);
     if (id === null) return res.status(400).json({ message: "??? ID" });
-    storage.updateContactHumanFlag(id, req.body.needs_human ? 1 : 0);
+    if (req.body.needs_human) {
+      const c = storage.getContact(id);
+      applyHandoff({ contactId: id, reason: "explicit_human_request", source: "api_put_human", brandId: c?.brand_id ?? undefined });
+    } else {
+      storage.updateContactHumanFlag(id, 0);
+    }
     return res.json({ success: true });
   });
 
@@ -2919,11 +2988,8 @@ export async function registerRoutes(
     const { reason } = req.body;
     const contact = storage.getContact(contactId);
     if (!contact) return res.status(404).json({ message: "??????" });
-    const transferReason = reason || "???????";
-    storage.updateContactStatus(contactId, "awaiting_human");
-    storage.updateContactHumanFlag(contactId, 1);
-    storage.updateContactAssignmentStatus(contactId, "waiting_human");
-    storage.createCaseNotification(contactId, "in_app");
+    const transferReason = (reason || "???????") as string;
+    applyHandoff({ contactId, reason: "explicit_human_request", source: "api_transfer_human", brandId: contact.brand_id ?? undefined });
     const assignedAgentId = assignment.assignCase(contactId);
     if (assignedAgentId == null && assignment.isAllAgentsUnavailable()) {
       storage.updateContactNeedsAssignment(contactId, 1);
@@ -2934,7 +3000,6 @@ export async function registerRoutes(
     }
     const muteUntil = new Date(Date.now() + 30 * 60 * 1000).toISOString();
     storage.setAiMutedUntil(contactId, muteUntil);
-    storage.createSystemAlert({ alert_type: "transfer", details: transferReason, brand_id: contact.brand_id || undefined, contact_id: contactId });
     broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
     broadcastSSE("new_message", { contact_id: contactId });
     console.log(`[Transfer] contact ${contactId} ???????: ${transferReason}${assignedAgentId != null ? `?????? ${assignedAgentId}` : "??????????"}`);
@@ -3058,7 +3123,7 @@ export async function registerRoutes(
     storage.updateContactLastHumanReply(contactId);
     broadcastSSE("new_message", { contact_id: contactId, message, brand_id: contact.brand_id });
     broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-    storage.updateContactHumanFlag(contactId, 1);
+    applyHandoff({ contactId, reason: "explicit_human_request", source: "api_admin_message", brandId: contact.brand_id ?? undefined });
 
     const muteUntil = new Date(Date.now() + 30 * 60 * 1000).toISOString();
     storage.setAiMutedUntil(contactId, muteUntil);
@@ -3508,7 +3573,7 @@ export async function registerRoutes(
     if (productScope) contextParts.push(`????????${productScope === "bag" ? "??/??" : "???"}`);
     const contextStr = contextParts.length ? contextParts.join("\n") : "?????????";
 
-    const systemPrompt = await getEnrichedSystemPrompt(brandId);
+    const systemPrompt = await getEnrichedSystemPrompt(brandId ?? undefined);
     const visionInstruction = `
 ????? - Vision First???????????????????????????
 ??????????
@@ -3638,9 +3703,10 @@ ${contextStr}
         loopCount++;
         chatMessages.push(responseMessage as OpenAI.Chat.Completions.ChatCompletionMessageParam);
         for (const toolCall of responseMessage.tool_calls) {
-          const fnName = toolCall.function.name;
+          const fn = (toolCall as { function?: { name?: string; arguments?: string } }).function;
+          const fnName = fn?.name ?? "";
           let fnArgs: Record<string, string> = {};
-          try { fnArgs = JSON.parse(toolCall.function.arguments); } catch (_e) {}
+          try { fnArgs = JSON.parse(fn?.arguments ?? "{}"); } catch (_e) {}
           const toolResult = await executeToolCall(fnName, fnArgs, {
             contactId: contactId,
             brandId: effectiveBrandId || undefined,
@@ -3849,8 +3915,7 @@ ${contextStr}
       if (riskCheck.level === "legal_risk") {
         console.log("[Webhook AI] needs_human=1 source=high_risk_short_circuit reasons=" + riskCheck.reasons.join(","));
         console.log(`[AI Risk] ??/??????: ${riskCheck.reasons.join(", ")}`);
-        storage.updateContactStatus(contact.id, "high_risk");
-        storage.updateContactHumanFlag(contact.id, 1);
+        applyHandoff({ contactId: contact.id, reason: "high_risk_short_circuit", source: "webhook_high_risk", brandId: effectiveBrandId || undefined, statusOverride: "high_risk" });
         storage.createMessage(contact.id, contact.platform, "system",
           `(????) ?????????????????????????${riskCheck.reasons.join("?")}`);
         broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
@@ -3915,9 +3980,7 @@ ${contextStr}
             await pushLineMessage(contact.platform_user_id, [{ type: "text", text: replyText }], channelToken);
           }
           if (safeConfirmDm.suggest_human) {
-            storage.updateContactStatus(contact.id, "awaiting_human");
-            storage.updateContactHumanFlag(contact.id, 1);
-            storage.createCaseNotification(contact.id, "in_app");
+            applyHandoff({ contactId: contact.id, reason: "policy_exception", source: "webhook_safe_confirm_template", brandId: effectiveBrandId || undefined });
             broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
           }
           const recentForCaption = storage.getMessages(contact.id).slice(-6);
@@ -4029,10 +4092,7 @@ ${contextStr}
       if (awkwardCheck.shouldHandoff && !skipAwkwardHandoffDueToActiveOrder && !isUserProvidingOrderDetails(lastAiMsg?.content ?? null, userMessage || "")) {
         console.log("[Webhook AI] needs_human=1 source=awkward_repeat reason=" + (awkwardCheck.reason ?? "unknown") + " msg=" + (userMessage || "").slice(0, 60));
         storage.updateContactConversationFields(contact.id, { product_scope_locked: null, customer_goal_locked: null });
-        storage.updateContactHumanFlag(contact.id, 1);
-        storage.updateContactStatus(contact.id, "awaiting_human");
-        storage.createCaseNotification(contact.id, "in_app");
-        storage.updateContactAssignmentStatus(contact.id, "waiting_human");
+        applyHandoff({ contactId: contact.id, reason: "awkward_repeat", source: "webhook_awkward_repeat", brandId: effectiveBrandId || undefined });
         const assignedIdAwk = assignment.assignCase(contact.id);
         if (assignedIdAwk == null && assignment.isAllAgentsUnavailable()) {
           const tags = JSON.parse(contact.tags || "[]");
@@ -4076,10 +4136,7 @@ ${contextStr}
       if (plan.mode === "handoff") {
         console.log("[Webhook AI] needs_human=1 source=state_resolver reason=" + (state.human_reason ?? "handoff") + " msg=" + (userMessage || "").slice(0, 60));
         storage.updateContactConversationFields(contact.id, { product_scope_locked: null, customer_goal_locked: null });
-        storage.updateContactHumanFlag(contact.id, 1);
-        storage.updateContactStatus(contact.id, "awaiting_human");
-        storage.createCaseNotification(contact.id, "in_app");
-        storage.updateContactAssignmentStatus(contact.id, "waiting_human");
+        (() => { const { reason, reason_detail } = normalizeHandoffReason(state.human_reason ?? "return_stage_3_insist"); applyHandoff({ contactId: contact.id, reason, reason_detail, source: "webhook_plan_handoff", brandId: effectiveBrandId || undefined }); })();
         const assignedId = assignment.assignCase(contact.id);
         if (assignedId == null && assignment.isAllAgentsUnavailable()) {
           storage.updateContactNeedsAssignment(contact.id, 1);
@@ -4166,7 +4223,7 @@ ${contextStr}
       // ???????off_topic_guard ???????????????????? systemPrompt ????????? LLM?
 
       // Phase 2 product_scope_locked?handoff/off_topic ???order_lookup/answer_directly ?????????
-      if (plan.mode === "handoff") {
+      if ((plan.mode as ReplyPlanMode) === "handoff") {
         storage.updateContactConversationFields(contact.id, { product_scope_locked: null, customer_goal_locked: "handoff" });
       } else if (plan.mode === "off_topic_guard") {
         storage.updateContactConversationFields(contact.id, { product_scope_locked: null, customer_goal_locked: null });
@@ -4180,12 +4237,13 @@ ${contextStr}
         }
       }
       let goalLocked: string | null = null;
-      if (plan.mode === "return_form_first" || plan.mode === "return_stage_1") {
+      const planMode = plan.mode as ReplyPlanMode;
+      if (planMode === "return_form_first" || planMode === "return_stage_1") {
         goalLocked = "return";
         storage.updateContactConversationFields(contact.id, { customer_goal_locked: "return" });
-      } else if (plan.mode === "handoff") {
+      } else if (planMode === "handoff") {
         goalLocked = "handoff";
-      } else if (plan.mode === "order_lookup") {
+      } else if (planMode === "order_lookup") {
         goalLocked = "order_lookup";
       } else if (plan.mode === "off_topic_guard") {
         goalLocked = null;
@@ -4193,16 +4251,16 @@ ${contextStr}
         goalLocked = (contact as any)?.customer_goal_locked ?? null;
       }
 
-      const effectiveScope = state.product_scope_locked || ((plan.mode === "order_lookup" || plan.mode === "answer_directly") ? getProductScopeFromMessage(userMessage) : null);
+      const effectiveScope = state.product_scope_locked || ((planMode === "order_lookup" || planMode === "answer_directly") ? getProductScopeFromMessage(userMessage) : null);
 
       let systemPrompt = await getEnrichedSystemPrompt(contact.brand_id || brandId || undefined, { productScope: effectiveScope, planMode: plan.mode });
       if (goalLocked) {
         systemPrompt += `\n\n??????????????${goalLocked}???????????????????`;
       }
-      if (plan.mode === "handoff") {
+      if (planMode === "handoff") {
         systemPrompt += "\n\n??????????????? transfer_to_human???????????????????????????????????????????????????????????????????????????????????????+??????????????/??/????????????????????";
       }
-      if (plan.mode === "off_topic_guard") {
+      if (planMode === "off_topic_guard") {
         systemPrompt += "\n\n??? ????????????????????????????????????????????????????????????????????????????????????????????????/??/???? 30?50 ??";
       }
       // ??2?F2 ?? ? ????????????????
@@ -4272,10 +4330,7 @@ ${contextStr}
             await pushLineMessage(contact.platform_user_id, [{ type: "text", text: alreadyHandoffText }], channelToken);
           }
           console.log("[Webhook AI] needs_human=1 source=already_provided_not_found msg=" + (userMessage || "").slice(0, 60));
-          storage.updateContactHumanFlag(contact.id, 1);
-          storage.updateContactStatus(contact.id, "awaiting_human");
-          storage.createCaseNotification(contact.id, "in_app");
-          storage.updateContactAssignmentStatus(contact.id, "waiting_human");
+          applyHandoff({ contactId: contact.id, reason: "repeat_unresolved", source: "webhook_already_provided_not_found", brandId: effectiveBrandId || undefined });
           assignment.assignCase(contact.id);
           storage.createAiLog({
             contact_id: contact.id,
@@ -4384,8 +4439,7 @@ ${contextStr}
           const timeoutCount = storage.incrementConsecutiveTimeouts(contact.id);
           storage.createSystemAlert({ alert_type: "timeout_escalation", details: `OpenAI ???? (?${timeoutCount}?)`, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
           if (timeoutCount >= 2) {
-            storage.updateContactStatus(contact.id, "awaiting_human");
-            storage.updateContactHumanFlag(contact.id, 1);
+            applyHandoff({ contactId: contact.id, reason: "timeout_escalation", source: "webhook_ai_timeout", brandId: effectiveBrandId || undefined });
             const comfortMsg = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, assignment.getUnavailableReason());
             storage.createMessage(contact.id, contact.platform, "ai", comfortMsg);
             if (platform === "messenger") {
@@ -4432,9 +4486,10 @@ ${contextStr}
 
         const toolResults = await Promise.all(
           responseMessage.tool_calls.map(async (toolCall) => {
-            const fnName = toolCall.function.name;
+            const fn = (toolCall as { function?: { name?: string; arguments?: string } }).function;
+            const fnName = fn?.name ?? "";
             let fnArgs: Record<string, string> = {};
-            try { fnArgs = JSON.parse(toolCall.function.arguments); } catch (_e) {}
+            try { fnArgs = JSON.parse(fn?.arguments ?? "{}"); } catch (_e) {}
             toolsCalled.push(fnName);
             console.log(`[Webhook AI] ?? Tool: ${fnName}???:`, fnArgs);
             try {
@@ -4453,17 +4508,15 @@ ${contextStr}
 
         for (const { toolCall, toolResult } of toolResults) {
           chatMessages.push({ role: "tool", tool_call_id: toolCall.id, content: toolResult });
-          const fnName = toolCall.function.name;
+          const fn = (toolCall as { function?: { name?: string; arguments?: string } }).function;
+          const fnName = fn?.name ?? "";
           let fnArgs: Record<string, string> = {};
-          try { fnArgs = JSON.parse(toolCall.function.arguments); } catch (_e) {}
+          try { fnArgs = JSON.parse(fn?.arguments ?? "{}"); } catch (_e) {}
 
           if (fnName === "transfer_to_human") {
             transferTriggered = true;
             transferReason = fnArgs.reason || "AI ????????";
-            storage.updateContactStatus(contact.id, "awaiting_human");
-            storage.updateContactHumanFlag(contact.id, 1);
-            storage.updateContactAssignmentStatus(contact.id, "waiting_human");
-            storage.createCaseNotification(contact.id, "in_app");
+            (() => { const { reason, reason_detail } = normalizeHandoffReason(transferReason); applyHandoff({ contactId: contact.id, reason, reason_detail, source: "webhook_tool_call", brandId: effectiveBrandId || undefined }); })();
             const assignedId = assignment.assignCase(contact.id);
             if (assignedId == null && assignment.isAllAgentsUnavailable()) {
               storage.updateContactNeedsAssignment(contact.id, 1);
@@ -4474,7 +4527,6 @@ ${contextStr}
               const reason = assignment.getUnavailableReason();
               storage.createMessage(contact.id, contact.platform, "system", getTransferUnavailableSystemMessage(reason));
             }
-            storage.createSystemAlert({ alert_type: "transfer", details: transferReason, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
             const freshContact = storage.getContact(contact.id);
             if (freshContact?.needs_human) {
               console.log(`[Webhook AI] transfer_to_human ?????? AI ????`);
@@ -4524,8 +4576,7 @@ ${contextStr}
             const loopTimeoutCount = storage.incrementConsecutiveTimeouts(contact.id);
             storage.createSystemAlert({ alert_type: "timeout_escalation", details: `???????? (?${loopTimeoutCount}?)`, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
             if (loopTimeoutCount >= 2) {
-              storage.updateContactStatus(contact.id, "awaiting_human");
-              storage.updateContactHumanFlag(contact.id, 1);
+              applyHandoff({ contactId: contact.id, reason: "timeout_escalation", source: "webhook_ai_loop_timeout", brandId: effectiveBrandId || undefined });
               const comfortMsg = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, assignment.getUnavailableReason());
               storage.createMessage(contact.id, contact.platform, "ai", comfortMsg);
               if (platform === "messenger") {
@@ -4698,19 +4749,70 @@ ${contextStr}
       });
   });
 
-  const fbWebhookDeps = {
+  type UnavailableReason = "weekend" | "lunch" | "after_hours" | "all_paused" | null;
+  const redisEnabled = !!process.env.REDIS_URL?.trim();
+  const wrappedEnqueueDebouncedAiReply = redisEnabled
+    ? async (
+        platform: string,
+        contactId: number,
+        message: string,
+        _inboundEventId: string,
+        channelToken: string | null,
+        matchedBrandId?: number
+      ) => {
+        const status = await getWorkerHeartbeatStatus();
+        if (status && !status.alive) {
+          recordAutoReplyBlocked(storage, {
+            reason: "blocked:worker_unavailable",
+            contactId,
+            platform,
+            brandId: matchedBrandId,
+            messageSummary: message ? message.slice(0, 80) + (message.length > 80 ? "?" : "") : undefined,
+          });
+          const contact = storage.getContact(contactId);
+          if (contact) {
+            console.log("[Queue] worker unavailable, fallback inline contactId=" + contactId);
+            await autoReplyWithAI(contact, message, channelToken ?? undefined, matchedBrandId, platform);
+          }
+          return;
+        }
+        await enqueueDebouncedAiReply(platform, contactId, message, _inboundEventId, channelToken, matchedBrandId);
+      }
+    : undefined;
+  const wrappedAddAiReplyJob = redisEnabled
+    ? async (data: { contactId: number; message: string; channelToken: string | null; matchedBrandId?: number; platform?: string }) => {
+        const status = await getWorkerHeartbeatStatus();
+        if (status && !status.alive) {
+          recordAutoReplyBlocked(storage, {
+            reason: "blocked:worker_unavailable",
+            contactId: data.contactId,
+            platform: data.platform ?? "line",
+            brandId: data.matchedBrandId,
+            messageSummary: data.message ? data.message.slice(0, 80) + (data.message.length > 80 ? "?" : "") : undefined,
+          });
+          const contact = storage.getContact(data.contactId);
+          if (contact) {
+            console.log("[Queue] worker unavailable, fallback inline contactId=" + data.contactId);
+            await autoReplyWithAI(contact, data.message, data.channelToken ?? undefined, data.matchedBrandId, data.platform);
+          }
+          return null;
+        }
+        return addAiReplyJob(data);
+      }
+    : addAiReplyJob;
+  const fbWebhookDeps: FacebookWebhookDeps = {
     storage,
     broadcastSSE,
     sendFBMessage,
     downloadExternalImage,
     handleImageVisionFirst,
-    enqueueDebouncedAiReply: process.env.REDIS_URL ? enqueueDebouncedAiReply : undefined,
+    enqueueDebouncedAiReply: wrappedEnqueueDebouncedAiReply,
     debounceTextMessage,
-    addAiReplyJob,
-    getHandoffReplyForCustomer,
+    addAiReplyJob: wrappedAddAiReplyJob,
+    getHandoffReplyForCustomer: (opening: string, unavailableReason?: string | null) => getHandoffReplyForCustomer(opening, (unavailableReason ?? null) as UnavailableReason),
     HANDOFF_MANDATORY_OPENING,
     SHORT_IMAGE_FALLBACK,
-    getUnavailableReason: () => assignment.getUnavailableReason(),
+    getUnavailableReason: () => (assignment.getUnavailableReason() ?? undefined) as string | undefined,
     resolveCommentMetadata,
     metaCommentsStorage,
     runAutoExecution,
@@ -4725,13 +4827,13 @@ ${contextStr}
       replyToLine,
       downloadLineContent,
       debounceTextMessage,
-      addAiReplyJob,
-      enqueueDebouncedAiReply: process.env.REDIS_URL ? enqueueDebouncedAiReply : undefined,
+      addAiReplyJob: wrappedAddAiReplyJob,
+      enqueueDebouncedAiReply: wrappedEnqueueDebouncedAiReply,
       autoReplyWithAI,
       handleImageVisionFirst,
-      getHandoffReplyForCustomer,
+      getHandoffReplyForCustomer: (opening: string, unavailableReason?: string | null) => getHandoffReplyForCustomer(opening, (unavailableReason ?? null) as UnavailableReason),
       HANDOFF_MANDATORY_OPENING,
-      getUnavailableReason: () => assignment.getUnavailableReason(),
+      getUnavailableReason: () => (assignment.getUnavailableReason() ?? undefined) as string | undefined,
     });
   });
 
@@ -4900,7 +5002,7 @@ ${contextStr}
       const reason = (args.reason || "AI ????????").trim();
       console.log(`[AI Tool Call] transfer_to_human???: ${reason}?contactId: ${context?.contactId}`);
       if (context?.contactId) {
-        storage.updateContactHumanFlag(context.contactId, 1);
+        (() => { const norm = normalizeHandoffReason(reason); applyHandoff({ contactId: context.contactId, reason: norm.reason, reason_detail: norm.reason_detail, source: "sandbox_tool_call", platform: context?.platform, brandId: context?.brandId }); })();
         storage.createMessage(context.contactId, context?.platform || "line", "system",
           `(????) AI ??????????????????${reason}`);
       }
@@ -5181,7 +5283,7 @@ ${contextStr}
               const matched = allNames.some(n => n.length >= 2 && (n.includes(cleanInput) || cleanInput.includes(n)));
               if (matched) {
                 console.log(`[AI Tool Call] ???????: ?${productName}???${officialName}?page_id=${pageId}`);
-                matchedPages = [{ pageId: pageId.toString(), productName: officialName }];
+                matchedPages = [{ id: String(pageId), pageId: pageId.toString(), prefix: officialName, productName: officialName }];
                 break;
               }
             }
@@ -5533,12 +5635,13 @@ ${contextStr}
         chatMessages.push(responseMessage as OpenAI.Chat.Completions.ChatCompletionMessageParam);
 
         for (const toolCall of responseMessage.tool_calls) {
-          const fnName = toolCall.function.name;
+          const fn = (toolCall as { function?: { name?: string; arguments?: string } }).function;
+          const fnName = fn?.name ?? "";
           let fnArgs: Record<string, string> = {};
           try {
-            fnArgs = JSON.parse(toolCall.function.arguments);
+            fnArgs = JSON.parse(fn?.arguments ?? "{}");
           } catch (_e) {
-            console.error("[Sandbox] Tool Call ??????:", toolCall.function.arguments);
+            console.error("[Sandbox] Tool Call ??????:", fn?.arguments);
             chatMessages.push({
               role: "tool",
               tool_call_id: toolCall.id,
@@ -5843,9 +5946,9 @@ ${contextStr}
     if (!user) return res.status(404).json({ message: "?????" });
     const normalized = assignments.map((a: any) => {
       const brand_id = typeof a.brand_id === "number" ? a.brand_id : parseInt(String(a.brand_id), 10);
-      const role = a.role === "backup" ? "backup" : "primary";
+      const role: import("@shared/schema").AgentBrandRole = a.role === "backup" ? "backup" : "primary";
       return { brand_id, role };
-    }).filter((a: { brand_id: number; role: string }) => !Number.isNaN(a.brand_id));
+    }).filter((a: { brand_id: number; role: import("@shared/schema").AgentBrandRole }) => !Number.isNaN(a.brand_id));
     storage.setAgentBrandAssignments(userId, normalized);
     return res.json({ success: true, assignments: storage.getAgentBrandAssignments(userId) });
   });
@@ -6254,7 +6357,7 @@ ${contextStr}
   app.put("/api/settings/tag-shortcuts", authMiddleware, managerOrAbove, (req: any, res) => {
     const body = req.body;
     const list = Array.isArray(body) ? body : (body?.tags ?? body?.list ?? []);
-    const tags = list.map((t: any, i: number) => ({ name: String(t?.name ?? t).trim(), order: typeof t?.order === "number" ? t.order : i })).filter((t) => t.name);
+    const tags = list.map((t: any, i: number) => ({ name: String(t?.name ?? t).trim(), order: typeof t?.order === "number" ? t.order : i })).filter((t: { name: string; order: number }) => t.name);
     storage.setTagShortcuts(tags);
     return res.json(storage.getTagShortcuts());
   });
@@ -6441,14 +6544,14 @@ ${contextStr}
       }
     } else if (userMsgs > 0) {
       const topKeywords = storage.getTopKeywordsFromMessages(startDate, endDate, brandId);
-      const intentCategories: Record<string, string[]> = {
-        "?????": ["???", "??", "??", "??", "??", "??", "??"],
-        "????": ["??", "??", "??", "??", "??"],
-        "????": ["??", "??", "??", "??"],
-        "????": ["??", "??", "??", "??", "??", "??", "??", "??", "??"],
-        "??/???": ["??", "??", "??", "??", "??", "??"],
-      };
-      for (const [category, kws] of Object.entries(intentCategories)) {
+      const intentCategories: [string, string[]][] = [
+        ["????", ["??", "??", "??", "??", "??", "??", "??"]],
+        ["???", ["??", "??", "??", "??", "??"]],
+        ["????", ["??", "??", "??", "??"]],
+        ["????", ["??", "??", "??", "??", "??", "??", "??", "??", "??"]],
+        ["??/??", ["??", "??", "??", "??", "??", "??", "?"]],
+      ];
+      for (const [category, kws] of intentCategories) {
         let catCount = 0;
         for (const kw of kws) {
           const found = topKeywords.find(k => k.keyword === kw);
@@ -6525,19 +6628,19 @@ ${contextStr}
       .sort((a, b) => b.mentions - a.mentions)
       .slice(0, 8);
 
-    const concernKeywords: Record<string, string> = {
-      "????": "?|??|??|??|??|??",
-      "???": "???|??|??|???|?|?|?",
-      "????": "??|??|??|???|???|???",
-      "????": "??|??|??|??|??",
-      "????": "???|???|??|??|???|?????",
-      "????": "??|?????|???|??",
-      "????": "???|???|??|??|??",
-      "????": "??|??|??|??|??",
-    };
+    const concernKeywords: [string, string][] = [
+      ["????", "??|??|??|??|??|??|??"],
+      ["???", "??|??|??|??|??"],
+      ["????", "??|??|??|??|??"],
+      ["????", "??|??|??|??|??"],
+      ["????", "??|??|??|??|??"],
+      ["????", "??|??|??|??|??"],
+      ["????", "??|??|??|??"],
+      ["??", "??|??|??"],
+    ];
     const concernCounts: Record<string, number> = {};
     for (const msg of userMessages) {
-      for (const [concern, pattern] of Object.entries(concernKeywords)) {
+      for (const [concern, pattern] of concernKeywords) {
         const regex = new RegExp(pattern);
         if (regex.test(msg.content)) {
           concernCounts[concern] = (concernCounts[concern] || 0) + 1;

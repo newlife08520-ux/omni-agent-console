@@ -119,10 +119,10 @@ export async function unifiedLookupByProductAndPhone(
     const shoplineConfig = getShoplineConfig(brandId);
     if (!shoplineConfig) return null;
     try {
-      const orders = await lookupShoplineOrdersByPhone(shoplineConfig, phone);
-      if (orders.length > 0) {
-        orders.forEach(o => { o.source = "shopline"; });
-        return { orders, source: "shopline", found: true };
+      const result = await lookupShoplineOrdersByPhone(shoplineConfig, phone);
+      if (result.orders.length > 0) {
+        result.orders.forEach((o: OrderInfo) => { o.source = "shopline"; });
+        return { orders: result.orders, source: "shopline", found: true };
       }
     } catch (_e) {
       console.log("[UnifiedOrder] SHOPLINE 手機查詢失敗:", (_e as Error).message);
@@ -203,11 +203,14 @@ export async function unifiedLookupByDateAndContact(
       const isPhone = /^[\d\-+\s()]+$/.test(contact) && contact.replace(/\D/g, "").length >= 8;
       let orders: OrderInfo[] = [];
       if (isEmail) {
-        orders = await lookupShoplineOrdersByEmail(shoplineConfig, contact);
+        const r = await lookupShoplineOrdersByEmail(shoplineConfig, contact);
+        orders = r.orders;
       } else if (isPhone) {
-        orders = await lookupShoplineOrdersByPhone(shoplineConfig, contact);
+        const r = await lookupShoplineOrdersByPhone(shoplineConfig, contact);
+        orders = r.orders;
       } else {
-        orders = await lookupShoplineOrdersByName(shoplineConfig, contact);
+        const r = await lookupShoplineOrdersByName(shoplineConfig, contact);
+        orders = r.orders;
       }
       if (orders.length > 0) {
         orders.forEach(o => { o.source = "shopline"; });
@@ -222,7 +225,7 @@ export async function unifiedLookupByDateAndContact(
   async function runSuperlanding(): Promise<UnifiedOrderResult | null> {
     if (!slConfig.merchantNo || !slConfig.accessKey) return null;
     try {
-      const result = await lookupOrdersByDateAndFilter(slConfig, contact, beginDate, endDate, pageId);
+      const result = await lookupOrdersByDateAndFilter(slConfig, contact, beginDate, endDate);
       if (result.orders.length > 0) {
         result.orders.forEach(o => { o.source = "superlanding"; });
         return { orders: result.orders, source: "superlanding", found: true };

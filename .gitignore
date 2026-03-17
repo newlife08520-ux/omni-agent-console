@@ -12,11 +12,12 @@ uploads/
 .env.*
 !.env.example
 
-# database
+# database（正式 DB 僅能由 DATA_DIR 產生，不得納入版控與交付包）
 *.db
 *.db-wal
 *.db-shm
 data/
+data_coldstart/
 
 # uploads / generated files
 uploads/

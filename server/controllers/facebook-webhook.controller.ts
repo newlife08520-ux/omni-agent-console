@@ -6,8 +6,11 @@
 import type { Request, Response } from "express";
 import crypto from "crypto";
 import type { IStorage } from "../storage";
+import { recordAutoReplyBlocked } from "../auto-reply-blocked";
 import { isLinkRequestMessage, isLinkRequestCorrectionMessage } from "../conversation-state-resolver";
 import { shouldEscalateImageSupplement } from "../safe-after-sale-classifier";
+import { applyHandoff } from "../services/handoff";
+import { resolveOpenAIModel } from "../openai-model";
 
 export interface FacebookWebhookDeps {
   storage: IStorage;
@@ -18,7 +21,7 @@ export interface FacebookWebhookDeps {
   enqueueDebouncedAiReply?: (platform: string, contactId: number, message: string, inboundEventId: string, channelToken: string | null, matchedBrandId?: number) => Promise<void>;
   debounceTextMessage: (contactId: number, text: string, cb: (mergedText: string) => void | Promise<void>) => void;
   addAiReplyJob: (data: { contactId: number; message: string; channelToken: string | null; matchedBrandId?: number; platform?: string }) => Promise<unknown>;
-  getHandoffReplyForCustomer: (opening: string, unavailableReason?: string) => string;
+  getHandoffReplyForCustomer: (opening: string, unavailableReason?: string | undefined) => string;
   HANDOFF_MANDATORY_OPENING: string;
   SHORT_IMAGE_FALLBACK: string;
   getUnavailableReason: () => string | undefined;
@@ -174,9 +177,7 @@ export function handleFacebookWebhook(req: Request, res: Response, deps: Faceboo
                     const recentMsgs = storage.getMessages(contact.id).slice(-8);
                     const escalate = shouldEscalateImageSupplement(recentMsgs);
                     if (escalate) {
-                      storage.updateContactStatus(contact.id, "awaiting_human");
-                      storage.updateContactHumanFlag(contact.id, 1);
-                      storage.createCaseNotification(contact.id, "in_app");
+                      applyHandoff({ contactId: contact.id, reason: "post_reply_handoff", source: "fb_webhook_image_escalate", brandId: matchedBrandId || contact.brand_id || undefined });
                       broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
                     }
                     storage.createAiLog({
@@ -190,7 +191,7 @@ export function handleFacebookWebhook(req: Request, res: Response, deps: Faceboo
                       transfer_reason: escalate ? "連續無效圖片補充升級人工" : undefined,
                       result_summary: `image_vision_first | intent=${visionResult.intent ?? "—"} | ${visionResult.usedFallback ? "fallback" : "direct"}`,
                       token_usage: 0,
-                      model: "gpt-4o",
+                      model: resolveOpenAIModel(),
                       response_time_ms: 0,
                       reply_source: "image_vision_first",
                       used_llm: 1,
@@ -212,7 +213,7 @@ export function handleFacebookWebhook(req: Request, res: Response, deps: Faceboo
 
               const needsHuman = HUMAN_KW.some((kw: string) => text.includes(kw));
               if (needsHuman) {
-                storage.updateContactHumanFlag(contact.id, 1);
+                applyHandoff({ contactId: contact.id, reason: "explicit_human_request", source: "fb_webhook_keyword", brandId: matchedBrandId || contact.brand_id || undefined });
                 const handoffText = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, getUnavailableReason());
                 const aiMsg = storage.createMessage(contact.id, "messenger", "ai", handoffText);
                 broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: matchedBrandId || contact.brand_id });
@@ -226,25 +227,62 @@ export function handleFacebookWebhook(req: Request, res: Response, deps: Faceboo
                 const allowOnlyLinkRestore = inHandoffState && (isLinkRequestMessage(trimmedText) || isLinkRequestCorrectionMessage(trimmedText));
                 const shouldInvokeAi = !inHandoffState || allowOnlyLinkRestore;
                 if (shouldInvokeAi) {
-                  const fbAiEnabled = matchedChannel ? (matchedChannel.is_ai_enabled === 1) : false;
-                  if (fbAiEnabled) {
-                    const testMode = storage.getSetting("test_mode");
-                    if (testMode !== "true" && matchedChannel?.access_token) {
-                      if (enqueueDebouncedAiReply) {
-                        const inboundEventId = eventId;
-                        enqueueDebouncedAiReply("messenger", contact.id, text, inboundEventId, matchedChannel.access_token ?? null, matchedBrandId).catch(err =>
-                          console.error("[FB Webhook] enqueueDebouncedAiReply failed:", err)
-                        );
+                  if (!matchedChannel) {
+                    recordAutoReplyBlocked(storage, {
+                      reason: "blocked:no_channel_match",
+                      contactId: contact.id,
+                      platform: "messenger",
+                      brandId: matchedBrandId ?? undefined,
+                      messageSummary: text ? `用戶說：${text}` : undefined,
+                    });
+                  } else {
+                    const fbAiEnabled = matchedChannel.is_ai_enabled === 1;
+                    if (!fbAiEnabled) {
+                      recordAutoReplyBlocked(storage, {
+                        reason: "blocked:channel_ai_disabled",
+                        contactId: contact.id,
+                        platform: "messenger",
+                        channelId: matchedChannel.id,
+                        brandId: matchedBrandId ?? undefined,
+                        messageSummary: text ? `用戶說：${text}` : undefined,
+                      });
+                    } else {
+                      const testMode = storage.getSetting("test_mode");
+                      if (testMode === "true") {
+                        recordAutoReplyBlocked(storage, {
+                          reason: "blocked:test_mode",
+                          contactId: contact.id,
+                          platform: "messenger",
+                          channelId: matchedChannel.id,
+                          brandId: matchedBrandId ?? undefined,
+                          messageSummary: text ? `用戶說：${text}` : undefined,
+                        });
+                      } else if (!matchedChannel.access_token?.trim()) {
+                        recordAutoReplyBlocked(storage, {
+                          reason: "blocked:no_channel_token",
+                          contactId: contact.id,
+                          platform: "messenger",
+                          channelId: matchedChannel.id,
+                          brandId: matchedBrandId ?? undefined,
+                          messageSummary: text ? `用戶說：${text}` : undefined,
+                        });
                       } else {
-                        debounceTextMessage(contact.id, text, (mergedText) =>
-                          addAiReplyJob({
-                            contactId: contact.id,
-                            message: mergedText,
-                            channelToken: matchedChannel!.access_token ?? null,
-                            matchedBrandId,
-                            platform: "messenger",
-                          }).catch(err => console.error("[FB Webhook] addAiReplyJob failed:", err))
-                        );
+                        if (enqueueDebouncedAiReply) {
+                          const inboundEventId = eventId;
+                          enqueueDebouncedAiReply("messenger", contact.id, text, inboundEventId, matchedChannel.access_token ?? null, matchedBrandId).catch(err =>
+                            console.error("[FB Webhook] enqueueDebouncedAiReply failed:", err)
+                          );
+                        } else {
+                          debounceTextMessage(contact.id, text, (mergedText) => {
+                            void addAiReplyJob({
+                              contactId: contact.id,
+                              message: mergedText,
+                              channelToken: matchedChannel.access_token ?? null,
+                              matchedBrandId,
+                              platform: "messenger",
+                            }).catch(err => console.error("[FB Webhook] addAiReplyJob failed:", err));
+                          });
+                        }
                       }
                     }
                   }

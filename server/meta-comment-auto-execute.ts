@@ -10,7 +10,8 @@ import { checkHighRiskByRule, checkLineRedirectByRule, checkSafeConfirmByRule, C
 import { FALLBACK_AFTER_SALE_LINE_LABEL } from "./safe-after-sale-classifier";
 import { evaluateRiskRules } from "./meta-comment-risk-rules";
 import { replyToComment, hideComment } from "./meta-facebook-comment-api";
-import * as storage from "./storage";
+import { storage } from "./storage";
+import { recordAutoReplyBlocked } from "./auto-reply-blocked";
 
 const EXECUTOR_AUTO = "auto";
 
@@ -441,11 +442,33 @@ export async function runAutoExecution(commentId: number): Promise<void> {
     return;
   }
 
-  // 若無粉專設定，不執行平台動作，只做分類與導向寫入；仍標記已跑過避免重試
+  // 若無粉專設定，不 claim 執行、不寫 auto_execution_run_at，讓補好設定後可重跑
   if (!pageSettings) {
     metaCommentsStorage.updateMetaComment(commentId, {
-      auto_execution_run_at: new Date().toISOString(),
-      main_status: computeMainStatus(metaCommentsStorage.getMetaComment(commentId)!),
+      main_status: "pending_config",
+      blocked_reason: "no_page_settings",
+    });
+    recordAutoReplyBlocked(storage, {
+      reason: "blocked:no_page_settings",
+      commentId,
+      pageId: comment.page_id,
+      brandId: comment.brand_id ?? undefined,
+    });
+    return;
+  }
+
+  // 確認 page 對應 channel token 可用後才 claim，避免標記已執行卻無法送平台
+  const channelToken = getChannelToken(comment.page_id);
+  if (!channelToken) {
+    metaCommentsStorage.updateMetaComment(commentId, {
+      main_status: "pending_config",
+      blocked_reason: "no_channel_token",
+    });
+    recordAutoReplyBlocked(storage, {
+      reason: "blocked:no_channel_token",
+      commentId,
+      pageId: comment.page_id,
+      brandId: comment.brand_id ?? undefined,
     });
     return;
   }
@@ -453,7 +476,7 @@ export async function runAutoExecution(commentId: number): Promise<void> {
   const autoReplyEnabled = pageSettings.auto_reply_enabled === 1;
   const autoHideSensitive = pageSettings.auto_hide_sensitive === 1;
 
-  // 3) 佔用：僅此時寫入 auto_execution_run_at，之後不再重跑
+  // 3) 佔用：僅在可執行平台動作時寫入 auto_execution_run_at，之後不再重跑
   const claimed = metaCommentsStorage.tryClaimAutoExecution(commentId);
   if (!claimed) return;
 

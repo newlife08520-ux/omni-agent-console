@@ -88,6 +88,7 @@ app.use((req, res, next) => {
   try {
     const dataDir = getDataDir();
     console.log("[server] DATA_DIR =", dataDir);
+    console.log("[server] DB path =", path.join(dataDir, "omnichannel.db"));
     if (process.env.NODE_ENV === "production" && dataDir === "/data") {
       console.warn("[server] 使用預設 /data。若未在 Railway 掛載 Volume 至 /data，重啟或重新部署後品牌/渠道等資料會遺失，請見 docs/RAILWAY_PERSISTENT_STORAGE.md");
     }
@@ -106,7 +107,7 @@ app.use((req, res, next) => {
       setRedisClient(redisClient);
       const { syncRedisToSqlite } = await import("./redis-brands-channels");
       const dbModule = await import("./db");
-      await syncRedisToSqlite(redisClient, dbModule.default);
+      await syncRedisToSqlite(redisClient, dbModule.default as unknown as Parameters<typeof syncRedisToSqlite>[1]);
       console.log("[server] Redis 品牌/渠道已同步至 SQLite");
     }
 

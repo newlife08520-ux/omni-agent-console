@@ -9,11 +9,17 @@
   "scripts": {
     "dev": "cross-env NODE_ENV=development tsx server/index.ts",
     "dev:worker": "cross-env NODE_ENV=development tsx server/workers/ai-reply.worker.ts",
-    "build": "tsx script/build.ts",
+    "build": "npm run check:server && tsx script/build.ts",
     "preview": "vite preview --config vite.config.ts",
     "start": "cross-env NODE_ENV=production node dist/index.cjs",
     "start:worker": "cross-env NODE_ENV=production node dist/workers/ai-reply.worker.cjs",
     "check": "tsc",
+    "check:server": "tsc -p tsconfig.server.json",
+    "check:all": "tsc",
+    "verify:server": "npm run check:server && npm run build",
+    "verify:full": "npm run check:all && npm run build",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true});require('fs').rmSync('node_modules/.cache',{recursive:true,force:true})\"",
+    "verify": "npm run verify:server",
     "db:push": "drizzle-kit push"
   },
   "dependencies": {

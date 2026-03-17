@@ -1,4 +1,5 @@
 import type { OrderInfo } from "@shared/schema";
+import { storage } from "./storage";
 
 const SUPERLANDING_API_BASE = "https://api.super-landing.com";
 
@@ -54,6 +55,22 @@ const ORDER_STATUS_MAP: Record<string, string> = {
 export interface SuperLandingConfig {
   merchantNo: string;
   accessKey: string;
+}
+
+export function getSuperLandingConfig(brandId?: number): SuperLandingConfig {
+  if (brandId) {
+    const brand = storage.getBrand(brandId);
+    if (brand && brand.superlanding_merchant_no && brand.superlanding_access_key) {
+      return {
+        merchantNo: brand.superlanding_merchant_no,
+        accessKey: brand.superlanding_access_key,
+      };
+    }
+  }
+  return {
+    merchantNo: storage.getSetting("superlanding_merchant_no") || "",
+    accessKey: storage.getSetting("superlanding_access_key") || "",
+  };
 }
 
 function mapOrder(o: any): OrderInfo {

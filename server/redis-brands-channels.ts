@@ -3,13 +3,12 @@
  * 使用 key: omni:brands, omni:channels (JSON 陣列), omni:brands:nextId, omni:channels:nextId。
  */
 import type { Brand, Channel, ChannelWithBrand } from "@shared/schema";
+import type { RedisClientLike } from "./redis-client";
 
 const KEY_BRANDS = "omni:brands";
 const KEY_CHANNELS = "omni:channels";
 const KEY_BRANDS_NEXT_ID = "omni:brands:nextId";
 const KEY_CHANNELS_NEXT_ID = "omni:channels:nextId";
-
-type RedisClient = { get: (k: string) => Promise<string | null>; set: (k: string, v: string) => Promise<unknown>; incr: (k: string) => Promise<number>; del: (k: string) => Promise<unknown> };
 
 function parseBrands(json: string | null): Brand[] {
   if (!json) return [];
@@ -31,16 +30,16 @@ function parseChannels(json: string | null): Channel[] {
   }
 }
 
-export function getBrands(client: RedisClient): Promise<Brand[]> {
-  return client.get(KEY_BRANDS).then(parseBrands).then((arr) => arr.sort((a, b) => (a.created_at || "").localeCompare(b.created_at || "")));
+export function getBrands(client: RedisClientLike): Promise<Brand[]> {
+  return client.get(KEY_BRANDS).then(parseBrands).then((arr: Brand[]) => arr.sort((a, b) => (a.created_at || "").localeCompare(b.created_at || "")));
 }
 
-export function getBrand(client: RedisClient, id: number): Promise<Brand | undefined> {
+export function getBrand(client: RedisClientLike, id: number): Promise<Brand | undefined> {
   return getBrands(client).then((arr) => arr.find((b) => b.id === id));
 }
 
 export async function createBrand(
-  client: RedisClient,
+  client: RedisClientLike,
   name: string,
   slug: string,
   logoUrl?: string,
@@ -74,7 +73,7 @@ export async function createBrand(
   return brand;
 }
 
-export async function updateBrand(client: RedisClient, id: number, data: Partial<Omit<Brand, "id" | "created_at">>): Promise<boolean> {
+export async function updateBrand(client: RedisClientLike, id: number, data: Partial<Omit<Brand, "id" | "created_at">>): Promise<boolean> {
   const brands = await getBrands(client);
   const idx = brands.findIndex((b) => b.id === id);
   if (idx < 0) return false;
@@ -84,7 +83,7 @@ export async function updateBrand(client: RedisClient, id: number, data: Partial
 }
 
 /** 將單一品牌同步進 Redis（品牌僅在 SQLite 存在時，更新後可寫入 Redis 以保持一致） */
-export async function syncBrandToRedis(client: RedisClient, brand: Brand): Promise<void> {
+export async function syncBrandToRedis(client: RedisClientLike, brand: Brand): Promise<void> {
   const brands = await getBrands(client);
   const idx = brands.findIndex((b) => b.id === brand.id);
   if (idx >= 0) {
@@ -96,7 +95,7 @@ export async function syncBrandToRedis(client: RedisClient, brand: Brand): Promi
   await client.set(KEY_BRANDS, JSON.stringify(brands));
 }
 
-export async function deleteBrand(client: RedisClient, id: number): Promise<boolean> {
+export async function deleteBrand(client: RedisClientLike, id: number): Promise<boolean> {
   const [brands, channels] = await Promise.all([getBrands(client), getChannels(client)]);
   const newBrands = brands.filter((b) => b.id !== id);
   const newChannels = channels.filter((c) => c.brand_id !== id);
@@ -105,11 +104,11 @@ export async function deleteBrand(client: RedisClient, id: number): Promise<bool
   return true;
 }
 
-export async function getChannels(client: RedisClient): Promise<Channel[]> {
-  return client.get(KEY_CHANNELS).then(parseChannels).then((arr) => arr.sort((a, b) => (a.created_at || "").localeCompare(b.created_at || "")));
+export async function getChannels(client: RedisClientLike): Promise<Channel[]> {
+  return client.get(KEY_CHANNELS).then(parseChannels).then((arr: Channel[]) => arr.sort((a, b) => (a.created_at || "").localeCompare(b.created_at || "")));
 }
 
-export async function getChannelsWithBrand(client: RedisClient): Promise<ChannelWithBrand[]> {
+export async function getChannelsWithBrand(client: RedisClientLike): Promise<ChannelWithBrand[]> {
   const [channels, brands] = await Promise.all([getChannels(client), getBrands(client)]);
   const brandMap = new Map(brands.map((b) => [b.id, b]));
   return channels.map((c) => {
@@ -118,18 +117,18 @@ export async function getChannelsWithBrand(client: RedisClient): Promise<Channel
   });
 }
 
-export async function getChannelsByBrand(client: RedisClient, brandId: number): Promise<Channel[]> {
+export async function getChannelsByBrand(client: RedisClientLike, brandId: number): Promise<Channel[]> {
   const channels = await getChannels(client);
   return channels.filter((c) => c.brand_id === brandId);
 }
 
-export async function getChannel(client: RedisClient, id: number): Promise<Channel | undefined> {
+export async function getChannel(client: RedisClientLike, id: number): Promise<Channel | undefined> {
   const channels = await getChannels(client);
   return channels.find((c) => c.id === id);
 }
 
 /** LINE：bot_id 與 Webhook destination 比對；支援 TRIM 與 U 前綴有無的雙向匹配，與 SQLite storage.getChannelByBotId 行為一致。 */
-export async function getChannelByBotId(client: RedisClient, botId: string): Promise<ChannelWithBrand | undefined> {
+export async function getChannelByBotId(client: RedisClientLike, botId: string): Promise<ChannelWithBrand | undefined> {
   const raw = (botId || "").trim();
   if (!raw) return undefined;
   const alt = raw.startsWith("U") ? raw.slice(1) : "U" + raw;
@@ -138,7 +137,7 @@ export async function getChannelByBotId(client: RedisClient, botId: string): Pro
 }
 
 export async function createChannel(
-  client: RedisClient,
+  client: RedisClientLike,
   brandId: number,
   platform: string,
   channelName: string,
@@ -166,7 +165,7 @@ export async function createChannel(
   return channel;
 }
 
-export async function updateChannel(client: RedisClient, id: number, data: Partial<Omit<Channel, "id" | "created_at">>): Promise<boolean> {
+export async function updateChannel(client: RedisClientLike, id: number, data: Partial<Omit<Channel, "id" | "created_at">>): Promise<boolean> {
   const channels = await getChannels(client);
   const idx = channels.findIndex((c) => c.id === id);
   if (idx < 0) return false;
@@ -175,7 +174,7 @@ export async function updateChannel(client: RedisClient, id: number, data: Parti
   return true;
 }
 
-export async function deleteChannel(client: RedisClient, id: number): Promise<boolean> {
+export async function deleteChannel(client: RedisClientLike, id: number): Promise<boolean> {
   const channels = await getChannels(client);
   const newChannels = channels.filter((c) => c.id !== id);
   if (newChannels.length === channels.length) return false;
@@ -184,7 +183,7 @@ export async function deleteChannel(client: RedisClient, id: number): Promise<bo
 }
 
 /** 初始化 nextId：若 key 不存在則設為 max(id)+1，避免覆寫既有資料時 id 衝突 */
-export async function ensureNextIds(client: RedisClient): Promise<void> {
+export async function ensureNextIds(client: RedisClientLike): Promise<void> {
   const [brands, channels] = await Promise.all([getBrands(client), getChannels(client)]);
   const maxBrandId = brands.length ? Math.max(...brands.map((b) => b.id)) : 0;
   const maxChannelId = channels.length ? Math.max(...channels.map((c) => c.id)) : 0;
@@ -195,8 +194,8 @@ export async function ensureNextIds(client: RedisClient): Promise<void> {
 
 /** 將 Redis 中的品牌與渠道同步到 SQLite，供 JOIN 與讀取使用（啟動時呼叫一次） */
 export async function syncRedisToSqlite(
-  client: RedisClient,
-  db: { prepare: (sql: string) => { run: (...args: unknown[]) => { lastInsertRowid: bigint }; get: (...args: unknown[]) => unknown; all: (...args: unknown[]) => unknown[] } }
+  client: RedisClientLike,
+  db: { prepare: (sql: string) => { run: (...args: unknown[]) => { lastInsertRowid: number | bigint }; get: (...args: unknown[]) => unknown; all: (...args: unknown[]) => unknown[] } }
 ): Promise<void> {
   const [brands, channels] = await Promise.all([getBrands(client), getChannels(client)]);
   if (brands.length === 0 && channels.length === 0) return;

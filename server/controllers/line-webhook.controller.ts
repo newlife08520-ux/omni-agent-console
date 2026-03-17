@@ -6,8 +6,11 @@ import type { Request, Response } from "express";
 import crypto from "crypto";
 import type { Contact } from "@shared/schema";
 import type { IStorage } from "../storage";
+import { recordAutoReplyBlocked } from "../auto-reply-blocked";
 import { isLinkRequestMessage, isLinkRequestCorrectionMessage } from "../conversation-state-resolver";
 import { shouldEscalateImageSupplement } from "../safe-after-sale-classifier";
+import { applyHandoff } from "../services/handoff";
+import { resolveOpenAIModel } from "../openai-model";
 
 const GHOST_REPLY_TOKEN = "00000000000000000000000000000000";
 const GHOST_USER_ID = "Udeadbeefdeadbeefdeadbeefdeadbeef";
@@ -238,7 +241,7 @@ export async function handleLineWebhook(req: Request, res: Response, deps: LineW
             const needsHuman = HUMAN_KEYWORDS.some((kw) => text.includes(kw));
             if (needsHuman) {
               console.log("[WEBHOOK] needs_human=1 source=webhook_keyword msg=" + (text || "").slice(0, 80));
-              storage.updateContactHumanFlag(contact.id, 1);
+              applyHandoff({ contactId: contact.id, reason: "explicit_human_request", source: "line_webhook_keyword", brandId: matchedBrandId || contact.brand_id || undefined });
               const handoffText = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, getUnavailableReason());
               const aiMsg = storage.createMessage(contact.id, "line", "ai", handoffText);
               broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: matchedBrandId || contact.brand_id });
@@ -253,14 +256,38 @@ export async function handleLineWebhook(req: Request, res: Response, deps: LineW
               const shouldInvokeAi = !inHandoffState || allowOnlyLinkRestore;
               if (shouldInvokeAi) {
                 const aiEnabled = matchedChannel ? matchedChannel.is_ai_enabled : 0;
-                if (!aiEnabled) {
-                  if (!matchedChannel) console.log("[WEBHOOK] 無匹配 channel，跳過文字自動回覆（fail-closed）");
-                  else console.log("[WEBHOOK] AI 已關閉 (channel:", matchedChannel.channel_name, ", is_ai_enabled=", matchedChannel.is_ai_enabled, ") - 跳過自動回覆");
+                if (!matchedChannel) {
+                  recordAutoReplyBlocked(storage, {
+                    reason: "blocked:no_channel_match",
+                    contactId: contact.id,
+                    platform: "line",
+                    brandId: matchedBrandId ?? undefined,
+                    messageSummary: text ? `用戶說：${text}` : undefined,
+                  });
+                  console.log("[WEBHOOK] 無匹配 channel，跳過文字自動回覆（fail-closed）");
+                } else if (!aiEnabled) {
+                  recordAutoReplyBlocked(storage, {
+                    reason: "blocked:channel_ai_disabled",
+                    contactId: contact.id,
+                    platform: "line",
+                    channelId: matchedChannel.id,
+                    brandId: matchedBrandId ?? undefined,
+                    messageSummary: text ? `用戶說：${text}` : undefined,
+                  });
+                  console.log("[WEBHOOK] AI 已關閉 (channel:", matchedChannel.channel_name, ", is_ai_enabled=", matchedChannel.is_ai_enabled, ") - 跳過自動回覆");
                 } else {
                   console.log("[WEBHOOK] AI 已啟用，準備文字自動回覆 — channel:", matchedChannel?.channel_name);
                   const testMode = storage.getSetting("test_mode");
                   if (testMode === "true") {
-                    storage.createMessage(contact.id, "line", "ai", `[測試模式] 收到您的訊息：「${text}」。`);
+                    recordAutoReplyBlocked(storage, {
+                      reason: "blocked:test_mode",
+                      contactId: contact.id,
+                      platform: "line",
+                      channelId: matchedChannel.id,
+                      brandId: matchedBrandId ?? undefined,
+                      messageSummary: text ? `用戶說：${text}` : undefined,
+                    });
+                    storage.createMessage(contact.id, "line", "system", `[模擬回覆，未實際送出] 收到您的訊息：「${text}」。`);
                   } else {
                     if (enqueueDebouncedAiReply) {
                       const inboundEventId = event.webhookEventId || `${event.timestamp}-${event.source?.userId || "u"}`;
@@ -338,9 +365,7 @@ export async function handleLineWebhook(req: Request, res: Response, deps: LineW
                 const recentMsgsForEscalate = storage.getMessages(contact.id).slice(-8);
                 const escalate = shouldEscalateImageSupplement(recentMsgsForEscalate);
                 if (escalate) {
-                  storage.updateContactStatus(contact.id, "awaiting_human");
-                  storage.updateContactHumanFlag(contact.id, 1);
-                  storage.createCaseNotification(contact.id, "in_app");
+                  applyHandoff({ contactId: contact.id, reason: "post_reply_handoff", source: "line_webhook_image_escalate", brandId: matchedBrandId || contact.brand_id || undefined });
                   broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
                 }
                 storage.createAiLog({
@@ -354,7 +379,7 @@ export async function handleLineWebhook(req: Request, res: Response, deps: LineW
                   transfer_reason: escalate ? "連續無效圖片補充升級人工" : undefined,
                   result_summary: `image_vision_first | intent=${visionResult.intent ?? "—"} | ${visionResult.usedFallback ? "fallback" : "direct"}`,
                   token_usage: 0,
-                  model: "gpt-4o",
+                  model: resolveOpenAIModel(),
                   response_time_ms: 0,
                   reply_source: "image_vision_first",
                   used_llm: 1,
@@ -390,7 +415,7 @@ export async function handleLineWebhook(req: Request, res: Response, deps: LineW
               else console.log("[WEBHOOK] AI 已關閉 (channel:", matchedChannel.channel_name, ") - 跳過影片回覆");
             } else {
               storage.createMessage(contact.id, "line", "ai", "(AI 系統提示) 已收到您的影片，將為您轉交專人檢視。");
-              storage.updateContactHumanFlag(contact.id, 1);
+              applyHandoff({ contactId: contact.id, reason: "post_reply_handoff", source: "line_webhook_video", brandId: matchedBrandId || contact.brand_id || undefined });
               await pushLineMessage(contact.platform_user_id, [{ type: "text", text: "已收到您的影片，將為您轉交專人檢視。" }], channelToken);
             }
           } else if (event.type === "message" && event.message?.type === "sticker") {

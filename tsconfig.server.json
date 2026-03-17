@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["shared/**/*", "server/**/*"],
+  "exclude": ["node_modules", "dist", "**/*.test.ts", "server/e2e-scenarios.ts", "server/scripts/explain-get-contacts.ts"]
+}

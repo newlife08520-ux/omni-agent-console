@@ -12,6 +12,7 @@
  */
 import type OpenAI from "openai";
 import db from "./db";
+import { resolveOpenAIModel } from "./openai-model";
 
 export type MessageLike = { sender_type: string; content?: string | null; message_type?: string; image_url?: string | null };
 
@@ -106,7 +107,7 @@ export async function extractOrderInfoFromImage(
 ): Promise<{ orderId?: string; phone?: string }> {
   try {
     const resp = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: resolveOpenAIModel(),
       max_tokens: 200,
       messages: [
         {
