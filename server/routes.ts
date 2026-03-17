@@ -4067,6 +4067,7 @@ ${contextStr}
       }
       const isReturnFirstRound = (freshContact as any).return_stage == null || (freshContact as any).return_stage === 0;
       const plan = buildReplyPlan({ state, returnFormUrl, isReturnFirstRound });
+      console.log("[AI Latency] contact", contact.id, "after_plan_ms", Date.now() - startTime, "mode=" + plan.mode);
 
       function isUserProvidingOrderDetails(lastAiMessage: string | null | undefined, currentUserMessage: string): boolean {
         if (!lastAiMessage || !ASK_ORDER_PHONE_FOR_BYPASS_KW.some((k) => lastAiMessage.includes(k))) return false;
@@ -4433,6 +4434,7 @@ ${contextStr}
       } catch (timeoutErr: any) {
         clearTimeout(streamTimeout);
         if (timeoutErr?.name === "AbortError" || timeoutErr?.message?.includes("abort")) {
+          console.log("[AI Latency] contact", contact.id, "first_llm_timeout_or_error_ms", Date.now() - startTime);
           console.log(`[AI Timeout] OpenAI ???? (>${AI_TIMEOUT_MS}ms) - contact ${contact.id}`);
           const timeoutCount = storage.incrementConsecutiveTimeouts(contact.id);
           storage.createSystemAlert({ alert_type: "timeout_escalation", details: `OpenAI ???? (?${timeoutCount}?)`, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
@@ -4461,6 +4463,7 @@ ${contextStr}
         throw timeoutErr;
       }
       clearTimeout(streamTimeout);
+      console.log("[AI Latency] contact", contact.id, "after_first_llm_ms", Date.now() - startTime);
       let loopCount = 0;
       const maxToolLoops = 3;
 
@@ -4489,9 +4492,11 @@ ${contextStr}
             let fnArgs: Record<string, string> = {};
             try { fnArgs = JSON.parse(fn?.arguments ?? "{}"); } catch (_e) {}
             toolsCalled.push(fnName);
+            const toolStartMs = Date.now();
             console.log(`[Webhook AI] ?? Tool: ${fnName}???:`, fnArgs);
             try {
               const toolResult = await callToolWithTimeout(fnName, fnArgs, toolCtx);
+              console.log("[AI Latency] contact", contact.id, "tool", fnName, "ms", Date.now() - toolStartMs);
               return { toolCall, toolResult };
             } catch (toolErr: any) {
               if (toolErr?.message === "TOOL_TIMEOUT") {
@@ -4671,6 +4676,8 @@ ${contextStr}
         }
       }
       if (reply && reply.trim()) {
+        const totalMs = Date.now() - startTime;
+        console.log("[AI Latency] contact", contact.id, "reply_sent_total_ms", totalMs, "tools=" + (toolsCalled.length ? toolsCalled.join(",") : "none"));
         const contactPlatform = platform || contact.platform || "line";
         const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", reply);
         broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: contact.brand_id });
@@ -4735,14 +4742,21 @@ ${contextStr}
     if (!contact) {
       return res.status(404).json({ message: "contact not found" });
     }
+    const runStartMs = Date.now();
+    console.log("[AI Latency] run-ai-reply start contactId=" + contactId);
     autoReplyWithAI(
       contact, String(message), channelToken ?? undefined,
       matchedBrandId != null ? Number(matchedBrandId) : undefined,
       platform ? String(platform) : undefined
     )
-      .then(() => res.status(200).json({ ok: true }))
+      .then(() => {
+        const totalMs = Date.now() - runStartMs;
+        console.log("[AI Latency] run-ai-reply done contactId=" + contactId + " in " + totalMs + "ms");
+        res.status(200).json({ ok: true });
+      })
       .catch((err) => {
-        console.error("[internal/run-ai-reply]", err);
+        const totalMs = Date.now() - runStartMs;
+        console.error("[AI Latency] run-ai-reply failed contactId=" + contactId + " after " + totalMs + "ms", err);
         res.status(500).json({ message: err?.message || "Internal Server Error" });
       });
   });
@@ -5179,6 +5193,7 @@ ${contextStr}
       }
 
       if (toolName === "lookup_order_by_product_and_phone") {
+        const toolStartMs = Date.now();
         const productName = (args.product_name || "").trim();
         const productIndex = args.product_index ? parseInt(String(args.product_index)) : 0;
         const phone = (args.phone || "").trim();
@@ -5333,6 +5348,7 @@ ${contextStr}
         }
 
         if (allResults.length === 0) {
+          console.log("[AI Latency] tool lookup_order_by_product_and_phone (no match) done in", Date.now() - toolStartMs, "ms");
           return JSON.stringify({ success: true, found: false, message: `????????? + SHOPLINE???????????????? ${matchedPages.length} ?????????????????????????????????????` });
         }
 
@@ -5378,10 +5394,12 @@ ${contextStr}
           const activeCtx = buildActiveOrderContext(o0, o0.source || orderSource, statusLabel0, onePageBlocks[0], "product_phone");
           storage.setActiveOrderContext(context.contactId, activeCtx);
         }
+        console.log("[AI Latency] tool lookup_order_by_product_and_phone done in", Date.now() - toolStartMs, "ms");
         return JSON.stringify({ success: true, found: true, total: uniqueOrders.length, orders: orderSummaries, note: multiOrderNote, formatted_list: uniqueOrders.length > 1 ? formattedList : undefined, one_page_summary: uniqueOrders.length === 1 ? onePageBlocks[0] : undefined, one_page_full });
       }
 
       if (toolName === "lookup_order_by_date_and_contact") {
+        const dateToolStartMs = Date.now();
         const contact = (args.contact || "").trim();
         const beginDate = (args.begin_date || "").trim();
         const endDate = (args.end_date || "").trim();
@@ -5483,6 +5501,7 @@ ${contextStr}
         const multiOrderNote = matched.length > 1
           ? `【重要】以下共 ${matched.length} 筆訂單。回覆時必須逐筆列出每筆的完整資訊（訂單編號、姓名、下單日期、金額、狀態、付款方式、配送方式等），不可只列一筆。請直接將下方 one_page_full 的內容完整呈現給客戶。\n簡表：\n${dateFormattedList}`
           : undefined;
+        console.log("[AI Latency] tool lookup_order_by_date_and_contact done in", Date.now() - dateToolStartMs, "ms");
         return JSON.stringify({ success: true, found: true, total: matched.length, orders: orderSummaries, truncated, note: multiOrderNote, formatted_list: matched.length > 1 ? dateFormattedList : undefined, one_page_summary: matched.length === 1 ? onePageBlocks[0] : undefined, one_page_full });
       }
 
@@ -6206,6 +6225,19 @@ ${contextStr}
     const contact = storage.getContact(contactId);
     if (!contact) return res.status(404).json({ message: "?????? mapping" });
     const assignedTo = contact.assigned_agent_id ? storage.getUserById(contact.assigned_agent_id) : null;
+    // 供操作者判斷：此對話目前是否會由 AI 回覆
+    let ai_will_reply = true;
+    let ai_not_reply_reason: string | null = null;
+    if (contact.needs_human === 1) {
+      ai_will_reply = false;
+      ai_not_reply_reason = "已轉人工";
+    } else if (contact.channel_id != null) {
+      const ch = storage.getChannel(contact.channel_id);
+      if (!ch || ch.is_ai_enabled !== 1) {
+        ai_will_reply = false;
+        ai_not_reply_reason = "此渠道未開啟 AI 回覆";
+      }
+    }
     return res.json({
       assigned_to_user_id: contact.assigned_agent_id,
       assigned_at: contact.assigned_at ?? contact.first_assigned_at,
@@ -6218,6 +6250,8 @@ ${contextStr}
       response_sla_deadline_at: contact.response_sla_deadline_at,
       assigned_agent_name: assignedTo?.display_name ?? null,
       assigned_agent_avatar_url: assignedTo?.avatar_url ?? null,
+      ai_will_reply,
+      ai_not_reply_reason,
     });
   });
 

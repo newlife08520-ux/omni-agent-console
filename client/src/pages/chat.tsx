@@ -1385,6 +1385,8 @@ export default function ChatPage() {
     response_sla_deadline_at: string | null;
     assigned_agent_name: string | null;
     assigned_agent_avatar_url: string | null;
+    ai_will_reply?: boolean;
+    ai_not_reply_reason?: string | null;
   }>({
     queryKey: ["/api/contacts", selectedId ?? 0, "assignment"],
     queryFn: () => apiRequest("GET", `/api/contacts/${selectedId}/assignment`) as Promise<any>,
@@ -2168,7 +2170,16 @@ export default function ChatPage() {
                 {effectiveSelectedContact?.needs_human ? (
                   <Badge variant="destructive" className="gap-1 text-xs" data-testid="badge-human-mode"><Headphones className="w-3 h-3" />人工模式</Badge>
                 ) : (
-                  <Badge variant="secondary" className="gap-1 text-xs bg-stone-100 text-stone-600" data-testid="badge-ai-mode"><Bot className="w-3 h-3" />AI 模式</Badge>
+                  <>
+                    <Badge variant="secondary" className="gap-1 text-xs bg-stone-100 text-stone-600" data-testid="badge-ai-mode"><Bot className="w-3 h-3" />AI 模式</Badge>
+                    {assignmentData?.ai_will_reply === false ? (
+                      <span className="text-[11px] text-amber-600" title={assignmentData?.ai_not_reply_reason ?? undefined}>
+                        （AI 不會回覆{assignmentData?.ai_not_reply_reason ? `：${assignmentData.ai_not_reply_reason}` : ""}）
+                      </span>
+                    ) : assignmentData?.ai_will_reply === true ? (
+                      <span className="text-[11px] text-emerald-600">AI 會回覆</span>
+                    ) : null}
+                  </>
                 )}
                 {effectiveSelectedContact?.status === "awaiting_human" && (
                   <Badge variant="outline" className="gap-1 text-xs border-orange-300 bg-orange-50 text-orange-600" data-testid="badge-ai-muted">

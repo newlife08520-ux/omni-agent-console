@@ -20,7 +20,10 @@
     "verify:full": "npm run check:all && npm run build",
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true});require('fs').rmSync('node_modules/.cache',{recursive:true,force:true})\"",
     "verify": "npm run verify:server",
-    "db:push": "drizzle-kit push"
+    "db:push": "drizzle-kit push",
+    "audit:superlanding": "tsx server/scripts/audit-superlanding-order-payload.ts",
+    "audit:shopline": "tsx server/scripts/audit-shopline-order-payload.ts",
+    "audit:payloads": "npm run audit:superlanding && npm run audit:shopline"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
