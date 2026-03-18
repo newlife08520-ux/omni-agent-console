@@ -87,7 +87,7 @@ export function getOrdersByPhone(
       .prepare(
         `SELECT payload, source FROM orders_normalized
          WHERE brand_id = ? AND buyer_phone_normalized = ?
-         ORDER BY datetime(created_at) DESC, synced_at DESC`
+         ORDER BY datetime(COALESCE(NULLIF(trim(order_created_at),''), created_at)) DESC, datetime(synced_at) DESC`
       )
       .all(brandId, norm) as { payload: string; source: string }[];
   } else {
@@ -95,7 +95,7 @@ export function getOrdersByPhone(
       .prepare(
         `SELECT payload, source FROM orders_normalized
          WHERE brand_id = ? AND buyer_phone_normalized = ? AND source = ?
-         ORDER BY datetime(created_at) DESC, synced_at DESC`
+         ORDER BY datetime(COALESCE(NULLIF(trim(order_created_at),''), created_at)) DESC, datetime(synced_at) DESC`
       )
       .all(brandId, norm, sourceHint) as { payload: string; source: string }[];
   }
@@ -122,9 +122,8 @@ export function getOrdersByPhoneMerged(brandId: number, phone: string): OrderInf
     const k = `${src}:${(o.global_order_id || "").toUpperCase()}`;
     if (!map.has(k)) map.set(k, o);
   }
-  return [...map.values()].sort((a, b) =>
-    String(b.created_at || b.order_created_at || "").localeCompare(String(a.created_at || a.order_created_at || ""))
-  );
+  const t = (o: OrderInfo) => String(o.order_created_at || o.created_at || "").trim();
+  return [...map.values()].sort((a, b) => t(b).localeCompare(t(a)));
 }
 
 export interface OrderItemRow {
@@ -219,16 +218,21 @@ export function upsertOrderNormalized(
   const globalId = (order.global_order_id || "").trim().toUpperCase();
   const payload = JSON.stringify(order);
   const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+  const orderCreatedAt = String(order.order_created_at || order.created_at || "").trim() || null;
   db.prepare(
     `
-    INSERT INTO orders_normalized (brand_id, source, global_order_id, buyer_phone_normalized, page_id, status, payload, synced_at, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO orders_normalized (brand_id, source, global_order_id, buyer_phone_normalized, page_id, status, payload, synced_at, created_at, order_created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(brand_id, source, global_order_id) DO UPDATE SET
       buyer_phone_normalized = excluded.buyer_phone_normalized,
       page_id = excluded.page_id,
       status = excluded.status,
       payload = excluded.payload,
-      synced_at = excluded.synced_at
+      synced_at = excluded.synced_at,
+      order_created_at = CASE
+        WHEN excluded.order_created_at IS NOT NULL AND trim(excluded.order_created_at) != '' THEN excluded.order_created_at
+        ELSE orders_normalized.order_created_at
+      END
   `
   ).run(
     brandId,
@@ -239,7 +243,8 @@ export function upsertOrderNormalized(
     order.status ?? null,
     payload,
     now,
-    now
+    now,
+    orderCreatedAt
   );
   const row = db
     .prepare("SELECT id FROM orders_normalized WHERE brand_id = ? AND source = ? AND global_order_id = ?")
@@ -286,7 +291,7 @@ export function lookupOrdersByProductAliasAndPhoneLocal(
             AND (pa.alias_normalized LIKE ? OR replace(lower(pa.alias), ' ', '') LIKE ?)
         ))
       )
-    ORDER BY datetime(o.created_at) DESC
+    ORDER BY datetime(COALESCE(NULLIF(trim(o.order_created_at),''), o.created_at)) DESC
   `
     )
     .all(brandId, norm, like, like, like) as { payload: string; source: string }[];
@@ -308,6 +313,9 @@ export function getOrderIndexStats(brandId?: number): {
   items_count: number;
   aliases_count: number;
   by_source: { superlanding: number; shopline: number };
+  order_created_at_missing_count: number;
+  order_created_at_min: string | null;
+  order_created_at_max: string | null;
 } {
   const orders_count = (
     brandId != null
@@ -343,5 +351,46 @@ export function getOrderIndexStats(brandId?: number): {
           .prepare("SELECT COUNT(*) as c FROM orders_normalized WHERE brand_id = ? AND source = 'shopline'")
           .get(brandId) as { c: number }).c
       : (db.prepare("SELECT COUNT(*) as c FROM orders_normalized WHERE source = 'shopline'").get() as { c: number }).c;
-  return { orders_count, items_count, aliases_count, by_source: { superlanding: sl, shopline: sh } };
+  let order_created_at_null = 0;
+  let order_created_at_min: string | null = null;
+  let order_created_at_max: string | null = null;
+  try {
+    order_created_at_null = (
+      brandId != null
+        ? (db
+            .prepare(
+              `SELECT COUNT(*) as c FROM orders_normalized WHERE brand_id = ? AND (order_created_at IS NULL OR trim(order_created_at) = '')`
+            )
+            .get(brandId) as { c: number })
+        : (db
+            .prepare(`SELECT COUNT(*) as c FROM orders_normalized WHERE order_created_at IS NULL OR trim(order_created_at) = ''`)
+            .get() as { c: number })
+    ).c;
+    const mm = (
+      brandId != null
+        ? db
+            .prepare(
+              `SELECT MIN(order_created_at) as mn, MAX(order_created_at) as mx FROM orders_normalized WHERE brand_id = ? AND order_created_at IS NOT NULL AND trim(order_created_at) != ''`
+            )
+            .get(brandId)
+        : db
+            .prepare(
+              `SELECT MIN(order_created_at) as mn, MAX(order_created_at) as mx FROM orders_normalized WHERE order_created_at IS NOT NULL AND trim(order_created_at) != ''`
+            )
+            .get()
+    ) as { mn: string | null; mx: string | null };
+    order_created_at_min = mm?.mn ?? null;
+    order_created_at_max = mm?.mx ?? null;
+  } catch {
+    /* column may be missing before migration */
+  }
+  return {
+    orders_count,
+    items_count,
+    aliases_count,
+    by_source: { superlanding: sl, shopline: sh },
+    order_created_at_missing_count: order_created_at_null,
+    order_created_at_min,
+    order_created_at_max,
+  };
 }

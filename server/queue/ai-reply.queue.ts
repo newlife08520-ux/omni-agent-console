@@ -40,6 +40,8 @@ export interface AiReplyJobData {
   channelToken: string | null;
   matchedBrandId?: number;
   platform?: string;
+  /** worker 計算 queue_wait_ms */
+  enqueuedAtMs?: number;
 }
 
 export interface DebouncedMessage {
@@ -235,6 +237,7 @@ export async function addAiReplyJob(data: {
       channelToken: data.channelToken,
       matchedBrandId: data.matchedBrandId,
       platform: data.platform,
+      enqueuedAtMs: Date.now(),
     }, {
       jobId: `${data.contactId}_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
     });

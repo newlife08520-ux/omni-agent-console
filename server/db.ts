@@ -133,6 +133,7 @@ export function initDatabase() {
   migrateContactStatusExpansion();
   migrateAiLogsTable();
   migrateAiLogsPhase0Observability();
+  migrateAiLogsPhase27Telemetry();
   migrateBrandsAndChannels();
   migrateShoplineFields();
   migrateSystemPrompt();
@@ -159,6 +160,7 @@ export function initDatabase() {
   migrateConversationStateFields();
   migratePhase2OrderIndex();
   migratePhase23OrderItemsAndAliases();
+  migratePhase24OrderCreatedAt();
 
   db.exec(`CREATE TABLE IF NOT EXISTS schema_info (key TEXT PRIMARY KEY, value TEXT)`);
   db.prepare("INSERT OR REPLACE INTO schema_info (key, value) VALUES ('schema_version', ?)").run("1");
@@ -591,6 +593,35 @@ function migratePhase23OrderItemsAndAliases() {
     db.exec("ALTER TABLE product_aliases ADD COLUMN alias_normalized TEXT");
     console.log("[DB Migration] product_aliases 已新增 alias_normalized");
   }
+}
+
+/** Phase 2.4：真實下單時間欄位（排序用），與列 created_at 同步時間分離 */
+function migratePhase24OrderCreatedAt() {
+  const onCols = (db.prepare("PRAGMA table_info(orders_normalized)").all() as { name: string }[]).map((c) => c.name);
+  if (!onCols.includes("order_created_at")) {
+    db.exec("ALTER TABLE orders_normalized ADD COLUMN order_created_at TEXT");
+    console.log("[DB Migration] orders_normalized 已新增 order_created_at");
+  }
+  const rows = db
+    .prepare(
+      "SELECT id, payload FROM orders_normalized WHERE order_created_at IS NULL OR trim(order_created_at) = ''"
+    )
+    .all() as { id: number; payload: string }[];
+  const upd = db.prepare("UPDATE orders_normalized SET order_created_at = ? WHERE id = ?");
+  let n = 0;
+  for (const r of rows) {
+    try {
+      const o = JSON.parse(r.payload || "{}") as { created_at?: string; order_created_at?: string };
+      const t = String(o.order_created_at || o.created_at || "").trim();
+      if (t) {
+        upd.run(t, r.id);
+        n++;
+      }
+    } catch {
+      /* skip */
+    }
+  }
+  if (n > 0) console.log(`[DB Migration] order_created_at backfill: ${n} rows`);
 }
 
 /** Meta 留言互動中心：留言、模板、貼文 mapping、規則 */
@@ -1190,6 +1221,28 @@ function migrateAiLogsPhase0Observability() {
   if (!names.has("reason_if_bypassed")) {
     db.exec("ALTER TABLE ai_logs ADD COLUMN reason_if_bypassed TEXT");
   }
+}
+
+/** Phase 2.7：first/second LLM、renderer、prompt、延遲欄位 */
+function migrateAiLogsPhase27Telemetry() {
+  const columns = db.prepare("PRAGMA table_info(ai_logs)").all() as { name: string }[];
+  const names = new Set(columns.map((c) => c.name));
+  const add = (col: string, sql: string) => {
+    if (!names.has(col)) {
+      db.exec(sql);
+      names.add(col);
+    }
+  };
+  add("used_first_llm", "ALTER TABLE ai_logs ADD COLUMN used_first_llm INTEGER DEFAULT 0");
+  add("used_second_llm", "ALTER TABLE ai_logs ADD COLUMN used_second_llm INTEGER DEFAULT 0");
+  add("reply_renderer", "ALTER TABLE ai_logs ADD COLUMN reply_renderer TEXT DEFAULT ''");
+  add("prompt_profile", "ALTER TABLE ai_logs ADD COLUMN prompt_profile TEXT DEFAULT ''");
+  add(
+    "first_customer_visible_reply_ms",
+    "ALTER TABLE ai_logs ADD COLUMN first_customer_visible_reply_ms INTEGER"
+  );
+  add("lookup_ack_sent_ms", "ALTER TABLE ai_logs ADD COLUMN lookup_ack_sent_ms INTEGER");
+  add("queue_wait_ms", "ALTER TABLE ai_logs ADD COLUMN queue_wait_ms INTEGER");
 }
 
 function migrateBrandsAndChannels() {

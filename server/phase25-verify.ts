@@ -1,0 +1,108 @@
+/**
+ * Phase 2.5 驗證：npx tsx server/phase25-verify.ts
+ */
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import { assembleEnrichedSystemPrompt } from "./services/prompt-builder";
+import { derivePaymentStatus } from "./order-payment-utils";
+import { deterministicReplyHasBannedPhrase } from "./order-reply-utils";
+import { filterOrdersByDateRange } from "./order-service";
+import type { OrderInfo } from "@shared/schema";
+import { packDeterministicMultiOrderToolResult } from "./order-multi-renderer";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+function assert(cond: boolean, msg: string) {
+  if (!cond) throw new Error(`[phase25-verify] FAIL: ${msg}`);
+}
+
+async function main() {
+  let n = 0;
+  const ok = (s: string) => console.log(`  OK ${++n}. ${s}`);
+
+  const lite = await assembleEnrichedSystemPrompt(1, { planMode: "order_lookup" });
+  assert(lite.prompt_profile === "order_lookup_ultra_lite", "profile order_lookup_ultra_lite");
+  assert(!lite.includes.catalog && !lite.includes.knowledge && !lite.includes.image, "lite no c/k/i");
+  assert(lite.full_prompt.length < 2500, "ultra-lite 顯著短於肥 prompt");
+  ok("order_lookup_ultra_lite 不含 catalog/knowledge/image");
+
+  const pbSrc = fs.readFileSync(path.join(__dirname, "services/prompt-builder.ts"), "utf8");
+  assert(pbSrc.includes("answer_directly_full") && pbSrc.includes("buildCatalogPrompt"), "full 路徑含 catalog");
+  ok("answer_directly_full 程式含 catalog（避免 verify 拉整包 catalog API）");
+
+  const fol = await assembleEnrichedSystemPrompt(1, {
+    planMode: "order_lookup",
+    hasActiveOrderContext: true,
+  });
+  assert(fol.prompt_profile === "order_followup_ultra_lite", "followup ultra_lite");
+  assert(fol.full_prompt.length <= lite.full_prompt.length, "followup 不大於 lookup ultra");
+  ok("order_followup_ultra_lite");
+
+  const o1: OrderInfo = {
+    global_order_id: "X1",
+    status: "新訂單",
+    final_total_order_amount: 1,
+    product_list: "[]",
+    buyer_name: "",
+    buyer_phone: "",
+    buyer_email: "",
+    tracking_number: "",
+    created_at: "",
+    payment_method: "credit_card",
+    prepaid: false,
+    source: "superlanding",
+  };
+  assert(derivePaymentStatus(o1, "新訂單", "superlanding").kind === "pending", "cc unpaid pending");
+  const o2: OrderInfo = { ...o1, global_order_id: "X2", status: "待出貨", payment_method: "virtual_account" };
+  assert(derivePaymentStatus(o2, "待出貨", "superlanding").kind === "pending", "atm pending");
+  const o3: OrderInfo = { ...o1, global_order_id: "X3", status: "已取消" };
+  assert(derivePaymentStatus(o3, "已取消", "superlanding").kind === "failed", "cancel failed");
+  ok("payment truth v2 pending/failed");
+
+  const d1: OrderInfo = {
+    ...o1,
+    global_order_id: "D1",
+    order_created_at: "2026-03-10T10:00:00+08:00",
+    created_at: "2026-03-10T10:00:00+08:00",
+  };
+  const d2: OrderInfo = { ...d1, global_order_id: "D2", order_created_at: "2026-04-01T10:00:00+08:00" };
+  assert(filterOrdersByDateRange([d1, d2], "2026-03-01", "2026-03-31").length === 1, "date filter");
+  ok("date range filter");
+
+  const noop = { setActiveOrderContext: () => {} } as unknown as import("./storage").IStorage;
+  const pack = packDeterministicMultiOrderToolResult({
+    orders: [d1, d2],
+    orderSource: "superlanding",
+    headerLine: "測試",
+    contactId: undefined,
+    storage: noop,
+    matchedBy: "text",
+    renderer: "test",
+  });
+  assert(pack.deterministic_skip_llm === true && typeof pack.deterministic_customer_reply === "string", "pack multi");
+  ok("multi deterministic pack");
+
+  const det = "訂單 A；貨到付款；狀態：待出貨。";
+  assert(!deterministicReplyHasBannedPhrase(det), "no banned");
+  ok("deterministic 無禁用句");
+
+  const routes = fs.readFileSync(path.join(__dirname, "routes.ts"), "utf8");
+  assert(routes.includes("prompt_profile=") && routes.includes("deterministic_skip_llm=true"), "log keywords");
+  assert(routes.includes("packDeterministicMultiOrderToolResult"), "routes uses pack");
+  ok("log 關鍵字存在");
+
+  const pb = fs.readFileSync(path.join(__dirname, "services/prompt-builder.ts"), "utf8");
+  assert(
+    pb.includes("buildOrderLookupUltraLitePrompt") && pb.includes("getBrandReplyMeta"),
+    "builder ultra-lite + meta"
+  );
+  ok("prompt-builder ultra-lite 分流");
+
+  console.log(`[phase25-verify] 通過 ${n} 項`);
+}
+
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

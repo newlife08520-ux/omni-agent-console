@@ -350,7 +350,7 @@ export interface ActiveOrderContext {
   matched_by: "image" | "text" | "product_phone" | "manual";
   matched_confidence?: "high" | "medium" | "low";
   last_fetched_at: string;
-  payment_status: "success" | "pending" | "failed" | "unknown";
+  payment_status: "success" | "pending" | "failed" | "cod" | "unknown";
   payment_method?: string;
   fulfillment_status?: string;
   shipping_method?: string;
@@ -385,6 +385,8 @@ export interface ActiveOrderContext {
     payment_status_label?: string;
     fulfillment_status?: string;
     order_time?: string;
+    /** shopline | superlanding，供「只看官網／只看一頁」篩選 */
+    source?: "shopline" | "superlanding";
   }[];
   selected_order_id?: string | null;
   candidate_count?: number;
@@ -479,6 +481,14 @@ export interface AiLog {
   plan_mode?: string | null;
   /** Phase 0：未進 LLM 時簡短原因 */
   reason_if_bypassed?: string | null;
+  /** Phase 2.7 */
+  used_first_llm?: number | null;
+  used_second_llm?: number | null;
+  reply_renderer?: string | null;
+  prompt_profile?: string | null;
+  first_customer_visible_reply_ms?: number | null;
+  lookup_ack_sent_ms?: number | null;
+  queue_wait_ms?: number | null;
 }
 
 export interface LoginRequest {

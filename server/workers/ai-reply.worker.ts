@@ -36,6 +36,7 @@ async function callInternalRunAiReply(payload: {
   channelToken?: string | null;
   matchedBrandId?: number;
   platform?: string;
+  enqueueTimestampMs?: number;
 }): Promise<void> {
   if (!INTERNAL_API_SECRET) {
     throw new Error("INTERNAL_API_SECRET is required");
@@ -96,12 +97,14 @@ function main() {
       storage.createAiReplyDeliveryIfMissing(deliveryKey, platform, contactId, eventIds, mergedText);
 
       try {
+        const enq = job.data.enqueuedAtMs ?? (job.timestamp as number);
         await callInternalRunAiReply({
           contactId,
           message: mergedText,
           channelToken: job.data.channelToken ?? undefined,
           matchedBrandId: job.data.matchedBrandId,
           platform,
+          enqueueTimestampMs: typeof enq === "number" ? enq : undefined,
         });
         storage.markAiReplyDeliverySent(deliveryKey);
         console.log("[Worker] sent:", deliveryKey);

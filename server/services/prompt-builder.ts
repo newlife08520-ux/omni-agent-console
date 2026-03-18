@@ -5,6 +5,12 @@
  * - 流程：查單條件、轉人工高層原則、非服務時段（由總 builder 組裝，並做 runtime 去重）
  */
 import { storage } from "../storage";
+import {
+  buildOrderLookupUltraLitePrompt as ultraLookup,
+  buildOrderFollowupUltraLitePrompt as ultraFollowup,
+  getBrandReplyMeta as getBrandReplyMetaFromUltra,
+} from "../prompts/order-ultra-lite";
+import { orderFeatureFlags } from "../order-feature-flags";
 import * as assignment from "../assignment";
 import { getSuperLandingConfig, ensurePagesCacheLoaded, buildProductCatalogPrompt } from "../superlanding";
 import type { SuperLandingConfig } from "../superlanding";
@@ -163,10 +169,16 @@ export function buildImagePrompt(brandId?: number): string {
 export interface EnrichedPromptContext {
   productScope?: string | null;
   planMode?: string;
+  /** 已有訂單上下文（追問輪） */
+  hasActiveOrderContext?: boolean;
+  /** 使用者最近一則含圖 */
+  recentUserHasImage?: boolean;
 }
 
 export interface EnrichedPromptResult {
   full_prompt: string;
+  prompt_profile: string;
+  prompt_chars: number;
   sections: Array<{ key: string; title: string; length: number }>;
   includes: {
     global_policy: boolean;
@@ -179,6 +191,36 @@ export interface EnrichedPromptResult {
   };
 }
 
+export function getBrandReplyMeta(brandId?: number) {
+  return getBrandReplyMetaFromUltra(brandId);
+}
+
+/** Phase 2.7：獨立 ultra 模組；flag 關閉時回退 slice */
+export function buildOrderLookupUltraLitePrompt(brandId?: number): string {
+  if (!orderFeatureFlags.orderUltraLitePrompt) {
+    const g = buildGlobalPolicyPrompt().slice(0, 1600);
+    const b = buildBrandPersonaPrompt(brandId).slice(0, 500);
+    return `${g}\n${b}\n\n--- 查單 legacy ---\n依工具結果簡答，勿捏造。`;
+  }
+  return ultraLookup(brandId);
+}
+
+export function buildOrderFollowupUltraLitePrompt(brandId?: number): string {
+  if (!orderFeatureFlags.orderUltraLitePrompt) {
+    return `${buildGlobalPolicyPrompt().slice(0, 800)}\n訂單追問：簡短依上下文。`;
+  }
+  return ultraFollowup(brandId);
+}
+
+/** @deprecated 保留相容；實際等同 ultra-lite */
+export function buildOrderLookupLitePrompt(brandId?: number): string {
+  return buildOrderLookupUltraLitePrompt(brandId);
+}
+
+export function buildOrderFollowupLitePrompt(brandId?: number): string {
+  return buildOrderFollowupUltraLitePrompt(brandId);
+}
+
 /**
  * 總組裝：依序拼接各區塊，最後做一次 section 去重（normalizeSections）。
  * 回傳 full_prompt 與 metadata（sections、includes）供 preview 與除錯使用。
@@ -187,26 +229,98 @@ export async function assembleEnrichedSystemPrompt(
   brandId?: number,
   context?: EnrichedPromptContext
 ): Promise<EnrichedPromptResult> {
-  const globalBlock = buildGlobalPolicyPrompt();
-  const brandBlock = buildBrandPersonaPrompt(brandId);
-  const humanHoursBlock = buildHumanHoursPrompt();
-  const flowBlock = buildFlowPrinciplesPrompt({
-    returnFormUrl: brandId ? storage.getBrand(brandId)?.return_form_url || undefined : undefined,
-    productScope: context?.productScope,
-  });
-  const catalogBlock = await buildCatalogPrompt(brandId);
-  const knowledgeBlock = buildKnowledgePrompt(brandId);
-  const imageBlock = buildImagePrompt(brandId);
+  const mode = context?.planMode || "";
+  const isOrderLookup = mode === "order_lookup";
+  const useFollowupLite = isOrderLookup && context?.hasActiveOrderContext;
+  const useImageFull = !!context?.recentUserHasImage;
 
-  const raw =
-    globalBlock +
-    brandBlock +
-    humanHoursBlock +
-    flowBlock +
-    catalogBlock +
-    knowledgeBlock +
-    imageBlock;
-  const full_prompt = normalizeSections(raw);
+  let prompt_profile: string;
+  let full_prompt: string;
+  let includes: EnrichedPromptResult["includes"];
+
+  if (useImageFull) {
+    prompt_profile = "image_lookup_full";
+    const globalBlock = buildGlobalPolicyPrompt();
+    const brandBlock = buildBrandPersonaPrompt(brandId);
+    const humanHoursBlock = buildHumanHoursPrompt();
+    const flowBlock = buildFlowPrinciplesPrompt({
+      returnFormUrl: brandId ? storage.getBrand(brandId)?.return_form_url || undefined : undefined,
+      productScope: context?.productScope,
+    });
+    const catalogBlock = await buildCatalogPrompt(brandId);
+    const knowledgeBlock = buildKnowledgePrompt(brandId);
+    const imageBlock = buildImagePrompt(brandId);
+    const raw =
+      globalBlock + brandBlock + humanHoursBlock + flowBlock + catalogBlock + knowledgeBlock + imageBlock;
+    full_prompt = normalizeSections(raw);
+    includes = {
+      global_policy: !!globalBlock.trim(),
+      brand_persona: !!brandBlock.trim(),
+      human_hours: !!humanHoursBlock.trim(),
+      flow_principles: !!flowBlock.trim(),
+      catalog: full_prompt.includes("--- CATALOG ---"),
+      knowledge: full_prompt.includes("--- KNOWLEDGE ---"),
+      image: full_prompt.includes("--- IMAGE ---"),
+    };
+  } else if (useFollowupLite) {
+    prompt_profile = orderFeatureFlags.orderUltraLitePrompt
+      ? "order_followup_ultra_lite"
+      : "order_followup_legacy_slice";
+    full_prompt = normalizeSections(buildOrderFollowupUltraLitePrompt(brandId));
+    includes = {
+      global_policy: true,
+      brand_persona: full_prompt.length > 100,
+      human_hours: false,
+      flow_principles: false,
+      catalog: false,
+      knowledge: false,
+      image: false,
+    };
+  } else if (isOrderLookup) {
+    prompt_profile = orderFeatureFlags.orderUltraLitePrompt
+      ? "order_lookup_ultra_lite"
+      : "order_lookup_legacy_slice";
+    full_prompt = normalizeSections(buildOrderLookupUltraLitePrompt(brandId));
+    includes = {
+      global_policy: true,
+      brand_persona: true,
+      human_hours: false,
+      flow_principles: false,
+      catalog: false,
+      knowledge: false,
+      image: false,
+    };
+  } else {
+    prompt_profile = "answer_directly_full";
+    const globalBlock = buildGlobalPolicyPrompt();
+    const brandBlock = buildBrandPersonaPrompt(brandId);
+    const humanHoursBlock = buildHumanHoursPrompt();
+    const flowBlock = buildFlowPrinciplesPrompt({
+      returnFormUrl: brandId ? storage.getBrand(brandId)?.return_form_url || undefined : undefined,
+      productScope: context?.productScope,
+    });
+    const catalogBlock = await buildCatalogPrompt(brandId);
+    const knowledgeBlock = buildKnowledgePrompt(brandId);
+    const imageBlock = buildImagePrompt(brandId);
+    const raw =
+      globalBlock +
+      brandBlock +
+      humanHoursBlock +
+      flowBlock +
+      catalogBlock +
+      knowledgeBlock +
+      imageBlock;
+    full_prompt = normalizeSections(raw);
+    includes = {
+      global_policy: !!globalBlock.trim(),
+      brand_persona: !!brandBlock.trim(),
+      human_hours: !!humanHoursBlock.trim(),
+      flow_principles: !!flowBlock.trim(),
+      catalog: full_prompt.includes("--- CATALOG ---"),
+      knowledge: full_prompt.includes("--- KNOWLEDGE ---"),
+      image: full_prompt.includes("--- IMAGE ---"),
+    };
+  }
 
   const sectionRe = /---\s*([^\n-]+?)\s*---/g;
   const matches: { key: string; title: string; index: number }[] = [];
@@ -222,15 +336,11 @@ export async function assembleEnrichedSystemPrompt(
     length: (i + 1 < matches.length ? matches[i + 1].index : full_prompt.length) - curr.index,
   }));
 
-  const includes = {
-    global_policy: !!globalBlock.trim(),
-    brand_persona: !!brandBlock.trim(),
-    human_hours: !!humanHoursBlock.trim(),
-    flow_principles: !!flowBlock.trim(),
-    catalog: full_prompt.includes("--- CATALOG ---"),
-    knowledge: full_prompt.includes("--- KNOWLEDGE ---"),
-    image: full_prompt.includes("--- IMAGE ---"),
+  return {
+    full_prompt,
+    prompt_profile,
+    prompt_chars: full_prompt.length,
+    sections,
+    includes,
   };
-
-  return { full_prompt, sections, includes };
 }

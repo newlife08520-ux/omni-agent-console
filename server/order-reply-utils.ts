@@ -1,47 +1,17 @@
 /**
- * 訂單回覆格式與付款狀態（供 fast path / tool 共用，避免 routes 循環依賴）
+ * 訂單回覆格式與付款狀態（供 fast path / tool 共用）
+ * 付款狀態一律走 derivePaymentStatus，COD 顯示「貨到付款（到收／取件時付款）」。
  */
-import type { OrderInfo } from "@shared/schema";
+import type { OrderInfo, ActiveOrderContext } from "@shared/schema";
+import { derivePaymentStatus, type PaymentKind } from "./order-payment-utils";
 
 const CVS_SHIPPING_KEYWORDS = ["超商", "門市", "7-11", "7-ELEVEN", "全家", "OK", "萊爾富"];
-const PAYMENT_FAIL_STATUS_KW = ["失敗", "未成功", "付款失敗"];
-const PAYMENT_FAIL_METHOD_KW = ["失敗", "未付"];
-const PAYMENT_SUCCESS_STATUS_KW = ["已確認", "待出貨", "已出貨", "已完成"];
-const PAYMENT_PENDING_STATUS_KW = ["待付款", "未付款", "確認中", "新訂單"];
 
-export type PayKind = "success" | "failed" | "pending" | "cod" | "unknown";
+export type PayKind = PaymentKind;
 
 export function payKindForOrder(order: OrderInfo, statusLabel: string, source: string): { kind: PayKind; label: string } {
-  if (/貨到付款|取貨付款|到店付款|COD|現金\s*與\s*刷卡/i.test(order.payment_method || "")) {
-    return { kind: "cod", label: "貨到付款" };
-  }
-  let k: PayKind = "unknown";
-  const payRaw = (order.payment_status_raw || "").toLowerCase();
-  if (source === "shopline" && payRaw) {
-    if (/paid|complete|success|captured|authorized/.test(payRaw)) k = "success";
-    else if (/pending|unpaid|awaiting|processing/.test(payRaw)) k = "pending";
-    else if (/fail|void|cancel|refund/.test(payRaw)) k = "failed";
-  }
-  if (k === "unknown") {
-    if (
-      PAYMENT_FAIL_STATUS_KW.some((x) => statusLabel.includes(x)) ||
-      (order.prepaid === false &&
-        order.paid_at == null &&
-        !PAYMENT_FAIL_METHOD_KW.some((x) => (order.payment_method || "").includes(x)))
-    )
-      k = "failed";
-    else if (order.prepaid === true || order.paid_at || PAYMENT_SUCCESS_STATUS_KW.some((x) => statusLabel.includes(x)))
-      k = "success";
-    else if (PAYMENT_PENDING_STATUS_KW.some((x) => statusLabel.includes(x))) k = "pending";
-  }
-  const labels: Record<PayKind, string> = {
-    success: "付款成功",
-    failed: "付款失敗",
-    pending: "待付款",
-    cod: "貨到付款",
-    unknown: "付款狀態未明",
-  };
-  return { kind: k, label: labels[k] };
+  const p = derivePaymentStatus(order, statusLabel, source);
+  return { kind: p.kind, label: p.label };
 }
 
 export function formatOrderOnePage(o: {
@@ -93,4 +63,58 @@ export function sourceChannelLabel(src: string | undefined): string {
   if (src === "shopline") return "官網（SHOPLINE）";
   if (src === "superlanding") return "一頁商店";
   return "訂單";
+}
+
+/** Phase 2.4：deterministic 模板禁用句型（verify 掃描） */
+export const PHASE24_BANNED_DETERMINISTIC_PHRASES = [
+  "真的很抱歉讓您久等了",
+  "我會隨時在這裡幫您",
+  "感謝您的耐心等候",
+  "感謝您的耐心",
+  "非常抱歉造成您的困擾",
+];
+
+export function deterministicReplyHasBannedPhrase(text: string): string | null {
+  const t = text || "";
+  for (const p of PHASE24_BANNED_DETERMINISTIC_PHRASES) {
+    if (t.includes(p)) return p;
+  }
+  return null;
+}
+
+/** Active order 追問：先結論、少套話；COD 不誤導付款失敗 */
+export function buildDeterministicFollowUpReply(ctx: ActiveOrderContext): string | null {
+  if (!ctx?.order_id) return null;
+  const parts: string[] = [`訂單 ${ctx.order_id}`];
+  if (ctx.payment_status && ctx.payment_status !== "unknown") {
+    const paymentText =
+      ctx.payment_status === "cod"
+        ? "貨到付款（到收／取件時付款），不是線上付款失敗"
+        : ctx.payment_status === "success"
+          ? "已付款"
+          : ctx.payment_status === "failed"
+            ? "這筆線上付款未完成，需重新下單或洽客服"
+            : "付款尚在確認或待付";
+    parts.push(paymentText);
+  }
+  if (ctx.fulfillment_status) parts.push(`狀態：${ctx.fulfillment_status}`);
+  if (ctx.delivery_target_type === "cvs") {
+    const storeBits = [ctx.cvs_brand, ctx.cvs_store_name].filter(Boolean).join(" ").trim();
+    const addr = (ctx.full_address || "").trim();
+    if (storeBits || addr) {
+      parts.push(
+        storeBits
+          ? `取貨：${storeBits}${addr ? `，${addr}` : ""}`
+          : `取貨地址：${addr}`
+      );
+    }
+  } else if (ctx.full_address?.trim() || ctx.address_or_store?.trim()) {
+    parts.push(`寄送：${(ctx.full_address || ctx.address_or_store || "").trim()}`);
+  }
+  if (ctx.tracking_no?.trim()) {
+    parts.push(`物流單號 ${ctx.tracking_no.trim()}，可到物流公司網站查進度`);
+  } else if (ctx.shipping_method?.trim() && ctx.delivery_target_type !== "cvs") {
+    parts.push(`配送：${ctx.shipping_method.trim()}`);
+  }
+  return parts.length > 1 ? parts.join("；") + "。" : null;
 }

@@ -2,4 +2,13 @@
 import { getOrderIndexStats } from "../order-index";
 
 const bid = process.argv[2] ? parseInt(process.argv[2], 10) : undefined;
-console.log(JSON.stringify(getOrderIndexStats(bid), null, 2));
+const s = getOrderIndexStats(bid);
+console.log(JSON.stringify(s, null, 2));
+console.log(
+  "[stats:order-index] Phase24: order_created_at_missing=",
+  s.order_created_at_missing_count,
+  "min=",
+  s.order_created_at_min,
+  "max=",
+  s.order_created_at_max
+);

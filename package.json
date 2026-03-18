@@ -28,7 +28,13 @@
     "derive:aliases": "tsx server/scripts/derive-product-aliases.ts",
     "stats:order-index": "tsx server/scripts/query-order-index-stats.ts",
     "verify:hardening": "tsx server/autonomous-hardening-verify.ts",
-    "verify:phase23": "npm run check:server && npm run verify:hardening && npm run stats:order-index"
+    "verify:phase23": "npm run check:server && npm run verify:hardening && npm run stats:order-index",
+    "verify:phase24": "npm run check:server && npm run verify:hardening && npx tsx server/phase24-verify.ts && npm run stats:order-index",
+    "verify:phase25": "npm run check:server && npm run verify:hardening && npx tsx server/phase24-verify.ts && npx tsx server/phase25-verify.ts && npm run stats:order-index",
+    "verify:phase26": "npm run check:server && npm run verify:hardening && npx tsx server/phase24-verify.ts && npx tsx server/phase25-verify.ts && npx tsx server/phase26-verify.ts && npm run stats:order-index",
+    "verify:phase27": "npm run check:server && npm run verify:hardening && npx tsx server/phase24-verify.ts && npx tsx server/phase25-verify.ts && npx tsx server/phase26-verify.ts && npx tsx server/phase27-verify.ts && npm run stats:order-index",
+    "stats:latency": "tsx server/scripts/query-latency-stats.ts",
+    "stats:latency-help": "tsx server/scripts/query-latency-stats.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

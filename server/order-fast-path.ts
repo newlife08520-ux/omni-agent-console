@@ -10,7 +10,7 @@ import {
   getUnifiedStatusLabel,
   type OrderLookupPreferSource,
 } from "./order-service";
-import { formatOrderOnePage, payKindForOrder, sourceChannelLabel } from "./order-reply-utils";
+import { formatOrderOnePage, payKindForOrder, sourceChannelLabel, buildDeterministicFollowUpReply } from "./order-reply-utils";
 import { buildActiveOrderContextFromOrder } from "./order-active-context";
 
 const ASK_ORDER_KW = /我要查訂單|查訂單|訂單查詢|幫我查訂單|想查訂單/i;
@@ -33,12 +33,29 @@ function isLineMostlyOrderId(msg: string): boolean {
   return /^[A-Za-z0-9\-]+$/.test(t);
 }
 
+/** 混合句內訂單號，例如「可以幫我查 AQX13705 嗎」 */
+export function extractOrderIdFromMixedSentence(msg: string): string | null {
+  const re = /[A-Za-z][A-Za-z0-9\-]{4,13}/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(msg)) !== null) {
+    const u = m[0].toUpperCase();
+    if (/^09\d/.test(u)) continue;
+    if (u.length >= 5 && u.length <= 14) return u;
+  }
+  return null;
+}
+
+const FOLLOWUP_FP_KW =
+  /出貨|付款成功|寄到哪|地址|門市|全家|物流|單號|追蹤|貨到|取件|配送/i;
+
 export type OrderFastPathType =
   | "order_id"
+  | "order_id_mixed"
   | "phone"
   | "shopline_phone"
   | "superlanding_phone"
   | "ask_for_identifier"
+  | "order_followup"
   | null;
 
 export async function tryOrderFastPath(params: {
@@ -57,16 +74,34 @@ export async function tryOrderFastPath(params: {
     return null;
   }
 
+  /** Phase 2.4：已有 active context 時，追問不進第一輪 LLM */
+  if (planMode === "order_lookup" || planMode === "order_followup") {
+    const ctx = storage.getActiveOrderContext(contactId);
+    if (ctx?.order_id && FOLLOWUP_FP_KW.test(msg) && !isLineMostlyPhone(msg)) {
+      const det = buildDeterministicFollowUpReply(ctx);
+      if (det) {
+        console.log(
+          `[order_followup_fast_path_hit=true] followup_intent=followup_reply contact=${contactId} order=${ctx.order_id}`
+        );
+        return { reply: det, fastPathType: "order_followup" };
+      }
+    }
+  }
+
   const preferShop = /官網|官方網站|官網購買|官網下單|SHOPLINE|shopline/i.test(msg) ||
     /官網|官方網站|SHOPLINE|shopline/i.test(recentUserMessages.slice(-3).join(" "));
   const preferSl =
     ONE_PAGE_HINTS.test(msg) || ONE_PAGE_HINTS.test(recentUserMessages.slice(-3).join(" "));
 
+  const mixedOid =
+    !isLineMostlyOrderId(msg) && extractOrderIdFromMixedSentence(msg);
   const allowFast =
     planMode === "order_lookup" ||
+    planMode === "order_followup" ||
     planMode === "answer_directly" ||
     (isLineMostlyPhone(msg) && msg.length <= 14) ||
     (isLineMostlyOrderId(msg) && msg.length <= 14) ||
+    (!!mixedOid && /查|幫我|看一下|訂單|請問|幫忙|查詢/i.test(msg)) ||
     (preferShop && extractTwPhone(msg)) ||
     (preferSl && extractTwPhone(msg));
   if (!allowFast) return null;
@@ -81,6 +116,48 @@ export async function tryOrderFastPath(params: {
         "要幫您查訂單的話，請直接傳「訂單編號」；若沒有單號，請傳「手機號碼」。若是官網下單，請打「官網」加上手機，例如：官網 0912345678。",
       fastPathType: "ask_for_identifier",
     };
+  }
+
+  if (mixedOid && !isLineMostlyOrderId(msg)) {
+    const id = mixedOid;
+    const prefer: OrderLookupPreferSource | undefined = preferShop ? "shopline" : preferSl ? "superlanding" : undefined;
+    const result = await unifiedLookupById(slConfig, id, brandId, prefer, false);
+    if (!result.found || !result.orders[0]) {
+      return {
+        reply: `這個編號目前查不到紀錄，請再確認是否正確。`,
+        fastPathType: "order_id_mixed",
+      };
+    }
+    const order = result.orders[0];
+    const st = getUnifiedStatusLabel(order.status, order.source || result.source);
+    const pk = payKindForOrder(order, st, order.source || result.source);
+    const payload = {
+      order_id: order.global_order_id,
+      status: st,
+      amount: order.final_total_order_amount,
+      product_list: order.product_list,
+      buyer_name: order.buyer_name,
+      buyer_phone: order.buyer_phone,
+      address: order.address,
+      full_address: order.full_address,
+      cvs_brand: order.cvs_brand,
+      cvs_store_name: order.cvs_store_name,
+      delivery_target_type: order.delivery_target_type,
+      tracking_number: order.tracking_number,
+      created_at: order.created_at,
+      shipped_at: order.shipped_at,
+      shipping_method: order.shipping_method,
+      payment_method: order.payment_method,
+      payment_status_label: pk.label,
+      source_channel: sourceChannelLabel(order.source),
+    };
+    const onePage = formatOrderOnePage(payload);
+    const reply = `查到一筆：\n${onePage}`;
+    storage.linkOrderForContact(contactId, order.global_order_id, "ai_lookup");
+    storage.setActiveOrderContext(contactId, buildActiveOrderContextFromOrder(order, result.source, st, onePage, "text"));
+    storage.updateContactOrderSource(contactId, order.source || result.source);
+    console.log(`[order_fast_path_hit=true] fast_path_type=order_id_mixed order=${id}`);
+    return { reply, fastPathType: "order_id_mixed" };
   }
 
   if (isLineMostlyOrderId(msg)) {
@@ -194,6 +271,10 @@ export async function tryOrderFastPath(params: {
         payment_status_label: x.payment_status_label,
         fulfillment_status: x.st,
         order_time: x.order_time,
+        source: (x.src === "shopline" || x.src === "superlanding" ? x.src : undefined) as
+          | "shopline"
+          | "superlanding"
+          | undefined,
       }));
       const multiCtx = {
         ...buildActiveOrderContextFromOrder(o0, o0.source || orderSource, status0, reply, "text"),

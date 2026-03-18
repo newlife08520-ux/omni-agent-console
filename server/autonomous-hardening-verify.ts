@@ -11,7 +11,8 @@ import type { IStorage } from "./storage";
 import type { SuperLandingConfig } from "./superlanding";
 import type { OrderInfo } from "@shared/schema";
 import { filterOrdersByProductQuery } from "./order-product-filter";
-import { formatOrderOnePage } from "./order-reply-utils";
+import { formatOrderOnePage, payKindForOrder } from "./order-reply-utils";
+import { derivePaymentStatus, isCodPaymentMethod } from "./order-payment-utils";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -46,6 +47,8 @@ function buildProductPhoneMultiPayload(n: number, reply: string) {
     total: n,
     deterministic_skip_llm: true as const,
     deterministic_customer_reply: reply,
+    deterministic_contract_version: 1,
+    deterministic_domain: "order",
   };
 }
 
@@ -65,6 +68,7 @@ async function main() {
     linkOrderForContact: () => {},
     setActiveOrderContext: () => {},
     updateContactOrderSource: () => {},
+    getActiveOrderContext: () => null,
   } as unknown as IStorage;
   const sl: SuperLandingConfig = { merchantNo: "", accessKey: "" };
 
@@ -166,7 +170,68 @@ async function main() {
   assert(normalizeProductName("A B 試") === "ab試", "normalizeProductName");
   assert(normalizePhone("09-12-345-678") === "0912345678", "normalizePhone");
 
-  console.log("[autonomous-hardening-verify] OK — 10 checks + cache/dedupe/fast-path + shopline filter + stats + image + format");
+  // --- COD hotfix 驗證：derivePaymentStatus 先判 COD，deterministic 回覆不誤導 ---
+  const superLandingCvsCod: OrderInfo = {
+    global_order_id: "SLCOD1",
+    source: "superlanding",
+    payment_method: "pending",
+    shipping_method: "超商取貨 to_store",
+    delivery_target_type: "cvs",
+    prepaid: false,
+    paid_at: null as unknown as string,
+    status: "待出貨",
+    final_total_order_amount: 100,
+    product_list: "[]",
+    buyer_name: "",
+    buyer_phone: "",
+    buyer_email: "",
+    tracking_number: "",
+    created_at: "",
+  };
+  assert(isCodPaymentMethod(superLandingCvsCod), "COD case 1a isCod SuperLanding CVS pending");
+  const d1 = derivePaymentStatus(superLandingCvsCod, "待出貨", "superlanding");
+  assert(d1.kind === "cod" && d1.label.includes("貨到付款"), "COD case 1b derivePaymentStatus SuperLanding CVS → cod");
+  const replyUtilsSrc = fs.readFileSync(path.join(__dirname, "order-reply-utils.ts"), "utf8");
+  assert(
+    routesSrc.includes("buildDeterministicFollowUpReply") && replyUtilsSrc.includes('payment_status === "cod"'),
+    "COD case 1c deterministic COD 收斂至 order-reply-utils"
+  );
+
+  const orderToShou: OrderInfo = { ...superLandingCvsCod, global_order_id: "O2", payment_method: "到收" };
+  assert(derivePaymentStatus(orderToShou, "待出貨", "superlanding").kind === "cod", "COD case 2 payment_method 到收 → cod");
+
+  const orderQuJian: OrderInfo = { ...superLandingCvsCod, global_order_id: "O3", payment_method: "取件時付款" };
+  assert(derivePaymentStatus(orderQuJian, "待出貨", "shopline").kind === "cod", "COD case 3 payment_method 取件時付款 → cod");
+
+  const orderCreditCard: OrderInfo = {
+    ...superLandingCvsCod,
+    global_order_id: "O4",
+    payment_method: "credit_card",
+    source: "shopline",
+    prepaid: false,
+    paid_at: null as unknown as string,
+  };
+  const d4 = derivePaymentStatus(orderCreditCard, "新訂單", "shopline");
+  assert(d4.kind !== "cod", "COD case 4 credit_card prepaid=false paid_at=null → not cod");
+
+  const ordersMixed = [
+    { o: { ...oAdventure, global_order_id: "M1", prepaid: true } as OrderInfo, st: "待出貨", src: "shopline" },
+    { o: { ...oAdventure, global_order_id: "M2", prepaid: false, paid_at: null as unknown as string, payment_method: "credit_card" } as OrderInfo, st: "付款失敗", src: "shopline" },
+    { o: { ...superLandingCvsCod, global_order_id: "M3" }, st: "待出貨", src: "superlanding" },
+  ];
+  const kinds = ordersMixed.map(({ o, st, src }) => payKindForOrder(o, st, src).kind);
+  assert(kinds[0] === "success" && kinds[1] === "failed" && kinds[2] === "cod", "COD case 5 multi-order kinds success/failed/cod");
+  const succ = kinds.filter((k) => k === "success").length;
+  const fail = kinds.filter((k) => k === "failed").length;
+  const codn = kinds.filter((k) => k === "cod").length;
+  const partsAgg: string[] = [];
+  if (succ) partsAgg.push(`${succ} 筆付款成功`);
+  if (fail) partsAgg.push(`${fail} 筆未成立／失敗`);
+  if (codn) partsAgg.push(`${codn} 筆貨到付款`);
+  const aggStr = partsAgg.join("、");
+  assert(aggStr.includes("1 筆付款成功") && aggStr.includes("1 筆未成立／失敗") && aggStr.includes("1 筆貨到付款"), "COD case 5 aggregate summary");
+
+  console.log("[autonomous-hardening-verify] OK — 10 checks + cache/dedupe/fast-path + shopline filter + stats + image + format + 5 COD hotfix cases");
 }
 
 main().catch((e) => {
