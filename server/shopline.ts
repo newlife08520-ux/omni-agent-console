@@ -95,6 +95,36 @@ function mapShoplineOrder(o: any): OrderInfo {
     productListStr = o.product_list;
   }
 
+  const subRaw = o.subtotal_items ?? o.subtotal_line_items;
+  if (Array.isArray(subRaw) && subRaw.length > 0) {
+    const fromSub = subRaw.map((item: any) => ({
+      name: item.title ?? item.name ?? item.product_name ?? item.product_title ?? "",
+      code: item.sku ?? item.variant_id ?? item.product_id ?? "",
+      qty: item.quantity ?? item.qty ?? 1,
+      price:
+        item.price?.dollars ??
+        (item.price?.cents != null ? item.price.cents / 100 : undefined) ??
+        item.price ??
+        item.subtotal?.dollars ??
+        0,
+    }));
+    const needSub =
+      !productListStr ||
+      productListStr === "[]" ||
+      (() => {
+        try {
+          const p = JSON.parse(productListStr);
+          return Array.isArray(p) && p.length === 0;
+        } catch {
+          return true;
+        }
+      })();
+    if (needSub) {
+      productListStr = JSON.stringify(fromSub);
+      itemsStructured = productListStr;
+    }
+  }
+
   let address = "";
   let fullAddress: string | undefined;
   let addressRaw: string | undefined;
@@ -155,6 +185,12 @@ function mapShoplineOrder(o: any): OrderInfo {
   const finalTotal = Number(totalDollars ?? totalFromPayment ?? 0);
 
   const deliveryTargetType = getShoplineDeliveryTargetType(o);
+  const payStatus = (orderPayment?.status || "").toLowerCase();
+  const paidAt =
+    orderPayment?.paid_at ??
+    orderPayment?.completed_at ??
+    orderPayment?.payment_at ??
+    (payStatus === "completed" || payStatus === "paid" ? o.updated_at : null);
 
   return {
     global_order_id: String(orderNumber),
@@ -170,6 +206,8 @@ function mapShoplineOrder(o: any): OrderInfo {
     order_created_at: o.created_at ?? o.order_created_at ?? "",
     shipping_method: orderDelivery?.name_translations?.["zh-hant"] ?? orderDelivery?.name_translations?.["zh-Hant"] ?? o.shipping_method ?? o.delivery_method ?? "",
     payment_method: orderPayment?.payment_type ?? orderPayment?.name_translations?.["zh-hant"] ?? o.payment_method ?? o.payment_type ?? "",
+    prepaid: /paid|complete|success|authorized|captured/i.test(payStatus) ? true : /pending|unpaid|awaiting/i.test(payStatus) ? false : undefined,
+    paid_at: paidAt != null ? String(paidAt) : null,
     address,
     note: o.note ?? o.customer_note ?? o.order_remarks ?? o.remark ?? "",
     page_id: o.page_id != null ? String(o.page_id) : undefined,

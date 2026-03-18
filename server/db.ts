@@ -158,6 +158,7 @@ export function initDatabase() {
   migrateTightenHumanTransferKeywords();
   migrateConversationStateFields();
   migratePhase2OrderIndex();
+  migratePhase23OrderItemsAndAliases();
 
   db.exec(`CREATE TABLE IF NOT EXISTS schema_info (key TEXT PRIMARY KEY, value TEXT)`);
   db.prepare("INSERT OR REPLACE INTO schema_info (key, value) VALUES ('schema_version', ?)").run("1");
@@ -576,6 +577,20 @@ function migratePhase2OrderIndex() {
     );
   `);
   console.log("[DB Migration] Phase 2 訂單索引表（orders_normalized, order_items_normalized, product_aliases, order_lookup_cache）已就緒");
+}
+
+/** Phase 2.3：明細正規化名稱、別名正規化（供本地商品+手機查詢） */
+function migratePhase23OrderItemsAndAliases() {
+  const itemCols = (db.prepare("PRAGMA table_info(order_items_normalized)").all() as { name: string }[]).map((c) => c.name);
+  if (!itemCols.includes("product_name_normalized")) {
+    db.exec("ALTER TABLE order_items_normalized ADD COLUMN product_name_normalized TEXT");
+    console.log("[DB Migration] order_items_normalized 已新增 product_name_normalized");
+  }
+  const paCols = (db.prepare("PRAGMA table_info(product_aliases)").all() as { name: string }[]).map((c) => c.name);
+  if (!paCols.includes("alias_normalized")) {
+    db.exec("ALTER TABLE product_aliases ADD COLUMN alias_normalized TEXT");
+    console.log("[DB Migration] product_aliases 已新增 alias_normalized");
+  }
 }
 
 /** Meta 留言互動中心：留言、模板、貼文 mapping、規則 */

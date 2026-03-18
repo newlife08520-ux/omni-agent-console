@@ -390,6 +390,13 @@ export interface ActiveOrderContext {
   candidate_count?: number;
   last_lookup_source?: string;
   aggregate_payment_summary?: string;
+  /** Phase 2.3：多筆來源摘要與分類單號（追問用） */
+  candidate_source_summary?: string;
+  successful_order_ids?: string[];
+  failed_order_ids?: string[];
+  pending_order_ids?: string[];
+  cod_order_ids?: string[];
+  selected_order_rank?: number | null;
 }
 
 /** Phase 2：本地正規化訂單（sync 寫入，查單可先查此表） */

@@ -7,7 +7,7 @@
 import { storage } from "../storage";
 import { getSuperLandingConfig } from "../superlanding";
 import { fetchOrders } from "../superlanding";
-import { upsertOrderNormalized } from "../order-index";
+import { upsertOrderNormalized, getOrderIndexStats } from "../order-index";
 import { fetchShoplineOrdersListPaginated } from "../shopline";
 
 async function main() {

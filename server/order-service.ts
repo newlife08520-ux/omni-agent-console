@@ -7,11 +7,15 @@ import { storage } from "./storage";
 import {
   getOrderByOrderId,
   getOrdersByPhone,
+  getOrdersByPhoneMerged,
   getOrderLookupCache,
   setOrderLookupCache,
   normalizePhone,
   upsertOrderNormalized,
+  cacheKeyOrderId,
+  cacheKeyPhone,
 } from "./order-index";
+import { filterOrdersByProductQuery } from "./order-product-filter";
 
 export interface UnifiedOrderResult {
   orders: OrderInfo[];
@@ -47,6 +51,18 @@ export function shouldPreferShoplineLookup(userMessage: string, recentUserMessag
 
 export type OrderLookupPreferSource = "superlanding" | "shopline";
 
+function dedupeOrdersBySourceId(orders: OrderInfo[]): OrderInfo[] {
+  const m = new Map<string, OrderInfo>();
+  for (const o of orders) {
+    const src = (o.source || "superlanding") as string;
+    const k = `${src}:${(o.global_order_id || "").toUpperCase()}`;
+    if (!m.has(k)) m.set(k, o);
+  }
+  return [...m.values()].sort((a, b) =>
+    String(b.created_at || b.order_created_at || "").localeCompare(String(a.created_at || a.order_created_at || ""))
+  );
+}
+
 export async function unifiedLookupById(
   slConfig: SuperLandingConfig,
   orderId: string,
@@ -56,17 +72,40 @@ export async function unifiedLookupById(
   allowCrossBrand = true
 ): Promise<UnifiedOrderResult> {
   const idNorm = (orderId || "").trim().toUpperCase();
+
   if (idNorm && brandId) {
-    const cacheKey = `order_id:${brandId}:${idNorm}`;
-    const cached = getOrderLookupCache(cacheKey);
-    if (cached?.found) {
-      return cached;
-    }
-    const local = getOrderByOrderId(brandId, idNorm);
-    if (local) {
-      const result: UnifiedOrderResult = { orders: [local], source: local.source || "superlanding", found: true };
-      setOrderLookupCache(cacheKey, result);
-      return result;
+    const scope = preferSource === "shopline" ? "shopline" : preferSource === "superlanding" ? "superlanding" : "any";
+    if (scope !== "any") {
+      const ck = cacheKeyOrderId(brandId, idNorm, scope);
+      const cached = getOrderLookupCache(ck);
+      if (cached?.found && cached.orders[0]?.source === scope) {
+        return cached as UnifiedOrderResult;
+      }
+      const loc = getOrderByOrderId(brandId, idNorm, scope);
+      if (loc) {
+        const result: UnifiedOrderResult = { orders: [loc], source: loc.source || scope, found: true };
+        setOrderLookupCache(ck, result);
+        setOrderLookupCache(cacheKeyOrderId(brandId, idNorm, "any"), result);
+        return result;
+      }
+    } else {
+      const ckAny = cacheKeyOrderId(brandId, idNorm, "any");
+      const cachedAny = getOrderLookupCache(ckAny);
+      if (cachedAny?.found) return cachedAny as UnifiedOrderResult;
+      const locSl = getOrderByOrderId(brandId, idNorm, "superlanding");
+      const locSh = getOrderByOrderId(brandId, idNorm, "shopline");
+      if (locSl) {
+        const result: UnifiedOrderResult = { orders: [locSl], source: "superlanding", found: true };
+        setOrderLookupCache(cacheKeyOrderId(brandId, idNorm, "superlanding"), result);
+        setOrderLookupCache(ckAny, result);
+        return result;
+      }
+      if (locSh) {
+        const result: UnifiedOrderResult = { orders: [locSh], source: "shopline", found: true };
+        setOrderLookupCache(cacheKeyOrderId(brandId, idNorm, "shopline"), result);
+        setOrderLookupCache(ckAny, result);
+        return result;
+      }
     }
   }
 
@@ -118,7 +157,15 @@ export async function unifiedLookupById(
   }
 
   let result: UnifiedOrderResult;
-  if (tryShoplineFirst) {
+  if (preferSource === undefined && brandId) {
+    const [sl, shop] = await Promise.all([runSuperlanding(), runShopline()]);
+    if (sl?.found && shop?.found && sl.orders[0] && shop.orders[0]) {
+      const merged = dedupeOrdersBySourceId([...sl.orders, ...shop.orders]);
+      result = { orders: merged, source: merged.length > 1 ? "unknown" : merged[0].source || "unknown", found: true };
+    } else if (sl?.found) result = sl;
+    else if (shop?.found) result = shop;
+    else result = { orders: [], source: "unknown", found: false };
+  } else if (tryShoplineFirst) {
     const shop = await runShopline();
     if (shop?.found) result = shop;
     else {
@@ -134,9 +181,22 @@ export async function unifiedLookupById(
     }
   }
   if (result.found && result.orders.length > 0 && idNorm && brandId && !result.crossBrand) {
-    setOrderLookupCache(`order_id:${brandId}:${idNorm}`, result);
-    const o = result.orders[0];
-    if (o?.global_order_id) upsertOrderNormalized(brandId, (o.source as "superlanding" | "shopline") || "superlanding", o);
+    const o0 = result.orders[0];
+    const src = (o0.source as "superlanding" | "shopline") || "superlanding";
+    setOrderLookupCache(cacheKeyOrderId(brandId, idNorm, src), {
+      orders: result.orders.length === 1 ? result.orders : [o0],
+      source: src,
+      found: true,
+    });
+    setOrderLookupCache(cacheKeyOrderId(brandId, idNorm, "any"), {
+      orders: result.orders,
+      source: result.source,
+      found: true,
+    });
+    for (const o of result.orders) {
+      if (o?.global_order_id && o.source)
+        upsertOrderNormalized(brandId, o.source as "superlanding" | "shopline", o);
+    }
   }
   return result;
 }
@@ -148,9 +208,14 @@ export async function unifiedLookupByProductAndPhone(
   brandId?: number,
   preferSource?: OrderLookupPreferSource,
   /** Phase 2.1：前台查單時傳 false，不搜其他品牌 */
-  allowCrossBrand = true
+  allowCrossBrand = true,
+  /** 商品關鍵字：Shopline 手機查詢後必須過濾，不可整包回傳 */
+  productQueryForShoplineFilter?: string
 ): Promise<UnifiedOrderResult> {
   const tryShoplineFirst = preferSource === "shopline";
+  const shoplineProductQuery =
+    (productQueryForShoplineFilter || "").trim() ||
+    matchedPages.map((m) => m.productName).filter(Boolean).join(" ").trim();
 
   async function runShopline(): Promise<UnifiedOrderResult | null> {
     const shoplineConfig = getShoplineConfig(brandId);
@@ -158,7 +223,21 @@ export async function unifiedLookupByProductAndPhone(
     try {
       const result = await lookupShoplineOrdersByPhone(shoplineConfig, phone);
       if (result.orders.length > 0) {
-        result.orders.forEach((o: OrderInfo) => { o.source = "shopline"; });
+        result.orders.forEach((o: OrderInfo) => {
+          o.source = "shopline";
+        });
+        if (shoplineProductQuery.length >= 2) {
+          const filtered = filterOrdersByProductQuery(result.orders, shoplineProductQuery, brandId);
+          if (filtered.length === 0) {
+            console.log(
+              "[UnifiedOrder] SHOPLINE product filter: phone hit n=%s → 0 after product match query=%s",
+              result.orders.length,
+              shoplineProductQuery.slice(0, 40)
+            );
+            return { orders: [], source: "shopline", found: false };
+          }
+          return { orders: filtered, source: "shopline", found: true };
+        }
         return { orders: result.orders, source: "shopline", found: true };
       }
     } catch (_e) {
@@ -300,22 +379,56 @@ export async function unifiedLookupByPhoneGlobal(
 ): Promise<UnifiedOrderResult> {
   const phoneNorm = normalizePhone(phone);
   if (phoneNorm && brandId) {
-    const cacheKey = `phone:${brandId}:${phoneNorm}`;
-    const cached = getOrderLookupCache(cacheKey);
-    if (cached?.found) return cached;
-    const localOrders = getOrdersByPhone(brandId, phone);
-    if (localOrders.length > 0) {
-      const result: UnifiedOrderResult = {
-        orders: localOrders,
-        source: (localOrders[0]?.source as "superlanding" | "shopline") || "superlanding",
-        found: true,
-      };
-      setOrderLookupCache(cacheKey, result);
-      return result;
+    if (preferSource === "shopline") {
+      const ck = cacheKeyPhone(brandId, phoneNorm, "shopline");
+      const cached = getOrderLookupCache(ck);
+      if (cached?.found) return cached as UnifiedOrderResult;
+      const localSh = getOrdersByPhone(brandId, phone, "shopline");
+      if (localSh.length > 0) {
+        const result: UnifiedOrderResult = {
+          orders: localSh,
+          source: "shopline",
+          found: true,
+        };
+        setOrderLookupCache(ck, result);
+        return result;
+      }
+    } else if (preferSource === "superlanding") {
+      const ck = cacheKeyPhone(brandId, phoneNorm, "superlanding");
+      const cached = getOrderLookupCache(ck);
+      if (cached?.found) return cached as UnifiedOrderResult;
+      const localSl = getOrdersByPhone(brandId, phone, "superlanding");
+      if (localSl.length > 0) {
+        const result: UnifiedOrderResult = {
+          orders: localSl,
+          source: "superlanding",
+          found: true,
+        };
+        setOrderLookupCache(ck, result);
+        return result;
+      }
+    } else {
+      const ckAny = cacheKeyPhone(brandId, phoneNorm, "any");
+      const cached = getOrderLookupCache(ckAny);
+      if (cached?.found) return cached as UnifiedOrderResult;
+      const mergedLocal = getOrdersByPhoneMerged(brandId, phone);
+      if (mergedLocal.length > 0) {
+        const src =
+          mergedLocal.every((o) => o.source === "shopline")
+            ? "shopline"
+            : mergedLocal.every((o) => o.source === "superlanding")
+              ? "superlanding"
+              : "unknown";
+        const result: UnifiedOrderResult = { orders: mergedLocal, source: src, found: true };
+        setOrderLookupCache(ckAny, result);
+        return result;
+      }
     }
   }
 
   const tryShoplineFirst = preferSource === "shopline";
+  const superlandingOnly = preferSource === "superlanding";
+  const shoplineOnly = preferSource === "shopline";
 
   async function runShopline(): Promise<UnifiedOrderResult | null> {
     const shoplineConfig = getShoplineConfig(brandId);
@@ -363,25 +476,54 @@ export async function unifiedLookupByPhoneGlobal(
   }
 
   let result: UnifiedOrderResult;
-  if (tryShoplineFirst) {
+  if (shoplineOnly) {
     const shop = await runShopline();
-    if (shop?.found) result = shop;
-    else {
-      const sl = await runSuperlanding();
-      result = sl ?? { orders: [], source: "unknown", found: false };
-    }
-  } else {
+    result = shop ?? { orders: [], source: "unknown", found: false };
+  } else if (superlandingOnly) {
     const sl = await runSuperlanding();
-    if (sl?.found) result = sl;
-    else {
-      const shop = await runShopline();
-      result = shop ?? { orders: [], source: "unknown", found: false };
+    result = sl ?? { orders: [], source: "unknown", found: false };
+  } else {
+    const [sl, shop] = await Promise.all([runSuperlanding(), runShopline()]);
+    const parts: OrderInfo[] = [];
+    if (sl?.found) parts.push(...sl.orders);
+    if (shop?.found) parts.push(...shop.orders);
+    const merged = dedupeOrdersBySourceId(parts);
+    if (merged.length > 0) {
+      const src = merged.every((o) => o.source === "shopline")
+        ? "shopline"
+        : merged.every((o) => o.source === "superlanding")
+          ? "superlanding"
+          : "unknown";
+      result = { orders: merged, source: src, found: true };
+    } else if (tryShoplineFirst) {
+      result = { orders: [], source: "unknown", found: false };
+    } else {
+      result = { orders: [], source: "unknown", found: false };
     }
   }
   if (result.found && result.orders.length > 0 && phoneNorm && brandId && !result.crossBrand) {
-    setOrderLookupCache(`phone:${brandId}:${phoneNorm}`, result);
+    if (preferSource === "shopline") {
+      setOrderLookupCache(cacheKeyPhone(brandId, phoneNorm, "shopline"), {
+        orders: result.orders,
+        source: "shopline",
+        found: true,
+      });
+    } else if (preferSource === "superlanding") {
+      setOrderLookupCache(cacheKeyPhone(brandId, phoneNorm, "superlanding"), {
+        orders: result.orders,
+        source: "superlanding",
+        found: true,
+      });
+    } else {
+      setOrderLookupCache(cacheKeyPhone(brandId, phoneNorm, "any"), {
+        orders: result.orders,
+        source: result.source,
+        found: true,
+      });
+    }
     for (const o of result.orders) {
-      if (o?.global_order_id) upsertOrderNormalized(brandId, (o.source as "superlanding" | "shopline") || "superlanding", o);
+      if (o?.global_order_id && o.source)
+        upsertOrderNormalized(brandId, o.source as "superlanding" | "shopline", o);
     }
   }
   return result;

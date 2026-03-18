@@ -27,5 +27,6 @@ uploads/
 .local/
 .replit/
 client.zip
+Omni-Agent-Console-FULL.zip
 content-guard-stats.json
 delivery/*.zip
