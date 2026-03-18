@@ -26,6 +26,8 @@ export interface ShoplineDateFilterResult {
   totalFetched: number;
   truncated: boolean;
   source: "shopline";
+  /** Phase 2.2：搜尋 API 實際翻頁次數（供 latency log） */
+  pagesFetched?: number;
 }
 
 /** SHOPLINE Open API 固定 base（Token 識別商店），見 https://open-api.docs.shoplineapp.com/docs/openapi-request-example */
@@ -245,6 +247,66 @@ function parseOrdersResponse(data: any): any[] {
   return Array.isArray(raw) ? raw : [];
 }
 
+/** 手機僅保留數字，供精準比對 */
+export function normalizeShoplinePhoneDigits(phone: string): string {
+  return (phone || "").replace(/\D/g, "");
+}
+
+function rawOrderIdExactMatch(raw: any, id: string): boolean {
+  const u = id.trim().toUpperCase();
+  const vals = [
+    raw?.order_number,
+    raw?.order_no,
+    raw?.name,
+    raw?.system_order_number,
+    raw?.display_number,
+    raw?.order_number_display,
+    raw?.id,
+  ];
+  return vals.some((v) => String(v ?? "").trim().toUpperCase() === u);
+}
+
+/**
+ * Phase 2.2：/orders/search 分頁拉滿（最多 maxPages），再於應用層做精準過濾。
+ */
+export async function fetchShoplineSearchAllPages(
+  config: ShoplineConfig,
+  query: string,
+  opts?: { maxPages?: number; perPage?: number }
+): Promise<{ raws: any[]; pagesFetched: number; truncated: boolean }> {
+  const maxPages = opts?.maxPages ?? 30;
+  const perPage = Math.min(250, Math.max(1, opts?.perPage ?? 100));
+  const seen = new Set<string>();
+  const raws: any[] = [];
+  let pagesFetched = 0;
+  let truncated = false;
+  const q = (query || "").trim();
+  if (!q) return { raws: [], pagesFetched: 0, truncated: false };
+
+  for (let page = 1; page <= maxPages; page++) {
+    const data = await shoplineRequest(config, "/orders/search", {
+      query: q,
+      per_page: String(perPage),
+      page: String(page),
+    });
+    const items = parseOrdersResponse(data);
+    pagesFetched++;
+    if (!items.length) break;
+    for (const item of items) {
+      const id = String(item?.id ?? item?._id ?? "");
+      const key = id || JSON.stringify(item).slice(0, 80);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      raws.push(item);
+    }
+    const total = data.pagination?.total;
+    if (typeof total === "number" && raws.length >= total) break;
+    if (items.length < perPage) break;
+  }
+  if (pagesFetched >= maxPages && raws.length > 0) truncated = true;
+  return { raws, pagesFetched, truncated };
+}
+
 export async function fetchShoplineOrders(
   config: ShoplineConfig,
   params: Record<string, string> = {}
@@ -284,37 +346,23 @@ export async function lookupShoplineOrderById(
   orderId: string
 ): Promise<OrderInfo | null> {
   const normalizedId = orderId.trim();
-  console.log(`[SHOPLINE] 查詢單號: ${normalizedId}`);
+  console.log(`[SHOPLINE] 查詢單號（精準）: ${normalizedId}`);
 
   try {
-    const orders = await fetchShoplineOrders(config, {
-      order_number: normalizedId,
+    const { raws, pagesFetched } = await fetchShoplineSearchAllPages(config, normalizedId, {
+      maxPages: 12,
+      perPage: 100,
     });
-
-    const exact = orders.find(
-      (o) => (o.global_order_id || "").trim().toUpperCase() === normalizedId.toUpperCase()
-    );
-    if (exact) {
-      console.log(
-        `[SHOPLINE] 找到訂單（精準匹配） ${exact.global_order_id} 狀態=${exact.status}`
-      );
-      return exact;
+    for (const raw of raws) {
+      if (rawOrderIdExactMatch(raw, normalizedId)) {
+        const o = mapShoplineOrder(raw);
+        console.log(
+          `[SHOPLINE] 精準命中 ${o.global_order_id} pagesFetched=${pagesFetched} 狀態=${o.status}`
+        );
+        return o;
+      }
     }
-
-    const ordersAlt = await fetchShoplineOrders(config, {
-      keyword: normalizedId,
-    });
-    const exactAlt = ordersAlt.find(
-      (o) => (o.global_order_id || "").trim().toUpperCase() === normalizedId.toUpperCase()
-    );
-    if (exactAlt) {
-      console.log(
-        `[SHOPLINE] 關鍵字搜尋找到訂單（精準匹配） ${exactAlt.global_order_id} 狀態=${exactAlt.status}`
-      );
-      return exactAlt;
-    }
-
-    console.log("[SHOPLINE] 查無訂單（精準匹配）:", normalizedId);
+    console.log("[SHOPLINE] 查無精準符合訂單:", normalizedId, "pagesFetched=", pagesFetched);
     return null;
   } catch (err: any) {
     console.error("[SHOPLINE] 查詢單號失敗:", err.message);
@@ -322,45 +370,72 @@ export async function lookupShoplineOrderById(
   }
 }
 
+/** Phase 2.2：分頁搜尋後僅保留「手機數字完全一致」的訂單 */
+export async function lookupShoplineOrdersByPhoneExact(
+  config: ShoplineConfig,
+  phone: string,
+  opts?: { maxPages?: number }
+): Promise<ShoplineDateFilterResult> {
+  const digits = normalizeShoplinePhoneDigits(phone);
+  console.log("[SHOPLINE] 手機精準查詢 digits=", digits);
+  if (digits.length < 8) {
+    return { orders: [], totalFetched: 0, truncated: false, source: "shopline", pagesFetched: 0 };
+  }
+  const query = phone.replace(/[-\s]/g, "").trim() || digits;
+  const { raws, pagesFetched, truncated } = await fetchShoplineSearchAllPages(config, query, {
+    maxPages: opts?.maxPages ?? 30,
+    perPage: 100,
+  });
+  const matched: OrderInfo[] = [];
+  for (const raw of raws) {
+    const o = mapShoplineOrder(raw);
+    if (normalizeShoplinePhoneDigits(o.buyer_phone || "") === digits) matched.push(o);
+  }
+  matched.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+  console.log(
+    `[SHOPLINE] 手機精準: pagesFetched=${pagesFetched} scanned=${raws.length} matched=${matched.length} truncated=${truncated}`
+  );
+  return {
+    orders: matched,
+    totalFetched: raws.length,
+    truncated,
+    source: "shopline",
+    pagesFetched,
+  };
+}
+
 export async function lookupShoplineOrdersByPhone(
   config: ShoplineConfig,
   phone: string
 ): Promise<ShoplineDateFilterResult> {
-  const normalizedPhone = phone.replace(/[-\s]/g, "");
-  console.log("[SHOPLINE] 以手機號碼搜尋:", normalizedPhone);
+  return lookupShoplineOrdersByPhoneExact(config, phone);
+}
 
-  let allMatched: OrderInfo[] = [];
-  let totalFetched = 0;
-
-  try {
-    const orders = await fetchShoplineOrders(config, {
-      keyword: normalizedPhone,
-      per_page: "50",
-    });
-    totalFetched += orders.length;
-
-    allMatched = orders.filter((o) => {
-      const orderPhone = (o.buyer_phone || "").replace(/[-\s]/g, "");
-      return (
-        orderPhone === normalizedPhone ||
-        orderPhone.includes(normalizedPhone) ||
-        normalizedPhone.includes(orderPhone)
-      );
-    });
-
-    console.log(
-      `[SHOPLINE] 手機搜尋完成: 取得 ${totalFetched} 筆，匹配 ${allMatched.length} 筆`
-    );
-  } catch (err: any) {
-    console.error("[SHOPLINE] 手機搜尋失敗:", err.message);
-    throw err;
+export async function lookupShoplineOrdersByEmailExact(
+  config: ShoplineConfig,
+  email: string,
+  opts?: { maxPages?: number }
+): Promise<ShoplineDateFilterResult> {
+  const normalizedEmail = email.trim().toLowerCase();
+  console.log("[SHOPLINE] Email 精準搜尋:", normalizedEmail);
+  if (!normalizedEmail.includes("@")) {
+    return { orders: [], totalFetched: 0, truncated: false, source: "shopline", pagesFetched: 0 };
   }
-
+  const { raws, pagesFetched, truncated } = await fetchShoplineSearchAllPages(config, normalizedEmail, {
+    maxPages: opts?.maxPages ?? 25,
+    perPage: 100,
+  });
+  const matched = raws
+    .map(mapShoplineOrder)
+    .filter((o) => (o.buyer_email || "").trim().toLowerCase() === normalizedEmail);
+  matched.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+  console.log(`[SHOPLINE] Email 精準: pagesFetched=${pagesFetched} matched=${matched.length}`);
   return {
-    orders: allMatched,
-    totalFetched,
-    truncated: false,
+    orders: matched,
+    totalFetched: raws.length,
+    truncated,
     source: "shopline",
+    pagesFetched,
   };
 }
 
@@ -368,36 +443,41 @@ export async function lookupShoplineOrdersByEmail(
   config: ShoplineConfig,
   email: string
 ): Promise<ShoplineDateFilterResult> {
-  const normalizedEmail = email.trim().toLowerCase();
-  console.log("[SHOPLINE] 以 Email 搜尋:", normalizedEmail);
+  return lookupShoplineOrdersByEmailExact(config, email);
+}
 
-  let allMatched: OrderInfo[] = [];
-  let totalFetched = 0;
+function normalizeShoplinePersonName(s: string): string {
+  return (s || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "");
+}
 
-  try {
-    const orders = await fetchShoplineOrders(config, {
-      keyword: normalizedEmail,
-      per_page: "50",
-    });
-    totalFetched += orders.length;
-
-    allMatched = orders.filter((o) => {
-      return (o.buyer_email || "").toLowerCase() === normalizedEmail;
-    });
-
-    console.log(
-      `[SHOPLINE] Email 搜尋完成: 取得 ${totalFetched} 筆，匹配 ${allMatched.length} 筆`
-    );
-  } catch (err: any) {
-    console.error("[SHOPLINE] Email 搜尋失敗:", err.message);
-    throw err;
+export async function lookupShoplineOrdersByNameExact(
+  config: ShoplineConfig,
+  name: string,
+  opts?: { maxPages?: number }
+): Promise<ShoplineDateFilterResult> {
+  const norm = normalizeShoplinePersonName(name);
+  console.log("[SHOPLINE] 姓名精準搜尋:", norm);
+  if (norm.length < 1) {
+    return { orders: [], totalFetched: 0, truncated: false, source: "shopline", pagesFetched: 0 };
   }
-
+  const { raws, pagesFetched, truncated } = await fetchShoplineSearchAllPages(config, name.trim(), {
+    maxPages: opts?.maxPages ?? 20,
+    perPage: 100,
+  });
+  const matched = raws
+    .map(mapShoplineOrder)
+    .filter((o) => normalizeShoplinePersonName(o.buyer_name || "") === norm);
+  matched.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+  console.log(`[SHOPLINE] 姓名精準: pagesFetched=${pagesFetched} matched=${matched.length}`);
   return {
-    orders: allMatched,
-    totalFetched,
-    truncated: false,
+    orders: matched,
+    totalFetched: raws.length,
+    truncated,
     source: "shopline",
+    pagesFetched,
   };
 }
 
@@ -405,37 +485,31 @@ export async function lookupShoplineOrdersByName(
   config: ShoplineConfig,
   name: string
 ): Promise<ShoplineDateFilterResult> {
-  const normalizedName = name.trim().toLowerCase();
-  console.log("[SHOPLINE] 以姓名搜尋:", normalizedName);
+  return lookupShoplineOrdersByNameExact(config, name);
+}
 
-  let allMatched: OrderInfo[] = [];
-  let totalFetched = 0;
-
-  try {
-    const orders = await fetchShoplineOrders(config, {
-      keyword: normalizedName,
-      per_page: "50",
-    });
-    totalFetched += orders.length;
-
-    allMatched = orders.filter((o) => {
-      return (o.buyer_name || "").toLowerCase().includes(normalizedName);
-    });
-
-    console.log(
-      `[SHOPLINE] 姓名搜尋完成: 取得 ${totalFetched} 筆，匹配 ${allMatched.length} 筆`
-    );
-  } catch (err: any) {
-    console.error("[SHOPLINE] 姓名搜尋失敗:", err.message);
-    throw err;
+/**
+ * Phase 2.2：同步最近訂單至本地（GET /orders 分頁，依 created_at 由新到舊）。
+ */
+export async function fetchShoplineOrdersListPaginated(
+  config: ShoplineConfig,
+  opts?: { maxPages?: number; perPage?: number; createdAfter?: string }
+): Promise<{ orders: OrderInfo[]; pagesFetched: number }> {
+  const maxPages = opts?.maxPages ?? 40;
+  const perPage = Math.min(250, Math.max(1, opts?.perPage ?? 100));
+  const params: Record<string, string> = { per_page: String(perPage) };
+  if (opts?.createdAfter) params.created_at_min = opts.createdAfter;
+  const out: OrderInfo[] = [];
+  let pagesFetched = 0;
+  for (let page = 1; page <= maxPages; page++) {
+    const data = await shoplineRequest(config, "/orders", { ...params, page: String(page) });
+    const rawList = parseOrdersResponse(data);
+    pagesFetched++;
+    if (!rawList.length) break;
+    for (const raw of rawList) out.push(mapShoplineOrder(raw));
+    if (rawList.length < perPage) break;
   }
-
-  return {
-    orders: allMatched,
-    totalFetched,
-    truncated: false,
-    source: "shopline",
-  };
+  return { orders: out, pagesFetched };
 }
 
 export async function lookupShoplineOrders(

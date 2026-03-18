@@ -378,6 +378,18 @@ export interface ActiveOrderContext {
   full_address?: string;
   address_raw?: string;
   source_channel_hint?: string;
+  /** Phase 2.2：多筆查單候選（手機／官網多單） */
+  active_order_candidates?: {
+    order_id: string;
+    payment_status: "success" | "failed" | "pending" | "cod" | "unknown";
+    payment_status_label?: string;
+    fulfillment_status?: string;
+    order_time?: string;
+  }[];
+  selected_order_id?: string | null;
+  candidate_count?: number;
+  last_lookup_source?: string;
+  aggregate_payment_summary?: string;
 }
 
 /** Phase 2：本地正規化訂單（sync 寫入，查單可先查此表） */
