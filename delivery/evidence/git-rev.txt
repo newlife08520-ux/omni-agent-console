@@ -1,0 +1,19 @@
+git rev-parse --short HEAD
+3fad49f
+
+git status -sb (節錄)
+## main...origin/main
+ M docs/Phase1-驗收報告書.md
+ M package.json
+ M server/db.ts
+ M server/order-service.ts
+ M server/routes.ts
+ M server/shopline.ts
+ M server/superlanding.ts
+ M shared/schema.ts
+?? server/order-index.ts
+?? server/scripts/query-order-index-stats.ts
+?? server/scripts/sync-orders-normalized.ts
+?? docs/PHASE2_IMPLEMENTATION_REPORT.md
+?? docs/SHOPLINE_INTEGRATION_TRUTH_REPORT.md
+... (其餘略)

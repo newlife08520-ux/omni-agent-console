@@ -304,6 +304,9 @@ export interface MarketingRule {
   brand_id: number | null;
 }
 
+/** 配送目標類型：宅配 / 超商取貨 / 未知 */
+export type DeliveryTargetType = "home" | "cvs" | "unknown";
+
 export interface OrderInfo {
   global_order_id: string;
   status: string;
@@ -325,6 +328,20 @@ export interface OrderInfo {
   address?: string;
   note?: string;
   source?: OrderSource;
+  /** Phase 1：頁面/門市/地址結構化 */
+  page_id?: string;
+  page_title?: string;
+  payment_status_raw?: string;
+  delivery_status_raw?: string;
+  delivery_target_type?: DeliveryTargetType;
+  cvs_brand?: string;
+  cvs_store_code?: string;
+  cvs_store_name?: string;
+  full_address?: string;
+  address_raw?: string;
+  payment_transaction_id?: string;
+  /** JSON string，結構化商品明細 */
+  items_structured?: string;
 }
 
 /** 當前訂單上下文：成功對到訂單後存於 contact_active_order，後續問同一筆單的延伸問題優先用此回答 */
@@ -351,6 +368,59 @@ export interface ActiveOrderContext {
   one_page_summary?: string;
   /** 原始來源 superlanding | shopline */
   source?: OrderSource;
+  /** Phase 1：同頁/其他訂單與追問用 */
+  page_id?: string;
+  page_title?: string;
+  delivery_target_type?: DeliveryTargetType;
+  cvs_brand?: string;
+  cvs_store_code?: string;
+  cvs_store_name?: string;
+  full_address?: string;
+  address_raw?: string;
+  source_channel_hint?: string;
+}
+
+/** Phase 2：本地正規化訂單（sync 寫入，查單可先查此表） */
+export interface OrderNormalized {
+  id: number;
+  brand_id: number;
+  source: OrderSource;
+  global_order_id: string;
+  buyer_phone_normalized: string;
+  page_id: string | null;
+  status: string | null;
+  payload: string | null;
+  synced_at: string;
+  created_at: string;
+}
+
+/** Phase 2：訂單明細正規化 */
+export interface OrderItemNormalized {
+  id: number;
+  order_normalized_id: number;
+  product_name: string | null;
+  sku: string | null;
+  quantity: number;
+  price_cents: number | null;
+  created_at: string;
+}
+
+/** Phase 2：商品別名（供語意匹配：用戶說「通勤包」→ page_id） */
+export interface ProductAlias {
+  id: number;
+  brand_id: number;
+  page_id: string;
+  canonical_name: string;
+  alias: string;
+  created_at: string;
+}
+
+/** Phase 2：查單結果快取（key 如 phone:0922123456 或 order_id:ABC123） */
+export interface OrderLookupCacheRow {
+  cache_key: string;
+  result_payload: string;
+  fetched_at: string;
+  ttl_seconds: number;
 }
 
 /** 回覆來源：用於區分「有無進 LLM」與短路路徑（Phase 0 可觀測性） */

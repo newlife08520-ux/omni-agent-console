@@ -157,6 +157,7 @@ export function initDatabase() {
   migrateBleedHumanTransferKeywords();
   migrateTightenHumanTransferKeywords();
   migrateConversationStateFields();
+  migratePhase2OrderIndex();
 
   db.exec(`CREATE TABLE IF NOT EXISTS schema_info (key TEXT PRIMARY KEY, value TEXT)`);
   db.prepare("INSERT OR REPLACE INTO schema_info (key, value) VALUES ('schema_version', ?)").run("1");
@@ -521,6 +522,60 @@ function migrateContactActiveOrder() {
       FOREIGN KEY (contact_id) REFERENCES contacts(id)
     );
   `);
+}
+
+/** Phase 2：本地訂單索引與查單快取，供 sync 與「先查本地再 API」決策使用 */
+function migratePhase2OrderIndex() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS orders_normalized (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      brand_id INTEGER NOT NULL,
+      source TEXT NOT NULL CHECK(source IN ('superlanding','shopline')),
+      global_order_id TEXT NOT NULL,
+      buyer_phone_normalized TEXT NOT NULL,
+      page_id TEXT,
+      status TEXT,
+      payload TEXT,
+      synced_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (brand_id) REFERENCES brands(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_orders_normalized_brand_phone ON orders_normalized(brand_id, buyer_phone_normalized);
+    CREATE INDEX IF NOT EXISTS idx_orders_normalized_order_id ON orders_normalized(brand_id, global_order_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_normalized_uniq ON orders_normalized(brand_id, source, global_order_id);
+
+    CREATE TABLE IF NOT EXISTS order_items_normalized (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_normalized_id INTEGER NOT NULL,
+      product_name TEXT,
+      sku TEXT,
+      quantity INTEGER NOT NULL DEFAULT 1,
+      price_cents INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (order_normalized_id) REFERENCES orders_normalized(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items_normalized(order_normalized_id);
+
+    CREATE TABLE IF NOT EXISTS product_aliases (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      brand_id INTEGER NOT NULL,
+      page_id TEXT NOT NULL,
+      canonical_name TEXT NOT NULL,
+      alias TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (brand_id) REFERENCES brands(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_product_aliases_brand ON product_aliases(brand_id);
+    CREATE INDEX IF NOT EXISTS idx_product_aliases_alias ON product_aliases(brand_id, alias);
+
+    CREATE TABLE IF NOT EXISTS order_lookup_cache (
+      cache_key TEXT PRIMARY KEY,
+      result_payload TEXT NOT NULL,
+      fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+      ttl_seconds INTEGER NOT NULL DEFAULT 300
+    );
+  `);
+  console.log("[DB Migration] Phase 2 訂單索引表（orders_normalized, order_items_normalized, product_aliases, order_lookup_cache）已就緒");
 }
 
 /** Meta 留言互動中心：留言、模板、貼文 mapping、規則 */

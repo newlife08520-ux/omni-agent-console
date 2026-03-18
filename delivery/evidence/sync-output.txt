@@ -1,0 +1,21 @@
+npx tsx server/scripts/sync-orders-normalized.ts 1 1 完整輸出
+========================================
+
+[DB Migration] Hard Mute + System Alerts 表已就緒
+[DB Migration] 案件管理、客服狀態、分配紀錄表已就緒
+[DB Migration] 客服值班欄位（在線、負載、SLA、全域時段、分配紀錄）已就緒
+[DB Migration] Meta 安全確認模板已補上 reply_private（私訊版）
+[DB Migration] Meta 留言互動中心表已就緒
+[DB Migration] contacts effective_case_priority backfill 完成
+[DB] ensurePerformanceIndexes() 已執行（僅索引，無 schema）
+[DB Migration] Phase 2 訂單索引表（orders_normalized, order_items_normalized, product_aliases, order_lookup_cache）已就緒
+[DB] path = D:\Omni-Agent-Console(自動客服系統)\Omni-Agent-Console\omnichannel.db schema_version = 1
+[Sync] Brand 1 (私藏生活) 2026-03-16 ~ 2026-03-17 ...
+[一頁商店] 正在查詢訂單，請求網址為: https://api.super-landing.com/orders.json?merchant_no=QT089002617&access_key=***&begin_date=2026-03-16&end_date=2026-03-17&per_page=200&page=1
+[一頁商店] 回傳結果: current_page= 1 total_entries= 5150 orders count= 200
+[一頁商店] 正在查詢訂單，請求網址為: https://api.super-landing.com/orders.json?...
+... (共 26 頁)
+[一頁商店] 回傳結果: current_page= 26 total_entries= 5151 orders count= 151
+[Sync] Brand 1 寫入 5151 筆
+
+結論：僅一頁商店（SuperLanding），無 [SHOPLINE]；寫入皆 source=superlanding。

@@ -1,4 +1,4 @@
-import type { OrderInfo } from "@shared/schema";
+import type { OrderInfo, DeliveryTargetType } from "@shared/schema";
 import { storage } from "./storage";
 
 const SUPERLANDING_API_BASE = "https://api.super-landing.com";
@@ -73,6 +73,45 @@ export function getSuperLandingConfig(brandId?: number): SuperLandingConfig {
   };
 }
 
+/** 一頁商店 convenient_store 格式：BRAND_STORECODE_門市名_地址，解析為結構化欄位 */
+export function parseConvenienceStore(raw: string | null | undefined): {
+  cvs_brand: string;
+  cvs_store_code: string;
+  cvs_store_name: string;
+  full_address: string;
+} {
+  const empty = { cvs_brand: "", cvs_store_code: "", cvs_store_name: "", full_address: "" };
+  if (typeof raw !== "string" || !raw.trim()) return empty;
+  const parts = raw.trim().split("_");
+  if (parts.length < 4) return empty;
+  const brandCode = (parts[0] || "").toUpperCase();
+  const cvsBrandMap: Record<string, string> = {
+    FAMI: "全家",
+    UNIMART: "萊爾富",
+    ELEVEN: "7-11",
+    "7-11": "7-11",
+    OK: "OK",
+  };
+  return {
+    cvs_brand: cvsBrandMap[brandCode] ?? brandCode,
+    cvs_store_code: parts[1] ?? "",
+    cvs_store_name: parts[2] ?? "",
+    full_address: parts.slice(3).join("_").trim() || "",
+  };
+}
+
+/** 依 shipping_method / convenient_store 判斷宅配或超商 */
+export function deriveDeliveryTargetType(
+  shippingMethod: string | null | undefined,
+  convenientStore: string | null | undefined
+): DeliveryTargetType {
+  const sm = (shippingMethod || "").toLowerCase();
+  if (sm && (sm.includes("home") || sm.includes("宅配") || sm.includes("delivery"))) return "home";
+  if (sm && (sm.includes("store") || sm.includes("cvs") || sm.includes("超商") || sm === "to_store")) return "cvs";
+  if (typeof convenientStore === "string" && convenientStore.trim().length > 0) return "cvs";
+  return "unknown";
+}
+
 function mapOrder(o: any): OrderInfo {
   let trackingNumber = "";
   if (Array.isArray(o.tracking_codes) && o.tracking_codes.length > 0) {
@@ -80,20 +119,38 @@ function mapOrder(o: any): OrderInfo {
   }
 
   let productListStr = "";
+  let itemsStructured: string | undefined;
   if (Array.isArray(o.product_list)) {
     productListStr = JSON.stringify(o.product_list);
+    itemsStructured = productListStr;
   } else if (typeof o.product_list === "string") {
     productListStr = o.product_list;
   }
 
   let address = "";
+  let addressRaw: string | undefined;
+  let fullAddress: string | undefined;
   if (typeof o.address === "string") {
+    addressRaw = o.address;
     try {
       const parsed = JSON.parse(o.address);
       address = [parsed.state, parsed.city, parsed.addr1, parsed.addr2].filter(Boolean).join("");
+      fullAddress = address || o.address;
     } catch (_e) {
       address = o.address;
+      fullAddress = o.address;
     }
+  } else if (o.address != null) {
+    addressRaw = JSON.stringify(o.address);
+  }
+
+  const convenientStore = o.convenient_store;
+  const deliveryTargetType = deriveDeliveryTargetType(o.shipping_method, convenientStore);
+  const cvsParsed = parseConvenienceStore(convenientStore);
+  if (deliveryTargetType === "cvs" && cvsParsed.full_address) {
+    fullAddress = cvsParsed.full_address;
+  } else if (fullAddress === undefined && address) {
+    fullAddress = address;
   }
 
   return {
@@ -114,6 +171,18 @@ function mapOrder(o: any): OrderInfo {
     paid_at: o.paid_at || null,
     address,
     note: o.note || "",
+    page_id: o.page_id != null ? String(o.page_id) : undefined,
+    page_title: typeof o.page_title === "string" ? o.page_title : undefined,
+    payment_status_raw: typeof o.payment_method === "string" ? o.payment_method : undefined,
+    delivery_status_raw: o.status != null ? String(o.status) : undefined,
+    delivery_target_type: deliveryTargetType,
+    cvs_brand: cvsParsed.cvs_brand || undefined,
+    cvs_store_code: cvsParsed.cvs_store_code || undefined,
+    cvs_store_name: cvsParsed.cvs_store_name || undefined,
+    full_address: fullAddress,
+    address_raw: addressRaw,
+    payment_transaction_id: typeof o.payment_transaction_id === "string" ? o.payment_transaction_id : undefined,
+    items_structured: itemsStructured,
   };
 }
 
@@ -585,3 +654,6 @@ export async function lookupOrdersByPhone(
   console.log(`[一頁商店] 全域搜尋完成：掃描 ${totalScanned} 筆，找到 ${uniqueOrders.length} 筆`);
   return { orders: uniqueOrders, totalFetched: totalScanned, truncated: wasTruncated };
 }
+
+/** Phase 1：依手機號碼全域查單（不限定 page_id）之別名 */
+export const lookup_order_by_phone_global = lookupOrdersByPhone;

@@ -1,0 +1,15 @@
+npx tsx server/scripts/query-order-index-stats.ts 完整輸出
+========================================
+
+=== orders_normalized 各 source 筆數 ===
+  source=superlanding  count=25135
+
+=== order_lookup_cache 總筆數 ===
+  total: 0
+
+=== order_lookup_cache 依 key 前綴（order_id vs phone）===
+  order_id:* count: 0
+  phone:* count: 0
+
+=== 最近 10 筆 source=shopline 的 orders_normalized ===
+  (無 source=shopline 資料)

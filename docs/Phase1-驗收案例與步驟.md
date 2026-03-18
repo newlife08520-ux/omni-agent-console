@@ -7,7 +7,7 @@
 | **A** | 你們東西很爛 | **不得** high_risk_short_circuit（應走 llm 或一般路徑，可標記 frustrated） |
 | **B** | 我要提告 / 我要找消保官 | **必須** legal_risk → handoff（reply_source=high_risk_short_circuit 或後續 handoff） |
 | **C** | 能轉人工嗎 | 直接 handoff，不再多問「您是想找真人嗎」 |
-| **D** | 人呢 | 直接 handoff |
+| **D** | 人呢 | **不** handoff（止血規則：招呼／曖昧語不單獨觸發轉人工；僅「明確要真人」如「能轉人工嗎」才 handoff） |
 | **E** | 第一句：我要退貨 → 第二句：說錯，我要查出貨速度 | 第二句覆蓋第一句，意圖為 order_lookup，不再沿用退貨流程 |
 | **F** | 我訂很久了很煩不要了幫我轉人工 | 最終只走真人（handoff），不可查單/表單/安撫搶答 |
 
@@ -40,12 +40,12 @@ curl -s -H "Cookie: ..." "http://localhost:5000/api/sandbox/prompt-preview?brand
 curl -s -H "Cookie: ..." "http://localhost:5000/api/sandbox/prompt-preview?brand_id=1&message=能轉人工嗎" | jq '.simulated_reply_source'
 # 預期：handoff
 
-# D
+# D（止血：人呢 不 handoff）
 curl -s -H "Cookie: ..." "http://localhost:5000/api/sandbox/prompt-preview?brand_id=1&message=人呢" | jq '.simulated_reply_source'
-# 預期：handoff
+# 預期：非 handoff（answer_directly 或類似），單獨「人呢」不觸發轉人工
 ```
 
-實際對話：發「能轉人工嗎」或「人呢」，預期回覆直接安排接手、不出現「您是想找真人嗎」。
+實際對話：發「能轉人工嗎」預期直接安排接手、不出現「您是想找真人嗎」。發「人呢」預期不轉人工（止血規則）。
 
 ### E：Correction override（兩句）
 
@@ -71,7 +71,7 @@ npx tsx server/phase1-verify.ts
 腳本會驗證：
 
 - 高風險：`爛` → 不觸發 legal_risk（由 routes 的 detectHighRisk 決定，腳本只驗 state/plan）。
-- 明確真人：`能轉人工嗎`、`人呢` → primary_intent=human_request，plan.mode=handoff。
+- 明確真人：`能轉人工嗎` → primary_intent=human_request，plan.mode=handoff；`人呢` → **不** handoff（止血）。
 - Correction override：`說錯，我要查出貨速度` + recentUserMessages=`["我要退貨"]` → primary_intent=order_lookup。
 - 混句：`我訂很久了很煩不要了幫我轉人工` → primary_intent=human_request，plan.mode=handoff。
 

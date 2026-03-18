@@ -23,7 +23,8 @@
     "db:push": "drizzle-kit push",
     "audit:superlanding": "tsx server/scripts/audit-superlanding-order-payload.ts",
     "audit:shopline": "tsx server/scripts/audit-shopline-order-payload.ts",
-    "audit:payloads": "npm run audit:superlanding && npm run audit:shopline"
+    "audit:payloads": "npm run audit:superlanding && npm run audit:shopline",
+    "sync:orders": "tsx server/scripts/sync-orders-normalized.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

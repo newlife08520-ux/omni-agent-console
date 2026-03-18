@@ -1,9 +1,17 @@
 import type { OrderInfo } from "@shared/schema";
 import type { SuperLandingConfig } from "./superlanding";
 import type { ShoplineConfig } from "./shopline";
-import { lookupOrderById, lookupOrdersByPageAndPhone, lookupOrdersByDateAndFilter, getStatusLabel } from "./superlanding";
+import { lookupOrderById, lookupOrdersByPageAndPhone, lookupOrdersByDateAndFilter, lookupOrdersByPhone, getStatusLabel } from "./superlanding";
 import { lookupShoplineOrderById, lookupShoplineOrdersByPhone, lookupShoplineOrdersByEmail, lookupShoplineOrdersByName, getShoplineStatusLabel } from "./shopline";
 import { storage } from "./storage";
+import {
+  getOrderByOrderId,
+  getOrdersByPhone,
+  getOrderLookupCache,
+  setOrderLookupCache,
+  normalizePhone,
+  upsertOrderNormalized,
+} from "./order-index";
 
 export interface UnifiedOrderResult {
   orders: OrderInfo[];
@@ -43,8 +51,25 @@ export async function unifiedLookupById(
   slConfig: SuperLandingConfig,
   orderId: string,
   brandId?: number,
-  preferSource?: OrderLookupPreferSource
+  preferSource?: OrderLookupPreferSource,
+  /** Phase 1：前台查單時傳 false，不搜其他品牌 */
+  allowCrossBrand = true
 ): Promise<UnifiedOrderResult> {
+  const idNorm = (orderId || "").trim().toUpperCase();
+  if (idNorm && brandId) {
+    const cacheKey = `order_id:${brandId}:${idNorm}`;
+    const cached = getOrderLookupCache(cacheKey);
+    if (cached?.found) {
+      return cached;
+    }
+    const local = getOrderByOrderId(brandId, idNorm);
+    if (local) {
+      const result: UnifiedOrderResult = { orders: [local], source: local.source || "superlanding", found: true };
+      setOrderLookupCache(cacheKey, result);
+      return result;
+    }
+  }
+
   const tryShoplineFirst = preferSource === "shopline";
 
   async function runShopline(): Promise<UnifiedOrderResult | null> {
@@ -73,6 +98,7 @@ export async function unifiedLookupById(
     } catch (_e) {
       console.log("[UnifiedOrder] SuperLanding 查詢失敗:", (_e as Error).message);
     }
+    if (!allowCrossBrand) return null;
     const allBrands = storage.getBrands();
     for (const brand of allBrands) {
       if (brand.id === brandId) continue;
@@ -91,19 +117,28 @@ export async function unifiedLookupById(
     return null;
   }
 
+  let result: UnifiedOrderResult;
   if (tryShoplineFirst) {
     const shop = await runShopline();
-    if (shop?.found) return shop;
-    const sl = await runSuperlanding();
-    if (sl?.found) return sl;
+    if (shop?.found) result = shop;
+    else {
+      const sl = await runSuperlanding();
+      result = sl ?? { orders: [], source: "unknown", found: false };
+    }
   } else {
     const sl = await runSuperlanding();
-    if (sl?.found) return sl;
-    const shop = await runShopline();
-    if (shop?.found) return shop;
+    if (sl?.found) result = sl;
+    else {
+      const shop = await runShopline();
+      result = shop ?? { orders: [], source: "unknown", found: false };
+    }
   }
-
-  return { orders: [], source: "unknown", found: false };
+  if (result.found && result.orders.length > 0 && idNorm && brandId && !result.crossBrand) {
+    setOrderLookupCache(`order_id:${brandId}:${idNorm}`, result);
+    const o = result.orders[0];
+    if (o?.global_order_id) upsertOrderNormalized(brandId, (o.source as "superlanding" | "shopline") || "superlanding", o);
+  }
+  return result;
 }
 
 export async function unifiedLookupByProductAndPhone(
@@ -111,7 +146,9 @@ export async function unifiedLookupByProductAndPhone(
   matchedPages: { pageId: string; productName: string }[],
   phone: string,
   brandId?: number,
-  preferSource?: OrderLookupPreferSource
+  preferSource?: OrderLookupPreferSource,
+  /** Phase 2.1：前台查單時傳 false，不搜其他品牌 */
+  allowCrossBrand = true
 ): Promise<UnifiedOrderResult> {
   const tryShoplineFirst = preferSource === "shopline";
 
@@ -148,6 +185,7 @@ export async function unifiedLookupByProductAndPhone(
       allResults.forEach(o => { o.source = "superlanding"; });
       return { orders: allResults, source: "superlanding", found: true };
     }
+    if (!allowCrossBrand) return null;
     const allBrands = storage.getBrands();
     for (const brand of allBrands) {
       if (brand.id === brandId) continue;
@@ -249,6 +287,104 @@ export async function unifiedLookupByDateAndContact(
   }
 
   return { orders: [], source: "unknown", found: false };
+}
+
+/** 依手機號碼跨管道查單（一頁商店不限定 page，SHOPLINE 依 phone），合併回傳 */
+export async function unifiedLookupByPhoneGlobal(
+  slConfig: SuperLandingConfig,
+  phone: string,
+  brandId?: number,
+  preferSource?: OrderLookupPreferSource,
+  /** Phase 2.1：前台查單時傳 false，不搜其他品牌、不污染當前品牌 cache/index */
+  allowCrossBrand = true
+): Promise<UnifiedOrderResult> {
+  const phoneNorm = normalizePhone(phone);
+  if (phoneNorm && brandId) {
+    const cacheKey = `phone:${brandId}:${phoneNorm}`;
+    const cached = getOrderLookupCache(cacheKey);
+    if (cached?.found) return cached;
+    const localOrders = getOrdersByPhone(brandId, phone);
+    if (localOrders.length > 0) {
+      const result: UnifiedOrderResult = {
+        orders: localOrders,
+        source: (localOrders[0]?.source as "superlanding" | "shopline") || "superlanding",
+        found: true,
+      };
+      setOrderLookupCache(cacheKey, result);
+      return result;
+    }
+  }
+
+  const tryShoplineFirst = preferSource === "shopline";
+
+  async function runShopline(): Promise<UnifiedOrderResult | null> {
+    const shoplineConfig = getShoplineConfig(brandId);
+    if (!shoplineConfig) return null;
+    try {
+      const result = await lookupShoplineOrdersByPhone(shoplineConfig, phone);
+      if (result.orders.length > 0) {
+        result.orders.forEach((o: OrderInfo) => { o.source = "shopline"; });
+        return { orders: result.orders, source: "shopline", found: true };
+      }
+    } catch (_e) {
+      console.log("[UnifiedOrder] SHOPLINE 手機全域查詢失敗:", (_e as Error).message);
+    }
+    return null;
+  }
+
+  async function runSuperlanding(): Promise<UnifiedOrderResult | null> {
+    if (!slConfig.merchantNo || !slConfig.accessKey) return null;
+    try {
+      const result = await lookupOrdersByPhone(slConfig, phone);
+      if (result.orders.length > 0) {
+        result.orders.forEach((o: OrderInfo) => { o.source = "superlanding"; });
+        return { orders: result.orders, source: "superlanding", found: true };
+      }
+    } catch (_e) {
+      console.log("[UnifiedOrder] SuperLanding 手機全域查詢失敗:", (_e as Error).message);
+    }
+    if (!allowCrossBrand) return null;
+    const allBrands = storage.getBrands();
+    for (const brand of allBrands) {
+      if (brand.id === brandId) continue;
+      if (!brand.superlanding_merchant_no || !brand.superlanding_access_key) continue;
+      try {
+        const result = await lookupOrdersByPhone(
+          { merchantNo: brand.superlanding_merchant_no, accessKey: brand.superlanding_access_key },
+          phone
+        );
+        if (result.orders.length > 0) {
+          result.orders.forEach((o: OrderInfo) => { o.source = "superlanding"; });
+          return { orders: result.orders, source: "superlanding", found: true, crossBrand: true, crossBrandName: brand.name };
+        }
+      } catch (_e) {}
+    }
+    return null;
+  }
+
+  let result: UnifiedOrderResult;
+  if (tryShoplineFirst) {
+    const shop = await runShopline();
+    if (shop?.found) result = shop;
+    else {
+      const sl = await runSuperlanding();
+      result = sl ?? { orders: [], source: "unknown", found: false };
+    }
+  } else {
+    const sl = await runSuperlanding();
+    if (sl?.found) result = sl;
+    else {
+      const shop = await runShopline();
+      result = shop ?? { orders: [], source: "unknown", found: false };
+    }
+  }
+  if (result.found && result.orders.length > 0 && phoneNorm && brandId && !result.crossBrand) {
+    setOrderLookupCache(`phone:${brandId}:${phoneNorm}`, result);
+    for (const o of result.orders) {
+      if (o?.global_order_id) upsertOrderNormalized(brandId, (o.source as "superlanding" | "shopline") || "superlanding", o);
+    }
+  }
+  return result;
 }
 
 export function getUnifiedStatusLabel(status: string, source?: string): string {

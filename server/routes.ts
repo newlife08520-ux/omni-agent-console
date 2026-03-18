@@ -27,7 +27,7 @@ import db from "./db";
 import { fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, fetchPages, lookupOrdersByPageAndPhone, ensurePagesCacheLoaded, refreshPagesCache, getCachedPages, getCachedPagesAge, buildProductCatalogPrompt, getSuperLandingConfig } from "./superlanding";
 import type { SuperLandingConfig } from "./superlanding";
 import type { OrderInfo, Contact, ContactStatus, IssueType, MetaCommentTemplate, MetaComment } from "@shared/schema";
-import { unifiedLookupById, unifiedLookupByProductAndPhone, unifiedLookupByDateAndContact, getUnifiedStatusLabel, getPaymentInterpretationForAI, shouldPreferShoplineLookup } from "./order-service";
+import { unifiedLookupById, unifiedLookupByProductAndPhone, unifiedLookupByDateAndContact, unifiedLookupByPhoneGlobal, getUnifiedStatusLabel, getPaymentInterpretationForAI, shouldPreferShoplineLookup } from "./order-service";
 import * as assignment from "./assignment";
 import {
   detectIntentLevel,
@@ -303,8 +303,10 @@ function getTransferUnavailableSystemMessage(reason: "weekend" | "lunch" | "afte
 /** Phase 2 商品範圍鎖定用：命中 bag/sweet 關鍵字時 product_scope_locked，下方為 Unicode 關鍵字 */
 const BAG_KEYWORDS = ["\u5305", "\u5305\u5305", "\u6258\u7279\u5305", "\u624b\u63d0\u5305", "\u80a9\u80cc\u5305", "\u5f8c\u80cc\u5305", "\u5074\u80cc\u5305"];
 const SWEET_KEYWORDS = ["\u751c", "\u751c\u9ede", "\u7cd6", "\u7cd6\u679c", "\u5de7\u514b\u529b", "\u86cb\u7cd5", "\u990a\u4e7e"];
-/** 宅配/超商/門市關鍵字（Regex 比對用） */
-const CVS_SHIPPING_KEYWORDS = ["\u5b85\u9148", "\u8d85\u5546", "\u9580\u5e02", "7-11", "7-ELEVEN", "\u5168\u5bb6", "OK", "\u840a\u723e\u5bcc"];
+/** Phase 1：宅配關鍵字（與超商分開，避免誤判為門市） */
+const HOME_SHIPPING_KEYWORDS = ["\u5b85\u9148", "\u5b85\u9148\u5230\u5e9c", "\u5230\u5e9c", "home", "delivery"];
+/** 超商/門市關鍵字（不含宅配） */
+const CVS_SHIPPING_KEYWORDS = ["\u8d85\u5546", "\u9580\u5e02", "7-11", "7-ELEVEN", "\u5168\u5bb6", "OK", "\u840a\u723e\u5bcc"];
 const PAYMENT_FAIL_STATUS_KW = ["\u5931\u6557", "\u672a\u6210\u529f", "\u4ed8\u6b3e\u5931\u6557"];
 const PAYMENT_FAIL_METHOD_KW = ["\u5931\u6557", "\u672a\u4ed8"];
 const PAYMENT_SUCCESS_STATUS_KW = ["\u5df2\u78ba\u8a8d", "\u5f85\u51fa\u8ca8", "\u5df2\u51fa\u8ca8", "\u5df2\u5b8c\u6210"];
@@ -313,6 +315,11 @@ const PAYMENT_PENDING_STATUS_KW = ["\u5f85\u4ed8\u6b3e", "\u672a\u4ed8\u6b3e", "
 const ASK_ORDER_PHONE_FOR_BYPASS_KW = ["\u8acb\u63d0\u4f9b\u8a02\u55ae\u7de8\u865f", "\u8a02\u55ae\u7de8\u865f", "\u8acb\u63d0\u4f9b", "\u624b\u6a5f\u865f\u78bc", "\u5546\u54c1\u540d\u7a31", "\u4e0b\u8a02\u624b\u6a5f", "\u6536\u4ef6\u4eba", "\u8acb\u63d0\u4f9b\u8cc3\u8a0a"];
 /** 訂單/單號/編號/出貨/物流/到貨等後續追蹤關鍵字 */
 const ORDER_FOLLOWUP_KW = ["\u8a02\u55ae\u7de8\u865f", "\u55ae\u865f", "\u7de8\u865f", "\u51fa\u8ca8", "\u7269\u6d41", "\u67e5\u8a62", "\u5230\u8ca8", "\u4ec0\u9ebc\u6642\u5019", "\u51e1\u5929", "\u6536\u5230"];
+/** Phase 2.1：可依 active context 做「確定性」回覆的追問關鍵字（出貨/物流/到貨/單號/追蹤/付款/地址/門市） */
+const ORDER_FOLLOWUP_DETERMINISTIC_KW = [
+  "\u51fa\u8ca8", "\u7269\u6d41", "\u5230\u8ca8", "\u4ec0\u9ebc\u6642\u5019", "\u55ae\u865f", "\u7de8\u865f", "\u8ffd\u8e64", "\u6536\u5230", "\u5df2\u51fa\u8ca8", "\u5f85\u51fa\u8ca8",
+  "\u4ed8\u6b3e", "\u4ed8\u6b3e\u6210\u529f", "\u6210\u529f\u4e86\u55ce", "\u5730\u5740", "\u5bc4\u5230\u54ea\u88e1", "\u9580\u5e02", "\u54ea\u9593\u5168\u5bb6", "\u54ea\u9593\u8d85\u5546", "\u4fbf\u5229\u5546\u5e97", "\u5168\u5bb6", "\u51fa\u8ca8\u4e86\u55ce", "\u7269\u6d41\u55ae\u865f",
+];
 const FULFILLMENT_SHIPPED_KW = ["\u5df2\u51fa\u8ca8", "\u5df2\u9001\u9054"];
 const FULFILLMENT_PENDING_SHIP_KW = ["\u65b0\u8a02\u55ae", "\u5f85\u51fa\u8ca8", "\u8655\u7406\u4e2d"];
 const FULFILLMENT_CANCELED_KW = ["\u5df2\u53d6\u6d88"];
@@ -322,6 +329,42 @@ function looksLikeOrderIdInput(s: string): boolean {
   const t = (s || "").trim();
   return t.length <= 10 && t.length >= 1 && /^[0-9A-Za-z\-]+$/.test(t);
 }
+
+/** Phase 2.1：依 ActiveOrderContext 產出確定性追問回覆（出貨/物流/單號/到貨/付款/地址/門市），同一 context 同一輸出 */
+function buildDeterministicFollowUpReply(ctx: import("@shared/schema").ActiveOrderContext): string | null {
+  if (!ctx?.order_id) return null;
+  const parts: string[] = [`訂單編號 ${ctx.order_id}`];
+  if (ctx.payment_status && ctx.payment_status !== "unknown") {
+    const paymentText =
+      ctx.payment_status === "success"
+        ? "付款已成功"
+        : ctx.payment_status === "failed"
+          ? "付款未成功，請重新下單或聯繫客服"
+          : "付款狀態：待付款或確認中";
+    parts.push(paymentText);
+  }
+  if (ctx.fulfillment_status) parts.push(`出貨／訂單狀態：${ctx.fulfillment_status}`);
+  if (ctx.delivery_target_type === "cvs") {
+    const storeBits = [ctx.cvs_brand, ctx.cvs_store_name].filter(Boolean).join(" ").trim();
+    const addr = (ctx.full_address || "").trim();
+    if (storeBits || addr) {
+      parts.push(
+        storeBits
+          ? `取貨門市：${storeBits}${addr ? `，門市地址：${addr}` : ""}`
+          : `取貨地址：${addr}`
+      );
+    }
+  } else if (ctx.full_address?.trim() || ctx.address_or_store?.trim()) {
+    parts.push(`寄送地址：${(ctx.full_address || ctx.address_or_store || "").trim()}`);
+  }
+  if (ctx.tracking_no?.trim()) {
+    parts.push(`物流單號：${ctx.tracking_no.trim()}，可至物流官網查配送進度`);
+  } else if (ctx.shipping_method?.trim() && ctx.delivery_target_type !== "cvs") {
+    parts.push(`配送方式：${ctx.shipping_method.trim()}`);
+  }
+  return parts.length > 1 ? parts.join("。") + "。" : null;
+}
+
 function getProductScopeFromMessage(text: string): "bag" | "sweet" | null {
   const t = (text || "").trim();
   if (BAG_KEYWORDS.some((k) => t.includes(k))) return "bag";
@@ -3249,17 +3292,15 @@ export async function registerRoutes(
     const { q, brand_id } = req.query;
     const query = (q as string || "").trim().toUpperCase();
     if (!query) return res.status(400).json({ message: "???????" });
-    const config = getSuperLandingConfig(brand_id ? parseInt(brand_id as string) : undefined);
-    if (!config.merchantNo || !config.accessKey) {
-      return res.json({ orders: [], error: "not_configured", message: "???????? API ??" });
-    }
+    const brandId = brand_id ? parseInt(brand_id as string) : undefined;
+    const config = getSuperLandingConfig(brandId);
     try {
       console.log("[????] ???????:", query, "(?????)");
-      const order = await lookupOrderById(config, query);
-      if (!order) {
+      const result = await unifiedLookupById(config, query, brandId, undefined, false);
+      if (!result.found || result.orders.length === 0) {
         return res.json({ orders: [], message: "??????????????????????" });
       }
-      return res.json({ orders: [order] });
+      return res.json({ orders: result.orders });
     } catch (err: any) {
       const errorMap: Record<string, string> = {
         missing_credentials: "API ?????",
@@ -3523,7 +3564,7 @@ export async function registerRoutes(
             if (order.final_total_order_amount != null) lines.push(`金額：$${Number(order.final_total_order_amount).toLocaleString()}`);
             lines.push(`配送方式：${(order.shipping_method || "").trim() || "（此筆訂單系統未回傳）"}`);
             if (order.tracking_number) lines.push(`物流單號：${order.tracking_number}`);
-            const isCvs = CVS_SHIPPING_KEYWORDS.some((k) => (order.shipping_method || "").toLowerCase().includes(k.toLowerCase()));
+            const isCvs = order.delivery_target_type === "cvs" || (order.delivery_target_type !== "home" && CVS_SHIPPING_KEYWORDS.some((k) => (order.shipping_method || "").toLowerCase().includes(k.toLowerCase())));
             if (order.address) lines.push(isCvs ? `門市地址：${order.address}` : `地址：${order.address}`);
             if (order.product_list) lines.push(`商品明細：${order.product_list}`);
             lines.push(`狀態：${statusLabel}`);
@@ -4292,6 +4333,7 @@ ${contextStr}
 - 工具回傳多筆訂單（total > 1）時，必須將 one_page_full 的內容完整逐筆呈現給客戶，不可只列一筆或只列簡表。
 - 工具回傳一筆訂單時，將 one_page_summary 或 one_page_full 完整回覆給客戶（含訂單編號、姓名、電話、下單時間、付款方式、配送方式、金額、狀態等）。
 - 勿要求客戶重複提供已提供過的訂單編號或手機、商品名稱。
+- 官網查單：客戶說官網／官方網站購買時，有訂單編號用 lookup_order_by_id（系統會優先查官網）；只有電話、沒有商品名時用 lookup_order_by_phone，不需問商品或日期，系統會辨識是否官網訂單並優先查官網。
 </ORDER_LOOKUP_RULES>`;
       }
       /** 依品牌/渠道設定與對話狀態決定是否允許 AI 回覆或強制轉人工 */
@@ -4355,6 +4397,47 @@ ${contextStr}
         if (found.orderId) parts.push(`???? ${found.orderId}`);
         if (found.phone) parts.push(`?? ${found.phone}`);
         systemPrompt += "\n\n??? ????????????????????????????????????" + parts.join("?") + "?????????";
+      }
+      /** Phase 1：Active Order 追問時以確定性回覆短路，不進 LLM */
+      if (plan.mode === "order_lookup") {
+        const activeCtxShort = storage.getActiveOrderContext(contact.id);
+        const msgTrimShort = (userMessage || "").trim();
+        const isFollowUpShort = activeCtxShort && (
+          ORDER_FOLLOWUP_KW.some((k) => msgTrimShort.includes(k)) ||
+          ORDER_FOLLOWUP_DETERMINISTIC_KW.some((k) => msgTrimShort.includes(k)) ||
+          looksLikeOrderIdInput(msgTrimShort)
+        );
+        const useDeterministic = isFollowUpShort && activeCtxShort && ORDER_FOLLOWUP_DETERMINISTIC_KW.some((k) => msgTrimShort.includes(k));
+        const deterministicText = useDeterministic ? buildDeterministicFollowUpReply(activeCtxShort!) : null;
+        if (deterministicText) {
+          const contactPlatformDet = platform || contact.platform || "line";
+          const aiMsgDet = storage.createMessage(contact.id, contactPlatformDet, "ai", deterministicText);
+          broadcastSSE("new_message", { contact_id: contact.id, message: aiMsgDet, brand_id: effectiveBrandId || contact.brand_id });
+          broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+          if (channelToken && contactPlatformDet === "messenger") {
+            await sendFBMessage(channelToken, contact.platform_user_id, deterministicText);
+          } else if (channelToken) {
+            await pushLineMessage(contact.platform_user_id, [{ type: "text", text: deterministicText }], channelToken);
+          }
+          storage.createAiLog({
+            contact_id: contact.id,
+            message_id: aiMsgDet.id,
+            brand_id: effectiveBrandId || undefined,
+            prompt_summary: `active_order_short_circuit: ${msgTrimShort.slice(0, 40)}`,
+            knowledge_hits: [],
+            tools_called: [],
+            transfer_triggered: false,
+            transfer_reason: undefined,
+            result_summary: "active_order_deterministic_reply",
+            token_usage: 0,
+            model: "active_order_short_circuit",
+            response_time_ms: Date.now() - startTime,
+            reply_source: "active_order_short_circuit",
+            used_llm: 0,
+            plan_mode: plan.mode,
+          });
+          return;
+        }
       }
       const openai = new OpenAI({ apiKey });
 
@@ -4466,11 +4549,27 @@ ${contextStr}
       console.log("[AI Latency] contact", contact.id, "after_first_llm_ms", Date.now() - startTime);
       let loopCount = 0;
       const maxToolLoops = 3;
+      const ORDER_LOOKUP_TOOL_NAMES = ["lookup_order_by_id", "lookup_order_by_product_and_phone", "lookup_order_by_date_and_contact", "lookup_more_orders", "lookup_order_by_phone"];
+      let sentLookupAckThisTurn = false;
 
       while (responseMessage?.tool_calls && responseMessage.tool_calls.length > 0 && loopCount < maxToolLoops) {
         loopCount++;
         console.log(`[Webhook AI] ?? ${responseMessage.tool_calls.length} ? Tool Call?? ${loopCount} ??`);
         chatMessages.push(responseMessage as OpenAI.Chat.Completions.ChatCompletionMessageParam);
+
+        const hasOrderLookupTool = responseMessage.tool_calls.some((tc: any) => ORDER_LOOKUP_TOOL_NAMES.includes(tc?.function?.name || ""));
+        if (hasOrderLookupTool && !sentLookupAckThisTurn) {
+          sentLookupAckThisTurn = true;
+          const lookupAckText = "我幫您查詢中～";
+          const ackMsg = storage.createMessage(contact.id, contact.platform || "line", "ai", lookupAckText);
+          broadcastSSE("new_message", { contact_id: contact.id, message: ackMsg, brand_id: effectiveBrandId || contact.brand_id });
+          broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+          if (channelToken && contact.platform === "messenger") {
+            sendFBMessage(channelToken, contact.platform_user_id, lookupAckText).catch(() => {});
+          } else if (channelToken) {
+            pushLineMessage(contact.platform_user_id, [{ type: "text", text: lookupAckText }], channelToken).catch(() => {});
+          }
+        }
 
         const recentUserMessagesForLookup = recentMessages
           .filter((m: any) => m.sender_type === "user" && m.content && m.content !== "[????]")
@@ -4925,6 +5024,35 @@ ${contextStr}
         },
       },
     },
+    {
+      type: "function",
+      function: {
+        name: "lookup_more_orders",
+        description: "同一銷售頁、同一手機號碼查詢更多訂單。需 phone；page_id 可省略（會用目前對話的 active_order 的 page_id）。",
+        parameters: {
+          type: "object",
+          properties: {
+            phone: { type: "string", description: "客戶手機號碼" },
+            page_id: { type: "string", description: "銷售頁 ID，若省略則使用目前對到訂單的 page_id" },
+          },
+          required: ["phone"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "lookup_order_by_phone",
+        description: "僅以手機號碼查訂單（不需商品名或日期）。當客戶說官網／官方網站購買且只提供電話時使用；系統會依對話是否含「官網」等關鍵字優先查官網（Shopline）。",
+        parameters: {
+          type: "object",
+          properties: {
+            phone: { type: "string", description: "客戶手機號碼" },
+          },
+          required: ["phone"],
+        },
+      },
+    },
   ];
 
   const humanHandoffTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
@@ -5049,7 +5177,7 @@ ${contextStr}
     }
 
     /** 依對話內容與既有狀態決定是否允許 AI 回覆或需轉人工 */
-    function formatOrderOnePage(o: { order_id?: string; buyer_name?: string; buyer_phone?: string; created_at?: string; payment_method?: string; amount?: number; shipping_method?: string; tracking_number?: string; address?: string; product_list?: string; status?: string; shipped_at?: string }): string {
+    function formatOrderOnePage(o: { order_id?: string; buyer_name?: string; buyer_phone?: string; created_at?: string; payment_method?: string; amount?: number; shipping_method?: string; tracking_number?: string; address?: string; product_list?: string; status?: string; shipped_at?: string; delivery_target_type?: string; cvs_brand?: string; cvs_store_name?: string; full_address?: string }): string {
       const lines: string[] = [];
       if (o.order_id) lines.push(`訂單編號：${o.order_id}`);
       if (o.buyer_name) lines.push(`收件人：${o.buyer_name}`);
@@ -5059,8 +5187,11 @@ ${contextStr}
       if (o.amount != null) lines.push(`金額：$${Number(o.amount).toLocaleString()}`);
       lines.push(`配送方式：${(o.shipping_method || "").trim() || "（此筆訂單系統未回傳）"}`);
       if (o.tracking_number) lines.push(`物流單號：${o.tracking_number}`);
-      const isCvs = CVS_SHIPPING_KEYWORDS.some((k) => (o.shipping_method || "").toLowerCase().includes(k.toLowerCase()));
-      if (o.address) lines.push(isCvs ? `門市地址：${o.address}` : `地址：${o.address}`);
+      const isCvs = o.delivery_target_type === "cvs" || (o.delivery_target_type !== "home" && CVS_SHIPPING_KEYWORDS.some((k) => (o.shipping_method || "").toLowerCase().includes(k.toLowerCase())));
+      const addressDisplay = isCvs
+        ? [o.cvs_brand, o.cvs_store_name, o.full_address].filter(Boolean).join(" ") || o.address
+        : (o.full_address || o.address);
+      if (addressDisplay) lines.push(isCvs ? `門市／地址：${addressDisplay}` : `地址：${addressDisplay}`);
       if (o.product_list) lines.push(`商品明細：${o.product_list}`);
       if (o.status) lines.push(`狀態：${o.status}`);
       if (o.shipped_at) lines.push(`出貨時間：${o.shipped_at}`);
@@ -5077,9 +5208,17 @@ ${contextStr}
     ): import("@shared/schema").ActiveOrderContext {
       const now = new Date().toISOString().replace("T", " ").substring(0, 19);
       let payment_status: "success" | "pending" | "failed" | "unknown" = "unknown";
-      if (PAYMENT_FAIL_STATUS_KW.some((k) => statusLabel.includes(k)) || (order.prepaid === false && order.paid_at == null && !PAYMENT_FAIL_METHOD_KW.some((k) => (order.payment_method || "").includes(k)))) payment_status = "failed";
-      else if (order.prepaid === true || order.paid_at || PAYMENT_SUCCESS_STATUS_KW.some((k) => statusLabel.includes(k))) payment_status = "success";
-      else if (PAYMENT_PENDING_STATUS_KW.some((k) => statusLabel.includes(k))) payment_status = "pending";
+      const payRaw = ((order as { payment_status_raw?: string }).payment_status_raw || "").toLowerCase();
+      if (source === "shopline" && payRaw) {
+        if (/paid|complete|success|captured|authorized/.test(payRaw)) payment_status = "success";
+        else if (/pending|unpaid|awaiting|processing/.test(payRaw)) payment_status = "pending";
+        else if (/fail|void|cancel|refund/.test(payRaw)) payment_status = "failed";
+      }
+      if (payment_status === "unknown") {
+        if (PAYMENT_FAIL_STATUS_KW.some((k) => statusLabel.includes(k)) || (order.prepaid === false && order.paid_at == null && !PAYMENT_FAIL_METHOD_KW.some((k) => (order.payment_method || "").includes(k)))) payment_status = "failed";
+        else if (order.prepaid === true || order.paid_at || PAYMENT_SUCCESS_STATUS_KW.some((k) => statusLabel.includes(k))) payment_status = "success";
+        else if (PAYMENT_PENDING_STATUS_KW.some((k) => statusLabel.includes(k))) payment_status = "pending";
+      }
       let fulfillment_status = statusLabel;
       if (FULFILLMENT_SHIPPED_KW.some((k) => statusLabel.includes(k))) fulfillment_status = "\u5df2\u51fa\u8ca8";
       else if (FULFILLMENT_PENDING_SHIP_KW.some((k) => statusLabel.includes(k))) fulfillment_status = "\u5f85\u51fa\u8ca8";
@@ -5088,6 +5227,12 @@ ${contextStr}
       else if (FULFILLMENT_NEW_KW.some((k) => statusLabel.includes(k))) fulfillment_status = "\u65b0\u8a02\u55ae";
       else if (payment_status === "failed") fulfillment_status = "\u4ed8\u6b3e\u5931\u6557";
       else if (payment_status === "pending") fulfillment_status = "\u5f85\u4ed8\u6b3e";
+      const addressOrStore =
+        order.delivery_target_type === "cvs"
+          ? [order.cvs_brand, order.cvs_store_name, order.full_address].filter(Boolean).join(" ") || order.address
+          : order.delivery_target_type === "home"
+            ? (order.full_address || order.address)
+            : (order.full_address || order.address);
       return {
         order_id: order.global_order_id,
         matched_by: matchedBy,
@@ -5100,11 +5245,20 @@ ${contextStr}
         tracking_no: order.tracking_number,
         receiver_name: order.buyer_name,
         receiver_phone: order.buyer_phone,
-        address_or_store: order.address,
+        address_or_store: addressOrStore || order.address,
         items: order.product_list,
         order_time: order.created_at || order.order_created_at,
         one_page_summary: onePageSummary,
         source: source as import("@shared/schema").OrderSource,
+        page_id: order.page_id,
+        page_title: order.page_title,
+        delivery_target_type: order.delivery_target_type,
+        cvs_brand: order.cvs_brand,
+        cvs_store_code: order.cvs_store_code,
+        cvs_store_name: order.cvs_store_name,
+        full_address: order.full_address,
+        address_raw: order.address_raw,
+        source_channel_hint: order.source === "superlanding" ? "superlanding" : order.source === "shopline" ? "shopline" : undefined,
       };
     }
 
@@ -5142,8 +5296,8 @@ ${contextStr}
         }
 
         const preferSource = context?.preferShopline ? "shopline" as const : undefined;
-        if (preferSource) console.log(`[AI Tool Call] ?? SHOPLINE ?????/SHOPLINE ???`);
-        const result = await unifiedLookupById(config, orderId, context?.brandId, preferSource);
+        if (preferSource) console.log(`[AI Tool Call] 官網查單：優先 SHOPLINE`);
+        const result = await unifiedLookupById(config, orderId, context?.brandId, preferSource, false);
 
         if (!result.found || result.orders.length === 0) {
           console.log(`[AI Tool Call] ????: ${orderId}`);
@@ -5170,6 +5324,10 @@ ${contextStr}
           buyer_name: order.buyer_name,
           buyer_phone: order.buyer_phone,
           address: order.address,
+          full_address: order.full_address,
+          cvs_brand: order.cvs_brand,
+          cvs_store_name: order.cvs_store_name,
+          delivery_target_type: order.delivery_target_type,
           tracking_number: order.tracking_number,
           created_at: order.created_at,
           shipped_at: order.shipped_at,
@@ -5319,8 +5477,8 @@ ${contextStr}
         const preferSourceProduct = context?.preferShopline ? "shopline" as const : undefined;
 
         if (preferSourceProduct) {
-          console.log(`[AI Tool Call] ??/SHOPLINE ?????? SHOPLINE ???????`);
-          const unifiedResult = await unifiedLookupByProductAndPhone(config, matchedPages, phone, context?.brandId, preferSourceProduct);
+          console.log("[AI Tool Call] 商品+手機：優先 SHOPLINE");
+          const unifiedResult = await unifiedLookupByProductAndPhone(config, matchedPages, phone, context?.brandId, preferSourceProduct, false);
           if (unifiedResult.found) {
             allResults = unifiedResult.orders;
             orderSource = unifiedResult.source;
@@ -5339,8 +5497,8 @@ ${contextStr}
           }
         }
         if (allResults.length === 0) {
-          console.log(`[AI Tool Call] ?? ${context?.brandId || "??"} SuperLanding ???????????...`);
-          const unifiedResult = await unifiedLookupByProductAndPhone(config, matchedPages, phone, context?.brandId, preferSourceProduct);
+          console.log(`[AI Tool Call] Brand ${context?.brandId || "?"} SuperLanding 無命中，嘗試 unified（含 SHOPLINE）...`);
+          const unifiedResult = await unifiedLookupByProductAndPhone(config, matchedPages, phone, context?.brandId, preferSourceProduct, false);
           if (unifiedResult.found) {
             allResults = unifiedResult.orders;
             orderSource = unifiedResult.source;
@@ -5372,6 +5530,10 @@ ${contextStr}
           buyer_name: o.buyer_name,
           buyer_phone: o.buyer_phone,
           address: o.address,
+          full_address: o.full_address,
+          cvs_brand: o.cvs_brand,
+          cvs_store_name: o.cvs_store_name,
+          delivery_target_type: o.delivery_target_type,
           tracking_number: o.tracking_number,
           created_at: o.created_at,
           shipped_at: o.shipped_at,
@@ -5486,6 +5648,10 @@ ${contextStr}
           buyer_name: o.buyer_name,
           buyer_phone: o.buyer_phone,
           address: o.address,
+          full_address: o.full_address,
+          cvs_brand: o.cvs_brand,
+          cvs_store_name: o.cvs_store_name,
+          delivery_target_type: o.delivery_target_type,
           tracking_number: o.tracking_number,
           created_at: o.created_at,
           shipped_at: o.shipped_at,
@@ -5503,6 +5669,100 @@ ${contextStr}
           : undefined;
         console.log("[AI Latency] tool lookup_order_by_date_and_contact done in", Date.now() - dateToolStartMs, "ms");
         return JSON.stringify({ success: true, found: true, total: matched.length, orders: orderSummaries, truncated, note: multiOrderNote, formatted_list: matched.length > 1 ? dateFormattedList : undefined, one_page_summary: matched.length === 1 ? onePageBlocks[0] : undefined, one_page_full });
+      }
+
+      if (toolName === "lookup_more_orders") {
+        const phone = (args.phone || "").trim();
+        let pageId = (args.page_id || "").trim();
+        if (!pageId && context?.contactId) {
+          const activeCtx = storage.getActiveOrderContext(context.contactId);
+          if (activeCtx?.page_id) pageId = activeCtx.page_id;
+        }
+        if (!phone) {
+          return JSON.stringify({ success: false, error: "請提供手機號碼" });
+        }
+        if (!pageId) {
+          return JSON.stringify({ success: false, error: "無法取得 page_id（請先以商品+手機查單，或傳入 page_id）" });
+        }
+        const result = await lookupOrdersByPageAndPhone(config, pageId, phone);
+        const orders = result.orders;
+        if (orders.length === 0) {
+          return JSON.stringify({ success: true, found: false, message: "此頁+此手機無其他訂單" });
+        }
+        orders.forEach((o: OrderInfo) => { o.source = "superlanding"; });
+        const orderSummaries = orders.map(o => ({
+          order_id: o.global_order_id,
+          status: getUnifiedStatusLabel(o.status, "superlanding"),
+          amount: o.final_total_order_amount,
+          product_list: o.product_list,
+          buyer_name: o.buyer_name,
+          buyer_phone: o.buyer_phone,
+          address: o.address,
+          full_address: o.full_address,
+          cvs_brand: o.cvs_brand,
+          cvs_store_name: o.cvs_store_name,
+          delivery_target_type: o.delivery_target_type,
+          tracking_number: o.tracking_number,
+          created_at: o.created_at,
+          shipped_at: o.shipped_at,
+          shipping_method: o.shipping_method,
+          payment_method: o.payment_method,
+          source: "superlanding",
+        }));
+        const formattedList = orderSummaries.map(o => `- **${o.order_id}** | ${o.created_at || ""} | $${o.amount ?? ""} | **${o.status || ""}**`).join("\n");
+        const onePageBlocks = orderSummaries.map(o => formatOrderOnePage(o));
+        const one_page_full = onePageBlocks.join("\n\n---\n\n");
+        const multiOrderNote = orders.length > 1
+          ? `【重要】以下共 ${orders.length} 筆訂單。回覆時必須逐筆列出。\n簡表：\n${formattedList}`
+          : undefined;
+        return JSON.stringify({ success: true, found: true, total: orders.length, orders: orderSummaries, note: multiOrderNote, formatted_list: orders.length > 1 ? formattedList : undefined, one_page_summary: orders.length === 1 ? onePageBlocks[0] : undefined, one_page_full });
+      }
+
+      if (toolName === "lookup_order_by_phone") {
+        const phone = (args.phone || "").trim();
+        if (!phone) return JSON.stringify({ success: false, error: "請提供手機號碼" });
+        const preferSource = context?.preferShopline ? "shopline" as const : undefined;
+        if (preferSource) console.log("[AI Tool Call] 官網查單：優先 SHOPLINE（依對話關鍵字）");
+        const result = await unifiedLookupByPhoneGlobal(config, phone, context?.brandId, preferSource, false);
+        if (!result.found || result.orders.length === 0) {
+          return JSON.stringify({ success: true, found: false, message: "此手機號碼查無訂單紀錄；若為官網購買可確認是否已留此電話。" });
+        }
+        const orders = result.orders;
+        const orderSource = result.source;
+        const orderSummaries = orders.map(o => ({
+          order_id: o.global_order_id,
+          status: getUnifiedStatusLabel(o.status, o.source || orderSource),
+          amount: o.final_total_order_amount,
+          product_list: o.product_list,
+          buyer_name: o.buyer_name,
+          buyer_phone: o.buyer_phone,
+          address: o.address,
+          full_address: o.full_address,
+          cvs_brand: o.cvs_brand,
+          cvs_store_name: o.cvs_store_name,
+          delivery_target_type: o.delivery_target_type,
+          tracking_number: o.tracking_number,
+          created_at: o.created_at,
+          shipped_at: o.shipped_at,
+          shipping_method: o.shipping_method,
+          payment_method: o.payment_method,
+          source: o.source || orderSource,
+        }));
+        const formattedList = orderSummaries.map(o => `- **${o.order_id}** | ${o.created_at || ""} | $${o.amount ?? ""} | **${o.status || ""}**`).join("\n");
+        const onePageBlocks = orderSummaries.map(o => formatOrderOnePage(o));
+        const one_page_full = onePageBlocks.join("\n\n---\n\n");
+        const multiOrderNote = orders.length > 1
+          ? `【重要】以下共 ${orders.length} 筆訂單。回覆時必須逐筆列出。\n簡表：\n${formattedList}`
+          : undefined;
+        if (context?.contactId && orders.length === 1) {
+          const o0 = orders[0];
+          const statusLabel0 = getUnifiedStatusLabel(o0.status, o0.source || orderSource);
+          const onePagePayload = { order_id: o0.global_order_id, status: statusLabel0, amount: o0.final_total_order_amount, product_list: o0.product_list, buyer_name: o0.buyer_name, buyer_phone: o0.buyer_phone, address: o0.address, full_address: o0.full_address, cvs_brand: o0.cvs_brand, cvs_store_name: o0.cvs_store_name, delivery_target_type: o0.delivery_target_type, tracking_number: o0.tracking_number, created_at: o0.created_at, shipped_at: o0.shipped_at, shipping_method: o0.shipping_method, payment_method: o0.payment_method };
+          storage.linkOrderForContact(context.contactId, o0.global_order_id, "ai_lookup");
+          const activeCtx = buildActiveOrderContext(o0, o0.source || orderSource, statusLabel0, onePageBlocks[0], "text");
+          storage.setActiveOrderContext(context.contactId, activeCtx);
+        }
+        return JSON.stringify({ success: true, found: true, total: orders.length, orders: orderSummaries, source: orderSource, note: multiOrderNote, formatted_list: orders.length > 1 ? formattedList : undefined, one_page_summary: orders.length === 1 ? onePageBlocks[0] : undefined, one_page_full });
       }
 
       return JSON.stringify({ success: false, error: `?????: ${toolName}` });

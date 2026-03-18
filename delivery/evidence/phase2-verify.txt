@@ -1,0 +1,16 @@
+npx tsx server/phase2-verify.ts 完整輸出
+========================================
+
+[PASS] 城市輕旅通勤包 → order_lookup
+[PASS] 城市輕旅通勤包 → scope=bag
+[PASS] 不想等了我要退貨 → aftersales_comfort_first
+[PASS] 很煩不要了幫我轉人工 → handoff
+[PASS] 晚餐吃什麼好 → off_topic_guard
+[PASS] off_topic 固定短句不推薦菜單
+[PASS] 我要查訂單 → order_lookup
+[PASS] order_lookup 回覆上限 140 字
+[PASS] 包包尺寸有圖片嗎 → answer_directly
+[PASS] 包包尺寸 → scope=bag
+
+---
+Phase 2 驗收: 10 通過, 0 失敗

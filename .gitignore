@@ -26,3 +26,6 @@ uploads/
 # local tool / cache folders
 .local/
 .replit/
+client.zip
+content-guard-stats.json
+delivery/*.zip

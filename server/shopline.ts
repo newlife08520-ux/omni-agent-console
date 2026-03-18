@@ -1,4 +1,4 @@
-import type { OrderInfo } from "@shared/schema";
+import type { OrderInfo, DeliveryTargetType } from "@shared/schema";
 
 const SHOPLINE_API_VERSION = "v1";
 
@@ -35,104 +35,153 @@ function buildBaseUrl(_config: ShoplineConfig): string {
   return `${SHOPLINE_OPEN_API_BASE}/${SHOPLINE_API_VERSION}`;
 }
 
+/** 從 order_payment 取付款狀態原始值 */
+export function getShoplinePaymentStatusRaw(o: any): string | undefined {
+  const status = o?.order_payment?.status;
+  return typeof status === "string" ? status : undefined;
+}
+
+/** 從 order_delivery 取配送狀態原始值 */
+export function getShoplineDeliveryStatusRaw(o: any): string | undefined {
+  const s = o?.order_delivery?.delivery_status ?? o?.order_delivery?.status;
+  return typeof s === "string" ? s : undefined;
+}
+
+/** 依 order_delivery / delivery_data 判斷宅配或超商 */
+export function getShoplineDeliveryTargetType(o: any): DeliveryTargetType {
+  const del = o?.order_delivery;
+  const data = o?.delivery_data;
+  const deliveryType = typeof del?.delivery_type === "string" ? del.delivery_type.toLowerCase() : "";
+  const nameZh = del?.name_translations?.["zh-hant"] ?? del?.name_translations?.["zh-Hant"] ?? "";
+  if (deliveryType === "pickup" || /超商|門市|取貨|store|cvs/i.test(nameZh)) return "cvs";
+  if (data?.location_code || data?.location_name || (data?.store_address && !del?.requires_customer_address)) return "cvs";
+  if (deliveryType === "custom" || del?.requires_customer_address === true || /宅配|到府|home|delivery/i.test(nameZh)) return "home";
+  return "unknown";
+}
+
 function mapShoplineOrder(o: any): OrderInfo {
+  const deliveryData = o?.delivery_data;
+  const orderDelivery = o?.order_delivery;
+  const deliveryAddr = o?.delivery_address;
+  const orderPayment = o?.order_payment;
+
   let trackingNumber = "";
-  if (o.fulfillments && Array.isArray(o.fulfillments)) {
+  if (deliveryData && typeof deliveryData.tracking_number === "string" && deliveryData.tracking_number) {
+    trackingNumber = deliveryData.tracking_number;
+  } else if (Array.isArray(o.fulfillments)) {
     trackingNumber = o.fulfillments
       .map((f: any) => f.tracking_number || f.tracking_code || "")
       .filter(Boolean)
       .join(", ");
-  } else if (o.tracking_number) {
+  } else if (typeof o.tracking_number === "string") {
     trackingNumber = o.tracking_number;
   }
 
   let productListStr = "";
-  if (Array.isArray(o.order_items || o.line_items || o.items)) {
-    const items = o.order_items || o.line_items || o.items;
-    productListStr = JSON.stringify(
-      items.map((item: any) => ({
-        name: item.name || item.product_name || item.title || "",
-        code: item.sku || item.product_id || "",
-        qty: item.quantity || item.qty || 1,
-        price: item.price || item.sale_price || 0,
-      }))
-    );
+  let itemsStructured: string | undefined;
+  const rawItems = o.order_items ?? o.line_items ?? o.items;
+  if (Array.isArray(rawItems)) {
+    const mapped = rawItems.map((item: any) => ({
+      name: item.name ?? item.product_name ?? item.title ?? "",
+      code: item.sku ?? item.product_id ?? "",
+      qty: item.quantity ?? item.qty ?? 1,
+      price: item.price ?? item.sale_price ?? 0,
+    }));
+    productListStr = JSON.stringify(mapped);
+    itemsStructured = productListStr;
   } else if (typeof o.product_list === "string") {
     productListStr = o.product_list;
   }
 
   let address = "";
-  if (o.shipping_address) {
+  let fullAddress: string | undefined;
+  let addressRaw: string | undefined;
+  if (deliveryAddr && typeof deliveryAddr === "object") {
+    address = [
+      deliveryAddr.country,
+      deliveryAddr.state,
+      deliveryAddr.city,
+      deliveryAddr.district,
+      deliveryAddr.address_1 ?? deliveryAddr.address1,
+      deliveryAddr.address_2 ?? deliveryAddr.address2,
+    ]
+      .filter(Boolean)
+      .join("");
+    if (address) fullAddress = address;
+    addressRaw = JSON.stringify(deliveryAddr);
+  } else if (o.shipping_address && typeof o.shipping_address === "object") {
     const addr = o.shipping_address;
-    if (typeof addr === "string") {
-      address = addr;
-    } else {
-      address = [
-        addr.country,
-        addr.province || addr.state,
-        addr.city,
-        addr.district,
-        addr.address1 || addr.address_1,
-        addr.address2 || addr.address_2,
-      ]
-        .filter(Boolean)
-        .join("");
-    }
-  } else if (o.address) {
-    address = typeof o.address === "string" ? o.address : JSON.stringify(o.address);
+    address = [
+      addr.country,
+      addr.province ?? addr.state,
+      addr.city,
+      addr.district,
+      addr.address1 ?? addr.address_1,
+      addr.address2 ?? addr.address_2,
+    ]
+      .filter(Boolean)
+      .join("");
+    if (address) fullAddress = address;
+  } else if (typeof o.shipping_address === "string") {
+    address = o.shipping_address;
+    fullAddress = o.shipping_address;
+  } else if (typeof o.address === "string") {
+    address = o.address;
+    fullAddress = o.address;
   }
 
-  let buyerName = "";
-  if (o.customer_name) {
-    buyerName = o.customer_name;
-  } else if (o.shipping_address?.name) {
-    buyerName = o.shipping_address.name;
-  } else if (o.customer?.name) {
-    buyerName = o.customer.name;
-  } else if (o.billing_address?.name) {
-    buyerName = o.billing_address.name;
-  } else if (o.recipient_name) {
-    buyerName = o.recipient_name;
-  }
+  const buyerName =
+    o.customer_name ??
+    deliveryAddr?.recipient_name ??
+    o.shipping_address?.name ??
+    o.customer?.name ??
+    o.billing_address?.name ??
+    o.recipient_name ??
+    "";
+  const buyerPhone =
+    o.customer_phone ??
+    deliveryAddr?.recipient_phone ??
+    o.shipping_address?.phone ??
+    o.customer?.phone ??
+    o.billing_address?.phone ??
+    "";
+  const buyerEmail = o.customer_email ?? o.customer?.email ?? o.email ?? "";
 
-  let buyerPhone = "";
-  if (o.customer_phone) {
-    buyerPhone = o.customer_phone;
-  } else if (o.shipping_address?.phone) {
-    buyerPhone = o.shipping_address.phone;
-  } else if (o.customer?.phone) {
-    buyerPhone = o.customer.phone;
-  } else if (o.billing_address?.phone) {
-    buyerPhone = o.billing_address.phone;
-  }
+  const orderNumber = o.order_number ?? o.order_no ?? o.name ?? o.id ?? "";
+  const totalDollars = o.total?.dollars ?? (o.total?.cents != null ? o.total.cents / 100 : undefined);
+  const totalFromPayment = orderPayment?.total?.dollars ?? (orderPayment?.total?.cents != null ? orderPayment.total.cents / 100 : undefined);
+  const finalTotal = Number(totalDollars ?? totalFromPayment ?? 0);
 
-  let buyerEmail = "";
-  if (o.customer_email) {
-    buyerEmail = o.customer_email;
-  } else if (o.customer?.email) {
-    buyerEmail = o.customer.email;
-  } else if (o.email) {
-    buyerEmail = o.email;
-  }
-
-  const orderNumber = o.order_number || o.order_no || o.name || o.id || "";
+  const deliveryTargetType = getShoplineDeliveryTargetType(o);
 
   return {
     global_order_id: String(orderNumber),
-    status: o.status || o.order_status || "unknown",
-    final_total_order_amount: Number(o.total || o.total_price || o.grand_total || 0),
+    status: typeof o.status === "string" ? o.status : (o.order_status ?? "unknown"),
+    final_total_order_amount: finalTotal,
     product_list: productListStr,
     buyer_name: buyerName,
     buyer_phone: buyerPhone,
     buyer_email: buyerEmail,
     tracking_number: trackingNumber,
-    created_at: o.created_at || o.created_date || "",
-    shipped_at: o.shipped_at || o.fulfilled_at || "",
-    order_created_at: o.created_at || o.order_created_at || "",
-    shipping_method: o.shipping_method || o.delivery_method || "",
-    payment_method: o.payment_method || o.payment_type || "",
+    created_at: orderDelivery?.created_at ?? o.created_at ?? o.created_date ?? "",
+    shipped_at: orderDelivery?.shipped_at ?? o.shipped_at ?? o.fulfilled_at ?? "",
+    order_created_at: o.created_at ?? o.order_created_at ?? "",
+    shipping_method: orderDelivery?.name_translations?.["zh-hant"] ?? orderDelivery?.name_translations?.["zh-Hant"] ?? o.shipping_method ?? o.delivery_method ?? "",
+    payment_method: orderPayment?.payment_type ?? orderPayment?.name_translations?.["zh-hant"] ?? o.payment_method ?? o.payment_type ?? "",
     address,
-    note: o.note || o.customer_note || o.remark || "",
+    note: o.note ?? o.customer_note ?? o.order_remarks ?? o.remark ?? "",
+    page_id: o.page_id != null ? String(o.page_id) : undefined,
+    page_title: typeof o.page_title === "string" ? o.page_title : undefined,
+    payment_status_raw: getShoplinePaymentStatusRaw(o),
+    delivery_status_raw: getShoplineDeliveryStatusRaw(o),
+    delivery_target_type: deliveryTargetType,
+    cvs_brand: deliveryTargetType === "cvs" && deliveryData?.location_name ? "超商" : undefined,
+    cvs_store_code: deliveryTargetType === "cvs" ? deliveryData?.location_code : undefined,
+    cvs_store_name: deliveryTargetType === "cvs" ? deliveryData?.location_name : undefined,
+    full_address: fullAddress ?? (deliveryTargetType === "cvs" ? deliveryData?.store_address : undefined),
+    address_raw: addressRaw,
+    payment_transaction_id: orderPayment?.payment_data?.info?.transactionId ?? undefined,
+    items_structured: itemsStructured,
   };
 }
 
@@ -242,30 +291,30 @@ export async function lookupShoplineOrderById(
       order_number: normalizedId,
     });
 
-    if (orders.length > 0) {
+    const exact = orders.find(
+      (o) => (o.global_order_id || "").trim().toUpperCase() === normalizedId.toUpperCase()
+    );
+    if (exact) {
       console.log(
-        `[SHOPLINE] 找到訂單 ${orders[0].global_order_id} 狀態=${orders[0].status}`
+        `[SHOPLINE] 找到訂單（精準匹配） ${exact.global_order_id} 狀態=${exact.status}`
       );
-      return orders[0];
+      return exact;
     }
 
     const ordersAlt = await fetchShoplineOrders(config, {
       keyword: normalizedId,
     });
-
-    if (ordersAlt.length > 0) {
-      const exact = ordersAlt.find(
-        (o) => o.global_order_id.toUpperCase() === normalizedId.toUpperCase()
+    const exactAlt = ordersAlt.find(
+      (o) => (o.global_order_id || "").trim().toUpperCase() === normalizedId.toUpperCase()
+    );
+    if (exactAlt) {
+      console.log(
+        `[SHOPLINE] 關鍵字搜尋找到訂單（精準匹配） ${exactAlt.global_order_id} 狀態=${exactAlt.status}`
       );
-      if (exact) {
-        console.log(
-          `[SHOPLINE] 關鍵字搜尋找到訂單 ${exact.global_order_id} 狀態=${exact.status}`
-        );
-        return exact;
-      }
+      return exactAlt;
     }
 
-    console.log("[SHOPLINE] 查無訂單:", normalizedId);
+    console.log("[SHOPLINE] 查無訂單（精準匹配）:", normalizedId);
     return null;
   } catch (err: any) {
     console.error("[SHOPLINE] 查詢單號失敗:", err.message);
@@ -291,17 +340,13 @@ export async function lookupShoplineOrdersByPhone(
     totalFetched += orders.length;
 
     allMatched = orders.filter((o) => {
-      const orderPhone = o.buyer_phone.replace(/[-\s]/g, "");
+      const orderPhone = (o.buyer_phone || "").replace(/[-\s]/g, "");
       return (
         orderPhone === normalizedPhone ||
         orderPhone.includes(normalizedPhone) ||
         normalizedPhone.includes(orderPhone)
       );
     });
-
-    if (allMatched.length === 0 && orders.length > 0) {
-      allMatched = orders;
-    }
 
     console.log(
       `[SHOPLINE] 手機搜尋完成: 取得 ${totalFetched} 筆，匹配 ${allMatched.length} 筆`
@@ -337,12 +382,8 @@ export async function lookupShoplineOrdersByEmail(
     totalFetched += orders.length;
 
     allMatched = orders.filter((o) => {
-      return o.buyer_email.toLowerCase() === normalizedEmail;
+      return (o.buyer_email || "").toLowerCase() === normalizedEmail;
     });
-
-    if (allMatched.length === 0 && orders.length > 0) {
-      allMatched = orders;
-    }
 
     console.log(
       `[SHOPLINE] Email 搜尋完成: 取得 ${totalFetched} 筆，匹配 ${allMatched.length} 筆`
@@ -378,12 +419,8 @@ export async function lookupShoplineOrdersByName(
     totalFetched += orders.length;
 
     allMatched = orders.filter((o) => {
-      return o.buyer_name.toLowerCase().includes(normalizedName);
+      return (o.buyer_name || "").toLowerCase().includes(normalizedName);
     });
-
-    if (allMatched.length === 0 && orders.length > 0) {
-      allMatched = orders;
-    }
 
     console.log(
       `[SHOPLINE] 姓名搜尋完成: 取得 ${totalFetched} 筆，匹配 ${allMatched.length} 筆`

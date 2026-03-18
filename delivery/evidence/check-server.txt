@@ -1,0 +1,8 @@
+npm run check:server 完整輸出
+========================================
+
+> rest-express@1.0.0 check:server
+> tsc -p tsconfig.server.json
+
+
+(無錯誤，exit code 0)
