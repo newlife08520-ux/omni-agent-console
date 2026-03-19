@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -672,6 +672,13 @@ export default function ChatPage() {
 
   const sseConnectedRef = useRef(false);
   const [sseConnected, setSseConnected] = useState(true);
+  /** Phase 2.9：首屏少抓，按需載入更多 */
+  const [contactsFetchLimit, setContactsFetchLimit] = useState(80);
+  useEffect(() => {
+    setContactsFetchLimit(80);
+  }, [selectedBrandId, viewMode]);
+  /** SSE 事件風暴時 stats 最多每 15s 刷新一次 */
+  const lastStatsInvalidateRef = useRef(0);
 
   useEffect(() => {
     apiRequest("POST", "/api/notifications/mark-read").catch(() => {});
@@ -713,15 +720,32 @@ export default function ChatPage() {
     el.style.height = `${h}px`;
   }, [messageInput]);
 
-  // SSE：僅在 mount 時綁定一次。Railway 等環境下 EventSource 易觸發 ERR_HTTP2_PROTOCOL_ERROR，
-  // 故先試 EventSource，失敗則試一次 fetch 串流；最多重試 5 次後改為僅輪詢，避免 Console 洗版。
+  // SSE：僅在 mount 時綁定一次。Railway 等環境下 EventSource 易觸發 ERR_HTTP2_PROTOCOL_ERROR。
+  // VITE_DISABLE_SSE=1 時跳過 EventSource，僅輪詢，避免 HTTP/2 洗版與卡頓。
   useEffect(() => {
+    const env = typeof import.meta !== "undefined" ? (import.meta as { env?: Record<string, string> }).env : undefined;
+    const sseOff = env?.VITE_DISABLE_SSE === "1" || env?.VITE_DISABLE_SSE === "true";
+    if (sseOff) {
+      sseConnectedRef.current = false;
+      setSseConnected(false);
+      return () => {};
+    }
+
     let es: EventSource | null = null;
     let fetchAbort: AbortController | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout>;
     let retryCount = 0;
     let fetchTried = false;
     const MAX_RETRIES = 5;
+    let sseWarnCount = 0;
+
+    function maybeInvalidateStats(q: QueryClient) {
+      const now = Date.now();
+      if (now - lastStatsInvalidateRef.current < 15000) return;
+      lastStatsInvalidateRef.current = now;
+      q.invalidateQueries({ queryKey: ["/api/manager-stats"], exact: false });
+      q.invalidateQueries({ queryKey: ["/api/agent-stats/me"] });
+    }
 
     function dispatchNewMessage(data: { contact_id?: number }) {
       const contactId = data?.contact_id;
@@ -733,13 +757,12 @@ export default function ChatPage() {
       const q = queryClientRef.current;
       q.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
       if (contactId != null) q.invalidateQueries({ queryKey: ["/api/contacts", contactId, "messages"] });
-      q.invalidateQueries({ queryKey: ["/api/manager-stats"], exact: false });
-      q.invalidateQueries({ queryKey: ["/api/agent-stats/me"] });
+      maybeInvalidateStats(q);
     }
     function dispatchContactsUpdated() {
-      queryClientRef.current.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
-      queryClientRef.current.invalidateQueries({ queryKey: ["/api/manager-stats"], exact: false });
-      queryClientRef.current.invalidateQueries({ queryKey: ["/api/agent-stats/me"] });
+      const q = queryClientRef.current;
+      q.invalidateQueries({ queryKey: ["/api/contacts"], exact: false });
+      maybeInvalidateStats(q);
     }
 
     function connectViaFetch() {
@@ -794,7 +817,10 @@ export default function ChatPage() {
           sseConnectedRef.current = false;
           setSseConnected(false);
           retryCount++;
-          if (retryCount <= 2) console.warn("[SSE] fetch 串流連線失敗（可能為 HTTP/2 環境）:", err?.message || err);
+          if (sseWarnCount < 1) {
+            sseWarnCount++;
+            console.warn("[SSE] fetch 串流失敗，已改輪詢（HTTP/2 環境可設 VITE_DISABLE_SSE=1）");
+          }
           if (retryCount < MAX_RETRIES) {
             const delay = Math.min(2000 * Math.pow(2, Math.min(retryCount, 5)), 30000);
             reconnectTimer = setTimeout(connect, delay);
@@ -835,7 +861,10 @@ export default function ChatPage() {
           setSseConnected(false);
           es?.close();
           es = null;
-          if (retryCount <= 2) console.warn("[SSE] EventSource 連線錯誤（retry #" + retryCount + "），可能為 ERR_HTTP2_PROTOCOL_ERROR");
+          if (sseWarnCount < 1) {
+            sseWarnCount++;
+            console.warn("[SSE] EventSource 失敗（可設 VITE_DISABLE_SSE=1 略過）");
+          }
           if (!fetchTried) {
             fetchTried = true;
             connectViaFetch();
@@ -850,7 +879,7 @@ export default function ChatPage() {
           reconnectTimer = setTimeout(connect, delay);
         };
       } catch (err) {
-        if (retryCount <= 2) console.warn("[SSE] EventSource 建立失敗:", err);
+        if (sseWarnCount < 1) sseWarnCount++;
         retryCount++;
         if (retryCount >= MAX_RETRIES) {
           console.warn("[SSE] 即時連線多次失敗，已改為每 5 秒輪詢更新，不再重試。");
@@ -871,13 +900,13 @@ export default function ChatPage() {
   }, []);
 
   const { data: contactsRaw = [], isLoading: contactsLoading, isError: contactsError } = useQuery<(ContactWithPreview & { is_urgent?: boolean; is_overdue?: boolean })[]>({
-    queryKey: ["/api/contacts", selectedBrandId, viewMode],
+    queryKey: ["/api/contacts", selectedBrandId, viewMode, contactsFetchLimit],
     queryFn: async () => {
       const params = new URLSearchParams();
       if (selectedBrandId) params.set("brand_id", String(selectedBrandId));
       if (viewMode === "my" || viewMode === "tracking") params.set("assigned_to_me", "1");
       if (viewMode === "my" || viewMode === "pending") params.set("need_reply_first", "1");
-      params.set("limit", "300");
+      params.set("limit", String(Math.min(500, contactsFetchLimit)));
       const url = `/api/contacts?${params}`;
       const res = await fetch(url, {
         credentials: "include",
@@ -887,7 +916,7 @@ export default function ChatPage() {
       const data = await res.json();
       return Array.isArray(data) ? data : [];
     },
-    refetchInterval: sseConnected ? 20000 : 5000,
+    refetchInterval: sseConnected ? 25000 : 12000,
     refetchIntervalInBackground: !sseConnected,
     staleTime: 15000,
     /** 切換品牌時不沿用上一筆資料，強制等新列表載入，避免「沒切過去」的錯覺 */
@@ -908,7 +937,7 @@ export default function ChatPage() {
       return Array.isArray(data) ? data : [];
     },
     enabled: !!selectedId,
-    refetchInterval: sseConnected ? 10000 : 5000,
+    refetchInterval: sseConnected ? 15000 : 12000,
     refetchIntervalInBackground: !sseConnected,
     staleTime: 5 * 60 * 1000,
     /** 效能護城河：不沿用 keepPreviousData，切換聯絡人時立即清空，搭配右側 key={selectedId} 消滅殘影 */
@@ -2030,8 +2059,23 @@ export default function ChatPage() {
             </div>
           ) : (
             <>
-            <div className="px-3 py-1.5 text-[10px] text-stone-400 border-b border-stone-100">
-              顯示 {contactListSafe.length} 筆 · 較早的對話請用上方「搜尋」查對話內容
+            <div className="px-3 py-1.5 text-[10px] text-stone-400 border-b border-stone-100 flex flex-wrap items-center gap-2">
+              <span>顯示 {contactListSafe.length} 筆（上限 {contactsFetchLimit}）</span>
+              {contactsRaw.length >= contactsFetchLimit && contactsFetchLimit < 480 && (
+                <button
+                  type="button"
+                  className="text-[10px] font-medium text-emerald-700 hover:underline"
+                  onClick={() => setContactsFetchLimit((n) => Math.min(n + 80, 480))}
+                >
+                  載入更多
+                </button>
+              )}
+              <span className="text-stone-300">·</span>
+              <span title={sseConnected ? "EventSource 連線中" : "已改為輪詢更新"} className={sseConnected ? "text-emerald-600" : "text-amber-600"}>
+                {sseConnected ? "即時" : "輪詢"}
+              </span>
+              <span className="text-stone-300">·</span>
+              <span>更早請用搜尋</span>
             </div>
             <div ref={listScrollRef} className="flex-1 min-h-0 overflow-auto p-2">
               <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, width: "100%", position: "relative" }}>

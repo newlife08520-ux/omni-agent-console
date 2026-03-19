@@ -8,6 +8,8 @@ export interface NormalizeCustomerFacingOptions {
   replySource: string;
   renderer?: string;
   platform?: string;
+  /** Phase 2.9：僅輕量整理（空行、重複 emoji），不剝開場套話，避免越修越僵 */
+  softHumanize?: boolean;
 }
 
 export interface NormalizeCustomerFacingResult {
@@ -51,6 +53,12 @@ export function normalizeCustomerFacingOrderReply(
     return { text: raw, changed: false, rulesHit: [] };
   }
   let text = raw;
+  if (opts.softHumanize) {
+    text = stripRepeatedEmoji(text);
+    text = text.replace(/\n{4,}/g, "\n\n").trim();
+    const changedSoft = text !== raw.trim();
+    return { text: changedSoft ? text : raw, changed: changedSoft, rulesHit: changedSoft ? ["phase29_soft"] : [] };
+  }
   const hard = opts.mode === "order_lookup" || opts.mode === "order_followup";
 
   if (hard) {

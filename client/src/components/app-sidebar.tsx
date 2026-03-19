@@ -51,7 +51,7 @@ export function AppSidebar({ user, userRole, systemName, logoUrl }: AppSidebarPr
   const { data: unreadData } = useQuery<{ count: number }>({
     queryKey: ["/api/notifications/unread-count"],
     queryFn: getQueryFn({ on401: "throw" }),
-    refetchInterval: 30000,
+    refetchInterval: 60000,
   });
   const unreadCount = unreadData?.count ?? 0;
 
@@ -64,7 +64,7 @@ export function AppSidebar({ user, userRole, systemName, logoUrl }: AppSidebarPr
     queryKey: ["/api/agent-stats/me"],
     queryFn: getQueryFn({ on401: "throw" }),
     enabled: isEmployee,
-    refetchInterval: 15000,
+    refetchInterval: 45000,
   });
 
   const loadText = agentStats != null && agentStats.max_active_conversations > 0
@@ -89,7 +89,7 @@ export function AppSidebar({ user, userRole, systemName, logoUrl }: AppSidebarPr
       return res.json();
     },
     enabled: isManager,
-    refetchInterval: 15000,
+    refetchInterval: 45000,
   });
 
   return (

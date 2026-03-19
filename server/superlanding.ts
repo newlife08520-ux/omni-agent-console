@@ -448,14 +448,12 @@ export async function lookupOrdersByPageAndPhone(
     console.error(`[一頁商店] page_id=${pageId} 探測失敗:`, err.message);
   }
 
+  /** Phase 30：多日期視窗合併去重，不可第一個視窗命中就早退（與 lookupOrdersByPhone 一致） */
   if (totalEntries > 3000) {
-    console.log(`[一頁商店] page_id=${pageId} 有 ${totalEntries} 筆訂單，使用日期窗口搜尋`);
-    const dateWindows = [
-      { days: 7 },
-      { days: 30 },
-      { days: 90 },
-      { days: 365 },
-    ];
+    console.log(`[一頁商店] page_id=${pageId} 有 ${totalEntries} 筆訂單，使用日期窗口合併搜尋`);
+    const dateWindows = [{ days: 7 }, { days: 30 }, { days: 90 }, { days: 365 }];
+    const byOrderId = new Map<string, OrderInfo>();
+    let totalFetched = 0;
 
     for (const window of dateWindows) {
       const today = new Date();
@@ -482,19 +480,16 @@ export async function lookupOrdersByPageAndPhone(
         if (p > maxPages) break;
       }
 
-      const matched = allOrders.filter(o => {
+      totalFetched += allOrders.length;
+      for (const o of allOrders) {
         const orderPhone = o.buyer_phone.replace(/[-\s]/g, "");
-        return orderPhone === normalizedPhone;
-      });
-
-      console.log(`[一頁商店] page_id=${pageId} ${window.days}天窗口: ${allOrders.length} 筆，電話匹配: ${matched.length} 筆`);
-
-      if (matched.length > 0) {
-        return { orders: matched, totalFetched: allOrders.length, truncated: false };
+        if (orderPhone === normalizedPhone) byOrderId.set(o.global_order_id, o);
       }
+      console.log(`[一頁商店] page_id=${pageId} ${window.days}天窗口: 掃 ${allOrders.length} 筆，累計不重複匹配 ${byOrderId.size}`);
     }
 
-    return { orders: [], totalFetched: totalEntries, truncated: true };
+    const merged = Array.from(byOrderId.values());
+    return { orders: merged, totalFetched, truncated: merged.length === 0 && totalEntries > 0 };
   }
 
   let page = 1;
@@ -553,13 +548,16 @@ export async function lookupOrdersByPhone(
   const perPage = 200;
   const parallelBatch = 5;
 
+  /** Phase 2.9：各日期視窗皆掃完並合併去重，不可「第一個視窗命中就 break」以免漏單 */
   const dateWindows = [
     { days: 1, label: "今天" },
     { days: 3, label: "3天" },
     { days: 7, label: "7天" },
     { days: 30, label: "30天" },
     { days: 90, label: "90天" },
+    { days: 180, label: "180天" },
   ];
+  const byOrderId = new Map<string, OrderInfo>();
 
   for (const window of dateWindows) {
     const today = new Date();
@@ -590,12 +588,11 @@ export async function lookupOrdersByPhone(
     const maxPages = Math.min(totalPages, 150);
     if (totalPages > maxPages) wasTruncated = true;
 
-    console.log(`[一頁商店] ${window.label}窗口（${beginDate}~${endDate}）: ${totalEntries} 筆，${totalPages} 頁，掃描 ${maxPages} 頁${totalPages > maxPages ? "（截斷）" : ""}`);
+    console.log(`[一頁商店] ${window.label}窗口（${beginDate}~${endDate}）: ${totalEntries} 筆，掃描 ${maxPages} 頁${totalPages > maxPages ? "（截斷）" : ""}`);
 
     if (totalEntries === 0) continue;
 
-    let windowMatched: OrderInfo[] = [];
-
+    let windowHits = 0;
     for (let batchStart = 1; batchStart <= maxPages; batchStart += parallelBatch) {
       const pageNums = [];
       for (let p = batchStart; p < batchStart + parallelBatch && p <= maxPages; p++) {
@@ -615,31 +612,24 @@ export async function lookupOrdersByPhone(
 
       for (const orders of batchResults) {
         totalScanned += orders.length;
-        const phoneMatches = orders.filter(o => {
+        for (const o of orders) {
           const orderPhone = o.buyer_phone.replace(/[-\s]/g, "");
-          return orderPhone === normalizedPhone;
-        });
-        if (phoneMatches.length > 0) {
-          windowMatched = windowMatched.concat(phoneMatches);
+          if (orderPhone === normalizedPhone) {
+            byOrderId.set(o.global_order_id, o);
+            windowHits++;
+          }
         }
       }
 
       await yieldEventLoop(300);
-      if (windowMatched.length > 0) break;
     }
 
-    if (windowMatched.length > 0) {
-      allMatched = windowMatched;
-      console.log(`[一頁商店] ${window.label}窗口找到 ${allMatched.length} 筆匹配`);
-      break;
-    }
-
-    console.log(`[一頁商店] ${window.label}窗口無匹配（本窗口掃描 ${totalScanned} 筆）`);
+    console.log(
+      `[一頁商店] ${window.label}窗口掃描完成，本視窗手機命中 ${windowHits} 筆（累計不重複 ${byOrderId.size}）`
+    );
   }
 
-  const uniqueOrders = Array.from(
-    new Map(allMatched.map(o => [o.global_order_id, o])).values()
-  );
+  const uniqueOrders = Array.from(byOrderId.values());
 
   if (productKeyword && uniqueOrders.length > 0) {
     const kw = productKeyword.toLowerCase();

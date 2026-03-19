@@ -18,12 +18,17 @@ import {
 import { filterOrdersByProductQuery } from "./order-product-filter";
 import { derivePaymentStatus } from "./order-payment-utils";
 
+/** Phase 30：local_only 表示僅來自本地索引，可能不完整，不可單筆定案 */
+export type DataCoverage = "local_only" | "api_only" | "merged_local_api";
+
 export interface UnifiedOrderResult {
   orders: OrderInfo[];
   source: "superlanding" | "shopline" | "unknown";
   found: boolean;
   crossBrand?: boolean;
   crossBrandName?: string;
+  /** 若為 local_only，表示未打 API，資料可能不全，不應單筆直接定案 */
+  data_coverage?: DataCoverage;
 }
 
 function getShoplineConfig(brandId?: number): ShoplineConfig | null {
@@ -410,6 +415,7 @@ export async function unifiedLookupByPhoneGlobal(
           orders: localSh,
           source: "shopline",
           found: true,
+          data_coverage: "local_only",
         };
         setOrderLookupCache(ck, result);
         return result;
@@ -424,6 +430,7 @@ export async function unifiedLookupByPhoneGlobal(
           orders: localSl,
           source: "superlanding",
           found: true,
+          data_coverage: "local_only",
         };
         setOrderLookupCache(ck, result);
         return result;
@@ -440,7 +447,12 @@ export async function unifiedLookupByPhoneGlobal(
             : mergedLocal.every((o) => o.source === "superlanding")
               ? "superlanding"
               : "unknown";
-        const result: UnifiedOrderResult = { orders: mergedLocal, source: src, found: true };
+        const result: UnifiedOrderResult = {
+          orders: mergedLocal,
+          source: src,
+          found: true,
+          data_coverage: "local_only",
+        };
         setOrderLookupCache(ckAny, result);
         return result;
       }
@@ -458,7 +470,7 @@ export async function unifiedLookupByPhoneGlobal(
       const result = await lookupShoplineOrdersByPhone(shoplineConfig, phone);
       if (result.orders.length > 0) {
         result.orders.forEach((o: OrderInfo) => { o.source = "shopline"; });
-        return { orders: result.orders, source: "shopline", found: true };
+        return { orders: result.orders, source: "shopline", found: true, data_coverage: "api_only" };
       }
     } catch (_e) {
       console.log("[UnifiedOrder] SHOPLINE 手機全域查詢失敗:", (_e as Error).message);
@@ -472,7 +484,7 @@ export async function unifiedLookupByPhoneGlobal(
       const result = await lookupOrdersByPhone(slConfig, phone);
       if (result.orders.length > 0) {
         result.orders.forEach((o: OrderInfo) => { o.source = "superlanding"; });
-        return { orders: result.orders, source: "superlanding", found: true };
+        return { orders: result.orders, source: "superlanding", found: true, data_coverage: "api_only" };
       }
     } catch (_e) {
       console.log("[UnifiedOrder] SuperLanding 手機全域查詢失敗:", (_e as Error).message);
@@ -515,7 +527,7 @@ export async function unifiedLookupByPhoneGlobal(
         : merged.every((o) => o.source === "superlanding")
           ? "superlanding"
           : "unknown";
-      result = { orders: merged, source: src, found: true };
+      result = { orders: merged, source: src, found: true, data_coverage: "merged_local_api" };
     } else if (tryShoplineFirst) {
       result = { orders: [], source: "unknown", found: false };
     } else {
@@ -523,24 +535,18 @@ export async function unifiedLookupByPhoneGlobal(
     }
   }
   if (result.found && result.orders.length > 0 && phoneNorm && brandId && !result.crossBrand) {
+    const cachePayload = {
+      orders: result.orders,
+      source: result.source,
+      found: true as const,
+      data_coverage: result.data_coverage,
+    };
     if (preferSource === "shopline") {
-      setOrderLookupCache(cacheKeyPhone(brandId, phoneNorm, "shopline"), {
-        orders: result.orders,
-        source: "shopline",
-        found: true,
-      });
+      setOrderLookupCache(cacheKeyPhone(brandId, phoneNorm, "shopline"), { ...cachePayload, source: "shopline" });
     } else if (preferSource === "superlanding") {
-      setOrderLookupCache(cacheKeyPhone(brandId, phoneNorm, "superlanding"), {
-        orders: result.orders,
-        source: "superlanding",
-        found: true,
-      });
+      setOrderLookupCache(cacheKeyPhone(brandId, phoneNorm, "superlanding"), { ...cachePayload, source: "superlanding" });
     } else {
-      setOrderLookupCache(cacheKeyPhone(brandId, phoneNorm, "any"), {
-        orders: result.orders,
-        source: result.source,
-        found: true,
-      });
+      setOrderLookupCache(cacheKeyPhone(brandId, phoneNorm, "any"), cachePayload);
     }
     for (const o of result.orders) {
       if (o?.global_order_id && o.source)

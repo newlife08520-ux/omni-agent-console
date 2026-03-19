@@ -4120,6 +4120,7 @@ ${contextStr}
               replySource: "order_fast_path",
               renderer: ftp ?? undefined,
               platform: contact.platform ?? undefined,
+              softHumanize: fpMode === "order_lookup" || fpMode === "order_followup",
             });
             fpReply = nr.text;
             if (orderFeatureFlags.orderLatencyV2) {
@@ -4392,7 +4393,25 @@ ${contextStr}
       if (plan.mode === "order_lookup") {
         const activeCtx = storage.getActiveOrderContext(contact.id);
         const msgTrim = (userMessage || "").trim();
-        const CLEAR_ACTIVE_ORDER_KW = ["\u4e0d\u67e5\u4e86", "\u4e0d\u8981\u4e86", "\u53d6\u6d88", "\u7d50\u6848", "\u6c92\u6709\u4e86", "\u5b8c\u6210", "\u8a2d\u8b8a"];
+        const CLEAR_ACTIVE_ORDER_KW = [
+          "\u4e0d\u67e5\u4e86",
+          "\u4e0d\u8981\u4e86",
+          "\u53d6\u6d88",
+          "\u7d50\u6848",
+          "\u6c92\u6709\u4e86",
+          "\u5b8c\u6210",
+          "\u8a2d\u8b8a",
+          "\u67e5\u5225\u7b46",
+          "\u6211\u8981\u67e5\u5225\u7b46",
+          "\u53e6\u4e00\u7b46",
+          "\u63db\u4e00\u7b46",
+          "\u91cd\u67e5",
+          "\u91cd\u65b0\u67e5",
+          "\u4e0d\u662f\u9019\u7b46",
+          "\u4e0d\u662f\u9019\u5f35\u55ae",
+          "\u6211\u4e0d\u662f\u554f\u9019\u7b46",
+          "\u6211\u5728\u554f\u5225\u5f35",
+        ];
         if (activeCtx && CLEAR_ACTIVE_ORDER_KW.some((k) => msgTrim.includes(k))) {
           storage.clearActiveOrderContext(contact.id);
         }
@@ -4404,10 +4423,12 @@ ${contextStr}
           systemPrompt += "\n\n【目前已查到的訂單摘要，回覆時可引用】\n\n" + activeCtx.one_page_summary;
         }
         systemPrompt += `\n\n<ORDER_LOOKUP_RULES>
-- 工具回傳多筆訂單（total > 1）時，必須將 one_page_full 的內容完整逐筆呈現給客戶，不可只列一筆或只列簡表。
-- 工具回傳一筆訂單時，將 one_page_summary 或 one_page_full 完整回覆給客戶（含訂單編號、姓名、電話、下單時間、付款方式、配送方式、金額、狀態等）。
-- 勿要求客戶重複提供已提供過的訂單編號或手機、商品名稱。
-- 官網查單：客戶說官網／官方網站購買時，有訂單編號用 lookup_order_by_id（系統會優先查官網）；只有電話、沒有商品名時用 lookup_order_by_phone，不需問商品或日期，系統會辨識是否官網訂單並優先查官網。
+- 有訂單編號：一律可直接 lookup_order_by_id。
+- 僅手機、無單號：若工具回傳多筆（total>1），必須列摘要或逐筆，不可擅自幫客戶「選一筆」當答案；應請客戶指定訂單編號、或補商品關鍵字、或說要看哪一筆。
+- 僅手機且命中只有 1 筆時，才可當單筆完整回覆。
+- 客戶明講官網／官方網站：只用官網管道查；若官網查無，明講官網查無，不可拿一頁商店訂單冒充。
+- 一頁商店＋僅手機＋多筆命中：優先請補商品或列多筆摘要，不可直接單筆定案。
+- 工具回傳多筆時必須善用 one_page_full 逐筆呈現；單筆時呈現完整欄位。
 </ORDER_LOOKUP_RULES>`;
       }
       /** 依品牌/渠道設定與對話狀態決定是否允許 AI 回覆或強制轉人工 */
@@ -4649,6 +4670,7 @@ ${contextStr}
                 replySource: "multi_order_router",
                 renderer: "multi_order_router",
                 platform: contact.platform ?? undefined,
+                softHumanize: true,
               });
               multiAns = normM.text;
               console.log(
@@ -4712,6 +4734,7 @@ ${contextStr}
               replySource: "active_order_short_circuit",
               renderer: "deterministic_followup",
               platform: contact.platform ?? undefined,
+              softHumanize: true,
             });
             detOut = normD.text;
             console.log(
@@ -4758,6 +4781,111 @@ ${contextStr}
             queue_wait_ms: queueWaitMs,
           });
           return;
+        }
+      }
+      /** Phase 2.9：單筆 context 下問「還有其他訂單／全部訂單」→ 依手機重查並展開多筆 */
+      if (plan.mode === "order_lookup") {
+        const act29 = storage.getActiveOrderContext(contact.id);
+        const msg29 = (userMessage || "").trim();
+        const PHASE29_MORE_ORDERS_KW = [
+          "其他訂單",
+          "還有訂單",
+          "還有其他",
+          "全部訂單",
+          "另外幾筆",
+          "其他筆",
+          "有多少筆",
+          "幾筆訂單",
+          "其他訂單嗎",
+          "還有嗎",
+          "還有幾筆",
+        ];
+        const bid29 = effectiveBrandId || contact.brand_id;
+        if (
+          bid29 &&
+          act29?.order_id &&
+          act29.receiver_phone &&
+          (!act29.candidate_count || act29.candidate_count <= 1) &&
+          PHASE29_MORE_ORDERS_KW.some((k) => msg29.includes(k))
+        ) {
+          const onlyOfficial = /只看\s*官網|只要\s*官網|官網的/.test(msg29);
+          const onlySl = /只看\s*一頁|只要\s*一頁|銷售頁/.test(msg29);
+          const prefer29: "shopline" | "superlanding" | undefined = onlyOfficial
+            ? "shopline"
+            : onlySl
+              ? "superlanding"
+              : undefined;
+          const slCfg29 = getSuperLandingConfig(bid29);
+          try {
+            const result29 = await unifiedLookupByPhoneGlobal(
+              slCfg29,
+              act29.receiver_phone,
+              bid29,
+              prefer29,
+              false
+            );
+            if (result29.orders.length > 1) {
+              const src29 =
+                result29.source === "shopline" || result29.source === "superlanding"
+                  ? result29.source
+                  : "superlanding";
+              const packed29 = packDeterministicMultiOrderToolResult({
+                orders: result29.orders,
+                orderSource: src29,
+                headerLine: "依您留的手機再查了一次",
+                contactId: contact.id,
+                storage,
+                matchedBy: "text",
+                renderer: "phase29_more_orders_expand",
+              });
+              let reply29 = String((packed29 as { deterministic_customer_reply?: string }).deterministic_customer_reply || "");
+              if (orderFeatureFlags.orderFinalNormalizer) {
+                const nr29 = normalizeCustomerFacingOrderReply(reply29, {
+                  mode: "order_lookup",
+                  replySource: "phase29_expand",
+                  renderer: "phase29_more_orders_expand",
+                  platform: contact.platform ?? undefined,
+                  softHumanize: true,
+                });
+                reply29 = nr29.text;
+              }
+              const plat29 = platform || contact.platform || "line";
+              const ai29 = storage.createMessage(contact.id, plat29, "ai", reply29);
+              broadcastSSE("new_message", { contact_id: contact.id, message: ai29, brand_id: effectiveBrandId || contact.brand_id });
+              broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+              if (channelToken && plat29 === "messenger") {
+                await sendFBMessage(channelToken, contact.platform_user_id, reply29);
+              } else if (channelToken) {
+                await pushLineMessage(contact.platform_user_id, [{ type: "text", text: reply29 }], channelToken);
+              }
+              storage.createAiLog({
+                contact_id: contact.id,
+                message_id: ai29.id,
+                brand_id: effectiveBrandId || undefined,
+                prompt_summary: `phase29_more_orders: ${msg29.slice(0, 50)}`,
+                knowledge_hits: [],
+                tools_called: ["phase29_expand_phone"],
+                transfer_triggered: false,
+                result_summary: `n=${result29.orders.length}`,
+                token_usage: 0,
+                model: "phase29_expand",
+                response_time_ms: Date.now() - startTime,
+                reply_source: "deterministic_tool",
+                used_llm: 0,
+                plan_mode: plan.mode,
+                used_first_llm: 0,
+                used_second_llm: 0,
+                reply_renderer: "phase29_more_orders_expand",
+                prompt_profile: "na",
+                first_customer_visible_reply_ms: Date.now() - startTime,
+                lookup_ack_sent_ms: null,
+                queue_wait_ms: queueWaitMs,
+              });
+              return;
+            }
+          } catch (e29) {
+            console.warn("[phase29_more_orders_expand]", (e29 as Error)?.message || e29);
+          }
         }
       }
       const openai = new OpenAI({ apiKey });
@@ -5161,6 +5289,7 @@ ${contextStr}
             replySource: secondLlmSkipped ? "deterministic_tool" : "llm",
             renderer: deterministicToolMeta.renderer,
             platform: contact.platform ?? undefined,
+            softHumanize: secondLlmSkipped && plan.mode === "order_lookup",
           });
           reply = normF.text;
           console.log(
@@ -6602,6 +6731,14 @@ ${contextStr}
         if (preferSource) console.log("[AI Tool Call] 官網查單：優先 SHOPLINE（依對話關鍵字）");
         const result = await unifiedLookupByPhoneGlobal(config, phone, context?.brandId, preferSource, false);
         if (!result.found || result.orders.length === 0) {
+          if (preferSource === "shopline") {
+            return JSON.stringify({
+              success: true,
+              found: false,
+              message:
+                "官網（SHOPLINE）這支手機目前查無訂單。若您是在一頁商店或其他管道下單，請說明或提供訂單編號，勿將一頁商店訂單當成官網結果。",
+            });
+          }
           return JSON.stringify({ success: true, found: false, message: "此手機號碼查無訂單紀錄；若為官網購買可確認是否已留此電話。" });
         }
         const orders = result.orders;
@@ -6667,10 +6804,10 @@ ${contextStr}
             return `${i + 1}. ${srcTag}${o.global_order_id}｜${o.created_at || ""}｜${label}｜${st}`;
           });
           const deterministicReply =
-            `幫您查到 ${n} 筆訂單（${ch}）。${aggStr}。\n\n` +
+            `這邊查到 ${n} 筆（${ch}），${aggStr}。\n` +
             lines.join("\n") +
-            (n > 3 ? `\n\n（另有 ${n - 3} 筆，說「全部訂單」可列出）` : "") +
-            `\n\n要看哪一筆請回覆訂單編號。`;
+            (n > 3 ? `\n（還有 ${n - 3} 筆，說「全部訂單」我幫您列）` : "") +
+            `\n要看哪一筆直接回訂單編號即可。`;
           const o0 = sorted[0];
           const status0 = getUnifiedStatusLabel(o0.status, o0.source || orderSource);
           const candidates = sorted.map((o) => {
@@ -6780,11 +6917,22 @@ ${contextStr}
                   payment_method: o0.payment_method,
                   payment_status_label: pk.label,
                 };
-                return `幫您查到了，這筆資料如下：\n${formatOrderOnePage(payload)}`;
+                return `我查到這筆了，內容如下：\n${formatOrderOnePage(payload)}`;
               })()
             : undefined;
         if (orders.length === 1 && singleDeterministic) {
-          console.log("[order_lookup] renderer=deterministic lookup=phone_single source=" + orderSource);
+          const isLocalOnly = result.data_coverage === "local_only";
+          const noSingleClaim =
+            orderFeatureFlags.conservativeSingleOrder && isLocalOnly;
+          const replyText = noSingleClaim
+            ? "目前僅從已同步資料查到 1 筆；若您有更早或其他訂單，可說「還有其他訂單嗎」再查。\n\n" +
+              singleDeterministic
+            : singleDeterministic;
+          console.log(
+            "[order_lookup] renderer=deterministic lookup=phone_single source=" +
+              orderSource +
+              (noSingleClaim ? " data_coverage=local_only" : "")
+          );
           return JSON.stringify({
             success: true,
             found: true,
@@ -6792,13 +6940,14 @@ ${contextStr}
             orders: orderSummaries,
             source: orderSource,
             deterministic_skip_llm: true,
-            deterministic_customer_reply: singleDeterministic,
+            deterministic_customer_reply: replyText,
             ...orderDeterministicContractFields(),
             renderer: "deterministic",
             one_page_summary: onePageBlocks[0],
+            ...(isLocalOnly ? { data_coverage: "local_only" } : {}),
           });
         }
-        return JSON.stringify({ success: true, found: true, total: orders.length, orders: orderSummaries, source: orderSource, note: multiOrderNote, formatted_list: orders.length > 1 ? formattedList : undefined, one_page_summary: orders.length === 1 ? onePageBlocks[0] : undefined, one_page_full });
+        return JSON.stringify({ success: true, found: true, total: orders.length, orders: orderSummaries, source: orderSource, note: multiOrderNote, formatted_list: orders.length > 1 ? formattedList : undefined, one_page_summary: orders.length === 1 ? onePageBlocks[0] : undefined, one_page_full, ...(result.data_coverage ? { data_coverage: result.data_coverage } : {}) });
       }
 
       return JSON.stringify({ success: false, error: `?????: ${toolName}` });
@@ -7384,18 +7533,17 @@ ${contextStr}
     const brandId = req.query.brand_id ? parseInt(String(req.query.brand_id)) : undefined;
     const counts = storage.getManagerStatsCounts(brandId);
     const agents = storage.getTeamMembers().filter((m) => m.role === "cs_agent");
+    const bulk = storage.getOpenAndPendingReplyByAgent(brandId);
     const team = agents.map((m) => {
       const st = storage.getAgentStatus(m.id);
-      const openCases = storage.getOpenCasesCountForAgent(m.id);
-      const pendingReply = storage.getAgentPendingReplyCount(m.id);
       return {
         id: m.id,
         display_name: m.display_name,
         is_online: (m as any).is_online ?? 0,
         is_available: (m as any).is_available ?? 1,
-        open_cases_count: openCases,
+        open_cases_count: bulk.open_by_agent[m.id] ?? 0,
         max_active_conversations: st?.max_active_conversations ?? 10,
-        pending_reply: pendingReply,
+        pending_reply: bulk.pending_reply_by_agent[m.id] ?? 0,
       };
     });
     return res.json({ today_new: counts.today_new, unassigned: counts.unassigned, urgent: counts.urgent_simple, overdue: counts.overdue, closed_today: counts.closed_today, vip_unhandled: counts.vip_unhandled, team });
@@ -7621,50 +7769,45 @@ ${contextStr}
   app.get("/api/manager-dashboard", authMiddleware, (req: any, res) => {
     if (!isSupervisor(req)) return res.json({ cards: {}, status_distribution: [], agent_workload: [], alerts: [], issue_type_rank: [], tag_rank: [] });
     const brandId = req.query.brand_id ? parseInt(String(req.query.brand_id)) : undefined;
-    const allContacts = storage.getContacts(brandId) as any[];
+    const snap = storage.getManagerDashboardSnapshot(brandId);
     const report = storage.getSupervisorReport();
-    const today = new Date().toISOString().slice(0, 10);
-    let todayPending = 0;
-    let urgent = 0;
-    let unassigned = 0;
-    let overdue = 0;
-    let vipUnhandled = 0;
-    let closedToday = 0;
-    const statusCount: Record<string, number> = {};
-    for (const c of allContacts) {
-      if (!["closed", "resolved"].includes(c.status)) {
-        todayPending++;
-        if (isUrgentContact(c)) urgent++;
-        if (isOverdueContact(c)) overdue++;
-        if (c.vip_level > 0 && String(c.last_message_sender_type || "").toLowerCase() === "user") vipUnhandled++;
-        statusCount[c.status || "pending"] = (statusCount[c.status || "pending"] || 0) + 1;
-      }
-      if (!c.assigned_agent_id && c.needs_human === 1) unassigned++;
-      if (["closed", "resolved"].includes(c.status) && c.closed_at && String(c.closed_at).slice(0, 10) === today) closedToday++;
-    }
-    const totalToday = allContacts.filter((c) => c.created_at && String(c.created_at).slice(0, 10) === today).length;
+    const todayPending = snap.today_pending;
+    const urgent = snap.urgent;
+    const unassigned = snap.unassigned;
+    const overdue = snap.overdue;
+    const vipUnhandled = snap.vip_unhandled;
+    const closedToday = snap.closed_today;
+    const totalToday = snap.today_new;
     const todayCloseRate = totalToday > 0 ? Math.round((closedToday / totalToday) * 100) : 0;
     const agents = storage.getTeamMembers().filter((m) => m.role === "cs_agent");
     const agentWorkload = agents.map((m) => {
       const st = storage.getAgentStatus(m.id);
-      const openCases = storage.getOpenCasesCountForAgent(m.id);
+      const openCases = snap.open_by_agent[m.id] ?? 0;
       const maxActive = st?.max_active_conversations ?? 10;
-      const agentContacts = storage.getContacts(brandId, m.id) as any[];
-      let pendingReply = 0;
-      for (const c of agentContacts) {
-        if (["closed", "resolved"].includes(c.status)) continue;
-        if (String(c.last_message_sender_type || "").toLowerCase() === "user") pendingReply++;
-      }
+      const pendingReply = snap.pending_reply_by_agent[m.id] ?? 0;
       return { id: m.id, name: m.display_name, open: openCases, max: maxActive, pending: pendingReply };
     });
-    const statusLabels: Record<string, string> = { pending: "???", processing: "???", awaiting_human: "???", assigned: "???", waiting_customer: "?????", high_risk: "??", new_case: "???", closed: "???", resolved: "???" };
-    const statusDistribution = Object.entries(statusCount).map(([status, count]) => ({ label: statusLabels[status] || status, count }));
+    const statusLabels: Record<string, string> = {
+      pending: "待處理",
+      processing: "處理中",
+      awaiting_human: "待人接",
+      assigned: "已指派",
+      waiting_customer: "待客戶回覆",
+      high_risk: "高風險",
+      new_case: "新案件",
+      closed: "已結案",
+      resolved: "已解決",
+    };
+    const statusDistribution = snap.status_distribution.map(({ status, count }) => ({
+      label: statusLabels[status] || status,
+      count,
+    }));
     const unassignedThreshold = 5;
     const alerts: { type: string; count: number; threshold?: number }[] = [];
-    if (overdue > 0) alerts.push({ type: "????", count: overdue });
-    if (urgent > 0) alerts.push({ type: "????", count: urgent });
-    if (vipUnhandled > 0) alerts.push({ type: "VIP ???", count: vipUnhandled });
-    if (unassigned >= unassignedThreshold) alerts.push({ type: "?????", count: unassigned, threshold: unassignedThreshold });
+    if (overdue > 0) alerts.push({ type: "逾時未回", count: overdue });
+    if (urgent > 0) alerts.push({ type: "緊急案件", count: urgent });
+    if (vipUnhandled > 0) alerts.push({ type: "VIP 待處理", count: vipUnhandled });
+    if (unassigned >= unassignedThreshold) alerts.push({ type: "待分配過多", count: unassigned, threshold: unassignedThreshold });
     const issueTypeRank = (report.category_ratio || []).map((c: { label: string; count: number }) => ({ name: c.label, count: c.count }));
     const tagRank = (report.tag_rank || []).map((t: { tag: string; count: number }) => ({ name: t.tag, count: t.count }));
     return res.json({

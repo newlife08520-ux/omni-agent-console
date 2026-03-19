@@ -144,6 +144,21 @@ export interface IStorage {
   getAgentStatsCounts(agentId: number): { pending_reply: number; closed_today: number; overdue: number; tracking: number; urgent_simple: number };
   /** 單一客服的「待回覆」數（最後一則為 user 且未結案）。用於 manager-stats 的 team[].pending_reply。 */
   getAgentPendingReplyCount(agentId: number): number;
+  /** 主管戰情 team 列：一次 GROUP BY 取代 N 次單人 COUNT。 */
+  getOpenAndPendingReplyByAgent(brandId?: number): { open_by_agent: Record<number, number>; pending_reply_by_agent: Record<number, number> };
+  /** 績效/主管儀表板：純 COUNT + GROUP BY，避免載入全品牌 contacts。 */
+  getManagerDashboardSnapshot(brandId?: number): {
+    today_pending: number;
+    urgent: number;
+    overdue: number;
+    unassigned: number;
+    vip_unhandled: number;
+    closed_today: number;
+    today_new: number;
+    status_distribution: { status: string; count: number }[];
+    open_by_agent: Record<number, number>;
+    pending_reply_by_agent: Record<number, number>;
+  };
   incrementAgentTodayAssigned(agentId: number): void;
   resetAgentDailyCountsIfNewDay(): void;
   updateContactIntentLevel(contactId: number, level: string | null): void;
@@ -1291,6 +1306,97 @@ export class SQLiteStorage implements IStorage {
       `SELECT COUNT(*) as c FROM contacts c WHERE c.assigned_agent_id = ? AND c.status NOT IN ('closed','resolved') AND LOWER(${lastSender}) = 'user'`
     ).get(agentId) as { c: number };
     return row?.c ?? 0;
+  }
+
+  getOpenAndPendingReplyByAgent(brandId?: number): { open_by_agent: Record<number, number>; pending_reply_by_agent: Record<number, number> } {
+    const brandCond = brandId != null ? " c.brand_id = ? " : " 1=1 ";
+    const p: unknown[] = brandId != null ? [brandId] : [];
+    const lastSender = SQLiteStorage.lastMessageSenderSubquery();
+    const openRows = db.prepare(
+      `SELECT c.assigned_agent_id as aid, COUNT(*) as c FROM contacts c WHERE ${brandCond} AND c.assigned_agent_id IS NOT NULL AND c.assigned_agent_id > 0 AND c.status NOT IN ('closed','resolved') GROUP BY c.assigned_agent_id`
+    ).all(...p) as { aid: number; c: number }[];
+    const pendingRows = db.prepare(
+      `SELECT c.assigned_agent_id as aid, COUNT(*) as c FROM contacts c WHERE ${brandCond} AND c.assigned_agent_id IS NOT NULL AND c.assigned_agent_id > 0 AND c.status NOT IN ('closed','resolved') AND LOWER(${lastSender}) = 'user' GROUP BY c.assigned_agent_id`
+    ).all(...p) as { aid: number; c: number }[];
+    const open_by_agent: Record<number, number> = {};
+    const pending_reply_by_agent: Record<number, number> = {};
+    for (const r of openRows) {
+      if (r.aid != null) open_by_agent[r.aid] = r.c ?? 0;
+    }
+    for (const r of pendingRows) {
+      if (r.aid != null) pending_reply_by_agent[r.aid] = r.c ?? 0;
+    }
+    return { open_by_agent, pending_reply_by_agent };
+  }
+
+  getManagerDashboardSnapshot(brandId?: number): {
+    today_pending: number;
+    urgent: number;
+    overdue: number;
+    unassigned: number;
+    vip_unhandled: number;
+    closed_today: number;
+    today_new: number;
+    status_distribution: { status: string; count: number }[];
+    open_by_agent: Record<number, number>;
+    pending_reply_by_agent: Record<number, number>;
+  } {
+    const today = new Date().toISOString().slice(0, 10);
+    const brandCond = brandId != null ? " c.brand_id = ? " : " 1=1 ";
+    const p: unknown[] = brandId != null ? [brandId] : [];
+    const lastSender = SQLiteStorage.lastMessageSenderSubquery();
+
+    const todayPendingRow = db.prepare(
+      `SELECT COUNT(*) as c FROM contacts c WHERE ${brandCond} AND c.status NOT IN ('closed','resolved')`
+    ).get(...p) as { c: number };
+
+    const urgentRow = db.prepare(
+      `SELECT COUNT(*) as c FROM contacts c WHERE ${brandCond} AND c.status NOT IN ('closed','resolved') AND (
+        c.status = 'high_risk' OR (c.case_priority IS NOT NULL AND c.case_priority <= 2)
+        OR IFNULL(c.tags,'') LIKE '%緊急%' OR IFNULL(c.tags,'') LIKE '%加急%' OR IFNULL(c.tags,'') LIKE '%急件%' OR IFNULL(c.tags,'') LIKE '%優先%'
+        OR (c.vip_level > 0 AND LOWER(${lastSender}) = 'user' AND c.last_message_at IS NOT NULL AND datetime(c.last_message_at) <= datetime('now','-1 hour'))
+        OR (c.response_sla_deadline_at IS NOT NULL AND datetime(c.response_sla_deadline_at) < datetime('now'))
+      )`
+    ).get(...p) as { c: number };
+
+    const overdueRow = db.prepare(
+      `SELECT COUNT(*) as c FROM contacts c WHERE ${brandCond} AND c.status NOT IN ('closed','resolved') AND c.last_message_at IS NOT NULL AND datetime(c.last_message_at) <= datetime('now','-1 hour') AND LOWER(${lastSender}) = 'user'`
+    ).get(...p) as { c: number };
+
+    const unassignedRow = db.prepare(
+      `SELECT COUNT(*) as c FROM contacts c WHERE ${brandCond} AND c.needs_human = 1 AND (c.assigned_agent_id IS NULL OR c.assigned_agent_id = 0)`
+    ).get(...p) as { c: number };
+
+    const vipRow = db.prepare(
+      `SELECT COUNT(*) as c FROM contacts c WHERE ${brandCond} AND c.status NOT IN ('closed','resolved') AND c.vip_level > 0 AND LOWER(${lastSender}) = 'user'`
+    ).get(...p) as { c: number };
+
+    const closedTodayRow = db.prepare(
+      `SELECT COUNT(*) as c FROM contacts c WHERE ${brandCond} AND c.status IN ('closed','resolved') AND c.closed_at IS NOT NULL AND date(c.closed_at) = ?`
+    ).get(...p, today) as { c: number };
+
+    const todayNewRow = db.prepare(
+      `SELECT COUNT(*) as c FROM contacts c WHERE ${brandCond} AND date(c.created_at) = ?`
+    ).get(...p, today) as { c: number };
+
+    const statusRows = db.prepare(
+      `SELECT c.status as status, COUNT(*) as c FROM contacts c WHERE ${brandCond} AND c.status NOT IN ('closed','resolved') GROUP BY c.status`
+    ).all(...p) as { status: string; c: number }[];
+
+    const { open_by_agent, pending_reply_by_agent } = this.getOpenAndPendingReplyByAgent(brandId);
+
+    return {
+      today_pending: todayPendingRow?.c ?? 0,
+      urgent: urgentRow?.c ?? 0,
+      overdue: overdueRow?.c ?? 0,
+      unassigned: unassignedRow?.c ?? 0,
+      vip_unhandled: vipRow?.c ?? 0,
+      closed_today: closedTodayRow?.c ?? 0,
+      today_new: todayNewRow?.c ?? 0,
+      status_distribution: (statusRows || []).map((r) => ({ status: r.status || "pending", count: r.c ?? 0 })),
+      open_by_agent,
+      pending_reply_by_agent,
+    };
   }
 
   incrementAgentTodayAssigned(agentId: number): void {

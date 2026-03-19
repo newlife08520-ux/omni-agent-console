@@ -1,8 +1,13 @@
 /**
- * Phase 2：手動同步訂單至本地索引（orders_normalized）。
- * 執行：npx tsx server/scripts/sync-orders-normalized.ts [brand_id] [days]
- * - 一頁商店：依日期拉取 SuperLanding 訂單。
- * - Shopline：依列表 API 分頁拉取，再以 created_at 過濾最近 N 天。
+ * Phase 2 / 2.9：手動同步訂單至本地索引（orders_normalized）。
+ *
+ * 執行：
+ *   npx tsx server/scripts/sync-orders-normalized.ts [brand_id] [days]
+ *   npx tsx server/scripts/sync-orders-normalized.ts [brand_id] --backfill
+ *
+ * - 預設 days：**90**（Phase 2.9 由 7 調高，避免 older orders 進不了索引）
+ * - **--backfill**：歷史回填，一頁商店與 Shopline 皆用 **365** 天視窗
+ * - Shopline：列表 API 分頁後以 created_at 過濾時間窗內訂單
  */
 import { storage } from "../storage";
 import { getSuperLandingConfig } from "../superlanding";
@@ -11,13 +16,22 @@ import { upsertOrderNormalized, getOrderIndexStats } from "../order-index";
 import { fetchShoplineOrdersListPaginated } from "../shopline";
 
 async function main() {
-  const brandIdArg = process.argv[2];
-  const daysArg = process.argv[3];
-  const days = Math.min(90, Math.max(1, parseInt(daysArg || "7", 10) || 7));
+  const argv = process.argv.slice(2);
+  const backfill = argv.includes("--backfill") || argv.includes("--full");
+  const rest = argv.filter((a) => a !== "--backfill" && a !== "--full");
+  const brandIdArgResolved = rest[0] && /^\d+$/.test(rest[0]) ? rest[0] : undefined;
+  const daysFromArg = rest[1] && /^\d+$/.test(rest[1]) ? rest[1] : undefined;
+  const days = backfill
+    ? 365
+    : Math.min(365, Math.max(1, parseInt(String(daysFromArg || "90"), 10) || 90));
+
+  console.log(
+    `[sync-orders-normalized] mode=${backfill ? "HISTORICAL_BACKFILL_365D" : "DEFAULT_RECENT"} days=${days} (default_recent=90, backfill=365)`
+  );
 
   const brands = storage.getBrands();
-  const targetBrands = brandIdArg
-    ? brands.filter((b) => String(b.id) === brandIdArg)
+  const targetBrands = brandIdArgResolved
+    ? brands.filter((b) => String(b.id) === brandIdArgResolved)
     : brands;
 
   if (targetBrands.length === 0) {
@@ -34,10 +48,10 @@ async function main() {
   for (const brand of targetBrands) {
     const config = getSuperLandingConfig(brand.id);
     if (config.merchantNo && config.accessKey) {
-      console.log(`[Sync SL] Brand ${brand.id} (${brand.name}) ${beginDate} ~ ${endDate} ...`);
+      console.log(`[Sync SL] Brand ${brand.id} (${brand.name}) ${beginDate} ~ ${endDate}（${days} 天）...`);
       let page = 1;
       const perPage = 200;
-      const maxPages = 50;
+      const maxPages = backfill ? 80 : 50;
       let total = 0;
       try {
         while (true) {
@@ -70,7 +84,7 @@ async function main() {
           apiToken: token,
         };
         const { orders, pagesFetched } = await fetchShoplineOrdersListPaginated(cfg, {
-          maxPages: 50,
+          maxPages: backfill ? 80 : 50,
           perPage: 100,
         });
         let n = 0;
@@ -85,6 +99,13 @@ async function main() {
         console.error(`[Sync Shopline] Brand ${brand.id} 失敗:`, e?.message || e);
       }
     }
+  }
+
+  try {
+    const stats = getOrderIndexStats();
+    console.log("[Order index stats]", JSON.stringify(stats, null, 2));
+  } catch (_e) {
+    /* ignore */
   }
 }
 

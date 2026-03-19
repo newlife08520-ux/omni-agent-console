@@ -14,6 +14,55 @@ export function payKindForOrder(order: OrderInfo, statusLabel: string, source: s
   return { kind: p.kind, label: p.label };
 }
 
+/**
+ * Phase 2.9：對客商品明細人類可讀，禁止 raw JSON。
+ * 優先 items_structured，再解析 product_list JSON，最後純字串。
+ */
+export function formatProductLinesForCustomer(o: {
+  product_list?: string;
+  items_structured?: unknown;
+}): string {
+  const raw = o.items_structured;
+  if (Array.isArray(raw) && raw.length > 0) {
+    const lines = raw.map((item: unknown) => {
+      if (item != null && typeof item === "object") {
+        const x = item as Record<string, unknown>;
+        const name = String(x.name ?? x.title ?? x.product_name ?? x.product_title ?? x.code ?? "").trim();
+        const qty = x.quantity ?? x.qty ?? 1;
+        if (!name) return "";
+        return `${name} × ${qty}`;
+      }
+      return String(item ?? "").trim();
+    });
+    const s = lines.filter(Boolean).join("；");
+    if (s) return s;
+  }
+  const pl = o.product_list;
+  if (pl == null || !String(pl).trim()) return "";
+  const s = String(pl).trim();
+  if (s.startsWith("[") && s.includes("{")) {
+    try {
+      const arr = JSON.parse(s) as unknown;
+      if (Array.isArray(arr)) {
+        const lines = arr.map((x: unknown) => {
+          if (x != null && typeof x === "object") {
+            const r = x as Record<string, unknown>;
+            const name = String(r.name ?? r.title ?? r.product_name ?? r.code ?? "").trim();
+            const qty = r.quantity ?? r.qty ?? 1;
+            return name ? `${name} × ${qty}` : "";
+          }
+          return String(x ?? "").trim();
+        });
+        const out = lines.filter(Boolean).join("；");
+        if (out) return out;
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+  return s.replace(/\s*\n\s*/g, "；");
+}
+
 export function formatOrderOnePage(o: {
   order_id?: string;
   buyer_name?: string;
@@ -53,7 +102,11 @@ export function formatOrderOnePage(o: {
     ? [o.cvs_brand, o.cvs_store_name, o.full_address].filter(Boolean).join(" ") || o.address
     : o.full_address || o.address;
   if (addressDisplay) lines.push(isCvs ? `門市／地址：${addressDisplay}` : `地址：${addressDisplay}`);
-  if (o.product_list) lines.push(`商品明細：${o.product_list}`);
+  const prodLine = formatProductLinesForCustomer({
+    product_list: o.product_list,
+    items_structured: (o as { items_structured?: unknown }).items_structured,
+  });
+  if (prodLine) lines.push(`商品：${prodLine}`);
   if (o.status) lines.push(`狀態：${o.status}`);
   if (o.shipped_at) lines.push(`出貨時間：${o.shipped_at}`);
   return lines.join("\n");
@@ -89,12 +142,12 @@ export function buildDeterministicFollowUpReply(ctx: ActiveOrderContext): string
   if (ctx.payment_status && ctx.payment_status !== "unknown") {
     const paymentText =
       ctx.payment_status === "cod"
-        ? "貨到付款（到收／取件時付款），不是線上付款失敗"
+        ? "貨到付款，取件時再付即可"
         : ctx.payment_status === "success"
-          ? "已付款"
+          ? "已付款完成"
           : ctx.payment_status === "failed"
-            ? "這筆線上付款未完成，需重新下單或洽客服"
-            : "付款尚在確認或待付";
+            ? "這筆線上款項未完成，若要繼續可重新下單或跟我說要查別筆"
+            : "付款還在確認中";
     parts.push(paymentText);
   }
   if (ctx.fulfillment_status) parts.push(`狀態：${ctx.fulfillment_status}`);

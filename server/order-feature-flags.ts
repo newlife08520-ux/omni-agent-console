@@ -17,4 +17,6 @@ export const orderFeatureFlags = {
   genericDeterministicOrder: envBool("ENABLE_GENERIC_DETERMINISTIC_ORDER", true),
   orderUltraLitePrompt: envBool("ENABLE_ORDER_ULTRA_LITE_PROMPT", true),
   orderLatencyV2: envBool("ENABLE_ORDER_LATENCY_V2", true),
+  /** Phase 30：為 true 時，若資料為 local_only（僅本地索引），不單筆定案，改回帶說明讓 LLM 補問或補查 */
+  conservativeSingleOrder: envBool("CONSERVATIVE_SINGLE_ORDER", true),
 } as const;

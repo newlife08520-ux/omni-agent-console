@@ -126,7 +126,7 @@ function AppHeader({
   const { data: unreadData } = useQuery<{ count: number }>({
     queryKey: ["/api/notifications/unread-count"],
     queryFn: getQueryFn({ on401: "returnNull" }),
-    refetchInterval: 30000,
+    refetchInterval: 60000,
   });
   const unreadCount = unreadData?.count ?? 0;
   const { data: managerStats } = useQuery<{ urgent: number; unassigned: number }>({
@@ -138,7 +138,7 @@ function AppHeader({
       return res.json();
     },
     enabled: isManager,
-    refetchInterval: 15000,
+    refetchInterval: 45000,
   });
   return (
     <header className="flex items-center justify-between gap-4 px-5 py-3 border-b border-stone-200 bg-white/95 backdrop-blur-sm shrink-0">
