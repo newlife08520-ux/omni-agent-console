@@ -28,11 +28,17 @@ try {
 $readme = @"
 # Omni-Agent-Console — 給 AI 解析用打包說明
 
+## 資安說明（Phase 31）
+本 bundle 匯出時**預設已做 secret / PII 清理**：
+- settings 中敏感鍵（api_key、token、secret、password、access_key 等）一律 redact，不輸出實際值。
+- 電話、email、地址等 PII 在匯出內容中會遮罩。
+- 若需除錯用 raw 匯出，請設定環境變數 EXPORT_RAW_SECRETS=1 後再執行 export（僅限本機除錯）。
+
 ## 請優先閱讀
 1. **AI-BUNDLE-CONTEXT.json** — 從本機 SQLite 匯出（若當時 DB 不在預設路徑會是空的/錯誤訊息）：
    - global_system_prompt：全域人格（設定「系統指令」）
    - brands_persona：各品牌 system_prompt（品牌人格）
-   - settings_ai_related：與 AI/模型相關的 settings 鍵值
+   - settings_ai_related：與 AI/模型相關的 settings 鍵值（敏感值已 redact）
    - recent_ai_logs：最近約 80 筆 AI 回覆軌跡（reply_source、prompt_profile、轉人工等），方便查「回覆異常」
 
 2. **SOURCE/** — 完整原始碼（已排除 node_modules、dist、.git、uploads、DB 檔）

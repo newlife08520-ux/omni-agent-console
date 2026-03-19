@@ -12,6 +12,12 @@ import {
 } from "./order-service";
 import { formatOrderOnePage, payKindForOrder, sourceChannelLabel, buildDeterministicFollowUpReply } from "./order-reply-utils";
 import { buildActiveOrderContextFromOrder } from "./order-active-context";
+import {
+  deriveOrderLookupIntent,
+  resolveOrderSourceIntent,
+  shouldAllowPhoneOnlyDirectLookup,
+  shouldRequireApiConfirmBeforeSingleClaim,
+} from "./order-lookup-policy";
 
 const ASK_ORDER_KW = /我要查訂單|查訂單|訂單查詢|幫我查訂單|想查訂單/i;
 const ONE_PAGE_HINTS = /一頁商店|一頁|粉絲團|團購|superlanding|SuperLanding/i;
@@ -88,10 +94,9 @@ export async function tryOrderFastPath(params: {
     }
   }
 
-  const preferShop = /官網|官方網站|官網購買|官網下單|SHOPLINE|shopline/i.test(msg) ||
-    /官網|官方網站|SHOPLINE|shopline/i.test(recentUserMessages.slice(-3).join(" "));
-  const preferSl =
-    ONE_PAGE_HINTS.test(msg) || ONE_PAGE_HINTS.test(recentUserMessages.slice(-3).join(" "));
+  const sourceIntent = resolveOrderSourceIntent(msg, recentUserMessages);
+  const preferShop = sourceIntent === "shopline";
+  const preferSl = sourceIntent === "superlanding";
 
   const mixedOid =
     !isLineMostlyOrderId(msg) && extractOrderIdFromMixedSentence(msg);
@@ -113,7 +118,7 @@ export async function tryOrderFastPath(params: {
   if (ASK_ORDER_KW.test(msg) && !extractTwPhone(msg) && !isLineMostlyOrderId(msg)) {
     return {
       reply:
-        "要幫您查訂單的話，請直接傳「訂單編號」；若沒有單號，請傳「手機號碼」。若是官網下單，請打「官網」加上手機，例如：官網 0912345678。",
+        "要幫您查訂單的話，請直接傳「訂單編號」；若沒有單號，請提供「商品名稱＋手機號碼」（例如：OO 商品 0912345678）。若只要查全部訂單摘要，可說「查我全部訂單」並附手機。",
       fastPathType: "ask_for_identifier",
     };
   }
@@ -203,6 +208,16 @@ export async function tryOrderFastPath(params: {
 
   const phone = extractTwPhone(msg);
   if (phone && (isLineMostlyPhone(msg) || preferShop || preferSl)) {
+    const activeCtx = storage.getActiveOrderContext(contactId);
+    const intent = deriveOrderLookupIntent(msg, recentUserMessages, activeCtx ?? undefined);
+    const purePhoneOnly = !preferShop && !preferSl && isLineMostlyPhone(msg);
+    if (purePhoneOnly && !shouldAllowPhoneOnlyDirectLookup(intent)) {
+      return {
+        reply:
+          "若要查特定訂單，請提供「商品名稱＋手機號碼」或直接傳訂單編號；若只要查全部訂單摘要，可說「查我全部訂單」或「還有其他訂單嗎」。",
+        fastPathType: "ask_for_identifier",
+      };
+    }
     let prefer: OrderLookupPreferSource | undefined;
     if (preferShop) prefer = "shopline";
     else if (preferSl) prefer = "superlanding";
@@ -216,6 +231,12 @@ export async function tryOrderFastPath(params: {
     }
     const orders = result.orders;
     const orderSource = result.source;
+    const needsConfirm = shouldRequireApiConfirmBeforeSingleClaim(
+      intent,
+      result.data_coverage,
+      orders.length
+    );
+    const isLocalOnlySingle = orders.length === 1 && result.data_coverage === "local_only";
 
     if (orders.length > 1) {
       const orderSummaries = orders.map((o) => {
@@ -322,6 +343,20 @@ export async function tryOrderFastPath(params: {
       source_channel: sourceChannelLabel(o0.source),
     };
     const onePage = formatOrderOnePage(payload);
+    if (isLocalOnlySingle || needsConfirm) {
+      const reply =
+        "目前從已同步資料先看到 1 筆訂單；若您有更早或其他訂單，可說「還有其他訂單嗎」再查。\n\n" + onePage;
+      storage.linkOrderForContact(contactId, o0.global_order_id, "ai_lookup");
+      storage.setActiveOrderContext(
+        contactId,
+        buildActiveOrderContextFromOrder(o0, o0.source || orderSource, st, reply, "text")
+      );
+      storage.updateContactOrderSource(contactId, o0.source || orderSource);
+      return {
+        reply,
+        fastPathType: preferShop ? "shopline_phone" : preferSl ? "superlanding_phone" : "phone",
+      };
+    }
     const reply = `幫您查到了：\n${onePage}`;
     storage.linkOrderForContact(contactId, o0.global_order_id, "ai_lookup");
     storage.setActiveOrderContext(

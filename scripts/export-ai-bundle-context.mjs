@@ -1,7 +1,8 @@
 /**
  * 匯出給 AI 解析用：全域/品牌 system_prompt（人格）、相關設定鍵、近期 ai_logs。
+ * Phase 31：預設 redact 敏感鍵、遮罩 PII，bundle 不得帶出 secret／個資。
  * 用法：node scripts/export-ai-bundle-context.mjs <輸出.json>
- * 環境：DATA_DIR（可選，與正式環境一致時指向 DB 目錄）
+ * 環境：DATA_DIR（可選）、EXPORT_RAW_SECRETS=1（僅除錯用，預設不輸出 raw secret）
  */
 import fs from "fs";
 import path from "path";
@@ -9,6 +10,26 @@ import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
+
+const allowRawSecrets = process.env.EXPORT_RAW_SECRETS === "1";
+
+const SENSITIVE_KEY_PATTERN = /api_key|apikey|secret|password|token|access_key|auth|credential/i;
+
+function redactValue(key, value) {
+  if (value == null || typeof value !== "string") return value;
+  if (allowRawSecrets) return value;
+  if (SENSITIVE_KEY_PATTERN.test(String(key))) return "[REDACTED]";
+  return value;
+}
+
+function maskPII(str) {
+  if (str == null || typeof str !== "string") return str;
+  let s = str;
+  s = s.replace(/09\d{8}/g, "09********");
+  s = s.replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, "[EMAIL]");
+  s = s.replace(/\d{3,4}[- ]?\d{3,4}[- ]?\d{4}/g, "[PHONE]");
+  return s;
+}
 
 function getDataDir() {
   if (process.env.DATA_DIR?.trim()) return path.resolve(process.env.DATA_DIR.trim());
@@ -23,8 +44,8 @@ async function main() {
   const dbPath = path.join(dataDir, "omnichannel.db");
   const base = {
     exported_at: new Date().toISOString(),
-    note: "人格＝settings.system_prompt（全域）+ brands.system_prompt（品牌）。回覆邏輯見 server/routes.ts、server/services/prompt-builder.ts、server/workers/ai-reply.worker.ts",
-    db_path_attempted: dbPath,
+    note: "人格＝settings.system_prompt（全域）+ brands.system_prompt（品牌）。回覆邏輯見 server/routes.ts。此 bundle 已做 secret redact 與 PII 遮罩。",
+    db_path_attempted: allowRawSecrets ? dbPath : "[REDACTED_PATH]",
     db_found: fs.existsSync(dbPath),
     global_system_prompt: null,
     brands_persona: [],
@@ -72,7 +93,9 @@ async function main() {
         /prompt|persona|人格|ai_|model|openai|llm|system/i.test(k) ||
         k === "system_prompt"
       ) {
-        const v = String(value ?? "");
+        let v = String(value ?? "");
+        v = redactValue(k, v);
+        if (typeof v === "string" && !v.includes("[REDACTED]")) v = maskPII(v);
         base.settings_ai_related[k] = v.length > 8000 ? v.slice(0, 8000) + "\n…(truncated)" : v;
       }
     }
@@ -85,13 +108,15 @@ async function main() {
          FROM ai_logs ORDER BY id DESC LIMIT 80`
       )
       .all();
-    base.recent_ai_logs = logs.map((r) => ({
-      ...r,
-      result_summary:
-        r.result_summary && String(r.result_summary).length > 1200
-          ? String(r.result_summary).slice(0, 1200) + "…"
-          : r.result_summary,
-    }));
+    base.recent_ai_logs = logs.map((r) => {
+      let summary = r.result_summary;
+      if (summary != null) {
+        summary = String(summary);
+        if (summary.length > 1200) summary = summary.slice(0, 1200) + "…";
+        summary = maskPII(summary);
+      }
+      return { ...r, result_summary: summary };
+    });
   } catch (e) {
     base.export_error = String(e?.message || e);
   } finally {

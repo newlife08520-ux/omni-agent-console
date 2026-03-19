@@ -17,9 +17,13 @@ import {
 } from "./order-index";
 import { filterOrdersByProductQuery } from "./order-product-filter";
 import { derivePaymentStatus } from "./order-payment-utils";
+import { resolveOrderSourceIntent } from "./order-lookup-policy";
 
 /** Phase 30：local_only 表示僅來自本地索引，可能不完整，不可單筆定案 */
 export type DataCoverage = "local_only" | "api_only" | "merged_local_api";
+
+/** Phase 31：覆蓋信心 — local_only 單筆為 low，API 或合併為 high */
+export type CoverageConfidence = "low" | "medium" | "high";
 
 export interface UnifiedOrderResult {
   orders: OrderInfo[];
@@ -29,6 +33,10 @@ export interface UnifiedOrderResult {
   crossBrandName?: string;
   /** 若為 local_only，表示未打 API，資料可能不全，不應單筆直接定案 */
   data_coverage?: DataCoverage;
+  /** Phase 31：覆蓋信心；local_only 單筆為 low */
+  coverage_confidence?: CoverageConfidence;
+  /** Phase 31：單筆且 local_only 時為 true，不可直接當最終真相 */
+  needs_live_confirm?: boolean;
 }
 
 function getShoplineConfig(brandId?: number): ShoplineConfig | null {
@@ -44,15 +52,9 @@ function getShoplineConfig(brandId?: number): ShoplineConfig | null {
   return null;
 }
 
-/** 是否應優先以 SHOPLINE 查單（官網購買／推斷為 SHOPLINE 時） */
-const PREFER_SHOPLINE_HINTS = /官網|官方網站|官網購買|官網下單|官網買|在官網|從官網|SHOPLINE|shopline/i;
-
+/** Phase 32 Ticket 1：薄封裝至 resolveOrderSourceIntent，不再用 recent 無限污染 */
 export function shouldPreferShoplineLookup(userMessage: string, recentUserMessages?: string[]): boolean {
-  const current = (userMessage || "").trim();
-  if (PREFER_SHOPLINE_HINTS.test(current)) return true;
-  const recent = recentUserMessages ?? [];
-  const combined = [current, ...recent].join(" ");
-  return PREFER_SHOPLINE_HINTS.test(combined);
+  return resolveOrderSourceIntent(userMessage, recentUserMessages ?? []) === "shopline";
 }
 
 export type OrderLookupPreferSource = "superlanding" | "shopline";
@@ -411,11 +413,14 @@ export async function unifiedLookupByPhoneGlobal(
       if (cached?.found) return cached as UnifiedOrderResult;
       const localSh = getOrdersByPhone(brandId, phone, "shopline");
       if (localSh.length > 0) {
+        const single = localSh.length === 1;
         const result: UnifiedOrderResult = {
           orders: localSh,
           source: "shopline",
           found: true,
           data_coverage: "local_only",
+          coverage_confidence: single ? "low" : "medium",
+          needs_live_confirm: single,
         };
         setOrderLookupCache(ck, result);
         return result;
@@ -426,11 +431,14 @@ export async function unifiedLookupByPhoneGlobal(
       if (cached?.found) return cached as UnifiedOrderResult;
       const localSl = getOrdersByPhone(brandId, phone, "superlanding");
       if (localSl.length > 0) {
+        const single = localSl.length === 1;
         const result: UnifiedOrderResult = {
           orders: localSl,
           source: "superlanding",
           found: true,
           data_coverage: "local_only",
+          coverage_confidence: single ? "low" : "medium",
+          needs_live_confirm: single,
         };
         setOrderLookupCache(ck, result);
         return result;
@@ -447,11 +455,14 @@ export async function unifiedLookupByPhoneGlobal(
             : mergedLocal.every((o) => o.source === "superlanding")
               ? "superlanding"
               : "unknown";
+        const single = mergedLocal.length === 1;
         const result: UnifiedOrderResult = {
           orders: mergedLocal,
           source: src,
           found: true,
           data_coverage: "local_only",
+          coverage_confidence: single ? "low" : "medium",
+          needs_live_confirm: single,
         };
         setOrderLookupCache(ckAny, result);
         return result;
@@ -470,7 +481,7 @@ export async function unifiedLookupByPhoneGlobal(
       const result = await lookupShoplineOrdersByPhone(shoplineConfig, phone);
       if (result.orders.length > 0) {
         result.orders.forEach((o: OrderInfo) => { o.source = "shopline"; });
-        return { orders: result.orders, source: "shopline", found: true, data_coverage: "api_only" };
+        return { orders: result.orders, source: "shopline", found: true, data_coverage: "api_only", coverage_confidence: "high", needs_live_confirm: false };
       }
     } catch (_e) {
       console.log("[UnifiedOrder] SHOPLINE 手機全域查詢失敗:", (_e as Error).message);
@@ -484,7 +495,7 @@ export async function unifiedLookupByPhoneGlobal(
       const result = await lookupOrdersByPhone(slConfig, phone);
       if (result.orders.length > 0) {
         result.orders.forEach((o: OrderInfo) => { o.source = "superlanding"; });
-        return { orders: result.orders, source: "superlanding", found: true, data_coverage: "api_only" };
+        return { orders: result.orders, source: "superlanding", found: true, data_coverage: "api_only", coverage_confidence: "high", needs_live_confirm: false };
       }
     } catch (_e) {
       console.log("[UnifiedOrder] SuperLanding 手機全域查詢失敗:", (_e as Error).message);
@@ -527,7 +538,7 @@ export async function unifiedLookupByPhoneGlobal(
         : merged.every((o) => o.source === "superlanding")
           ? "superlanding"
           : "unknown";
-      result = { orders: merged, source: src, found: true, data_coverage: "merged_local_api" };
+      result = { orders: merged, source: src, found: true, data_coverage: "merged_local_api", coverage_confidence: "high", needs_live_confirm: false };
     } else if (tryShoplineFirst) {
       result = { orders: [], source: "unknown", found: false };
     } else {

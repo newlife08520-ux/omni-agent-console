@@ -481,11 +481,15 @@ export async function lookupOrdersByPageAndPhone(
       }
 
       totalFetched += allOrders.length;
+      const windowHits = allOrders.filter((o) => o.buyer_phone.replace(/[-\s]/g, "") === normalizedPhone).length;
       for (const o of allOrders) {
         const orderPhone = o.buyer_phone.replace(/[-\s]/g, "");
         if (orderPhone === normalizedPhone) byOrderId.set(o.global_order_id, o);
       }
-      console.log(`[一頁商店] page_id=${pageId} ${window.days}天窗口: 掃 ${allOrders.length} 筆，累計不重複匹配 ${byOrderId.size}`);
+      const cumulativeUnique = byOrderId.size;
+      console.log(
+        `[一頁商店] page_phone_window=${window.days} window_hits=${windowHits} cumulative_unique_hits=${cumulativeUnique} 累計不重複匹配 ${cumulativeUnique} page_id=${pageId}`
+      );
     }
 
     const merged = Array.from(byOrderId.values());

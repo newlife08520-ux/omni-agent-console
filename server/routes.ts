@@ -910,6 +910,25 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/debug/runtime-flags", authMiddleware, (_req: any, res) => {
+    try {
+      return res.json({
+        timestamp: new Date().toISOString(),
+        server_flags: {
+          ENABLE_ORDER_FAST_PATH: orderFeatureFlags.orderFastPath,
+          CONSERVATIVE_SINGLE_ORDER: orderFeatureFlags.conservativeSingleOrder,
+          ENABLE_ORDER_FINAL_NORMALIZER: orderFeatureFlags.orderFinalNormalizer,
+          ENABLE_GENERIC_DETERMINISTIC_ORDER: orderFeatureFlags.genericDeterministicOrder,
+          ENABLE_ORDER_ULTRA_LITE_PROMPT: orderFeatureFlags.orderUltraLitePrompt,
+          ENABLE_ORDER_LATENCY_V2: orderFeatureFlags.orderLatencyV2,
+        },
+        note: "前端 SSE/輪詢由 build-time VITE_DISABLE_SSE 決定，此 API 僅回傳 server 端旗標。",
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get("/api/internal/guard-stats", authMiddleware, (req: any, res) => {
     if (!["super_admin", "marketing_manager"].includes(req.session?.userRole)) {
       return res.status(403).json({ message: "????" });
@@ -4394,23 +4413,10 @@ ${contextStr}
         const activeCtx = storage.getActiveOrderContext(contact.id);
         const msgTrim = (userMessage || "").trim();
         const CLEAR_ACTIVE_ORDER_KW = [
-          "\u4e0d\u67e5\u4e86",
-          "\u4e0d\u8981\u4e86",
-          "\u53d6\u6d88",
-          "\u7d50\u6848",
-          "\u6c92\u6709\u4e86",
-          "\u5b8c\u6210",
-          "\u8a2d\u8b8a",
-          "\u67e5\u5225\u7b46",
-          "\u6211\u8981\u67e5\u5225\u7b46",
-          "\u53e6\u4e00\u7b46",
-          "\u63db\u4e00\u7b46",
-          "\u91cd\u67e5",
-          "\u91cd\u65b0\u67e5",
-          "\u4e0d\u662f\u9019\u7b46",
-          "\u4e0d\u662f\u9019\u5f35\u55ae",
-          "\u6211\u4e0d\u662f\u554f\u9019\u7b46",
-          "\u6211\u5728\u554f\u5225\u5f35",
+          "不查了", "不要了", "取消", "結案", "沒有了", "完成", "設變",
+          "查別筆", "我要查別筆", "換一筆", "重查", "重新查",
+          "不是這筆", "不是這張單", "我不是問這筆", "我在問別張",
+          "換另一筆", "查另一張", "另外一筆", "不是這張", "重查一下",
         ];
         if (activeCtx && CLEAR_ACTIVE_ORDER_KW.some((k) => msgTrim.includes(k))) {
           storage.clearActiveOrderContext(contact.id);
@@ -4423,11 +4429,11 @@ ${contextStr}
           systemPrompt += "\n\n【目前已查到的訂單摘要，回覆時可引用】\n\n" + activeCtx.one_page_summary;
         }
         systemPrompt += `\n\n<ORDER_LOOKUP_RULES>
-- 有訂單編號：一律可直接 lookup_order_by_id。
-- 僅手機、無單號：若工具回傳多筆（total>1），必須列摘要或逐筆，不可擅自幫客戶「選一筆」當答案；應請客戶指定訂單編號、或補商品關鍵字、或說要看哪一筆。
-- 僅手機且命中只有 1 筆時，才可當單筆完整回覆。
+- 有訂單編號：一律可直接 lookup_order_by_id，不補問。
+- 沒有訂單編號時，預設要「商品名稱＋手機」；僅手機時應先補問商品或請客戶說「查全部訂單」。
+- 僅當客戶明確說「查全部／還有其他訂單／我有幾筆」時，才允許僅用手機查；且多筆時列摘要，單筆時若為 data_coverage=local_only 不可當最終真相，需說明「目前先看到 1 筆，再幫您確認是否還有其他單」。
 - 客戶明講官網／官方網站：只用官網管道查；若官網查無，明講官網查無，不可拿一頁商店訂單冒充。
-- 一頁商店＋僅手機＋多筆命中：優先請補商品或列多筆摘要，不可直接單筆定案。
+- 工具回傳 data_coverage=local_only 且只有 1 筆時，不可單筆定案；必須帶說明或請客戶說「還有其他訂單嗎」再查。
 - 工具回傳多筆時必須善用 one_page_full 逐筆呈現；單筆時呈現完整欄位。
 </ORDER_LOOKUP_RULES>`;
       }
@@ -6922,8 +6928,7 @@ ${contextStr}
             : undefined;
         if (orders.length === 1 && singleDeterministic) {
           const isLocalOnly = result.data_coverage === "local_only";
-          const noSingleClaim =
-            orderFeatureFlags.conservativeSingleOrder && isLocalOnly;
+          const noSingleClaim = isLocalOnly;
           const replyText = noSingleClaim
             ? "目前僅從已同步資料查到 1 筆；若您有更早或其他訂單，可說「還有其他訂單嗎」再查。\n\n" +
               singleDeterministic
@@ -6945,9 +6950,24 @@ ${contextStr}
             renderer: "deterministic",
             one_page_summary: onePageBlocks[0],
             ...(isLocalOnly ? { data_coverage: "local_only" } : {}),
+            ...(result.coverage_confidence ? { coverage_confidence: result.coverage_confidence } : {}),
+            ...(result.needs_live_confirm ? { needs_live_confirm: result.needs_live_confirm } : {}),
           });
         }
-        return JSON.stringify({ success: true, found: true, total: orders.length, orders: orderSummaries, source: orderSource, note: multiOrderNote, formatted_list: orders.length > 1 ? formattedList : undefined, one_page_summary: orders.length === 1 ? onePageBlocks[0] : undefined, one_page_full, ...(result.data_coverage ? { data_coverage: result.data_coverage } : {}) });
+        return JSON.stringify({
+          success: true,
+          found: true,
+          total: orders.length,
+          orders: orderSummaries,
+          source: orderSource,
+          note: multiOrderNote,
+          formatted_list: orders.length > 1 ? formattedList : undefined,
+          one_page_summary: orders.length === 1 ? onePageBlocks[0] : undefined,
+          one_page_full,
+          ...(result.data_coverage ? { data_coverage: result.data_coverage } : {}),
+          ...(result.coverage_confidence ? { coverage_confidence: result.coverage_confidence } : {}),
+          ...(result.needs_live_confirm ? { needs_live_confirm: result.needs_live_confirm } : {}),
+        });
       }
 
       return JSON.stringify({ success: false, error: `?????: ${toolName}` });

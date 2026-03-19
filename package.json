@@ -35,6 +35,9 @@
     "verify:phase27": "npm run check:server && npm run verify:hardening && npx tsx server/phase24-verify.ts && npx tsx server/phase25-verify.ts && npx tsx server/phase26-verify.ts && npx tsx server/phase27-verify.ts && npm run stats:order-index",
     "verify:phase29": "npm run check:server && npm run verify:hardening && npx tsx server/phase24-verify.ts && npx tsx server/phase25-verify.ts && npx tsx server/phase26-verify.ts && npx tsx server/phase27-verify.ts && npx tsx server/phase29-verify.ts && npm run stats:order-index",
     "verify:phase30": "npm run verify:phase29 && npx tsx server/phase30-verify.ts",
+    "verify:phase31": "npm run verify:phase30 && npx tsx server/phase31-verify.ts",
+    "verify:phase32": "npm run verify:phase31 && npx tsx server/phase32-verify.ts",
+    "verify:bundle-safety": "node scripts/verify-bundle-safety.mjs",
     "stats:latency": "tsx server/scripts/query-latency-stats.ts",
     "stats:latency-help": "tsx server/scripts/query-latency-stats.ts"
   },
