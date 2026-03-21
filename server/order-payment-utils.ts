@@ -71,6 +71,13 @@ export function derivePaymentStatus(
       reason = "shopline_pay_raw_fail";
     }
   }
+  /** Phase 33 Ticket 33-6：一頁商店 LINE Pay / 卡類，若有明確失敗 raw 或狀態字，勿當 pending */
+  if (kind === "unknown" && source === "superlanding" && payRaw) {
+    if (/fail|failed|reject|declin|void|cancel|error|unsuccess/.test(payRaw)) {
+      kind = "failed";
+      reason = "superlanding_pay_raw_fail";
+    }
+  }
   if (kind === "unknown") {
     if (PAYMENT_FAIL_STATUS_KW.some((k) => statusLabel.includes(k))) {
       kind = "failed";
@@ -84,6 +91,16 @@ export function derivePaymentStatus(
     } else if (PAYMENT_SUCCESS_STATUS_KW.some((k) => statusLabel.includes(k)) && order.prepaid !== false) {
       kind = "success";
       reason = "status_implies_paid";
+    } else if (
+      source === "superlanding" &&
+      REQUIRES_PREPAY_METHOD.test(pm) &&
+      order.prepaid === false &&
+      order.paid_at == null &&
+      (/失敗|未成功|付款失敗|失敗單|未付款成功|紅叉/i.test(statusLabel) ||
+        /failed|fail|reject|declin|void|cancel|error|unsuccess/i.test(String(order.status || "")))
+    ) {
+      kind = "failed";
+      reason = "superlanding_linepay_card_fail_signal";
     } else if (PAYMENT_SUCCESS_STATUS_KW.some((k) => statusLabel.includes(k)) && order.prepaid === false && REQUIRES_PREPAY_METHOD.test(pm)) {
       kind = "pending";
       reason = "status_ship_flow_but_prepay_unclear";

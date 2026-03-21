@@ -34,7 +34,7 @@ const TW_PHONE = /09\d{8}/;
 
 /** 是否像「查全部 / 還有其他訂單 / 我有幾筆」 */
 const PHONE_ALL_ORDERS_KW =
-  /全部訂單|所有訂單|還有其他訂單|其他訂單|我有幾筆|幾筆訂單|查我全部|全部查|列出全部|列出所有/i;
+  /全部訂單|所有訂單|還有其他訂單|其他訂單|我有幾筆|我有幾個訂單|幾筆訂單|幾個訂單|查我全部|全部查|列出全部|列出所有/i;
 
 /** 是否像「官網」查單（僅查 SHOPLINE） */
 const SHOPLINE_HINTS = /官網|官方網站|官網購買|官網下單|官網買|在官網|從官網|SHOPLINE|shopline/i;
@@ -42,31 +42,48 @@ const SHOPLINE_HINTS = /官網|官方網站|官網購買|官網下單|官網買|
 /** 是否像「一頁」查單 */
 const SUPERLANDING_HINTS = /一頁商店|一頁|粉絲團|團購|superlanding|SuperLanding/i;
 
-/** Phase 32 Ticket 1：反向語句 — 不是官網、不是網站買的、粉專買的／一頁買的 → 清除官網偏好 */
-const SHOPLINE_NEGATIVE = /不是官網|不是官網的|不是在官網|不是網站買的|不是網站|粉專買的|一頁買的|團購買的|社團買的/i;
+/** Phase 32/33：反向語句 — 清除或反轉官網偏好 */
+const SHOPLINE_NEGATIVE =
+  /不是官網|不是官網的|不是在官網買的|不是在官網|不是官方網站|不是網站買的|不是網站|不是那個平台|粉專買的|一頁買的|團購買的|社團買的/i;
 
 /** Phase 32 Ticket 1：查單來源意圖 — 僅當前句＋負向即清，不讓「官網」殘留到下一支手機 */
 export type OrderSourceIntent = "shopline" | "superlanding" | "unknown";
 
-export function resolveOrderSourceIntent(
+/** Phase 33 Ticket 33-1：含 clear，呼叫端可明確清除 sticky preference */
+export type LookupSourceIntent = "shopline" | "superlanding" | "unknown" | "clear";
+
+/**
+ * Phase 33 Ticket 33-1：偵測查單來源意圖。
+ * - 當前句含負向語句 → `clear`（應清除先前官網偏好）。
+ * - 當前句同時含手機與負向 → 僅依當前句，不讀 recent 的官網。
+ */
+export function detectLookupSourceIntent(
   currentMessage: string,
   recentMessages?: string[]
-): OrderSourceIntent {
+): LookupSourceIntent {
   const msg = (currentMessage || "").trim();
-  const recent = (recentMessages || []).slice(-2);
-
-  if (SHOPLINE_NEGATIVE.test(msg)) return "unknown";
+  if (SHOPLINE_NEGATIVE.test(msg)) return "clear";
   if (SHOPLINE_HINTS.test(msg)) return "shopline";
   if (SUPERLANDING_HINTS.test(msg)) return "superlanding";
 
   const isOnlyPhone = /^09\d{8}$/.test(msg.replace(/\s/g, "")) || /^\+?8869\d{8}$/.test(msg.replace(/\s/g, ""));
   if (isOnlyPhone && msg.length <= 14) return "unknown";
 
+  const recent = (recentMessages || []).slice(-2);
   const lastMsg = recent[recent.length - 1] || "";
-  if (SHOPLINE_NEGATIVE.test(lastMsg)) return "unknown";
+  if (SHOPLINE_NEGATIVE.test(lastMsg)) return "clear";
   if (SHOPLINE_HINTS.test(lastMsg)) return "shopline";
   if (SUPERLANDING_HINTS.test(lastMsg)) return "superlanding";
   return "unknown";
+}
+
+export function resolveOrderSourceIntent(
+  currentMessage: string,
+  recentMessages?: string[]
+): OrderSourceIntent {
+  const d = detectLookupSourceIntent(currentMessage, recentMessages);
+  if (d === "clear") return "unknown";
+  return d;
 }
 
 function extractOrderId(msg: string): string | null {
@@ -202,4 +219,20 @@ export function shouldRequireApiConfirmBeforeSingleClaim(
   if (dataCoverage === "api_only" || dataCoverage === "merged_local_api") return false;
   if (dataCoverage === "local_only") return true;
   return intent.requireApiConfirmBeforeSingleClaim;
+}
+
+/**
+ * Phase 33 Ticket 33-2：是否允許依手機直接查（不先補問商品）。
+ * 單號、商品+手機、明確「全部訂單」類、官網/一頁+手機 → true；純手機且意圖不明 → false。
+ */
+export function shouldDirectLookupByPhone(
+  userMessage: string,
+  recentMessages: string[],
+  activeCtx: OrderLookupPolicyContext | null | undefined
+): boolean {
+  const intent = deriveOrderLookupIntent(userMessage, recentMessages, activeCtx);
+  if (intent.kind === "order_id_direct") return true;
+  if (intent.kind === "phone_all_orders") return true;
+  if (intent.kind === "product_phone_rescue") return true;
+  return shouldAllowPhoneOnlyDirectLookup(intent);
 }

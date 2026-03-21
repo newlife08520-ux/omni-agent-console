@@ -28,5 +28,7 @@ uploads/
 .replit/
 client.zip
 Omni-Agent-Console-FULL.zip
+Omni-Agent-Console-SOURCE_*.zip
+Omni-Agent-Console-AI-ANALYSIS-BUNDLE_*.zip
 content-guard-stats.json
 delivery/*.zip

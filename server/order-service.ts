@@ -52,7 +52,7 @@ function getShoplineConfig(brandId?: number): ShoplineConfig | null {
   return null;
 }
 
-/** Phase 32 Ticket 1：薄封裝至 resolveOrderSourceIntent，不再用 recent 無限污染 */
+/** Phase 32/33：薄封裝；clear/unknown 皆不 prefer shopline */
 export function shouldPreferShoplineLookup(userMessage: string, recentUserMessages?: string[]): boolean {
   return resolveOrderSourceIntent(userMessage, recentUserMessages ?? []) === "shopline";
 }
@@ -403,10 +403,12 @@ export async function unifiedLookupByPhoneGlobal(
   brandId?: number,
   preferSource?: OrderLookupPreferSource,
   /** Phase 2.1：前台查單時傳 false，不搜其他品牌、不污染當前品牌 cache/index */
-  allowCrossBrand = true
+  allowCrossBrand = true,
+  /** Phase 33：跳過本地索引與 cache 早退，強制 live API（「全部訂單」展開等） */
+  bypassLocalIndex = false
 ): Promise<UnifiedOrderResult> {
   const phoneNorm = normalizePhone(phone);
-  if (phoneNorm && brandId) {
+  if (phoneNorm && brandId && !bypassLocalIndex) {
     if (preferSource === "shopline") {
       const ck = cacheKeyPhone(brandId, phoneNorm, "shopline");
       const cached = getOrderLookupCache(ck);

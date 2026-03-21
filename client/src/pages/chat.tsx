@@ -672,6 +672,12 @@ export default function ChatPage() {
 
   const sseConnectedRef = useRef(false);
   const [sseConnected, setSseConnected] = useState(true);
+  /** Phase 33：部署可辨識（build mode + 是否 build 時關閉 SSE） */
+  const viteBuildMeta = useMemo(() => {
+    const e = import.meta.env;
+    const sseOff = e.VITE_DISABLE_SSE === "1" || e.VITE_DISABLE_SSE === "true";
+    return { mode: e.MODE, sseOff, hash: String((e as { VITE_BUILD_HASH?: string }).VITE_BUILD_HASH || "").slice(0, 8) };
+  }, []);
   /** Phase 2.9：首屏少抓，按需載入更多 */
   const [contactsFetchLimit, setContactsFetchLimit] = useState(80);
   useEffect(() => {
@@ -2072,7 +2078,16 @@ export default function ChatPage() {
               )}
               <span className="text-stone-300">·</span>
               <span title={sseConnected ? "EventSource 連線中" : "已改為輪詢更新"} className={sseConnected ? "text-emerald-600" : "text-amber-600"}>
-                {sseConnected ? "即時" : "輪詢"}
+                {sseConnected ? "即時(SSE)" : "輪詢"}
+              </span>
+              <span className="text-stone-300">·</span>
+              <span
+                className="font-mono text-[9px] text-stone-400"
+                title={`MODE=${viteBuildMeta.mode} VITE_DISABLE_SSE=${viteBuildMeta.sseOff ? "1" : "0"}${viteBuildMeta.hash ? ` hash=${viteBuildMeta.hash}` : ""}`}
+              >
+                {viteBuildMeta.mode}
+                {viteBuildMeta.sseOff ? "·SSE關" : ""}
+                {viteBuildMeta.hash ? `·${viteBuildMeta.hash}` : ""}
               </span>
               <span className="text-stone-300">·</span>
               <span>更早請用搜尋</span>

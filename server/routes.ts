@@ -37,7 +37,7 @@ import {
   shouldPreferShoplineLookup,
 } from "./order-service";
 import { packDeterministicMultiOrderToolResult } from "./order-multi-renderer";
-import { getOrdersByPhone, lookupOrdersByProductAliasAndPhoneLocal } from "./order-index";
+import { getOrdersByPhone, lookupOrdersByProductAliasAndPhoneLocal, normalizePhone } from "./order-index";
 import { tryOrderFastPath } from "./order-fast-path";
 import { formatOrderOnePage, payKindForOrder, sourceChannelLabel, buildDeterministicFollowUpReply } from "./order-reply-utils";
 import { normalizeCustomerFacingOrderReply } from "./customer-reply-normalizer";
@@ -4802,6 +4802,9 @@ ${contextStr}
           "其他筆",
           "有多少筆",
           "幾筆訂單",
+          "幾個訂單",
+          "我有幾個訂單",
+          "我有幾筆",
           "其他訂單嗎",
           "還有嗎",
           "還有幾筆",
@@ -4828,7 +4831,8 @@ ${contextStr}
               act29.receiver_phone,
               bid29,
               prefer29,
-              false
+              false,
+              true
             );
             if (result29.orders.length > 1) {
               const src29 =
@@ -5020,7 +5024,7 @@ ${contextStr}
         chatMessages.push(responseMessage as OpenAI.Chat.Completions.ChatCompletionMessageParam);
 
         const hasOrderLookupTool = responseMessage.tool_calls.some((tc: any) => ORDER_LOOKUP_TOOL_NAMES.includes(tc?.function?.name || ""));
-        if (hasOrderLookupTool && !sentLookupAckThisTurn) {
+        if (orderFeatureFlags.orderLookupAck && hasOrderLookupTool && !sentLookupAckThisTurn) {
           sentLookupAckThisTurn = true;
           lookupAckSentMs = Date.now() - startTime;
           firstCustomerVisibleReplyMs = lookupAckSentMs;
@@ -5606,7 +5610,8 @@ ${contextStr}
       type: "function",
       function: {
         name: "lookup_order_by_phone",
-        description: "僅以手機號碼查訂單（不需商品名或日期）。當客戶說官網／官方網站購買且只提供電話時使用；系統會依對話是否含「官網」等關鍵字優先查官網（Shopline）。",
+        description:
+          "以手機查訂單。預設應先請客戶提供「商品名稱＋手機」；僅在客戶明確要看全部訂單摘要、還有其他訂單、或同句已寫官網／一頁管道時才單用手機。若客戶說不是在官網買的，勿再優先官網。官網查無時不可改查一頁冒充。",
         parameters: {
           type: "object",
           properties: {
@@ -6737,15 +6742,33 @@ ${contextStr}
         if (preferSource) console.log("[AI Tool Call] 官網查單：優先 SHOPLINE（依對話關鍵字）");
         const result = await unifiedLookupByPhoneGlobal(config, phone, context?.brandId, preferSource, false);
         if (!result.found || result.orders.length === 0) {
+          const brandForDiag = context?.brandId ? storage.getBrand(context.brandId) : undefined;
+          const shoplineOk = !!(brandForDiag?.shopline_api_token?.trim() && brandForDiag?.shopline_store_domain?.trim());
+          const normPhone = normalizePhone(phone);
+          const lookupDiag = {
+            preferred_source: preferSource ?? "any",
+            shopline_config_present: shoplineOk,
+            normalized_phone: normPhone || phone.replace(/\s/g, ""),
+            lookup_miss_reason: preferSource === "shopline" ? (shoplineOk ? "shopline_search_zero_or_mismatch" : "shopline_not_configured") : "no_hit_merged",
+          };
+          console.log("[order_lookup] lookup_miss", JSON.stringify(lookupDiag));
           if (preferSource === "shopline") {
+            const hintNoCfg = shoplineOk
+              ? "官網（SHOPLINE）這支手機目前查無訂單。可請客戶提供訂單編號或當初留的 Email 再查；若在一頁商店下單請說明，勿將一頁訂單當官網結果。"
+              : "官網（SHOPLINE）尚未正確綁定 API 或商店網域，無法查官網訂單。請客戶提供訂單編號，或確認品牌後台 Shopline 設定。";
             return JSON.stringify({
               success: true,
               found: false,
-              message:
-                "官網（SHOPLINE）這支手機目前查無訂單。若您是在一頁商店或其他管道下單，請說明或提供訂單編號，勿將一頁商店訂單當成官網結果。",
+              message: hintNoCfg,
+              lookup_diagnostic: lookupDiag,
             });
           }
-          return JSON.stringify({ success: true, found: false, message: "此手機號碼查無訂單紀錄；若為官網購買可確認是否已留此電話。" });
+          return JSON.stringify({
+            success: true,
+            found: false,
+            message: "此手機號碼查無訂單紀錄；若為官網購買可確認是否已留此電話。",
+            lookup_diagnostic: lookupDiag,
+          });
         }
         const orders = result.orders;
         const orderSource = result.source;

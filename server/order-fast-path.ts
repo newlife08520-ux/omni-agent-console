@@ -15,7 +15,7 @@ import { buildActiveOrderContextFromOrder } from "./order-active-context";
 import {
   deriveOrderLookupIntent,
   resolveOrderSourceIntent,
-  shouldAllowPhoneOnlyDirectLookup,
+  shouldDirectLookupByPhone,
   shouldRequireApiConfirmBeforeSingleClaim,
 } from "./order-lookup-policy";
 
@@ -211,7 +211,7 @@ export async function tryOrderFastPath(params: {
     const activeCtx = storage.getActiveOrderContext(contactId);
     const intent = deriveOrderLookupIntent(msg, recentUserMessages, activeCtx ?? undefined);
     const purePhoneOnly = !preferShop && !preferSl && isLineMostlyPhone(msg);
-    if (purePhoneOnly && !shouldAllowPhoneOnlyDirectLookup(intent)) {
+    if (purePhoneOnly && !shouldDirectLookupByPhone(msg, recentUserMessages, activeCtx ?? undefined)) {
       return {
         reply:
           "若要查特定訂單，請提供「商品名稱＋手機號碼」或直接傳訂單編號；若只要查全部訂單摘要，可說「查我全部訂單」或「還有其他訂單嗎」。",
