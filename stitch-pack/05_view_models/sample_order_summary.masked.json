@@ -1,0 +1,9 @@
+{
+  "global_order_id_masked": "SL***901",
+  "status": "awaiting_for_shipment",
+  "payment_customer_label": "待付款",
+  "fulfillment_customer_label": "備貨中",
+  "source": "superlanding",
+  "buyer_phone_masked": "0912***678",
+  "_note": "右側面板常用欄位示意；標籤為對客文案非 raw API"
+}

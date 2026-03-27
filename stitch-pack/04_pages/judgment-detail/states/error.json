@@ -1,0 +1,8 @@
+{
+  "selectedContactId": 1001,
+  "messages_error": "無法載入訊息（500）",
+  "send_error": null,
+  "composer_enabled": true,
+  "retry_visible": true,
+  "ui_notes": "需區分「載入歷史失敗」與「送出失敗」"
+}

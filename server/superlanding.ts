@@ -112,6 +112,63 @@ export function deriveDeliveryTargetType(
   return "unknown";
 }
 
+/**
+ * 一頁商店：從真實 payload 組出 payment_status_raw，供 derivePaymentStatus 判斷失敗／pending。
+ * 不可再把 payment_method 直接當作 payment_status_raw（會把 credit_card/pending 誤當成「支付狀態」）。
+ */
+export function deriveSuperlandingPaymentStatusRaw(o: Record<string, unknown>): string | undefined {
+  const chunks: string[] = [];
+  const sn = o.system_note;
+  if (sn && typeof sn === "object") {
+    const note = sn as Record<string, unknown>;
+    const t = String(note.type ?? "").trim();
+    const m = String(note.message ?? "").trim();
+    if (m) chunks.push(m);
+    if (t) chunks.push(`type:${t}`);
+  }
+  const extraKeys = [
+    "payment_status",
+    "pay_status",
+    "gateway_status",
+    "gateway_payment_status",
+    "line_pay_status",
+    "payment_result",
+    "ecpay_status",
+    "payment_error_message",
+  ] as const;
+  for (const k of extraKeys) {
+    const v = o[k];
+    if (typeof v === "string" && v.trim()) chunks.push(v.trim());
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      try {
+        chunks.push(JSON.stringify(v));
+      } catch {
+        /* skip */
+      }
+    }
+  }
+  if (typeof o.tag === "string" && o.tag.trim()) chunks.push(`tag:${o.tag.trim()}`);
+  const st = o.status != null ? String(o.status) : "";
+  if (st && /cancel|void|fail|refund|closed|error/i.test(st)) {
+    chunks.push(`order.status=${st}`);
+  }
+  /** 少數 webhook／同步層會包一層 nested `order`（與 orders.json 扁平欄位並存時仍要吃失敗訊號） */
+  const nested = o.order;
+  if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+    const no = nested as Record<string, unknown>;
+    if (no.status != null) chunks.push(`nested.order.status=${String(no.status)}`);
+    const ng = no.gateway_status;
+    if (typeof ng === "string" && ng.trim()) chunks.push(ng.trim());
+    const sn2 = no.system_note;
+    if (sn2 && typeof sn2 === "object") {
+      const m2 = String((sn2 as Record<string, unknown>).message ?? "").trim();
+      if (m2) chunks.push(m2);
+    }
+  }
+  const joined = chunks.join(" | ").trim();
+  return joined || undefined;
+}
+
 function mapOrder(o: any): OrderInfo {
   let trackingNumber = "";
   if (Array.isArray(o.tracking_codes) && o.tracking_codes.length > 0) {
@@ -173,7 +230,7 @@ function mapOrder(o: any): OrderInfo {
     note: o.note || "",
     page_id: o.page_id != null ? String(o.page_id) : undefined,
     page_title: typeof o.page_title === "string" ? o.page_title : undefined,
-    payment_status_raw: typeof o.payment_method === "string" ? o.payment_method : undefined,
+    payment_status_raw: deriveSuperlandingPaymentStatusRaw(o as Record<string, unknown>),
     delivery_status_raw: o.status != null ? String(o.status) : undefined,
     delivery_target_type: deliveryTargetType,
     cvs_brand: cvsParsed.cvs_brand || undefined,
@@ -184,6 +241,11 @@ function mapOrder(o: any): OrderInfo {
     payment_transaction_id: typeof o.payment_transaction_id === "string" ? o.payment_transaction_id : undefined,
     items_structured: itemsStructured,
   };
+}
+
+/** Phase34B：供 fixture / verify 走完整 payload → mapOrder → derivePaymentStatus */
+export function mapSuperlandingOrderFromApiPayload(raw: Record<string, unknown>): OrderInfo {
+  return mapOrder(raw as any);
 }
 
 export function getStatusLabel(status: string): string {
@@ -323,6 +385,10 @@ export async function refreshPagesCache(config: SuperLandingConfig): Promise<Pro
 }
 
 export async function ensurePagesCacheLoaded(config: SuperLandingConfig): Promise<ProductPageMapping[]> {
+  /** review bundle：僅匯出 prompt 快照時勿打銷售頁 API（避免 100+ 頁輪詢卡住打包） */
+  if (process.env.REVIEW_PROMPT_EXPORT_SKIP_CATALOG === "1") {
+    return [];
+  }
   if (cachedPages.length > 0 && (Date.now() - cacheTimestamp) < CACHE_TTL_MS) {
     return cachedPages;
   }

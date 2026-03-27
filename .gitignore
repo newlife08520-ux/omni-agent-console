@@ -32,3 +32,8 @@ Omni-Agent-Console-SOURCE_*.zip
 Omni-Agent-Console-AI-ANALYSIS-BUNDLE_*.zip
 content-guard-stats.json
 delivery/*.zip
+
+# 本機產生的審查包／R1 交付 zip（勿入版控）
+Omni-Agent-Console-REVIEW-*.zip
+R1_DELIVERABLES.zip
+scripts/Omni-Agent-Console-REVIEW-*.zip

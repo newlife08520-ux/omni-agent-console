@@ -1,0 +1,7 @@
+{
+  "page": "performance",
+  "kpi_loaded": true,
+  "charts_loading": true,
+  "kpi": { "handled_today": 12, "avg_first_response_min": null },
+  "ui_notes": "數字先出、圖表後到 — 避免 KPI 與圖表時間範圍不一致未標示"
+}

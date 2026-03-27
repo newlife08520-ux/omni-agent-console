@@ -1,0 +1,7 @@
+{
+  "page": "performance",
+  "error": "無法載入績效資料",
+  "status": 503,
+  "retry_visible": true,
+  "ui_notes": "與空資料區分：錯誤需明確 icon／色票"
+}

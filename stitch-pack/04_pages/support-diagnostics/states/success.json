@@ -1,0 +1,11 @@
+{
+  "page": "performance",
+  "range": { "from": "2026-03-01", "to": "2026-03-25" },
+  "role_view": "cs_agent",
+  "kpi": {
+    "handled_today": 12,
+    "avg_first_response_min": 4.2,
+    "satisfaction_sample": 4.5
+  },
+  "ui_notes": "數值為虛構示例；實際欄位名以 performance.tsx 為準"
+}

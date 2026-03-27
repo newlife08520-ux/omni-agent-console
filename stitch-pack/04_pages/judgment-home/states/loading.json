@@ -1,0 +1,8 @@
+{
+  "viewMode": "my",
+  "brand": { "id": 1, "name": "示例品牌" },
+  "contacts": [],
+  "fetching": true,
+  "skeleton_rows": 12,
+  "selectedContactId": null
+}

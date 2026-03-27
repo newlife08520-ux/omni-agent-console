@@ -1,0 +1,7 @@
+{
+  "page": "performance",
+  "range": { "from": "2026-03-01", "to": "2026-03-25" },
+  "kpi_cards_skeleton": true,
+  "charts_skeleton": true,
+  "ui_notes": "篩選器可保留上次選取，圖表區 skeleton"
+}

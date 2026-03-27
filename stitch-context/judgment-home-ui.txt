@@ -1,0 +1,52 @@
+# judgment-home UI 結構精簡版
+# 來源：client/src/pages/chat.tsx（約 3000+ 行；此檔僅保留 Stitch 需知的版面與 testid）
+# 已移除：具體 API URL、商業邏輯實作、敏感設定說明內文
+
+## 根節點
+- div.flex.h-full.bg-[#faf9f5] data-testid="chat-page"
+
+## SSE / 輪詢警示（頂部全寬）
+- 條件：!sseConnected → 琥珀色橫條 +「重新整理頁面」
+
+## 左欄（固定寬 w-[300px] border-r bg-white）
+### 區塊 A：搜尋與篩選（p-3 border-b）
+- Input data-testid="input-search-contacts" placeholder 搜尋聯絡人或對話內容
+- （客服或主管）view 按鈕：button-view-all | my | pending | high_risk | tracking
+- 平台：button-filter-all | line | messenger
+- 文案：目前品牌：…
+- 可選：品牌綁定／渠道設定之**操作提示**（實作內有長說明；設計時保留「可關閉提示」區塊即可，勿刪類別）
+
+### 區塊 B：列表主體（flex-1 min-h-0）
+- 錯誤：紅字「無法載入聯絡人列表」
+- 初次載入：載入中
+- 搜尋模式：聯絡人區塊 + 對話紀錄區塊（message 結果列）
+- 空列表：依 viewMode 變化文案（查無結果／目前沒有…案件）
+- 一般：頂部 meta 列（顯示 n 筆、載入更多、SSE/輪詢、build 提示）+ **虛擬列表** ContactListItem
+
+### ContactListItem（精簡）
+- 頭像、名稱、預覽、狀態徽章（listGetStatusSemantic → STATUS_SEMANTIC 色票）
+- 點擊 → onSelect(contactId)
+
+## 中欄（flex-1 flex flex-col）
+- 未選：空狀態插圖 +「選擇一位聯絡人」
+- 已選：上為訊息區（ScrollArea / 虛擬化）、下為 composer
+
+### Composer（border-t bg-white）
+- 待傳檔預覽區 data-testid="file-preview-area"
+- 列：button-quick-reply | button-attach-file | button-more-actions | Textarea data-testid="input-message" | Button data-testid="button-send-message"（emerald）
+- 提示列：小字說明真人發送／附件方式
+
+## 右欄（寬度依實作，訂單／查單／案件）
+- Tabs：訂單查詢（訂單號／商品+電話／進階）、案件資訊等
+- 訂單卡片：狀態對應 ORDER_STATUS_MAP、付款／履行標籤函式
+
+## 對話框（範例）
+- 改派客服、指派客服：Dialog + Select 客服列表 + 確認／取消
+
+## 語意色常數（設計對齊）
+STATUS_SEMANTIC: danger | warning | assigned | normal | muted
+- 對應 tailwind：紅/橘/藍/綠/灰 邊框+淺底
+
+## 禁止在改版中拿掉的 data-testid（範例）
+chat-page, input-search-contacts, button-view-*, button-filter-*,
+input-message, button-send-message, button-attach-file, button-quick-reply

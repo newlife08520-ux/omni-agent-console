@@ -1,0 +1,8 @@
+{
+  "viewMode": "high_risk",
+  "brand": { "id": 1, "name": "示例品牌" },
+  "contacts": [],
+  "fetching": false,
+  "empty_reason": "no_match_filter",
+  "hint": "可嘗試切換「我的案件」或清除搜尋關鍵字"
+}

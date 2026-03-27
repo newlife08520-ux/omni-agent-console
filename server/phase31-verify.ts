@@ -51,8 +51,10 @@ export async function runPhase31Verify(): Promise<void> {
     "order-fast-path: local_only single guard"
   );
   assert(
-    orderFastPath.includes("目前從已同步資料先看到 1 筆") || orderFastPath.includes("目前先看到 1 筆"),
-    "order-fast-path: single local_only 回覆帶說明不直接定案"
+    orderFastPath.includes("目前從已同步資料先看到 1 筆") ||
+      orderFastPath.includes("目前先看到 1 筆") ||
+      orderFastPath.includes("候選訂單"),
+    "order-fast-path: single local_only 回覆帶說明／候選摘要不直接定案"
   );
 
   // Routes: 單筆 local_only 一律 noSingleClaim（Phase 31 不依賴 feature flag）

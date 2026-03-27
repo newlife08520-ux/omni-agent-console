@@ -1,0 +1,39 @@
+# support-diagnostics UI 精簡版
+# 來源：client/src/pages/performance.tsx
+
+## 根
+- div.p-6.max-w-[1200px].mx-auto.space-y-6 data-testid="performance-page"
+
+## 角色
+- useQuery /api/auth/check → role
+- isManager = super_admin | marketing_manager
+
+## 客服（!isManager）
+- 載入：置中 Loader2 +「載入績效數據...」
+- 內容：grid StatCard ×8（今日新進、待處理、處理中、今日已結案、累計已結案、平均首次回覆、平均結案時間、結案率/解決率）
+- StatCard：Card + title + icon + text-2xl value + optional sub
+
+## 主管（isManager）
+### Tabs defaultValue="dashboard"
+- TabsList bg-stone-100
+- TabsTrigger: dashboard | performance | report
+
+### TabsContent dashboard
+- loading：置中「載入戰情...」
+- 四主卡：今日待處理、緊急案件(red accent)、待分配(amber)、今日結案率(emerald)+sub
+- alerts：條件渲染 Card border-red 列表 type/count/threshold
+- 圖表列：PieChart 案件狀態分布 | BarChart 各客服負載（Recharts ResponsiveContainer h-240）
+- 下排：問題類型排行 ul | 熱門標籤 Badge flex-wrap
+
+### TabsContent performance
+- 載入或 AgentPerformanceRow 卡片列表（每客服一 Card）
+
+### TabsContent report
+- SupervisorReport 相關區塊（見檔案後半）
+
+## 色彩
+- CHART_COLORS 常數陣列供 Pie Cell
+- Bar: open #10b981, pending #f59e0b
+
+## 禁止
+- 勿移除「戰情板」與「異常與警示」視覺層級差異

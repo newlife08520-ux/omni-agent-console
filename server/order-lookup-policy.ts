@@ -69,7 +69,8 @@ export function detectLookupSourceIntent(
   const isOnlyPhone = /^09\d{8}$/.test(msg.replace(/\s/g, "")) || /^\+?8869\d{8}$/.test(msg.replace(/\s/g, ""));
   if (isOnlyPhone && msg.length <= 14) return "unknown";
 
-  const recent = (recentMessages || []).slice(-2);
+  /** Phase 34-1：來源意圖 TTL＝僅「上一則」使用者訊息可繼承，避免官網關鍵字污染過多輪 */
+  const recent = (recentMessages || []).slice(-1);
   const lastMsg = recent[recent.length - 1] || "";
   if (SHOPLINE_NEGATIVE.test(lastMsg)) return "clear";
   if (SHOPLINE_HINTS.test(lastMsg)) return "shopline";
@@ -88,6 +89,8 @@ export function resolveOrderSourceIntent(
 
 function extractOrderId(msg: string): string | null {
   const t = (msg || "").trim();
+  /** Phase 34-2：官網（SHOPLINE）長純數字單號，與人格／查單決策樹一致 */
+  if (/^\d{15,22}$/.test(t)) return t;
   if (t.length >= 5 && t.length <= 14 && /^[A-Za-z0-9\-]+$/.test(t) && !/^09\d/.test(t)) return t.toUpperCase();
   let m: RegExpExecArray | null;
   ORDER_ID_PATTERN.lastIndex = 0;
@@ -96,6 +99,8 @@ function extractOrderId(msg: string): string | null {
     if (/^09\d/.test(u)) continue;
     if (u.length >= 5 && u.length <= 14) return u;
   }
+  const isolatedLong = msg.match(/(?<!\d)\d{15,22}(?!\d)/);
+  if (isolatedLong) return isolatedLong[0];
   return null;
 }
 
@@ -197,6 +202,33 @@ export function deriveOrderLookupIntent(
     allowPhoneOnly: false,
     requireApiConfirmBeforeSingleClaim: true,
   };
+}
+
+/**
+ * Phase 34 review：手機全域查單是否跳過本地索引／cache 早退，強制走 live API 合併路徑。
+ * - 「全部／其他／幾筆」：避免本地僅 1～N 筆就當完整真相，漏掉尚未寫入索引的訂單。
+ * - 當句或上一句使用者訊息含官網語意：避免 merged local（常僅一頁索引有資料）誤當官網結果。
+ */
+export function shouldBypassLocalPhoneIndex(
+  userMessage: string,
+  recentMessages: string[],
+  activeCtx: OrderLookupPolicyContext | null | undefined
+): boolean {
+  const intent = deriveOrderLookupIntent(userMessage, recentMessages, activeCtx);
+  if (intent.kind === "phone_all_orders") return true;
+  if (resolveOrderSourceIntent(userMessage, recentMessages) === "shopline") return true;
+
+  /** 純手機句：`detectLookupSourceIntent` 刻意不繼承官網（phase33「純手機不繼承官網+手機句」）。
+   * 但若「僅上一則」為官網語意且該句未含另一支手機，仍應強制 live，避免本地索引誤導。 */
+  const msg = (userMessage || "").trim();
+  const norm = msg.replace(/\s/g, "");
+  const onlyPhone =
+    /^09\d{8}$/.test(norm) || /^\+?8869\d{8}$/.test(norm) || /^8869\d{8}$/.test(norm);
+  if (onlyPhone && msg.length <= 14) {
+    const lastUser = (recentMessages || []).slice(-1)[0] || "";
+    if (SHOPLINE_HINTS.test(lastUser) && !extractPhone(lastUser)) return true;
+  }
+  return false;
 }
 
 /** 是否允許僅用手機直接查（不補問商品） */

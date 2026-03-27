@@ -1,0 +1,26 @@
+# 共用 UI（Stitch 摘要）
+# 技術棧：React + Tailwind + shadcn/ui（style: new-york, baseColor: neutral, cssVariables: true）
+# 目錄：client/src/components/ui/（以下為檔名清單，實作請以 repo 為準）
+
+## 元件清單（47 個 .tsx）
+accordion, alert, alert-dialog, aspect-ratio, avatar, badge, breadcrumb, button, calendar, card, carousel, chart, checkbox, collapsible, command, context-menu, dialog, drawer, dropdown-menu, form, hover-card, input, input-otp, label, menubar, navigation-menu, pagination, popover, progress, radio-group, resizable, scroll-area, select, separator, sheet, sidebar, skeleton, slider, switch, table, tabs, textarea, toast, toaster, toggle, toggle-group, tooltip
+
+## 工具
+- cn()：client/src/lib/utils.ts — clsx + tailwind-merge
+- cva：class-variance-authority（Button 等）
+
+## Button 變體（節錄邏輯名稱）
+- variant: default | destructive | outline | secondary | ghost
+- size: default | sm | lg | icon
+- 全檔見 repo button.tsx（含 focus ring、disabled opacity）
+
+## 色彩 token（CSS 變數，節錄）
+--background, --foreground, --primary, --destructive, --muted, --border, --radius
+側欄語意：--sidebar, --sidebar-primary, …
+
+## 圖表
+- chart.tsx 搭配 recharts 容器樣式（若改版圖表需保留軸標與圖例區）
+
+## 禁止
+- 不要把整包 node_modules 或帶 API key 的範例貼進設計稿
+- Icon 請統一 lucide-react，勿混多種線條粗細差異過大的圖示庫

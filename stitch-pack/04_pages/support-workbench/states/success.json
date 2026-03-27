@@ -1,0 +1,9 @@
+{
+  "page": "knowledge",
+  "selected_brand_id": 1,
+  "global_prompt_preview_masked": "--- 全域政策（***REDACTED*** 範例）---\n- 不捏造訂單狀態",
+  "brand_tone_masked": "品牌語氣：親切、簡潔（示例）",
+  "dirty": false,
+  "last_saved_at": "2026-03-25T10:00:00.000Z",
+  "ui_notes": "實際內容以 DB 為準；此為去敏感示意"
+}

@@ -1,0 +1,28 @@
+{
+  "_comment": "去識別化參考：模擬一頁商店 orders.json 單筆扁平結構 + 金流失敗常見欄位。驗證請用 mapSuperlandingOrderFromApiPayload → getStatusLabel → derivePaymentStatus。若線上 payload 多包一層 order{}，deriveSuperlandingPaymentStatusRaw 會合併 nested 訊號。",
+  "id": 999001,
+  "global_order_id": "ESC20981",
+  "recipient": "王**",
+  "mobile": "09*******8",
+  "email": "u***@example.com",
+  "status": "new_order",
+  "payment_method": "line_pay",
+  "gateway_status": "failed",
+  "payment_result": null,
+  "prepaid": false,
+  "paid_at": null,
+  "shipping_method": "home",
+  "final_total_order_amount": 1280,
+  "product_list": [
+    { "code": "去識別商品A", "qty": 1 }
+  ],
+  "created_date": "2026-03-20",
+  "order_created_at": "2026-03-20T14:22:00+08:00",
+  "system_note": {
+    "type": "error",
+    "message": "LINE Pay 未成立（紅叉）"
+  },
+  "address": "{}",
+  "tracking_codes": [],
+  "convenient_store": null
+}

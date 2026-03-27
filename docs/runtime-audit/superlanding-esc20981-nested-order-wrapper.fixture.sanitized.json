@@ -1,0 +1,24 @@
+{
+  "_comment": "補充：若上游 JSON 將訂單狀態包在 order.status（與頂層 status 並存或僅 nested），payment raw 仍須吃到失敗。頂層仍建議與真 API 一致補齊 global_order_id / payment_method 等供 mapOrder。",
+  "global_order_id": "ESC20981",
+  "status": "new_order",
+  "payment_method": "line_pay",
+  "prepaid": false,
+  "paid_at": null,
+  "shipping_method": "home",
+  "gateway_status": "failed",
+  "payment_result": null,
+  "system_note": {
+    "message": "未成立 / 紅叉"
+  },
+  "order": {
+    "status": "pending",
+    "gateway_status": "failed"
+  },
+  "final_total_order_amount": 1280,
+  "product_list": [{ "code": "去識別商品", "qty": 1 }],
+  "created_date": "2026-03-20",
+  "order_created_at": "2026-03-20T14:00:00+08:00",
+  "address": "{}",
+  "tracking_codes": []
+}

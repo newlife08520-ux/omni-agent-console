@@ -1,0 +1,10 @@
+{
+  "viewMode": "unassigned",
+  "brand": { "id": 1, "name": "示例品牌" },
+  "contacts": [
+    { "id": 2001, "display_name": "李**", "last_message_preview": "…", "partial": true }
+  ],
+  "selectedContactId": 2001,
+  "right_pane": "loading_messages",
+  "ui_notes": "左列表已選列，右側對話尚在載入"
+}

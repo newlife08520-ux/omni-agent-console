@@ -1,0 +1,20 @@
+{
+  "_comment": "REVIEW_BUNDLE_DEMO — 與 seed-review-bundle-shopline-demo 搭配；非真實客戶資料",
+  "case_id": "shopline_lookup_demo_masked",
+  "environment": "staging_or_local_demo_seed",
+  "user_input_sequence": [
+    "想查官網訂單",
+    "09********"
+  ],
+  "tool_sequence": [
+    {
+      "name": "lookup_order_by_phone",
+      "args_redacted": { "phone": "09********" },
+      "result_summary": "found=true, source=shopline, total=1, order_id=BUNDLE_DEMO_SL_001 (demo index row)"
+    }
+  ],
+  "expected_behavior": "若為 DEMO 種子：僅驗證索引與 diagnose 計數；Live Shopline API 仍以真實 token 為準",
+  "whether_local_only": true,
+  "whether_api_fallback": false,
+  "data_coverage_note": "DEMO payload in orders_normalized; API may still fail with placeholder token"
+}

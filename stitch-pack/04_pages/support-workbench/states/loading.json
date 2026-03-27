@@ -1,0 +1,7 @@
+{
+  "page": "knowledge",
+  "brands_loading": true,
+  "settings_loading": true,
+  "form_disabled": true,
+  "ui_notes": "長表單頁建議分段 skeleton，避免整頁白屏"
+}

@@ -1,0 +1,18 @@
+{
+  "viewMode": "pending",
+  "brand": { "id": 1, "name": "示例品牌（去敏感）" },
+  "contacts": [
+    {
+      "id": 1001,
+      "display_name": "王**",
+      "platform": "line",
+      "last_message_preview": "請問我的訂單什麼時候出貨？",
+      "updated_at": "2026-03-25T12:00:00.000Z",
+      "status": "open",
+      "issue_type": "logistics",
+      "badges": ["待回", "一般"]
+    }
+  ],
+  "selectedContactId": null,
+  "ui_notes": "列表可捲動；選取後詳情見 judgment-detail"
+}

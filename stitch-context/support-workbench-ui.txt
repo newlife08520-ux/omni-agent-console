@@ -1,0 +1,44 @@
+# support-workbench UI 結構精簡版
+# 來源：client/src/pages/knowledge.tsx
+# 已省略：API 呼叫實作、型別 import 細節、錯誤處理程式碼
+
+## 頁型
+- 單頁長表單 + Tabs；依 `useBrand()` 篩選品牌相關檔案／規則／素材
+
+## 資料狀態（概念）
+- systemPrompt / brandPrompt（來自 settings 與 selectedBrand）
+- files, marketingRules, imageAssets（各為列表）
+- sandboxMessages, sandboxInput, sandboxLoading
+- promptPreview 對話框狀態
+
+## Tabs（頂部）
+- TabsList
+  - TabsTrigger value="prompt" data-testid="tab-prompt" → 文案含「Prompt」類意義
+  - TabsTrigger value="images" data-testid="tab-images"
+  - TabsTrigger value="marketing" data-testid="tab-marketing"
+  - TabsTrigger value="sandbox" data-testid="tab-sandbox"
+
+## TabsContent: prompt
+- 全域：大 Textarea（system_prompt）
+- 品牌：大 Textarea（brand system_prompt）
+- Buttons：儲存全域、儲存品牌（各自 loading 狀態）
+- 可選：預覽按鈕（專案內有 preview 流程，testid 見原始碼 button-preview-prompt）
+
+## TabsContent: images
+- 圖像素材上傳、列表、編輯 Dialog（display_name, description, keywords）
+
+## TabsContent: marketing
+- 行銷規則列表 + 新增／編輯 Dialog（keyword, pitch, url 等）
+
+## TabsContent: sandbox
+- 訊息列表（user / ai / system）
+- 輸入框 + 送出任務按鈕
+- 可附加圖片／影片（預覽區）
+- ScrollArea 捲到底 ref
+
+## 共用元件
+- Button, Input, Textarea, Tabs, ScrollArea, Avatar, Dialog, lucide 圖示
+
+## 設計注意
+- 長文字編輯區需 **最小高度** 與 **字數／風險提示** 區塊預留（視覺可加「高影響設定」橫幅）
+- 沙盒與正式 prompt 在視覺上應可區隔（邊框色或標題）

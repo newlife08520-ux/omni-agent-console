@@ -1,0 +1,7 @@
+{
+  "error": true,
+  "http_status": 503,
+  "message": "無法載入對話列表（示例，非真實錯誤）",
+  "recover_action": "重新整理頁面或稍後再試",
+  "no_secrets": true
+}

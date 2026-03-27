@@ -1,0 +1,18 @@
+{
+  "contact_id": 1001,
+  "messages": [
+    {
+      "id": 501,
+      "sender_type": "user",
+      "body": "我要查訂單 0912***678",
+      "created_at": "2026-03-25T11:00:00.000Z"
+    },
+    {
+      "id": 502,
+      "sender_type": "ai",
+      "body": "已為您查詢訂單狀態…",
+      "created_at": "2026-03-25T11:00:03.000Z"
+    }
+  ],
+  "_note": "masked demo"
+}

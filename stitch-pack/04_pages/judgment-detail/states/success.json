@@ -1,0 +1,16 @@
+{
+  "selectedContactId": 1001,
+  "messages": [
+    { "id": 1, "role": "user", "body": "查訂單 0912***678", "created_at": "2026-03-25T11:00:00.000Z" },
+    { "id": 2, "role": "ai", "body": "已為您查詢，請稍候…", "created_at": "2026-03-25T11:00:05.000Z" }
+  ],
+  "order_panel": {
+    "order_id_masked": "AB***12",
+    "payment_label": "待付款",
+    "fulfillment_label": "待出貨",
+    "source_label": "一頁商店"
+  },
+  "composer_enabled": true,
+  "draft": "",
+  "ui_notes": "右欄與訊息語意一致；皆為去敏感示例"
+}

@@ -42,14 +42,19 @@ export interface UnifiedOrderResult {
 function getShoplineConfig(brandId?: number): ShoplineConfig | null {
   if (brandId) {
     const brand = storage.getBrand(brandId);
-    if (brand?.shopline_api_token?.trim()) {
+    if (brand?.shopline_api_token?.trim() && brand?.shopline_store_domain?.trim()) {
       return {
-        storeDomain: brand.shopline_store_domain?.trim() || "",
+        storeDomain: brand.shopline_store_domain.trim(),
         apiToken: brand.shopline_api_token.trim(),
       };
     }
   }
   return null;
+}
+
+/** R1：是否可打 Shopline live API（token+domain 齊備）；未設定時須對客降級，不可假裝可查官網 */
+export function isShoplineLookupConfiguredForBrand(brandId?: number): boolean {
+  return getShoplineConfig(brandId) != null;
 }
 
 /** Phase 32/33：薄封裝；clear/unknown 皆不 prefer shopline */
@@ -177,8 +182,8 @@ export async function unifiedLookupById(
     const shop = await runShopline();
     if (shop?.found) result = shop;
     else {
-      const sl = await runSuperlanding();
-      result = sl ?? { orders: [], source: "unknown", found: false };
+      /** R1-1／R1-3：客戶明講官網時僅走 Shopline 路徑，禁止回落一頁以免混單或假裝官網結果 */
+      result = { orders: [], source: "unknown", found: false };
     }
   } else {
     const sl = await runSuperlanding();
@@ -297,14 +302,13 @@ export async function unifiedLookupByProductAndPhone(
   if (tryShoplineFirst) {
     const shop = await runShopline();
     if (shop?.found) return shop;
-    const sl = await runSuperlanding();
-    if (sl?.found) return sl;
-  } else {
-    const sl = await runSuperlanding();
-    if (sl?.found) return sl;
-    const shop = await runShopline();
-    if (shop?.found) return shop;
+    /** R1-1：官網（商品+手機）不回落一頁 */
+    return { orders: [], source: "unknown", found: false };
   }
+  const sl = await runSuperlanding();
+  if (sl?.found) return sl;
+  const shop = await runShopline();
+  if (shop?.found) return shop;
 
   return { orders: [], source: "unknown", found: false };
 }
@@ -384,14 +388,13 @@ export async function unifiedLookupByDateAndContact(
   if (tryShoplineFirst) {
     const shop = await runShopline();
     if (shop?.found) return shop;
-    const sl = await runSuperlanding();
-    if (sl?.found) return sl;
-  } else {
-    const sl = await runSuperlanding();
-    if (sl?.found) return sl;
-    const shop = await runShopline();
-    if (shop?.found) return shop;
+    /** R1-1：官網日期／聯絡查詢不回落一頁 */
+    return { orders: [], source: "unknown", found: false };
   }
+  const sl = await runSuperlanding();
+  if (sl?.found) return sl;
+  const shop = await runShopline();
+  if (shop?.found) return shop;
 
   return { orders: [], source: "unknown", found: false };
 }

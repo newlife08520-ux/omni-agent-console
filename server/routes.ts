@@ -36,10 +36,17 @@ import {
   getPaymentInterpretationForAI,
   shouldPreferShoplineLookup,
 } from "./order-service";
+import { shouldBypassLocalPhoneIndex } from "./order-lookup-policy";
 import { packDeterministicMultiOrderToolResult } from "./order-multi-renderer";
 import { getOrdersByPhone, lookupOrdersByProductAliasAndPhoneLocal, normalizePhone } from "./order-index";
 import { tryOrderFastPath } from "./order-fast-path";
-import { formatOrderOnePage, payKindForOrder, sourceChannelLabel, buildDeterministicFollowUpReply } from "./order-reply-utils";
+import {
+  formatOrderOnePage,
+  formatLocalOnlyCandidateSummary,
+  payKindForOrder,
+  sourceChannelLabel,
+  buildDeterministicFollowUpReply,
+} from "./order-reply-utils";
 import { normalizeCustomerFacingOrderReply } from "./customer-reply-normalizer";
 import { packDeterministicSingleOrderToolResult, buildSingleOrderCustomerReply } from "./order-single-renderer";
 import { isValidOrderDeterministicPayload, orderDeterministicContractFields } from "./deterministic-order-contract";
@@ -347,6 +354,20 @@ const ORDER_FOLLOWUP_DETERMINISTIC_KW = [
   "\u51fa\u8ca8", "\u7269\u6d41", "\u5230\u8ca8", "\u4ec0\u9ebc\u6642\u5019", "\u55ae\u865f", "\u7de8\u865f", "\u8ffd\u8e64", "\u6536\u5230", "\u5df2\u51fa\u8ca8", "\u5f85\u51fa\u8ca8",
   "\u4ed8\u6b3e", "\u4ed8\u6b3e\u6210\u529f", "\u6210\u529f\u4e86\u55ce", "\u5730\u5740", "\u5bc4\u5230\u54ea\u88e1", "\u9580\u5e02", "\u54ea\u9593\u5168\u5bb6", "\u54ea\u9593\u8d85\u5546", "\u4fbf\u5229\u5546\u5e97", "\u5168\u5bb6", "\u51fa\u8ca8\u4e86\u55ce", "\u7269\u6d41\u55ae\u865f",
 ];
+/** Phase 34：有 active order 時，品牌 delay／確定性追問不限於 order_lookup（久候型安撫、一般問答模式亦可能帶著訂單 context） */
+function planAllowsActiveOrderDeterministic(mode: string): boolean {
+  return (
+    mode === "order_lookup" ||
+    mode === "order_followup" ||
+    mode === "answer_directly" ||
+    mode === "aftersales_comfort_first" ||
+    mode === "return_stage_1" ||
+    mode === "ask_one_question" ||
+    mode === "fallback_unknown" ||
+    mode === "idle_closure" ||
+    mode === "invite_rating"
+  );
+}
 const FULFILLMENT_SHIPPED_KW = ["\u5df2\u51fa\u8ca8", "\u5df2\u9001\u9054"];
 const FULFILLMENT_PENDING_SHIP_KW = ["\u65b0\u8a02\u55ae", "\u5f85\u51fa\u8ca8", "\u8655\u7406\u4e2d"];
 const FULFILLMENT_CANCELED_KW = ["\u5df2\u53d6\u6d88"];
@@ -4429,11 +4450,13 @@ ${contextStr}
           systemPrompt += "\n\n【目前已查到的訂單摘要，回覆時可引用】\n\n" + activeCtx.one_page_summary;
         }
         systemPrompt += `\n\n<ORDER_LOOKUP_RULES>
-- 有訂單編號：一律可直接 lookup_order_by_id，不補問。
+- 單一真相人格與話術：docs/persona/全區域人格設定.txt、docs/persona/ai客服人格.txt（訂單蒐集順序、久候話術、禁用內部術語）。
+- 有訂單編號：一律可直接 lookup_order_by_id，不補問。官網（SHOPLINE）常見「長純數字」訂單編號（約 15～22 位）視同單號；預設優先官網管道，除非同一句出現一頁商店／團購／粉絲團等明確意圖則改走對應管道。
 - 沒有訂單編號時，預設要「商品名稱＋手機」；僅手機時應先補問商品或請客戶說「查全部訂單」。
 - 僅當客戶明確說「查全部／還有其他訂單／我有幾筆」時，才允許僅用手機查；且多筆時列摘要，單筆時若為 data_coverage=local_only 不可當最終真相，需說明「目前先看到 1 筆，再幫您確認是否還有其他單」。
 - 客戶明講官網／官方網站：只用官網管道查；若官網查無，明講官網查無，不可拿一頁商店訂單冒充。
-- 工具回傳 data_coverage=local_only 且只有 1 筆時，不可單筆定案；必須帶說明或請客戶說「還有其他訂單嗎」再查。
+- 若後台尚未設定官網（SHOPLINE）API：不可假裝已代查官網；應依系統降級說明，並引導訂單編號、一頁／團購管道＋商品＋手機、或「查全部訂單」語意。
+- 工具回傳 data_coverage=local_only 且只有 1 筆時，不可單筆定案；回覆不可寫成「幫您查到了」當最終結論，必須帶「目前從已同步資料先看到…」類說明或請客戶說「還有其他訂單嗎」再查。
 - 工具回傳多筆時必須善用 one_page_full 逐筆呈現；單筆時呈現完整欄位。
 </ORDER_LOOKUP_RULES>`;
       }
@@ -4722,7 +4745,7 @@ ${contextStr}
         }
       }
       /** Phase 1：Active Order 追問時以確定性回覆短路，不進 LLM */
-      if (plan.mode === "order_lookup") {
+      if (planAllowsActiveOrderDeterministic(plan.mode)) {
         const activeCtxShort = storage.getActiveOrderContext(contact.id);
         const msgTrimShort = (userMessage || "").trim();
         const isFollowUpShort = activeCtxShort && (
@@ -4731,7 +4754,9 @@ ${contextStr}
           looksLikeOrderIdInput(msgTrimShort)
         );
         const useDeterministic = isFollowUpShort && activeCtxShort && ORDER_FOLLOWUP_DETERMINISTIC_KW.some((k) => msgTrimShort.includes(k));
-        const deterministicText = useDeterministic ? buildDeterministicFollowUpReply(activeCtxShort!) : null;
+        const deterministicText = useDeterministic
+          ? buildDeterministicFollowUpReply(activeCtxShort!, msgTrimShort)
+          : null;
         if (deterministicText) {
           let detOut = deterministicText;
           if (orderFeatureFlags.orderFinalNormalizer) {
@@ -5053,6 +5078,8 @@ ${contextStr}
           platform: contact.platform,
           platformUserId: contact.platform_user_id,
           preferShopline: shouldPreferShoplineLookup(userMessage, recentUserMessagesForLookup),
+          userMessage: userMessage || "",
+          recentUserMessages: recentUserMessagesForLookup,
         };
 
         const toolResults = await Promise.all(
@@ -5704,7 +5731,17 @@ ${contextStr}
   async function executeToolCall(
     toolName: string,
     args: Record<string, string>,
-    context?: { contactId?: number; brandId?: number; channelToken?: string; platform?: string; platformUserId?: string; preferShopline?: boolean }
+    context?: {
+      contactId?: number;
+      brandId?: number;
+      channelToken?: string;
+      platform?: string;
+      platformUserId?: string;
+      preferShopline?: boolean;
+      /** 本輪使用者訊息（查單 policy：是否跳過本地索引早退） */
+      userMessage?: string;
+      recentUserMessages?: string[];
+    }
   ): Promise<string> {
     if (toolName === "transfer_to_human") {
       const reason = (args.reason || "AI ????????").trim();
@@ -6740,7 +6777,20 @@ ${contextStr}
         if (!phone) return JSON.stringify({ success: false, error: "請提供手機號碼" });
         const preferSource = context?.preferShopline ? "shopline" as const : undefined;
         if (preferSource) console.log("[AI Tool Call] 官網查單：優先 SHOPLINE（依對話關鍵字）");
-        const result = await unifiedLookupByPhoneGlobal(config, phone, context?.brandId, preferSource, false);
+        const actBypass = context?.contactId ? storage.getActiveOrderContext(context.contactId) : null;
+        const bypassLocal = shouldBypassLocalPhoneIndex(
+          context?.userMessage ?? "",
+          context?.recentUserMessages ?? [],
+          actBypass ?? undefined
+        );
+        const result = await unifiedLookupByPhoneGlobal(
+          config,
+          phone,
+          context?.brandId,
+          preferSource,
+          false,
+          bypassLocal
+        );
         if (!result.found || result.orders.length === 0) {
           const brandForDiag = context?.brandId ? storage.getBrand(context.brandId) : undefined;
           const shoplineOk = !!(brandForDiag?.shopline_api_token?.trim() && brandForDiag?.shopline_store_domain?.trim());
@@ -6894,6 +6944,7 @@ ${contextStr}
           });
         }
 
+        const isSingleLocalOnly = orders.length === 1 && result.data_coverage === "local_only";
         if (context?.contactId && orders.length === 1) {
           const o0 = orders[0];
           const statusLabel0 = getUnifiedStatusLabel(o0.status, o0.source || orderSource);
@@ -6917,11 +6968,21 @@ ${contextStr}
             payment_method: o0.payment_method,
             payment_status_label: pk.label,
           };
+          const summaryForCtx = isSingleLocalOnly
+            ? formatLocalOnlyCandidateSummary({
+                order_id: o0.global_order_id,
+                created_at: o0.created_at || o0.order_created_at,
+                product_list: o0.product_list,
+                items_structured: o0.items_structured,
+                source_channel: sourceChannelLabel(o0.source || orderSource),
+                status_short: statusLabel0,
+              })
+            : formatOrderOnePage(onePagePayload);
           storage.linkOrderForContact(context.contactId, o0.global_order_id, "ai_lookup");
-          const activeCtx = buildActiveOrderContext(o0, o0.source || orderSource, statusLabel0, formatOrderOnePage(onePagePayload), "text");
+          const activeCtx = buildActiveOrderContext(o0, o0.source || orderSource, statusLabel0, summaryForCtx, "text");
           storage.setActiveOrderContext(context.contactId, activeCtx);
         }
-        const singleDeterministic =
+        const singleDeterministicBody =
           orders.length === 1
             ? (() => {
                 const o0 = orders[0];
@@ -6946,16 +7007,26 @@ ${contextStr}
                   payment_method: o0.payment_method,
                   payment_status_label: pk.label,
                 };
-                return `我查到這筆了，內容如下：\n${formatOrderOnePage(payload)}`;
+                if (isSingleLocalOnly) {
+                  return formatLocalOnlyCandidateSummary({
+                    order_id: o0.global_order_id,
+                    created_at: o0.created_at || o0.order_created_at,
+                    product_list: o0.product_list,
+                    items_structured: o0.items_structured,
+                    source_channel: sourceChannelLabel(o0.source || orderSource),
+                    status_short: st,
+                  });
+                }
+                return formatOrderOnePage(payload);
               })()
             : undefined;
-        if (orders.length === 1 && singleDeterministic) {
+        if (orders.length === 1 && singleDeterministicBody) {
           const isLocalOnly = result.data_coverage === "local_only";
           const noSingleClaim = isLocalOnly;
+          /** local_only 單筆：候選摘要，禁止定案語與完整 order card */
           const replyText = noSingleClaim
-            ? "目前僅從已同步資料查到 1 筆；若您有更早或其他訂單，可說「還有其他訂單嗎」再查。\n\n" +
-              singleDeterministic
-            : singleDeterministic;
+            ? singleDeterministicBody
+            : `我查到這筆了，內容如下：\n${singleDeterministicBody}`;
           console.log(
             "[order_lookup] renderer=deterministic lookup=phone_single source=" +
               orderSource +
@@ -6971,7 +7042,7 @@ ${contextStr}
             deterministic_customer_reply: replyText,
             ...orderDeterministicContractFields(),
             renderer: "deterministic",
-            one_page_summary: onePageBlocks[0],
+            one_page_summary: noSingleClaim ? singleDeterministicBody : onePageBlocks[0],
             ...(isLocalOnly ? { data_coverage: "local_only" } : {}),
             ...(result.coverage_confidence ? { coverage_confidence: result.coverage_confidence } : {}),
             ...(result.needs_live_confirm ? { needs_live_confirm: result.needs_live_confirm } : {}),
@@ -6985,7 +7056,19 @@ ${contextStr}
           source: orderSource,
           note: multiOrderNote,
           formatted_list: orders.length > 1 ? formattedList : undefined,
-          one_page_summary: orders.length === 1 ? onePageBlocks[0] : undefined,
+          one_page_summary:
+            orders.length === 1
+              ? isSingleLocalOnly
+                ? formatLocalOnlyCandidateSummary({
+                    order_id: orders[0].global_order_id,
+                    created_at: orders[0].created_at || orders[0].order_created_at,
+                    product_list: orders[0].product_list,
+                    items_structured: orders[0].items_structured,
+                    source_channel: sourceChannelLabel(orders[0].source || orderSource),
+                    status_short: getUnifiedStatusLabel(orders[0].status, orders[0].source || orderSource),
+                  })
+                : onePageBlocks[0]
+              : undefined,
           one_page_full,
           ...(result.data_coverage ? { data_coverage: result.data_coverage } : {}),
           ...(result.coverage_confidence ? { coverage_confidence: result.coverage_confidence } : {}),

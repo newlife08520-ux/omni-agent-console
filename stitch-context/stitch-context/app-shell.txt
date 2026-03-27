@@ -1,0 +1,48 @@
+# App Shell 精簡版
+# 來源：client/src/main.tsx, App.tsx, components/app-sidebar.tsx
+
+## main.tsx
+- ReactDOM createRoot
+- QueryClientProvider、TooltipProvider、Toaster
+- 載入 App
+
+## App.tsx 結構（登入後）
+- BrandProvider → ChatViewProvider → AuthenticatedAppErrorBoundary
+- div.flex.h-screen.bg-[#faf9f5]
+  - AppSidebar（user, userRole, systemName, logoUrl）
+  - div.flex.flex-col.flex-1
+    - AppHeader（標題、通知、設定、登出；主管顯示緊急/待分配）
+    - main.flex-1.overflow-auto
+      - Suspense fallback：中央 spinner
+      - Switch / wouter Route：
+        - / → ChatPage
+        - /comment-center → redirect
+        - /comment-center/:tab → CommentCenterPage（lazy）
+        - /settings/brands-channels, /settings, /knowledge, /team, /analytics, /performance（lazy）
+        - 預設 NotFound
+
+## 權限（概念）
+- ROUTE_ACCESS：path → 允許的 role 陣列
+- 不允許 → AccessDenied 畫面（盾牌圖示 + 權限不足）
+
+## AppHeader 重點 UI
+- Logo 或 Building2 占位
+- 標題：選中品牌名或 systemName
+- 副標：品牌工作區 / 全通路中控台
+- 通知 Link href="/"、未讀數紅點
+- 設定 Link（super_admin | marketing_manager）
+- Button 登出 data-testid="button-logout"
+
+## AppSidebar 重點 UI
+- data-testid="sidebar"
+- 區塊「目前登入」：Avatar + 名稱 + 角色中文
+- 客服：我的工作（格狀統計）、我的快捷（viewMode 按鈕，導向 /）
+- 主管：今日戰情格狀、團隊摘要、快捷
+- 品牌下拉：切 selectedBrandId
+- 選單列：Link + 圖示 + 標題 + desc（僅角色符合時顯示）
+
+## 錯誤邊界
+- AppErrorBoundary、AuthenticatedAppErrorBoundary：錯誤訊息 + 重新整理按鈕
+
+## 不含
+- 任何 .env、token、cookie 字串；apiRequest 僅知為「帶 credentials 的 fetch」即可

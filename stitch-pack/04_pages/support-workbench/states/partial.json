@@ -1,0 +1,7 @@
+{
+  "page": "knowledge",
+  "global_prompt_loaded": true,
+  "brand_prompts_loading": true,
+  "save_enabled": false,
+  "ui_notes": "區塊非同步載入時，已載入區可編輯、未載入區顯示載入中"
+}

@@ -1,0 +1,7 @@
+{
+  "page": "knowledge",
+  "error_code": "SAVE_FAILED",
+  "message": "儲存失敗，請重試",
+  "draft_preserved": true,
+  "ui_notes": "錯誤時不可默默丟失編輯中內容"
+}

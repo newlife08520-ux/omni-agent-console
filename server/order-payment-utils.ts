@@ -33,7 +33,7 @@ export function isCodPaymentMethod(order: OrderInfo): boolean {
   return false;
 }
 
-const PAYMENT_FAIL_STATUS_KW = ["失敗", "未成功", "付款失敗"];
+const PAYMENT_FAIL_STATUS_KW = ["失敗", "未成功", "付款失敗", "訂單未成立", "未成立", "紅叉"];
 const PAYMENT_FAIL_METHOD_KW = ["失敗", "未付"];
 const PAYMENT_SUCCESS_STATUS_KW = ["已確認", "待出貨", "出貨中", "已出貨", "已完成", "處理中"];
 const PAYMENT_PENDING_STATUS_KW = ["待付款", "未付款", "確認中", "新訂單", "待處理"];
@@ -73,7 +73,10 @@ export function derivePaymentStatus(
   }
   /** Phase 33 Ticket 33-6：一頁商店 LINE Pay / 卡類，若有明確失敗 raw 或狀態字，勿當 pending */
   if (kind === "unknown" && source === "superlanding" && payRaw) {
-    if (/fail|failed|reject|declin|void|cancel|error|unsuccess/.test(payRaw)) {
+    /** Phase34B：payRaw 含中文失敗訊號（紅叉／未成立／LINE Pay 失敗）須進 failed，勿落到 pending */
+    if (
+      /fail|failed|reject|declin|void|cancel|error|unsuccess|未成功|紅叉|未成立|付款失敗|交易失敗/.test(payRaw)
+    ) {
       kind = "failed";
       reason = "superlanding_pay_raw_fail";
     }
@@ -130,7 +133,8 @@ export function derivePaymentStatus(
   }
   const labels: Record<PaymentKind, string> = {
     success: "付款成功",
-    failed: "付款失敗",
+    /** Phase 34-4：對客標籤與人格一致（失敗＝未成立） */
+    failed: "付款失敗／訂單未成立",
     pending: "待付款或待確認",
     cod: "貨到付款（到收／取件時付款）",
     unknown: "付款狀態未明",
