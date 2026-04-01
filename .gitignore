@@ -37,3 +37,6 @@ delivery/*.zip
 Omni-Agent-Console-REVIEW-*.zip
 R1_DELIVERABLES.zip
 scripts/Omni-Agent-Console-REVIEW-*.zip
+
+# 救火階段產出的報告與證據封存，不推上遠端
+_rescue_archives/
