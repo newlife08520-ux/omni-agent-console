@@ -8,6 +8,7 @@
  * 3. aftersales_comfort_first（久候型：等太久不想等 → 先安撫+查單，不先表單）
  * 4. return_stage_1（退換貨第一階段承接，尚未給表單）
  * 5. order_lookup（單純訂單/出貨查詢）
+ * 5b. order_followup（已有訂單上下文之出貨／物流等追問，不清除 active context）
  * 6. off_topic_guard（品牌外問題，不陪聊）
  * 7. answer_directly（商品問答、價格、smalltalk、其餘）
  */
@@ -19,6 +20,7 @@ export type ReplyPlanMode =
   | "aftersales_comfort_first"
   | "return_stage_1"
   | "order_lookup"
+  | "order_followup"
   | "off_topic_guard"
   | "answer_directly"
   | "ask_one_question"
@@ -33,6 +35,7 @@ export const MODE_PRIORITY_ORDER: ReplyPlanMode[] = [
   "aftersales_comfort_first",
   "return_stage_1",
   "order_lookup",
+  "order_followup",
   "off_topic_guard",
   "answer_directly",
   "ask_one_question",
@@ -63,16 +66,18 @@ export interface PlanBuilderInput {
   returnFormUrl: string;
   /** 是否為退換貨「首輪」承接（尚未給過表單、尚未查單） */
   isReturnFirstRound?: boolean;
+  /** 已有 active order 且本句為出貨／物流等追問（與首輪查單區隔） */
+  orderFollowupTurn?: boolean;
 }
 
 /** 依 state 與設定產出本輪唯一 ReplyPlan */
 export function buildReplyPlan(input: PlanBuilderInput): ReplyPlan {
-  const { state, returnFormUrl, isReturnFirstRound = false } = input;
+  const { state, returnFormUrl, isReturnFirstRound = false, orderFollowupTurn = false } = input;
   const { primary_intent, return_reason_type, needs_human, human_reason, return_stage } = state;
 
   if (needs_human && human_reason) {
     if (human_reason === "explicit_human_request" || human_reason === "legal_or_reputation_threat" || human_reason === "payment_or_order_risk" || human_reason === "policy_exception" || human_reason === "return_stage_3_insist" || human_reason === "repeat_unresolved") {
-      return { mode: "handoff", must_not_include: F2_FORBIDDEN_PHRASES };
+      return { mode: "handoff" };
     }
   }
 
@@ -82,37 +87,34 @@ export function buildReplyPlan(input: PlanBuilderInput): ReplyPlan {
     if (return_reason_type === "product_issue") {
       return {
         mode: "return_form_first",
-        must_not_include: F2_FORBIDDEN_PHRASES,
         should_include: ["先道歉", "表示會協助處理", "退換貨／售後表單", returnFormUrl ? "表單連結" : ""].filter(Boolean),
       };
     }
     if (return_reason_type === "wait_too_long") {
       return {
         mode: "aftersales_comfort_first",
-        must_not_include: F2_FORBIDDEN_PHRASES,
         should_include: ["先安撫", "先查詢出貨狀況", "說明是否有現貨／能否加急", "不要先丟表單", "不要先轉人工"],
       };
     }
     if (return_reason_type === "insist") {
-      if (return_stage === 1) return { mode: "return_stage_1", must_not_include: F2_FORBIDDEN_PHRASES };
+      if (return_stage === 1) return { mode: "return_stage_1" };
       return {
         mode: "return_form_first",
-        must_not_include: F2_FORBIDDEN_PHRASES,
         should_include: ["安撫", "表單", returnFormUrl ? "退換貨表單連結" : ""].filter(Boolean),
       };
     }
     if (return_reason_type === null || return_reason_type === undefined) {
       return {
         mode: "aftersales_comfort_first",
-        must_not_include: F2_FORBIDDEN_PHRASES,
         should_include: ["先安撫", "先理解原因", "可查詢出貨", "不要一開口就表單"],
       };
     }
-    if (return_stage === 1) return { mode: "return_stage_1", must_not_include: F2_FORBIDDEN_PHRASES };
+    if (return_stage === 1) return { mode: "return_stage_1" };
   }
 
   if (primary_intent === "order_lookup" && !isRefundReturnIntent) {
-    return { mode: "order_lookup", must_not_include: F2_FORBIDDEN_PHRASES };
+    if (orderFollowupTurn) return { mode: "order_followup" };
+    return { mode: "order_lookup" };
   }
 
   if (primary_intent === "off_topic") {

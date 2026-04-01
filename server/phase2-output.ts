@@ -77,18 +77,7 @@ export const OUTPUT_GUARD_MAX_CHARS_RELAXED = 200;
 /**
  * Phase 2 output guard：首輪回覆長度上限；超標時截斷至最後一句完整句或字數上限＋「…」。
  */
-export function enforceOutputGuard(text: string, planMode: string): string {
-  const trimmed = (text || "").trim();
-  if (!trimmed) return trimmed;
-  const maxLen = planMode === "order_lookup" ? OUTPUT_GUARD_MAX_CHARS : OUTPUT_GUARD_MAX_CHARS_RELAXED;
-  if (trimmed.length <= maxLen) return trimmed;
-  const cut = trimmed.slice(0, maxLen);
-  const lastPeriod = Math.max(
-    cut.lastIndexOf("。"),
-    cut.lastIndexOf("！"),
-    cut.lastIndexOf("？"),
-    cut.lastIndexOf("\n")
-  );
-  if (lastPeriod > maxLen * 0.5) return cut.slice(0, lastPeriod + 1).trim();
-  return cut.trim() + "…";
+export function enforceOutputGuard(text: string, _planMode: string): string {
+  /** Minimal Safe Mode：不再截斷語氣與長度，交給單一 system prompt。 */
+  return (text || "").trim();
 }

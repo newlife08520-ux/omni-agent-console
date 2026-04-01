@@ -18,8 +18,7 @@ export interface FacebookWebhookDeps {
   sendFBMessage: (pageAccessToken: string, recipientId: string, text: string) => Promise<void>;
   downloadExternalImage: (imageUrl: string) => Promise<string | null>;
   handleImageVisionFirst: (imageFilePath: string, contactId: number) => Promise<{ reply: string; usedFallback: boolean; intent?: string; confidence?: string }>;
-  enqueueDebouncedAiReply?: (platform: string, contactId: number, message: string, inboundEventId: string, channelToken: string | null, matchedBrandId?: number) => Promise<void>;
-  debounceTextMessage: (contactId: number, text: string, cb: (mergedText: string) => void | Promise<void>) => void;
+  enqueueDebouncedAiReply: (platform: string, contactId: number, message: string, inboundEventId: string, channelToken: string | null, matchedBrandId?: number) => Promise<void>;
   addAiReplyJob: (data: { contactId: number; message: string; channelToken: string | null; matchedBrandId?: number; platform?: string }) => Promise<unknown>;
   getHandoffReplyForCustomer: (opening: string, unavailableReason?: string | undefined) => string;
   HANDOFF_MANDATORY_OPENING: string;
@@ -54,7 +53,6 @@ export function handleFacebookWebhook(req: Request, res: Response, deps: Faceboo
     downloadExternalImage,
     handleImageVisionFirst,
     enqueueDebouncedAiReply,
-    debounceTextMessage,
     addAiReplyJob,
     getHandoffReplyForCustomer,
     HANDOFF_MANDATORY_OPENING,
@@ -267,22 +265,10 @@ export function handleFacebookWebhook(req: Request, res: Response, deps: Faceboo
                           messageSummary: text ? `用戶說：${text}` : undefined,
                         });
                       } else {
-                        if (enqueueDebouncedAiReply) {
-                          const inboundEventId = eventId;
-                          enqueueDebouncedAiReply("messenger", contact.id, text, inboundEventId, matchedChannel.access_token ?? null, matchedBrandId).catch(err =>
-                            console.error("[FB Webhook] enqueueDebouncedAiReply failed:", err)
-                          );
-                        } else {
-                          debounceTextMessage(contact.id, text, (mergedText) => {
-                            void addAiReplyJob({
-                              contactId: contact.id,
-                              message: mergedText,
-                              channelToken: matchedChannel.access_token ?? null,
-                              matchedBrandId,
-                              platform: "messenger",
-                            }).catch(err => console.error("[FB Webhook] addAiReplyJob failed:", err));
-                          });
-                        }
+                        const inboundEventId = eventId;
+                        enqueueDebouncedAiReply("messenger", contact.id, text, inboundEventId, matchedChannel.access_token ?? null, matchedBrandId).catch(err =>
+                          console.error("[FB Webhook] enqueueDebouncedAiReply failed:", err)
+                        );
                       }
                     }
                   }

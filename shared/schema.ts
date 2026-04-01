@@ -399,6 +399,8 @@ export interface ActiveOrderContext {
   pending_order_ids?: string[];
   cod_order_ids?: string[];
   selected_order_rank?: number | null;
+  /** R1：local_only 單筆候選；持久化時不應帶齊等同「已鎖單」之物流／地址細節 */
+  lookup_provisional?: boolean;
 }
 
 /** Phase 2：本地正規化訂單（sync 寫入，查單可先查此表） */

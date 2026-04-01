@@ -234,8 +234,10 @@ async function shoplineRequest(
   endpoint: string,
   params: Record<string, string> = {}
 ): Promise<any> {
-  if (!config.storeDomain || !config.apiToken) {
-    throw new Error("missing_credentials");
+  const domain = String(config.storeDomain || "").trim();
+  const token = String(config.apiToken || "").trim();
+  if (!domain || !token) {
+    throw new Error("MISSING_SHOPLINE_CONFIG: shopline_store_domain and shopline_api_token are required");
   }
 
   const baseUrl = buildBaseUrl(config);
@@ -244,7 +246,7 @@ async function shoplineRequest(
 
   console.log(
     "[SHOPLINE] API 請求:",
-    url.replace(config.apiToken, "***")
+    url.replace(token, "***")
   );
 
   try {
@@ -253,7 +255,7 @@ async function shoplineRequest(
       headers: {
         Accept: "application/json",
         "Content-Type": "application/json",
-        Authorization: `Bearer ${config.apiToken}`,
+        Authorization: `Bearer ${token}`,
         "User-Agent": process.env.SHOPLINE_USER_AGENT || "OmniAgentConsole/1.0",
       },
     });
@@ -270,7 +272,8 @@ async function shoplineRequest(
   } catch (err: any) {
     if (
       err.message === "missing_credentials" ||
-      err.message === "invalid_credentials"
+      err.message === "invalid_credentials" ||
+      (typeof err.message === "string" && err.message.startsWith("MISSING_SHOPLINE_CONFIG"))
     )
       throw err;
     if (err.message?.startsWith("api_error_")) throw err;

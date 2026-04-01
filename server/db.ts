@@ -153,6 +153,7 @@ export function initDatabase() {
   migrateContactsLastMessageDenormalization();
   migrateAiReplyDeliveries();
   ensurePerformanceIndexes();
+  migrateContactsPlatformUserUniqueIndex();
   seedMockData();
   migrateRemoveOldHandoffAndReturnRules();
   migrateBleedHumanTransferKeywords();
@@ -308,7 +309,7 @@ function ensurePerformanceIndexes() {
 
   run(`CREATE INDEX IF NOT EXISTS idx_messages_contact_created ON messages(contact_id, created_at DESC);`);
   run(`CREATE INDEX IF NOT EXISTS idx_contacts_brand_id ON contacts(brand_id);`);
-  run(`CREATE INDEX IF NOT EXISTS idx_contacts_platform_user ON contacts(platform, platform_user_id);`);
+  /** 非唯一清單索引改由 migrateContactsPlatformUserUniqueIndex 建立 UNIQUE idx_contacts_platform_user */
   run(`CREATE INDEX IF NOT EXISTS idx_contacts_status ON contacts(status);`);
   run(`CREATE INDEX IF NOT EXISTS idx_ai_logs_contact_id ON ai_logs(contact_id);`);
   run(`CREATE INDEX IF NOT EXISTS idx_ai_logs_created_at ON ai_logs(created_at DESC);`);
@@ -327,6 +328,74 @@ function ensurePerformanceIndexes() {
   run(`CREATE INDEX IF NOT EXISTS idx_contacts_brand_list_order ON contacts(brand_id, is_pinned DESC, effective_case_priority ASC, last_message_at DESC);`);
 
   console.log("[DB] ensurePerformanceIndexes() 已執行（僅索引，無 schema）");
+}
+
+/** contacts(platform, platform_user_id) 唯一索引 + 併發 INSERT 去重；舊非唯一 idx 先卸除 */
+function migrateContactsPlatformUserUniqueIndex() {
+  try {
+    db.exec("DROP INDEX IF EXISTS idx_contacts_platform_user;");
+  } catch (_e) {
+    /* ignore */
+  }
+  const dupGroups = db
+    .prepare(
+      `SELECT platform, platform_user_id, MIN(id) AS keep_id, COUNT(*) AS c
+       FROM contacts GROUP BY platform, platform_user_id HAVING c > 1`
+    )
+    .all() as { platform: string; platform_user_id: string; keep_id: number }[];
+  for (const g of dupGroups) {
+    const others = db
+      .prepare(`SELECT id FROM contacts WHERE platform = ? AND platform_user_id = ? AND id != ?`)
+      .all(g.platform, g.platform_user_id, g.keep_id) as { id: number }[];
+    for (const { id } of others) {
+      db.prepare(`UPDATE messages SET contact_id = ? WHERE contact_id = ?`).run(g.keep_id, id);
+      db.prepare(`UPDATE ai_logs SET contact_id = ? WHERE contact_id = ?`).run(g.keep_id, id);
+      try {
+        db.prepare(`UPDATE ai_reply_deliveries SET contact_id = ? WHERE contact_id = ?`).run(g.keep_id, id);
+      } catch (_e) {
+        /* table may be absent in very old DBs */
+      }
+      try {
+        db.prepare(`DELETE FROM active_order_context WHERE contact_id = ?`).run(id);
+      } catch (_e) {
+        /* ignore */
+      }
+      try {
+        db.prepare(`DELETE FROM contact_order_links WHERE contact_id = ?`).run(id);
+      } catch (_e) {
+        /* ignore */
+      }
+      try {
+        db.prepare(`DELETE FROM agent_contact_flags WHERE contact_id = ?`).run(id);
+      } catch (_e) {
+        /* ignore */
+      }
+      try {
+        db.prepare(`UPDATE assignment_history SET contact_id = ? WHERE contact_id = ?`).run(g.keep_id, id);
+      } catch (_e) {
+        /* ignore */
+      }
+      try {
+        db.prepare(`UPDATE case_notifications SET contact_id = ? WHERE contact_id = ?`).run(g.keep_id, id);
+      } catch (_e) {
+        /* ignore */
+      }
+      try {
+        db.prepare(`UPDATE system_alerts SET contact_id = ? WHERE contact_id = ?`).run(g.keep_id, id);
+      } catch (_e) {
+        /* ignore */
+      }
+      db.prepare(`DELETE FROM contacts WHERE id = ?`).run(id);
+    }
+  }
+  try {
+    db.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_platform_user ON contacts(platform, platform_user_id);`
+    );
+    console.log("[DB] idx_contacts_platform_user UNIQUE 已確保");
+  } catch (e) {
+    console.warn("[DB] idx_contacts_platform_user UNIQUE 建立失敗（可能仍有重複資料）:", (e as Error).message);
+  }
 }
 
 /** 緊急止血：後台關鍵字強制縮為僅四項，移除招呼/情緒詞。每次啟動時若現有值與目標不同則覆寫。 */
@@ -1371,24 +1440,8 @@ function migrateShoplineFields() {
 }
 
 function migrateSystemPrompt() {
-  const row = db.prepare("SELECT value FROM settings WHERE key = 'system_prompt'").get() as { value: string } | undefined;
-  if (!row || !row.value) return;
-
-  const ORDER_RULES_V4 = `\n\n## 訂單查詢決策樹（Strict Rules v4.3）\n\n### ⚠️ 核心鐵律：零驗證原則\n本系統查詢訂單**不需要任何身分驗證**。\n- **絕對禁止**要求客戶提供「手機末三碼」「完整電話」「Email」來核對身分。\n- **絕對禁止**說出「為了保護您的隱私」「為了確認是本人」「為了避免查到不同人的訂單」等驗證話術。\n- 只要客戶提供了訂單編號，就閉嘴直接去查。不問、不驗、不囉嗦。\n\n### 路徑 A：極速查詢（客戶有訂單編號）\n當客戶提供了訂單編號（如 KBT58265、DEN12345、MRQ00001、MRH99999 等格式）：\n→ **立即、直接**觸發訂單查詢，不追問任何額外資訊。\n→ 查到後回覆訂單狀態、物流進度等。\n→ 查無結果則告知客戶「這個編號目前查不到紀錄，請確認是否正確唷～」\n→ 流程結束。\n\n### 路徑 B：無單號救援（客戶沒有訂單編號）\n當客戶表示找不到單號、忘記了、沒收到確認信時：\n⚠️ 絕對不可以在此階段提議轉接真人客服！\n→ 親切詢問「商品名稱」和「手機號碼」兩項資訊。\n→ 話術：「沒關係唷～請告訴我您買的是什麼商品，再加上下單時留的手機號碼，我馬上幫您查！😊」\n→ 客戶說出商品後，從內部商品清單語意匹配（支持錯字、簡稱、俗稱）。\n→ 若匹配到多個商品，列出選項讓客戶確認（只顯示產品名稱）。\n→ 確認唯一商品 + 取得手機號碼後，觸發查詢。\n→ 流程結束。\n\n### 路徑 A 與路徑 B 互不干涉\n- 走路徑 A 時，不需要手機號碼、不需要商品名稱、不需要任何額外資訊。\n- 走路徑 B 時，不需要訂單編號。\n- 兩條路徑絕對不可混用。\n\n### 備用方案：日期 + 個資查詢\n若客戶無法說出商品名稱，可用「下單日期」+「Email/手機/姓名」查詢（日期範圍限 31 天）。\n\n### 最後防線：轉接專人\n只有在所有方案都無法取得資訊，或查詢結果為空時，才可詢問是否轉接真人客服。\n話術：「很抱歉目前沒有查到相符的紀錄，可能是下單時用了不同的聯絡方式～我幫您轉接專人客服處理唷！」\n\n### 回覆語氣規範\n- 語氣溫暖親切，像朋友般自然，適度使用「唷」「呢」「～」等語助詞。\n- 用「了解」「沒問題」「好的」開場，禁止「根據系統」「依照規則」「步驟一」等機械用語。\n- 適度使用 emoji（😊、✨）但不過度。回覆簡潔有力，不冗長囉嗦。\n\n### 嚴格保密規範\n- **絕對禁止**在對話中顯示任何內部編號、API 欄位、系統代碼、技術參數。\n- **絕對禁止**提及「對應表」「商品清單」「備用查詢」「Function Calling」等系統用語。\n- 所有回覆必須像專業真人客服，只使用客戶能理解的自然語言。`;
-
-  const currentVersion = "訂單查詢決策樹（Strict Rules v4.3）";
-  if (row.value.includes(currentVersion)) return;
-
-  let newValue = row.value;
-  const oldRulesPattern = /\n\n## 訂單查詢[^\n]*（Strict Rules[^\n]*）\n[\s\S]*?(?=\n\n## (?!訂單)|\n\n---|\s*$)/;
-  if (oldRulesPattern.test(row.value)) {
-    newValue = row.value.replace(oldRulesPattern, ORDER_RULES_V4);
-    console.log("[DB] 已將訂單查詢規則升級至 v4.3（零驗證極速決策樹）");
-  } else {
-    newValue = row.value + ORDER_RULES_V4;
-    console.log("[DB] 已自動附加「訂單查詢決策樹 v4.3」至系統提示詞");
-  }
-  db.prepare("UPDATE settings SET value = ? WHERE key = 'system_prompt'").run(newValue);
+  /** Rescue：不再把 ORDER_RULES 硬寫進 DB；人格與查單規範改由後台 UI system_prompt 管理 */
+  return;
 }
 
 function migrateHardMuteAndAlerts() {

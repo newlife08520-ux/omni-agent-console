@@ -1,13 +1,12 @@
 /**
- * 統一付款狀態判斷（單一真相）：先判 COD，再判 success / failed / pending。
- * 避免到收／取件時付款被誤判成付款失敗。
+ * 統一付款狀態判斷：COD → paid_at/prepaid → 訂單狀態已取消 → 失敗訊號（含中文／payment_status_raw／gateway_status）→ 其餘 pending。
+ * 對客標籤關鍵字：紅叉、訂單未成立、授權失敗 等 — 見 derivePaymentStatus / hasExplicitPaymentFailureSignal。
  */
 import type { OrderInfo } from "@shared/schema";
 
 const COD_METHOD_REGEX =
   /貨到付款|到收|取件時付款|取貨付款|到店付款|cash_on_delivery|cash\s*on\s*delivery|cod|現金\s*與\s*刷卡/i;
 
-/** 一頁商店：payment_method=pending + 超商/門市/to_store + prepaid=false + paid_at=null → 視為 COD（不可單憑 pending 判失敗） */
 function isSuperLandingCvsCod(order: OrderInfo): boolean {
   if ((order.source || "") !== "superlanding") return false;
   const pm = (order.payment_method || "").trim().toLowerCase();
@@ -22,10 +21,6 @@ function isSuperLandingCvsCod(order: OrderInfo): boolean {
   return true;
 }
 
-/**
- * 是否為貨到付款／到收／取件時付款。
- * 涵蓋明確字串與一頁商店超商 pending 特例。
- */
 export function isCodPaymentMethod(order: OrderInfo): boolean {
   if (COD_METHOD_REGEX.test(order.payment_method || "")) return true;
   if (/^到收$|^取件時付款$/i.test((order.payment_method || "").trim())) return true;
@@ -33,19 +28,73 @@ export function isCodPaymentMethod(order: OrderInfo): boolean {
   return false;
 }
 
-const PAYMENT_FAIL_STATUS_KW = ["失敗", "未成功", "付款失敗", "訂單未成立", "未成立", "紅叉"];
-const PAYMENT_FAIL_METHOD_KW = ["失敗", "未付"];
-const PAYMENT_SUCCESS_STATUS_KW = ["已確認", "待出貨", "出貨中", "已出貨", "已完成", "處理中"];
-const PAYMENT_PENDING_STATUS_KW = ["待付款", "未付款", "確認中", "新訂單", "待處理"];
-const REQUIRES_PREPAY_METHOD = /credit_card|linepay|line_pay|line pay|apple_pay|google_pay|jkopay|街口/i;
-const DEFERRED_PAY_METHOD = /virtual_account|atm|ibon|超商|轉帳|匯款|bank|繳費/i;
+/** 中文與常見網關錯誤樣式（不比對整段 order.status，避免與「已取消」狀態列重複時序問題） */
+function hasZhOrGatewayFailureFragment(payRaw: string, gatewayRaw: string): boolean {
+  const orig = `${payRaw} ${gatewayRaw}`;
+  if (
+    /失敗|取消|拒絕|異常|授權失敗|紅叉|未成立|交易失敗|付款失敗|作廢|退刷|刷卡不成功|銀行拒絕|付款逾時|款項未到|請重新付款/i.test(
+      orig
+    )
+  )
+    return true;
+  if (/\b(?:E\d{3,6}|ERR[_-]?\d+|NG\d+|DECLINE|DECLINED)\b/i.test(orig)) return true;
+  return false;
+}
+
+/**
+ * 亞洲／台灣常見網關與 3D／超時等隱性失敗字樣（Phase 90：QA 指定 Regex 全字面值納入）。
+ * 修飾符 i 使 3d驗證失敗 可匹配「3D驗證失敗」；void／reject 依規格不加重邊界（英文欄位需留意 avoid 等誤觸）。
+ */
+const ASIA_GATEWAY_FAILURE_HINT =
+  /授權失敗|拒絕交易|餘額不足|連線異常|未付款失效|逾期未繳|付款異常|訂單取消|expired|timeout|3d驗證失敗|3d\s*secure|do\s*not\s*honor|insufficient\s*funds|order\s*cancelled|void|reject/i;
+
+/** 僅在 API 原生 payment / gateway 字串中比對明確失敗語意 */
+function hasExplicitPaymentFailureSignal(payRaw: string, gatewayRaw: string): boolean {
+  const combined = `${payRaw} ${gatewayRaw}`;
+  if (ASIA_GATEWAY_FAILURE_HINT.test(combined)) return true;
+  if (hasZhOrGatewayFailureFragment(payRaw, gatewayRaw)) return true;
+  const hay = `${payRaw} ${gatewayRaw}`.toLowerCase();
+  const needles = [
+    "void",
+    "cancel",
+    "cancelled",
+    "canceled",
+    "declined",
+    "decline",
+    "rejected",
+    "reject",
+    "refunded",
+    "refund",
+    "chargeback",
+    "failed",
+    "failure",
+    "error",
+  ];
+  for (const t of needles) {
+    let from = 0;
+    while (from < hay.length) {
+      const i = hay.indexOf(t, from);
+      if (i < 0) break;
+      const before = i > 0 ? hay[i - 1] : " ";
+      const after = i + t.length < hay.length ? hay[i + t.length] : " ";
+      const atBoundary = !/[a-z0-9_]/.test(before) && !/[a-z0-9_]/.test(after);
+      if (atBoundary) return true;
+      from = i + 1;
+    }
+  }
+  return false;
+}
 
 export type PaymentKind = "success" | "failed" | "pending" | "cod" | "unknown";
 
+/** Phase 3.0：fallback pending 時對客顯示（取代冰冷「待付款或待確認」） */
+export const PENDING_FALLBACK_CUSTOMER_LABEL =
+  "金流狀態同步中（若您稍早剛完成付款，請稍候系統連線更新）";
+
 export function derivePaymentStatus(
   order: OrderInfo,
-  statusLabel: string,
-  source: string
+  _statusLabel: string,
+  _source: string
 ): { kind: PaymentKind; label: string; reason?: string; confidence?: "high" | "medium" | "low" } {
   if (isCodPaymentMethod(order)) {
     return {
@@ -55,95 +104,54 @@ export function derivePaymentStatus(
       confidence: "high",
     };
   }
-  const pm = (order.payment_method || "").trim();
-  let kind: PaymentKind = "unknown";
-  let reason = "";
-  const payRaw = ((order as { payment_status_raw?: string }).payment_status_raw || "").toLowerCase();
-  if (source === "shopline" && payRaw) {
-    if (/paid|complete|success|captured|authorized/.test(payRaw)) {
-      kind = "success";
-      reason = "shopline_pay_raw_paid";
-    } else if (/pending|unpaid|awaiting|processing/.test(payRaw)) {
-      kind = "pending";
-      reason = "shopline_pay_raw_pending";
-    } else if (/fail|void|cancel|refund/.test(payRaw)) {
-      kind = "failed";
-      reason = "shopline_pay_raw_fail";
-    }
+
+  const prepaidOk = order.prepaid === true;
+  const paidAtOk = order.paid_at != null && String(order.paid_at).trim() !== "";
+  if (prepaidOk || paidAtOk) {
+    return {
+      kind: "success",
+      label: "付款成功",
+      reason: prepaidOk ? "prepaid" : "paid_at",
+      confidence: "high",
+    };
   }
-  /** Phase 33 Ticket 33-6：一頁商店 LINE Pay / 卡類，若有明確失敗 raw 或狀態字，勿當 pending */
-  if (kind === "unknown" && source === "superlanding" && payRaw) {
-    /** Phase34B：payRaw 含中文失敗訊號（紅叉／未成立／LINE Pay 失敗）須進 failed，勿落到 pending */
-    if (
-      /fail|failed|reject|declin|void|cancel|error|unsuccess|未成功|紅叉|未成立|付款失敗|交易失敗/.test(payRaw)
-    ) {
-      kind = "failed";
-      reason = "superlanding_pay_raw_fail";
-    }
+
+  const statusLine = `${order.status || ""} ${_statusLabel || ""}`;
+  if (/已取消|訂單已取消|取消訂單/.test(statusLine)) {
+    return {
+      kind: "failed",
+      label: "付款失敗／訂單未成立",
+      reason: "order_status_cancelled_zh",
+      confidence: "high",
+    };
   }
-  if (kind === "unknown") {
-    if (PAYMENT_FAIL_STATUS_KW.some((k) => statusLabel.includes(k))) {
-      kind = "failed";
-      reason = "status_fail_kw";
-    } else if (/已取消|作廢|退單|void|cancelled|canceled/i.test(statusLabel)) {
-      kind = "failed";
-      reason = "status_cancelled";
-    } else if (order.prepaid === true || order.paid_at) {
-      kind = "success";
-      reason = "prepaid_or_paid_at";
-    } else if (PAYMENT_SUCCESS_STATUS_KW.some((k) => statusLabel.includes(k)) && order.prepaid !== false) {
-      kind = "success";
-      reason = "status_implies_paid";
-    } else if (
-      source === "superlanding" &&
-      REQUIRES_PREPAY_METHOD.test(pm) &&
-      order.prepaid === false &&
-      order.paid_at == null &&
-      (/失敗|未成功|付款失敗|失敗單|未付款成功|紅叉/i.test(statusLabel) ||
-        /failed|fail|reject|declin|void|cancel|error|unsuccess/i.test(String(order.status || "")))
-    ) {
-      kind = "failed";
-      reason = "superlanding_linepay_card_fail_signal";
-    } else if (PAYMENT_SUCCESS_STATUS_KW.some((k) => statusLabel.includes(k)) && order.prepaid === false && REQUIRES_PREPAY_METHOD.test(pm)) {
-      kind = "pending";
-      reason = "status_ship_flow_but_prepay_unclear";
-    } else if (PAYMENT_PENDING_STATUS_KW.some((k) => statusLabel.includes(k))) {
-      kind = "pending";
-      reason = "status_pending_kw";
-    } else if (DEFERRED_PAY_METHOD.test(pm) && !order.paid_at) {
-      kind = "pending";
-      reason = "deferred_payment_awaiting";
-    } else if (REQUIRES_PREPAY_METHOD.test(pm) && order.prepaid === false && !order.paid_at) {
-      kind = "pending";
-      reason = "card_like_unpaid_not_failed";
-    } else if (
-      order.prepaid === false &&
-      order.paid_at == null &&
-      PAYMENT_FAIL_METHOD_KW.some((k) => pm.includes(k))
-    ) {
-      kind = "failed";
-      reason = "explicit_fail_in_method";
-    } else if (PAYMENT_SUCCESS_STATUS_KW.some((k) => statusLabel.includes(k))) {
-      kind = "success";
-      reason = "status_success_fallback";
-    } else {
-      kind = "unknown";
-      reason = "ambiguous_no_fail_assumption";
-    }
+
+  const payRaw = String(order.payment_status_raw || "");
+  const gatewayRaw = String((order as { gateway_status?: string }).gateway_status || "");
+
+  if (hasExplicitPaymentFailureSignal(payRaw, gatewayRaw)) {
+    return {
+      kind: "failed",
+      label: "付款失敗／訂單未成立",
+      reason: "native_payment_or_gateway_signal",
+      confidence: "high",
+    };
   }
-  const labels: Record<PaymentKind, string> = {
-    success: "付款成功",
-    /** Phase 34-4：對客標籤與人格一致（失敗＝未成立） */
-    failed: "付款失敗／訂單未成立",
-    pending: "待付款或待確認",
-    cod: "貨到付款（到收／取件時付款）",
-    unknown: "付款狀態未明",
+
+  const orderNo = String((order as { global_order_id?: string }).global_order_id || "").trim() || "(no_id)";
+  console.warn(
+    "[LIVE_PAYMENT_FALLBACK_PENDING] 缺乏明確狀態，退回 pending。訂單號: " +
+      orderNo +
+      " | Raw Pay: " +
+      payRaw +
+      " | Gateway: " +
+      gatewayRaw
+  );
+
+  return {
+    kind: "pending",
+    label: PENDING_FALLBACK_CUSTOMER_LABEL,
+    reason: "fallback_pending",
+    confidence: "medium",
   };
-  const confidence: "high" | "medium" | "low" =
-    reason.includes("shopline_pay_raw") || reason === "cod" || reason === "prepaid_or_paid_at"
-      ? "high"
-      : kind === "unknown"
-        ? "low"
-        : "medium";
-  return { kind, label: labels[kind], reason, confidence };
 }

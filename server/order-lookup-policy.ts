@@ -3,6 +3,8 @@
  * 目標：有單號直接查；沒單號預設商品+手機；純手機僅在「查全部/其他訂單」時允許，且 local_only 單筆不得定案。
  */
 
+import { ORDER_FOLLOWUP_PATTERNS } from "./conversation-state-resolver";
+
 /** 簡化版 active context 用於意圖推斷（僅需部分欄位） */
 export interface OrderLookupPolicyContext {
   order_id?: string | null;
@@ -27,6 +29,8 @@ export interface OrderLookupIntent {
   allowPhoneOnly: boolean;
   /** 單筆結果是否需先 live API 確認才能當最終答案（local_only 單筆時為 true） */
   requireApiConfirmBeforeSingleClaim: boolean;
+  /** 純手機等情境：Tool 層只允許摘要、不得對 LLM 輸出單筆明細 */
+  summaryOnly: boolean;
 }
 
 const ORDER_ID_PATTERN = /[A-Za-z][A-Za-z0-9\-]{4,13}/g;
@@ -69,12 +73,7 @@ export function detectLookupSourceIntent(
   const isOnlyPhone = /^09\d{8}$/.test(msg.replace(/\s/g, "")) || /^\+?8869\d{8}$/.test(msg.replace(/\s/g, ""));
   if (isOnlyPhone && msg.length <= 14) return "unknown";
 
-  /** Phase 34-1：來源意圖 TTL＝僅「上一則」使用者訊息可繼承，避免官網關鍵字污染過多輪 */
-  const recent = (recentMessages || []).slice(-1);
-  const lastMsg = recent[recent.length - 1] || "";
-  if (SHOPLINE_NEGATIVE.test(lastMsg)) return "clear";
-  if (SHOPLINE_HINTS.test(lastMsg)) return "shopline";
-  if (SUPERLANDING_HINTS.test(lastMsg)) return "superlanding";
+  /** P0：僅看當前句，不跨輪繼承官網／一頁意圖（recentMessages 參數保留相容，不再讀取） */
   return "unknown";
 }
 
@@ -135,54 +134,70 @@ export function deriveOrderLookupIntent(
       requiresProduct: false,
       allowPhoneOnly: false,
       requireApiConfirmBeforeSingleClaim: false,
+      summaryOnly: false,
     };
   }
 
   // 已有選定訂單的追問（出貨、付款、地址等）
   if (activeCtx?.order_id && activeCtx?.selected_order_id === null && !extractOrderId(msg)) {
-    const followupKw = /出貨|付款|寄到|地址|門市|全家|物流|單號|追蹤|貨到|取件|配送/i;
-    if (followupKw.test(msg)) {
+    if (ORDER_FOLLOWUP_PATTERNS.test(msg)) {
       return {
         kind: "followup_on_selected_order",
         requiresProduct: false,
         allowPhoneOnly: false,
         requireApiConfirmBeforeSingleClaim: false,
+        summaryOnly: false,
       };
     }
   }
 
-  // 「其他訂單 / 全部訂單 / 我有幾筆」→ 允許 phone-only，但僅能做摘要/候選，不單筆定案
-  if (PHONE_ALL_ORDERS_KW.test(combined) || PHONE_ALL_ORDERS_KW.test(msg)) {
+  // 僅「當前訊息」命中查全部／其他訂單等，才允許 phone-only（禁止用 combined 從歷史幽靈放行）
+  if (PHONE_ALL_ORDERS_KW.test(msg)) {
     return {
       kind: "phone_all_orders",
       requiresProduct: false,
       allowPhoneOnly: true,
       requireApiConfirmBeforeSingleClaim: true, // 單筆時仍要確認
+      summaryOnly: false,
     };
   }
 
   const phone = extractPhone(msg);
+
+  // P0：純手機（無單號、非「查全部」）一律補問商品，禁止只拿手機當單筆答案
+  if (phone && isLineMostlyPhone(msg)) {
+    return {
+      kind: "phone_ambiguous",
+      requiresProduct: true,
+      allowPhoneOnly: false,
+      requireApiConfirmBeforeSingleClaim: true,
+      summaryOnly: true,
+    };
+  }
+
   const sourceIntent = resolveOrderSourceIntent(msg, recentMessages ?? []);
   const hasShopline = sourceIntent === "shopline";
   const hasSuperlanding = sourceIntent === "superlanding";
 
-  // 官網+手機 或 一頁+手機：允許該管道用手機查，但仍偏保守（local_only 單筆不定案）
+  // 官網+手機 或 一頁+手機（同一句明確意圖）：允許該管道用手機查
   if ((hasShopline || hasSuperlanding) && phone) {
     return {
       kind: "product_phone_rescue",
       requiresProduct: false,
       allowPhoneOnly: true,
       requireApiConfirmBeforeSingleClaim: true,
+      summaryOnly: false,
     };
   }
 
-  // 純手機、無「全部/其他」意圖 → 預設要商品+手機，不允許僅手機直接當單筆答案
-  if (phone && (isLineMostlyPhone(msg) || /查訂單|幫我查|訂單查詢/i.test(msg))) {
+  // 含手機但非純手機列（例如「查訂單 09…」）→ 仍要求補齊商品語意前不當 phone-only 定案
+  if (phone && /查訂單|幫我查|訂單查詢/i.test(msg)) {
     return {
       kind: "phone_ambiguous",
       requiresProduct: true,
       allowPhoneOnly: false,
       requireApiConfirmBeforeSingleClaim: true,
+      summaryOnly: true,
     };
   }
 
@@ -193,6 +208,7 @@ export function deriveOrderLookupIntent(
       requiresProduct: false,
       allowPhoneOnly: false,
       requireApiConfirmBeforeSingleClaim: true,
+      summaryOnly: false,
     };
   }
 
@@ -201,6 +217,7 @@ export function deriveOrderLookupIntent(
     requiresProduct: true,
     allowPhoneOnly: false,
     requireApiConfirmBeforeSingleClaim: true,
+    summaryOnly: true,
   };
 }
 

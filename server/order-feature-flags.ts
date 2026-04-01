@@ -12,10 +12,11 @@ function envBool(key: string, defaultTrue: boolean): boolean {
 }
 
 export const orderFeatureFlags = {
-  orderFastPath: envBool("ENABLE_ORDER_FAST_PATH", true),
-  orderFinalNormalizer: envBool("ENABLE_ORDER_FINAL_NORMALIZER", true),
-  genericDeterministicOrder: envBool("ENABLE_GENERIC_DETERMINISTIC_ORDER", true),
-  orderUltraLitePrompt: envBool("ENABLE_ORDER_ULTRA_LITE_PROMPT", true),
+  /** P0 Minimal Safe Mode：預設關閉，還權 LLM；需舊行為時設對應 ENABLE_*=1 */
+  orderFastPath: envBool("ENABLE_ORDER_FAST_PATH", false),
+  orderFinalNormalizer: envBool("ENABLE_ORDER_FINAL_NORMALIZER", false),
+  genericDeterministicOrder: envBool("ENABLE_GENERIC_DETERMINISTIC_ORDER", false),
+  orderUltraLitePrompt: envBool("ENABLE_ORDER_ULTRA_LITE_PROMPT", false),
   orderLatencyV2: envBool("ENABLE_ORDER_LATENCY_V2", true),
   /** Phase 30：為 true 時，若資料為 local_only（僅本地索引），不單筆定案，改回帶說明讓 LLM 補問或補查 */
   conservativeSingleOrder: envBool("CONSERVATIVE_SINGLE_ORDER", true),

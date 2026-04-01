@@ -4,7 +4,7 @@
 import type { OrderInfo, ActiveOrderContext } from "@shared/schema";
 import type { IStorage } from "./storage";
 import { getUnifiedStatusLabel } from "./order-service";
-import { formatOrderOnePage, payKindForOrder } from "./order-reply-utils";
+import { payKindForOrder } from "./order-reply-utils";
 import { buildActiveOrderContextFromOrder } from "./order-active-context";
 import { orderDeterministicContractFields } from "./deterministic-order-contract";
 
@@ -110,25 +110,11 @@ export function packDeterministicMultiOrderToolResult(params: {
     found: true,
     total: n,
     source: orderSource,
-    deterministic_skip_llm: true,
-    deterministic_customer_reply: deterministicReply,
+    orders: orderSummaries,
+    deterministic_skip_llm: false,
     ...orderDeterministicContractFields(),
     renderer,
-    note: `Phase25 deterministic multi n=${n}`,
+    note: `查單結果 n=${n}；請依 orders 與人格產生對客回覆（勿直接複製系統內部標籤）。`,
     formatted_list: orderSummaries.map((o) => `- **${o.order_id}** | ${o.payment_status_label}`).join("\n"),
-    one_page_full: orderSummaries
-      .map((s) =>
-        formatOrderOnePage({
-          order_id: s.order_id,
-          status: s.status,
-          amount: s.amount,
-          product_list: s.product_list,
-          buyer_name: s.buyer_name,
-          buyer_phone: s.buyer_phone,
-          created_at: s.created_at,
-          payment_status_label: s.payment_status_label,
-        })
-      )
-      .join("\n\n---\n\n"),
   };
 }

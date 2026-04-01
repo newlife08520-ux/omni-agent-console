@@ -24,7 +24,7 @@ export function runPhase29Verify(): void {
     "routes: 官網查無文案"
   );
   assert(routes.includes("查別筆") || routes.includes("\\u67e5\\u5225\\u7b46"), "routes: 切換訂單關鍵字");
-  assert(routes.includes("<ORDER_LOOKUP_RULES>"), "routes: ORDER_LOOKUP_RULES");
+  assert(!routes.includes("<ORDER_LOOKUP_RULES>"), "P0: ORDER_LOOKUP_RULES 已移除（改由 DB）");
 
   const sl = read("server/superlanding.ts");
   assert(sl.includes("byOrderId"), "superlanding: 多視窗合併 byOrderId");

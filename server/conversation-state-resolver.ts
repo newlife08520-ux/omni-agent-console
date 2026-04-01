@@ -96,6 +96,14 @@ const PRODUCT_ISSUE_PATTERNS = /瑕疵|損壞|錯貨|缺件|漏寄|壞掉|破損
 const REFUND_RETURN_PATTERNS = /退貨|退款|換貨|取消訂單|不想等|不要了|等太久|怎麼還沒|還沒收到|等很久|不要等/i;
 /** 單純問訂單／出貨進度（不帶強烈退貨意圖時）；供 handoff 第二句條件用（同一句有提到才可補訂單提示） */
 export const ORDER_LOOKUP_PATTERNS = /訂單|查單|出貨|物流|還沒到|單號|編號|什麼時候到|什麼時候到貨|什麼時候出貨|何時出貨|出貨進度|還沒寄|何時會到/i;
+
+/**
+ * 訂單追問相關關鍵字（出貨進度、物流、地址、付款狀態等）
+ * 供 reply-plan（ai-reply）、order-lookup-policy、order-fast-path 統一使用。
+ */
+export const ORDER_FOLLOWUP_PATTERNS =
+  /出貨|付款|寄到|地址|門市|全家|物流|單號|編號|追蹤|貨到|取件|配送|多久|預購|久等|怎麼還沒|沒收到|催|什麼時候|查詢|收到|付款成功|成功了嗎|待出貨|已出貨|物流單號|便利商店|哪間超商|寄到哪裡|哪間全家/i;
+
 /** 像訂單編號的格式：英數字+連字號 5 碼以上，可含空格（會先去除）。只要偵測到就應觸發查單。 */
 export function looksLikeOrderNumber(text: string): boolean {
   const normalized = (text || "").trim().replace(/\s+/g, "");

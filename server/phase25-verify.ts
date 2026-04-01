@@ -56,8 +56,13 @@ async function main() {
   assert(derivePaymentStatus(o1, "新訂單", "superlanding").kind === "pending", "cc unpaid pending");
   const o2: OrderInfo = { ...o1, global_order_id: "X2", status: "待出貨", payment_method: "virtual_account" };
   assert(derivePaymentStatus(o2, "待出貨", "superlanding").kind === "pending", "atm pending");
-  const o3: OrderInfo = { ...o1, global_order_id: "X3", status: "已取消" };
-  assert(derivePaymentStatus(o3, "已取消", "superlanding").kind === "failed", "cancel failed");
+  const o3: OrderInfo = {
+    ...o1,
+    global_order_id: "X3",
+    status: "已取消",
+    payment_status_raw: "cancelled",
+  };
+  assert(derivePaymentStatus(o3, "已取消", "superlanding").kind === "failed", "cancel failed via payment_status_raw");
   ok("payment truth v2 pending/failed");
 
   const d1: OrderInfo = {
@@ -80,16 +85,20 @@ async function main() {
     matchedBy: "text",
     renderer: "test",
   });
-  assert(pack.deterministic_skip_llm === true && typeof pack.deterministic_customer_reply === "string", "pack multi");
+  assert(
+    pack.deterministic_skip_llm === false && Array.isArray((pack as { orders?: unknown }).orders),
+    "pack multi (JSON for LLM)"
+  );
   ok("multi deterministic pack");
 
   const det = "訂單 A；貨到付款；狀態：待出貨。";
   assert(!deterministicReplyHasBannedPhrase(det), "no banned");
   ok("deterministic 無禁用句");
 
-  const routes = fs.readFileSync(path.join(__dirname, "routes.ts"), "utf8");
-  assert(routes.includes("prompt_profile=") && routes.includes("deterministic_skip_llm=true"), "log keywords");
-  assert(routes.includes("packDeterministicMultiOrderToolResult"), "routes uses pack");
+  const toolEx = fs.readFileSync(path.join(__dirname, "services/tool-executor.service.ts"), "utf8");
+  assert(toolEx.includes("deterministic_skip_llm: false"), "tool executor skips llm=false");
+  const coreRoutes = fs.readFileSync(path.join(__dirname, "routes", "core.routes.ts"), "utf8");
+  assert(coreRoutes.includes("packDeterministicMultiOrderToolResult"), "routes uses pack");
   ok("log 關鍵字存在");
 
   const pb = fs.readFileSync(path.join(__dirname, "services/prompt-builder.ts"), "utf8");

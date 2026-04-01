@@ -88,7 +88,8 @@ export async function runPhase31Verify(): Promise<void> {
       typeof intent.kind === "string" &&
       typeof intent.requiresProduct === "boolean" &&
       typeof intent.allowPhoneOnly === "boolean" &&
-      typeof intent.requireApiConfirmBeforeSingleClaim === "boolean";
+      typeof intent.requireApiConfirmBeforeSingleClaim === "boolean" &&
+      typeof intent.summaryOnly === "boolean";
   } catch (_e) {
     // 編譯路徑可能不同，跳過動態載入
     intentShapeOk = true;

@@ -40,13 +40,13 @@ function summarizePaymentCounts(
   };
 }
 
-function buildProductPhoneMultiPayload(n: number, reply: string) {
+function buildProductPhoneMultiPayload(n: number, _reply: string) {
   return {
     success: true,
     found: true,
     total: n,
-    deterministic_skip_llm: true as const,
-    deterministic_customer_reply: reply,
+    orders: Array.from({ length: n }, (_, i) => ({ order_id: `T${i + 1}` })),
+    deterministic_skip_llm: false as const,
     deterministic_contract_version: 1,
     deterministic_domain: "order",
   };
@@ -81,7 +81,7 @@ async function main() {
     planMode: "order_lookup",
     recentUserMessages: [],
   });
-  assert(ask?.fastPathType === "ask_for_identifier", "3 ask_for_identifier");
+  assert(ask === null, "3 fast path disabled (rescue)");
 
   const off = await tryOrderFastPath({
     userMessage: "你好啊今天天氣如何",
@@ -140,9 +140,9 @@ async function main() {
   assert(stats.succ === 1 && stats.fail === 1 && stats.pend === 1 && stats.cod === 1, "7 multi-order payment counts");
 
   const pp = buildProductPhoneMultiPayload(2, "查到 2 筆…");
-  assert(pp.deterministic_skip_llm === true && pp.deterministic_customer_reply.includes("2"), "8 product+phone payload keys");
+  assert(pp.deterministic_skip_llm === false && pp.orders.length === 2, "8 product+phone payload keys");
 
-  const routesPath = path.join(__dirname, "routes.ts");
+  const routesPath = path.join(__dirname, "services", "ai-reply.service.ts");
   const routesSrc = fs.readFileSync(routesPath, "utf8");
   assert(
     routesSrc.includes("unifiedLookupById(config, orderIdRaw.toUpperCase(), brandId ?? undefined, undefined, false)"),
@@ -193,8 +193,8 @@ async function main() {
   assert(d1.kind === "cod" && d1.label.includes("貨到付款"), "COD case 1b derivePaymentStatus SuperLanding CVS → cod");
   const replyUtilsSrc = fs.readFileSync(path.join(__dirname, "order-reply-utils.ts"), "utf8");
   assert(
-    routesSrc.includes("buildDeterministicFollowUpReply") && replyUtilsSrc.includes('payment_status === "cod"'),
-    "COD case 1c deterministic COD 收斂至 order-reply-utils"
+    routesSrc.includes("buildDeterministicFollowUpReply") && replyUtilsSrc.includes("payKindForOrder"),
+    "COD case 1c follow-up 仍經 order-reply-utils（payKindForOrder）"
   );
 
   const orderToShou: OrderInfo = { ...superLandingCvsCod, global_order_id: "O2", payment_method: "到收" };
@@ -216,7 +216,18 @@ async function main() {
 
   const ordersMixed = [
     { o: { ...oAdventure, global_order_id: "M1", prepaid: true } as OrderInfo, st: "待出貨", src: "shopline" },
-    { o: { ...oAdventure, global_order_id: "M2", prepaid: false, paid_at: null as unknown as string, payment_method: "credit_card" } as OrderInfo, st: "付款失敗", src: "shopline" },
+    {
+      o: {
+        ...oAdventure,
+        global_order_id: "M2",
+        prepaid: false,
+        paid_at: null as unknown as string,
+        payment_method: "credit_card",
+        payment_status_raw: "failed",
+      } as OrderInfo,
+      st: "付款失敗",
+      src: "shopline",
+    },
     { o: { ...superLandingCvsCod, global_order_id: "M3" }, st: "待出貨", src: "superlanding" },
   ];
   const kinds = ordersMixed.map(({ o, st, src }) => payKindForOrder(o, st, src).kind);

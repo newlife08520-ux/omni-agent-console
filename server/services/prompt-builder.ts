@@ -5,16 +5,8 @@
  * - 流程：查單條件、轉人工高層原則、非服務時段（由總 builder 組裝，並做 runtime 去重）
  */
 import { storage } from "../storage";
-import {
-  buildOrderLookupUltraLitePrompt as ultraLookup,
-  buildOrderFollowupUltraLitePrompt as ultraFollowup,
-  getBrandReplyMeta as getBrandReplyMetaFromUltra,
-} from "../prompts/order-ultra-lite";
-import { orderFeatureFlags } from "../order-feature-flags";
 import * as assignment from "../assignment";
 import { getSuperLandingConfig, ensurePagesCacheLoaded, buildProductCatalogPrompt } from "../superlanding";
-import type { SuperLandingConfig } from "../superlanding";
-
 const IMAGE_PRECISION_COT_BLOCK = `
 
 --- 圖片辨識與回覆規範 ---
@@ -191,28 +183,38 @@ export interface EnrichedPromptResult {
   };
 }
 
-export function getBrandReplyMeta(brandId?: number) {
-  return getBrandReplyMetaFromUltra(brandId);
+export function getBrandReplyMeta(brandId?: number): {
+  salutationStyle: string;
+  emojiPolicy: "minimal" | "allow";
+  forbiddenPhrases: string[];
+  terseOrderMode: boolean;
+} {
+  if (!brandId) {
+    return { salutationStyle: "您好", emojiPolicy: "minimal", forbiddenPhrases: [], terseOrderMode: true };
+  }
+  const brand = storage.getBrand(brandId);
+  const sp = (brand?.system_prompt || "").trim();
+  const noEmoji = /勿用\s*emoji|不用\s*emoji|避免\s*emoji|少用\s*emoji/i.test(sp);
+  return {
+    salutationStyle: /親愛的/.test(sp) ? "親愛的顧客" : "您好",
+    emojiPolicy: noEmoji ? "minimal" : "allow",
+    forbiddenPhrases: [],
+    terseOrderMode: true,
+  };
 }
 
-/** Phase 2.7：獨立 ultra 模組；flag 關閉時回退 slice */
+/** @deprecated 保留相容 API；Minimal Safe Mode 下改為與完整 DB system_prompt 同源之濃縮片段 */
 export function buildOrderLookupUltraLitePrompt(brandId?: number): string {
-  if (!orderFeatureFlags.orderUltraLitePrompt) {
-    const g = buildGlobalPolicyPrompt().slice(0, 1600);
-    const b = buildBrandPersonaPrompt(brandId).slice(0, 500);
-    return `${g}\n${b}\n\n--- 查單 legacy ---\n依工具結果簡答，勿捏造。`;
-  }
-  return ultraLookup(brandId);
+  const g = buildGlobalPolicyPrompt().slice(0, 1600);
+  const b = buildBrandPersonaPrompt(brandId).slice(0, 500);
+  return `${g}\n${b}\n\n--- 查單 ---\n依工具結果簡答，勿捏造；勿對客戶唸內部欄位或英文代碼。`;
 }
 
 export function buildOrderFollowupUltraLitePrompt(brandId?: number): string {
-  if (!orderFeatureFlags.orderUltraLitePrompt) {
-    return `${buildGlobalPolicyPrompt().slice(0, 800)}\n訂單追問：簡短依上下文。`;
-  }
-  return ultraFollowup(brandId);
+  return `${buildGlobalPolicyPrompt().slice(0, 800)}\n${buildBrandPersonaPrompt(brandId).slice(0, 400)}\n訂單追問：依上下文與工具，簡潔誠實。`;
 }
 
-/** @deprecated 保留相容；實際等同 ultra-lite */
+/** @deprecated 保留相容 */
 export function buildOrderLookupLitePrompt(brandId?: number): string {
   return buildOrderLookupUltraLitePrompt(brandId);
 }
@@ -229,10 +231,10 @@ export async function assembleEnrichedSystemPrompt(
   brandId?: number,
   context?: EnrichedPromptContext
 ): Promise<EnrichedPromptResult> {
-  const mode = context?.planMode || "";
-  const isOrderLookup = mode === "order_lookup";
-  const useFollowupLite = isOrderLookup && context?.hasActiveOrderContext;
   const useImageFull = !!context?.recentUserHasImage;
+  /** Phase 1.5：查單／追問專用 prompt 瘦身，略過型錄與購物流程區塊。 */
+  const plan = context?.planMode || "";
+  const orderLookupDiet = plan === "order_lookup" || plan === "order_followup";
 
   let prompt_profile: string;
   let full_prompt: string;
@@ -242,13 +244,15 @@ export async function assembleEnrichedSystemPrompt(
     prompt_profile = "image_lookup_full";
     const globalBlock = buildGlobalPolicyPrompt();
     const brandBlock = buildBrandPersonaPrompt(brandId);
-    const humanHoursBlock = buildHumanHoursPrompt();
-    const flowBlock = buildFlowPrinciplesPrompt({
-      returnFormUrl: brandId ? storage.getBrand(brandId)?.return_form_url || undefined : undefined,
-      productScope: context?.productScope,
-    });
-    const catalogBlock = await buildCatalogPrompt(brandId);
-    const knowledgeBlock = buildKnowledgePrompt(brandId);
+    const humanHoursBlock = orderLookupDiet ? "" : buildHumanHoursPrompt();
+    const flowBlock = orderLookupDiet
+      ? ""
+      : buildFlowPrinciplesPrompt({
+          returnFormUrl: brandId ? storage.getBrand(brandId)?.return_form_url || undefined : undefined,
+          productScope: context?.productScope,
+        });
+    const catalogBlock = orderLookupDiet ? "" : await buildCatalogPrompt(brandId);
+    const knowledgeBlock = orderLookupDiet ? "" : buildKnowledgePrompt(brandId);
     const imageBlock = buildImagePrompt(brandId);
     const raw =
       globalBlock + brandBlock + humanHoursBlock + flowBlock + catalogBlock + knowledgeBlock + imageBlock;
@@ -262,45 +266,20 @@ export async function assembleEnrichedSystemPrompt(
       knowledge: full_prompt.includes("--- KNOWLEDGE ---"),
       image: full_prompt.includes("--- IMAGE ---"),
     };
-  } else if (useFollowupLite) {
-    prompt_profile = orderFeatureFlags.orderUltraLitePrompt
-      ? "order_followup_ultra_lite"
-      : "order_followup_legacy_slice";
-    full_prompt = normalizeSections(buildOrderFollowupUltraLitePrompt(brandId));
-    includes = {
-      global_policy: true,
-      brand_persona: full_prompt.length > 100,
-      human_hours: false,
-      flow_principles: false,
-      catalog: false,
-      knowledge: false,
-      image: false,
-    };
-  } else if (isOrderLookup) {
-    prompt_profile = orderFeatureFlags.orderUltraLitePrompt
-      ? "order_lookup_ultra_lite"
-      : "order_lookup_legacy_slice";
-    full_prompt = normalizeSections(buildOrderLookupUltraLitePrompt(brandId));
-    includes = {
-      global_policy: true,
-      brand_persona: true,
-      human_hours: false,
-      flow_principles: false,
-      catalog: false,
-      knowledge: false,
-      image: false,
-    };
   } else {
-    prompt_profile = "answer_directly_full";
+    /** order_lookup／order_followup：極致瘦身（無 catalog／flow／knowledge／human_hours）。 */
+    prompt_profile = orderLookupDiet ? "order_lookup_prompt_diet" : "answer_directly_full";
     const globalBlock = buildGlobalPolicyPrompt();
     const brandBlock = buildBrandPersonaPrompt(brandId);
-    const humanHoursBlock = buildHumanHoursPrompt();
-    const flowBlock = buildFlowPrinciplesPrompt({
-      returnFormUrl: brandId ? storage.getBrand(brandId)?.return_form_url || undefined : undefined,
-      productScope: context?.productScope,
-    });
-    const catalogBlock = await buildCatalogPrompt(brandId);
-    const knowledgeBlock = buildKnowledgePrompt(brandId);
+    const humanHoursBlock = orderLookupDiet ? "" : buildHumanHoursPrompt();
+    const flowBlock = orderLookupDiet
+      ? ""
+      : buildFlowPrinciplesPrompt({
+          returnFormUrl: brandId ? storage.getBrand(brandId)?.return_form_url || undefined : undefined,
+          productScope: context?.productScope,
+        });
+    const catalogBlock = orderLookupDiet ? "" : await buildCatalogPrompt(brandId);
+    const knowledgeBlock = orderLookupDiet ? "" : buildKnowledgePrompt(brandId);
     const imageBlock = buildImagePrompt(brandId);
     const raw =
       globalBlock +

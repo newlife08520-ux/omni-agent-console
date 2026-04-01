@@ -64,3 +64,46 @@ export function buildActiveOrderContextFromOrder(
     source_channel_hint: order.source === "superlanding" ? "superlanding" : order.source === "shopline" ? "shopline" : undefined,
   };
 }
+
+/**
+ * R1：local_only 單筆僅「候選」— 不寫入完整收件／地址／追蹤，避免後續追問讀起來像已鎖定真相。
+ * 付款狀態仍走 derivePaymentStatus，供 COD／失敗等話術一致。
+ */
+export function buildProvisionalLocalOnlyActiveContextFromOrder(
+  order: OrderInfo,
+  source: string,
+  statusLabel: string,
+  candidateSummaryForAi: string,
+  matchedBy: ActiveOrderContext["matched_by"]
+): ActiveOrderContext {
+  const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+  const payment = derivePaymentStatus(order, statusLabel, source);
+  return {
+    order_id: order.global_order_id,
+    matched_by: matchedBy,
+    matched_confidence: "low",
+    last_fetched_at: now,
+    payment_status: payment.kind,
+    payment_method: order.payment_method,
+    fulfillment_status: undefined,
+    shipping_method: undefined,
+    tracking_no: undefined,
+    receiver_name: undefined,
+    receiver_phone: undefined,
+    address_or_store: undefined,
+    items: undefined,
+    order_time: order.created_at || order.order_created_at,
+    one_page_summary: candidateSummaryForAi,
+    source: order.source || (source as ActiveOrderContext["source"]),
+    page_id: order.page_id,
+    page_title: order.page_title,
+    delivery_target_type: undefined,
+    cvs_brand: undefined,
+    cvs_store_code: undefined,
+    cvs_store_name: undefined,
+    full_address: undefined,
+    address_raw: undefined,
+    source_channel_hint: order.source === "superlanding" ? "superlanding" : order.source === "shopline" ? "shopline" : undefined,
+    lookup_provisional: true,
+  };
+}

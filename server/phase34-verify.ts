@@ -7,12 +7,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { detectLookupSourceIntent, deriveOrderLookupIntent } from "./order-lookup-policy";
 import { derivePaymentStatus } from "./order-payment-utils";
-import {
-  buildDeterministicFollowUpReply,
-  deterministicReplyHasBannedPhrase,
-  displayPaymentMethod,
-  displayShippingMethod,
-} from "./order-reply-utils";
+import { buildDeterministicFollowUpReply, displayPaymentMethod, displayShippingMethod } from "./order-reply-utils";
 import { extractLongNumericOrderIdFromMixedSentence } from "./order-fast-path";
 import { deriveSuperlandingPaymentStatusRaw } from "./superlanding";
 import type { ActiveOrderContext } from "@shared/schema";
@@ -32,16 +27,13 @@ function main() {
 
   console.log("[phase34-verify] 開始…");
 
-  /** 34-1：來源意圖僅繼承「上一則」recent，不讀更舊的官網句 */
+  /** 34-1／P0：純手機不繼承；僅當前句含官網才為 shopline */
   assert(
     detectLookupSourceIntent("0912345678", ["官網買的", "好的收到"]) === "unknown",
     "phone-only still unknown (no inherit)"
   );
-  assert(
-    detectLookupSourceIntent("查訂單", ["舊的無關句", "官網買的"]) === "shopline",
-    "last recent only: shopline"
-  );
-  ok("34-1 lookup source TTL (slice -1)");
+  assert(detectLookupSourceIntent("官網買的查一下", []) === "shopline", "shopline from current message only");
+  ok("34-1 lookup source current-message only");
 
   /** 34-2：長數字單號＋意圖 */
   const longId = "1234567890123456789";
@@ -53,33 +45,30 @@ function main() {
     extractLongNumericOrderIdFromMixedSentence("團購單 9876543210987654321 幫忙看") === "9876543210987654321",
     "mixed with 團購 keyword"
   );
-  const fastPathSrc = fs.readFileSync(path.join(__dirname, "order-fast-path.ts"), "utf8");
-  assert(fastPathSrc.includes("preferSourceForOrderIdLookup"), "preferSourceForOrderIdLookup present");
-  assert(fastPathSrc.includes("return \"shopline\""), "default shopline for long numeric");
-  ok("34-2 Shopline long numeric order id");
-
-  /** 34-3：local_only 單筆不得「幫您查到了」定案（fast path 原始碼守門） */
+  const toolExecutorSrc = fs.readFileSync(path.join(__dirname, "services", "tool-executor.service.ts"), "utf8");
   assert(
-    fastPathSrc.includes("isLocalOnlySingle") && fastPathSrc.includes("目前從已同步資料先看到"),
-    "local_only single uses conservative wording"
+    toolExecutorSrc.includes("finalizeLlmToolJsonString") && toolExecutorSrc.includes("toolJson"),
+    "tool-executor: LLM JSON sanitize (toolJson + finalize)"
+  );
+  ok("34-2 long numeric order id + tool sanitize hook");
+
+  /** 34-3：純手機 summary_only + local_only 候選摘要（Minimal Safe Mode） */
+  assert(
+    toolExecutorSrc.includes("orderLookupSummaryOnly") && toolExecutorSrc.includes("summary_only"),
+    "tool-executor: phone summary-only lock"
+  );
+  assert(
+    toolExecutorSrc.includes("singleDeterministicBody") && toolExecutorSrc.includes("formatLocalOnlyCandidateSummary"),
+    "tool-executor: local_only 候選摘要與定案分離"
   );
   const routesSrc = fs.readFileSync(path.join(__dirname, "routes.ts"), "utf8");
-  assert(routesSrc.includes("不可寫成「幫您查到了」"), "ORDER_LOOKUP_RULES 幫您查到了 guard");
+  const aiReplySrc = fs.readFileSync(path.join(__dirname, "services", "ai-reply.service.ts"), "utf8");
+  assert(!routesSrc.includes("<ORDER_LOOKUP_RULES>"), "P0: 已移除硬編碼 ORDER_LOOKUP_RULES");
   assert(
-    routesSrc.includes("local_only") && routesSrc.includes("不可單筆定案"),
-    "ORDER_LOOKUP_RULES local_only"
+    aiReplySrc.includes("planAllowsActiveOrderDeterministic") && /return\s+false/.test(aiReplySrc),
+    "ai-reply: deterministic active-order shortcut disabled"
   );
-  assert(
-    routesSrc.includes("singleDeterministicBody") && routesSrc.includes("formatLocalOnlyCandidateSummary"),
-    "routes: local_only 候選摘要與定案分離"
-  );
-  assert(
-    routesSrc.includes("planAllowsActiveOrderDeterministic") &&
-      routesSrc.includes("aftersales_comfort_first") &&
-      routesSrc.includes("order_followup"),
-    "routes: 品牌 delay 短路模式擴充"
-  );
-  ok("34-3 local_only single no false finality");
+  ok("34-3 local_only + phone summary lock + deterministic off");
 
   assert(!/\bpending\b/i.test(displayPaymentMethod("pending")), "displayPaymentMethod 不輸出 pending");
   assert(!/\bto_store\b/i.test(displayShippingMethod("to_store")), "displayShippingMethod 不輸出 to_store");
@@ -91,13 +80,19 @@ function main() {
   } as Record<string, unknown>);
   assert(!!slRaw && /失敗|error/i.test(slRaw), "SuperLanding raw 取自 system_note 等，非僅 payment_method");
   const orderSvc = fs.readFileSync(path.join(__dirname, "order-service.ts"), "utf8");
-  assert(orderSvc.includes("longNumericShoplineOnly") && orderSvc.includes("15,22"), "unifiedLookupById 長數字 shopline-only");
-  const fpSrc = fs.readFileSync(path.join(__dirname, "order-fast-path.ts"), "utf8");
+  const policySrc = fs.readFileSync(path.join(__dirname, "order-lookup-policy.ts"), "utf8");
+  assert(policySrc.includes("15,22"), "order-lookup-policy: 長純數字單號 \\d{15,22}");
+  assert(policySrc.includes("summaryOnly"), "order-lookup-policy: summaryOnly 欄位");
   assert(
-    fpSrc.includes("aftersales_comfort_first") && fpSrc.includes("order_followup"),
-    "fast path 品牌追問模式擴充（含 order_followup）"
+    orderSvc.includes("unifiedLookupById") && orderSvc.includes("R1-1／R1-3"),
+    "order-service: unifiedLookupById + 官網不回落一頁（R1）"
   );
-  ok("34-audit: humanize + SL raw + shopline-only + deterministic modes");
+  const sanitizeMod = fs.readFileSync(path.join(__dirname, "tool-llm-sanitize.ts"), "utf8");
+  assert(
+    sanitizeMod.includes("payment_status_raw") === false && sanitizeMod.includes("stripRawAndGateway"),
+    "tool-llm-sanitize: strip raw keys helper present"
+  );
+  ok("34-audit: humanize + SL raw + shopline-only + policy summaryOnly");
 
   /** 34-4：付款失敗對客標籤＋關鍵字 */
   const payUtil = fs.readFileSync(path.join(__dirname, "order-payment-utils.ts"), "utf8");
@@ -131,7 +126,7 @@ function main() {
   );
   ok("34-4 payment failed label + signals");
 
-  /** 34-5：久候品牌模板＋禁用句型 */
+  /** 34-5／P0：確定性追問已關閉 */
   const ctxDelay: ActiveOrderContext = {
     order_id: "T1",
     matched_by: "text",
@@ -143,18 +138,14 @@ function main() {
     cvs_store_name: "測試店",
     full_address: "",
   };
-  const delayReply = buildDeterministicFollowUpReply(ctxDelay, "什麼時候會出貨");
-  assert(!!delayReply && delayReply.includes("5 個工作天") && delayReply.includes("7–20 個工作天"), "brand delay");
-  assert(!deterministicReplyHasBannedPhrase(delayReply!), "no phase24 banned in delay reply");
+  assert(buildDeterministicFollowUpReply(ctxDelay, "什麼時候會出貨") === null, "P0 follow-up null");
   const ctxCod: ActiveOrderContext = {
     ...ctxDelay,
     payment_status: "cod",
     fulfillment_status: "待出貨",
   };
-  const codDet = buildDeterministicFollowUpReply(ctxCod, "出貨了嗎");
-  assert(!!codDet && codDet.includes("貨到付款") && codDet.includes("不是付款失敗"), "cod wording");
-  assert(!deterministicReplyHasBannedPhrase(codDet!), "cod no banned");
-  ok("34-5 brand delay + COD deterministic");
+  assert(buildDeterministicFollowUpReply(ctxCod, "出貨了嗎") === null, "P0 COD follow-up null");
+  ok("34-5 deterministic follow-up disabled (LLM)");
 
   /** 人格檔入庫 */
   const personaDir = path.join(__dirname, "..", "docs", "persona");

@@ -182,8 +182,8 @@ export async function unifiedLookupById(
     const shop = await runShopline();
     if (shop?.found) result = shop;
     else {
-      /** R1-1／R1-3：客戶明講官網時僅走 Shopline 路徑，禁止回落一頁以免混單或假裝官網結果 */
-      result = { orders: [], source: "unknown", found: false };
+      /** R1-1／R1-3：官網查無不回退一頁；source 標 shopline 以利隔離 */
+      result = { orders: [], source: "shopline", found: false };
     }
   } else {
     const sl = await runSuperlanding();
@@ -303,7 +303,7 @@ export async function unifiedLookupByProductAndPhone(
     const shop = await runShopline();
     if (shop?.found) return shop;
     /** R1-1：官網（商品+手機）不回落一頁 */
-    return { orders: [], source: "unknown", found: false };
+    return { orders: [], source: "shopline", found: false };
   }
   const sl = await runSuperlanding();
   if (sl?.found) return sl;
@@ -389,7 +389,7 @@ export async function unifiedLookupByDateAndContact(
     const shop = await runShopline();
     if (shop?.found) return shop;
     /** R1-1：官網日期／聯絡查詢不回落一頁 */
-    return { orders: [], source: "unknown", found: false };
+    return { orders: [], source: "shopline", found: false };
   }
   const sl = await runSuperlanding();
   if (sl?.found) return sl;
@@ -527,7 +527,7 @@ export async function unifiedLookupByPhoneGlobal(
   let result: UnifiedOrderResult;
   if (shoplineOnly) {
     const shop = await runShopline();
-    result = shop ?? { orders: [], source: "unknown", found: false };
+    result = shop ?? { orders: [], source: "shopline", found: false };
   } else if (superlandingOnly) {
     const sl = await runSuperlanding();
     result = sl ?? { orders: [], source: "unknown", found: false };

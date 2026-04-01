@@ -9,7 +9,7 @@ import { execSync } from "child_process";
 import { isValidOrderDeterministicPayload } from "./deterministic-order-contract";
 import { orderFeatureFlags } from "./order-feature-flags";
 import { assembleEnrichedSystemPrompt } from "./services/prompt-builder";
-import { packDeterministicSingleOrderToolResult, buildSingleOrderCustomerReply } from "./order-single-renderer";
+import { packDeterministicSingleOrderToolResult } from "./order-single-renderer";
 import { ORDER_ULTRA_LITE_VERSION } from "./prompts/order-ultra-lite";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -23,14 +23,14 @@ async function main() {
   const ok = (s: string) => console.log(`  OK ${++n}. ${s}`);
 
   const apiSingle = packDeterministicSingleOrderToolResult({
-    deterministic_customer_reply: buildSingleOrderCustomerReply("商品＋手機（API）", "訂單#API1"),
     renderer: "deterministic_single_product_phone_api",
     one_page_summary: "訂單#API1",
     source: "superlanding",
   });
   assert(apiSingle.renderer === "deterministic_single_product_phone_api", "api single renderer");
-  assert(isValidOrderDeterministicPayload(apiSingle as Record<string, unknown>), "api single contract");
-  ok("product+phone API 單筆 deterministic");
+  assert(apiSingle.deterministic_skip_llm === false, "api single does not skip llm");
+  assert(!isValidOrderDeterministicPayload(apiSingle as Record<string, unknown>), "api single not deterministic-skip contract");
+  ok("product+phone API 單筆 tool payload");
 
   assert(!isValidOrderDeterministicPayload({ deterministic_skip_llm: true, deterministic_customer_reply: "x" }), "no version");
   assert(
@@ -44,7 +44,9 @@ async function main() {
   );
   ok("generic deterministic 需 version=1 + domain=order");
 
-  const routes = fs.readFileSync(path.join(__dirname, "routes.ts"), "utf8");
+  const aiReplySrc = fs.readFileSync(path.join(__dirname, "services", "ai-reply.service.ts"), "utf8");
+  const coreRoutesSrc = fs.readFileSync(path.join(__dirname, "routes", "core.routes.ts"), "utf8");
+  const routes = `${aiReplySrc}\n${coreRoutesSrc}`;
   assert(routes.includes("isValidOrderDeterministicPayload"), "routes contract check");
   assert(routes.includes("orderFeatureFlags.orderFastPath") && routes.includes("orderFinalNormalizer"), "fast path flags+norm");
   assert(routes.includes("final_normalizer_changed=") && routes.includes("fpEarly"), "fast path normalizer log");

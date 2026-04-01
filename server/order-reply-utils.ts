@@ -213,78 +213,10 @@ export function deterministicReplyHasBannedPhrase(text: string): string | null {
   return null;
 }
 
-function isDelayFulfillmentStatus(status: string | undefined): boolean {
-  if (!status) return true;
-  return /待出貨|新訂單|確認中|備貨|處理中|尚未出貨|排程|awaiting|confirming/i.test(status);
-}
+/** P0：久候模板已停用；若需話術請改由 DB／LLM */
+export const BRAND_DELAY_SHIPPING_TEMPLATE = "";
 
-/** Phase 34-5／R1-5：品牌久候／預購話術（單一模板；不對客播報 pending／to_store／待出貨 等後台口吻） */
-export const BRAND_DELAY_SHIPPING_TEMPLATE =
-  "真的很不好意思讓您久等了🥺 這邊先跟您說聲抱歉。我們這邊出貨多為排單／預購型安排：若有現貨可排，會盡量在 5 個工作天內幫您處理；若屬預購或補貨批次，常見約 7–20 個工作天。這邊先不想亂跟您保證確切日期，但我先幫您催促加急、盡快確認最新安排。";
-
-/** Active order 追問：COD 不誤導付款失敗；久候／出貨追問套用品牌話術（見 docs/persona） */
-export function buildDeterministicFollowUpReply(ctx: ActiveOrderContext, userMessage?: string): string | null {
-  if (!ctx?.order_id) return null;
-  const msg = (userMessage || "").trim();
-  const delayAsk =
-    msg &&
-    /什麼時候|多久|還沒|預購|缺貨|久等|出貨|寄出|到了嗎|怎麼還沒|沒收到貨|催/i.test(msg);
-  const needsBrandDelay =
-    delayAsk &&
-    isDelayFulfillmentStatus(ctx.fulfillment_status) &&
-    !ctx.tracking_no?.trim();
-
-  const parts: string[] = [`訂單 ${ctx.order_id}`];
-  if (ctx.payment_status && ctx.payment_status !== "unknown") {
-    const paymentText =
-      ctx.payment_status === "cod"
-        ? "此筆為貨到付款（到收／取件時付款），不是付款失敗，取件時再付即可"
-        : ctx.payment_status === "success"
-          ? "已付款完成"
-          : ctx.payment_status === "failed"
-            ? "這筆線上款項未完成／未成立，若要繼續可重新下單或跟我說要查別筆"
-            : "付款還在確認中";
-    parts.push(paymentText);
-  }
-  /** R1-5：久候模板路徑不逐字唸後台狀態（待出貨等），改由上方品牌話術統一說明 */
-  if (ctx.fulfillment_status && !needsBrandDelay) parts.push(`目前狀態：${ctx.fulfillment_status}`);
-  if (ctx.delivery_target_type === "cvs") {
-    const storeBits = [ctx.cvs_brand, ctx.cvs_store_name].filter(Boolean).join(" ").trim();
-    const addr = (ctx.full_address || "").trim();
-    if (storeBits || addr) {
-      parts.push(
-        storeBits
-          ? `取貨門市：${storeBits}${addr ? `（${addr}）` : ""}`
-          : `取貨地址：${addr}`
-      );
-    }
-  } else if (ctx.full_address?.trim() || ctx.address_or_store?.trim()) {
-    parts.push(`寄送地址：${(ctx.full_address || ctx.address_or_store || "").trim()}`);
-  }
-  if (ctx.tracking_no?.trim()) {
-    parts.push(`物流單號 ${ctx.tracking_no.trim()}，可到物流公司網站查進度`);
-  } else if (ctx.shipping_method?.trim() && ctx.delivery_target_type !== "cvs") {
-    parts.push(`配送方式：${displayShippingMethod(ctx.shipping_method)}`);
-  }
-  const body = parts.length > 1 ? parts.join("；") + "。" : null;
-  if (!body) return null;
-
-  /** 已出貨有單號時追問「何時收到」：先道歉＋物流說明，不使用 5–20 工作天預購模板 */
-  const receiptAsk =
-    msg &&
-    /什麼時候收到|何時收到|多久到貨|什麼時候到貨|什麼時候會到|還沒收到|沒收到貨/i.test(msg);
-  if (receiptAsk && ctx.tracking_no?.trim()) {
-    const intro =
-      "了解您關心包裹何時會到，先跟您說聲不好意思讓您久候🙏 建議您先用上方物流單號到物流公司官網查最新配送進度；若顯示已送達您仍未收到，再跟我說我幫您反映。";
-    return `${intro}\n\n${body}`;
-  }
-
-  if (needsBrandDelay) {
-    const cvsNote =
-      ctx.delivery_target_type === "cvs"
-        ? " 出貨後系統才會更新物流／到店進度，到時也會比較清楚。"
-        : "";
-    return `${BRAND_DELAY_SHIPPING_TEMPLATE}${cvsNote}\n\n${body}`;
-  }
-  return body;
+/** P0 Minimal Safe Mode：不組確定性追問句，交還 LLM */
+export function buildDeterministicFollowUpReply(_ctx: ActiveOrderContext, _userMessage?: string): string | null {
+  return null;
 }

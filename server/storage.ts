@@ -137,6 +137,7 @@ export interface IStorage {
   getAssignmentHistory(contactId: number): AssignmentRecord[];
   createAssignmentRecord(contactId: number, assignedToAgentId: number, assignedByAgentId: number | null, reassignedFromAgentId: number | null, note: string | null): AssignmentRecord;
   updateContactAssignment(contactId: number, assignedAgentId: number | null, firstAssignedAt?: string): void;
+  updateContactNeedsAssignment(contactId: number, value: number): void;
   getOpenCasesCountForAgent(agentId: number): number;
   /** 主管戰情：僅用 COUNT 查詢，不載入全表。用於 /api/manager-stats。 */
   getManagerStatsCounts(brandId?: number): { today_new: number; unassigned: number; closed_today: number; overdue: number; urgent_simple: number; vip_unhandled: number };
@@ -659,29 +660,30 @@ export class SQLiteStorage implements IStorage {
   }
 
   getOrCreateContact(platform: string, platformUserId: string, displayName: string, brandId?: number, channelId?: number): Contact {
+    const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+    db.prepare(
+      "INSERT OR IGNORE INTO contacts (platform, platform_user_id, display_name, needs_human, is_pinned, status, tags, vip_level, order_count, total_spent, brand_id, channel_id, created_at) VALUES (?, ?, ?, 0, 0, 'pending', '[]', 0, 0, 0, ?, ?, ?)"
+    ).run(platform, platformUserId, displayName, brandId ?? null, channelId ?? null, now);
     let contact = db.prepare("SELECT * FROM contacts WHERE platform = ? AND platform_user_id = ?").get(platform, platformUserId) as Contact | undefined;
     if (!contact) {
-      const now = new Date().toISOString().replace("T", " ").substring(0, 19);
-      const result = db.prepare("INSERT INTO contacts (platform, platform_user_id, display_name, needs_human, is_pinned, status, tags, vip_level, order_count, total_spent, brand_id, channel_id, created_at) VALUES (?, ?, ?, 0, 0, 'pending', '[]', 0, 0, 0, ?, ?, ?)").run(platform, platformUserId, displayName, brandId || null, channelId || null, now);
-      contact = { id: Number(result.lastInsertRowid), platform, platform_user_id: platformUserId, display_name: displayName, avatar_url: null, needs_human: 0, is_pinned: 0, status: "pending", tags: "[]", vip_level: 0, order_count: 0, total_spent: 0, cs_rating: null, ai_rating: null, last_message_at: null, created_at: now, brand_id: brandId || null, channel_id: channelId || null, issue_type: null, order_source: null, assigned_agent_id: null, intent_level: null, order_number_type: null, first_assigned_at: null, closed_at: null, closed_by_agent_id: null, case_priority: null, assigned_at: null, last_human_reply_at: null, reassign_count: null, assignment_status: null, assignment_method: null, needs_assignment: null, assignment_reason: null, response_sla_deadline_at: null };
-    } else {
-      // 每次有帶入 brand/channel（例如 Webhook 匹配到渠道）就更新，讓「這則訊息從哪個渠道來」為準，避免錯歸一次就永遠錯
-      let needsUpdate = false;
-      let newBrandId = contact.brand_id;
-      let newChannelId = contact.channel_id;
-      if (brandId != null && contact.brand_id !== brandId) {
-        newBrandId = brandId;
-        needsUpdate = true;
-      }
-      if (channelId != null && contact.channel_id !== channelId) {
-        newChannelId = channelId;
-        needsUpdate = true;
-      }
-      if (needsUpdate) {
-        db.prepare("UPDATE contacts SET brand_id = ?, channel_id = ? WHERE id = ?").run(newBrandId ?? null, newChannelId ?? null, contact.id);
-        contact.brand_id = newBrandId ?? null;
-        contact.channel_id = newChannelId ?? null;
-      }
+      throw new Error(`getOrCreateContact: row missing after INSERT OR IGNORE for ${platform}/${platformUserId}`);
+    }
+    // 每次有帶入 brand/channel（例如 Webhook 匹配到渠道）就更新，讓「這則訊息從哪個渠道來」為準，避免錯歸一次就永遠錯
+    let needsUpdate = false;
+    let newBrandId = contact.brand_id;
+    let newChannelId = contact.channel_id;
+    if (brandId != null && contact.brand_id !== brandId) {
+      newBrandId = brandId;
+      needsUpdate = true;
+    }
+    if (channelId != null && contact.channel_id !== channelId) {
+      newChannelId = channelId;
+      needsUpdate = true;
+    }
+    if (needsUpdate) {
+      db.prepare("UPDATE contacts SET brand_id = ?, channel_id = ? WHERE id = ?").run(newBrandId ?? null, newChannelId ?? null, contact.id);
+      contact.brand_id = newBrandId ?? null;
+      contact.channel_id = newChannelId ?? null;
     }
     return contact as Contact;
   }
@@ -903,7 +905,8 @@ export class SQLiteStorage implements IStorage {
     lookup_ack_sent_ms?: number | null;
     queue_wait_ms?: number | null;
   }): AiLog {
-    const result = db.prepare(`
+    try {
+      const result = db.prepare(`
       INSERT INTO ai_logs (contact_id, message_id, brand_id, prompt_summary, knowledge_hits, tools_called, transfer_triggered, transfer_reason, result_summary, token_usage, model, response_time_ms, reply_source, used_llm, plan_mode, reason_if_bypassed, used_first_llm, used_second_llm, reply_renderer, prompt_profile, first_customer_visible_reply_ms, lookup_ack_sent_ms, queue_wait_ms)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
@@ -931,7 +934,11 @@ export class SQLiteStorage implements IStorage {
       data.lookup_ack_sent_ms ?? null,
       data.queue_wait_ms ?? null
     );
-    return db.prepare("SELECT * FROM ai_logs WHERE id = ?").get(Number(result.lastInsertRowid)) as AiLog;
+      return db.prepare("SELECT * FROM ai_logs WHERE id = ?").get(Number(result.lastInsertRowid)) as AiLog;
+    } catch (e) {
+      console.error("[storage] createAiLog failed:", (e as Error)?.message || e);
+      throw e;
+    }
   }
 
   getAiLogs(contactId: number): AiLog[] {

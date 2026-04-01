@@ -11,6 +11,7 @@ import { isLinkRequestMessage, isLinkRequestCorrectionMessage } from "../convers
 import { shouldEscalateImageSupplement } from "../safe-after-sale-classifier";
 import { applyHandoff } from "../services/handoff";
 import { resolveOpenAIModel } from "../openai-model";
+import { acquireLineWebhookEvent } from "../webhook-idempotency";
 
 const GHOST_REPLY_TOKEN = "00000000000000000000000000000000";
 const GHOST_USER_ID = "Udeadbeefdeadbeefdeadbeefdeadbeef";
@@ -27,11 +28,6 @@ export interface LineWebhookDeps {
     channelAccessToken?: string | null,
     channelIdForLog?: number | null
   ) => Promise<string | null>;
-  debounceTextMessage: (
-    contactId: number,
-    text: string,
-    processCallback: (mergedText: string) => void | Promise<void>
-  ) => void;
   addAiReplyJob: (data: {
     contactId: number;
     message: string;
@@ -39,7 +35,7 @@ export interface LineWebhookDeps {
     matchedBrandId?: number;
     platform?: string;
   }) => Promise<unknown>;
-  enqueueDebouncedAiReply?: (
+  enqueueDebouncedAiReply: (
     platform: string,
     contactId: number,
     message: string,
@@ -64,7 +60,7 @@ export interface LineWebhookDeps {
 }
 
 /**
- * 處理 LINE Webhook POST：驗簽 → 200 OK → 非同步處理 events。
+ * 處理 LINE Webhook POST：驗簽 → 事件入列／寫入完成後回 200；處理失敗回 500 讓 LINE 重試。
  * 商業邏輯與原 routes.ts 內 app.post("/api/webhook/line") 完全一致。
  */
 export async function handleLineWebhook(req: Request, res: Response, deps: LineWebhookDeps): Promise<void> {
@@ -74,7 +70,6 @@ export async function handleLineWebhook(req: Request, res: Response, deps: LineW
     pushLineMessage,
     replyToLine,
     downloadLineContent,
-    debounceTextMessage,
     addAiReplyJob,
     enqueueDebouncedAiReply,
     autoReplyWithAI,
@@ -159,9 +154,6 @@ export async function handleLineWebhook(req: Request, res: Response, deps: LineW
       console.log("[WEBHOOK] Skipping signature check - no channel_secret configured");
     }
 
-    res.status(200).json({ success: true });
-    console.log("[WEBHOOK] Sent 200 OK to LINE (ACK < 2s), processing events async...");
-
     const humanKeywordsSetting = storage.getSetting("human_transfer_keywords");
     const HUMAN_KEYWORDS = humanKeywordsSetting
       ? humanKeywordsSetting.split(",").map((k) => k.trim()).filter(Boolean)
@@ -205,22 +197,26 @@ export async function handleLineWebhook(req: Request, res: Response, deps: LineW
     }
 
     const events = req.body?.events || [];
-    (async () => {
+    try {
       for (const event of events) {
         if (event.replyToken === GHOST_REPLY_TOKEN || event.source?.userId === GHOST_USER_ID) {
           console.log("[WEBHOOK] Skipping ghost/verification event");
           continue;
         }
 
-        const webhookEventId = event.webhookEventId || event.timestamp?.toString();
-        if (webhookEventId && storage.isEventProcessed(webhookEventId)) {
-          console.log("[WEBHOOK] Skipping duplicate event:", webhookEventId);
-          storage.createSystemAlert({ alert_type: "dedupe_hit", details: `LINE event ${webhookEventId}`, brand_id: matchedBrandId || undefined });
+        const dedupeKey =
+          event.webhookEventId ||
+          `${event.type}-${event.timestamp}-${event.source?.userId || "u"}-${event.type === "message" && event.message && "id" in event.message ? String((event.message as { id?: string }).id ?? "na") : "na"}`;
+        if (storage.isEventProcessed(dedupeKey)) {
+          console.warn("[IDEMPOTENCY_SKIP] duplicate LINE webhook (processed_events):", dedupeKey);
+          storage.createSystemAlert({ alert_type: "dedupe_hit", details: `LINE event ${dedupeKey}`, brand_id: matchedBrandId || undefined });
           continue;
         }
-        if (webhookEventId) {
-          storage.markEventProcessed(webhookEventId);
+        if (!(await acquireLineWebhookEvent(dedupeKey))) {
+          console.warn("[IDEMPOTENCY_SKIP] duplicate LINE inbound (short idempotency lock):", dedupeKey);
+          continue;
         }
+        storage.markEventProcessed(dedupeKey);
 
         try {
           console.log("[WEBHOOK] Processing event:", event.type, event.message?.type || "", "from:", event.source?.userId || "unknown");
@@ -289,21 +285,7 @@ export async function handleLineWebhook(req: Request, res: Response, deps: LineW
                     });
                     storage.createMessage(contact.id, "line", "system", `[模擬回覆，未實際送出] 收到您的訊息：「${text}」。`);
                   } else {
-                    if (enqueueDebouncedAiReply) {
-                      const inboundEventId = event.webhookEventId || `${event.timestamp}-${event.source?.userId || "u"}`;
-                      enqueueDebouncedAiReply("line", contact.id, text, inboundEventId, channelToken, matchedBrandId).catch((err) =>
-                        console.error("[WEBHOOK] enqueueDebouncedAiReply failed:", err)
-                      );
-                    } else {
-                      debounceTextMessage(contact.id, text, (mergedText) => {
-                        addAiReplyJob({
-                          contactId: contact.id,
-                          message: mergedText,
-                          channelToken,
-                          matchedBrandId,
-                        }).catch((err) => console.error("[WEBHOOK] addAiReplyJob failed:", err));
-                      });
-                    }
+                    await enqueueDebouncedAiReply("line", contact.id, text, dedupeKey, channelToken, matchedBrandId);
                   }
                 }
               }
@@ -447,12 +429,22 @@ export async function handleLineWebhook(req: Request, res: Response, deps: LineW
           }
         } catch (err) {
           console.error("Webhook event processing error:", err);
+          throw err;
         }
       }
       console.log("[WEBHOOK] All events processed");
-    })().catch(err => console.error("[WEBHOOK] Async event processing error:", err));
+      res.status(200).json({ success: true });
+    } catch (batchErr: unknown) {
+      const msg = batchErr instanceof Error ? batchErr.message : String(batchErr);
+      console.error("[WEBHOOK] Event batch processing failed:", msg, batchErr);
+      if (!res.headersSent) {
+        res.status(500).json({ success: false, message: "LINE webhook processing failed" });
+      }
+    }
   } catch (outerErr) {
     console.error("[WEBHOOK] FATAL ERROR in webhook handler:", outerErr);
-    if (!res.headersSent) res.status(200).json({ success: true });
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, message: "LINE webhook fatal error" });
+    }
   }
 }

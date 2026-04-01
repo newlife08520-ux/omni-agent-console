@@ -7,7 +7,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { assembleEnrichedSystemPrompt } from "./services/prompt-builder";
 import { normalizeCustomerFacingOrderReply } from "./customer-reply-normalizer";
-import { packDeterministicSingleOrderToolResult, buildSingleOrderCustomerReply } from "./order-single-renderer";
+import { packDeterministicSingleOrderToolResult } from "./order-single-renderer";
 import { isValidOrderDeterministicPayload, orderDeterministicContractFields } from "./deterministic-order-contract";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -73,31 +73,23 @@ async function main() {
   ok("五種 order tool 皆可被 generic 選出 deterministic reply");
 
   const single = packDeterministicSingleOrderToolResult({
-    deterministic_customer_reply: buildSingleOrderCustomerReply("查到：", "訂單#X｜待出貨"),
     renderer: "deterministic_single_test",
     one_page_summary: "訂單#X｜待出貨",
   });
   assert(
-    single.deterministic_skip_llm === true &&
-      String(single.deterministic_customer_reply).includes("訂單#X") &&
+    single.deterministic_skip_llm === false &&
+      String(single.one_page_summary).includes("訂單#X") &&
       single.deterministic_contract_version === 1 &&
       single.deterministic_domain === "order",
     "single pack + contract"
   );
-  ok("單筆 deterministic packer 契約");
+  ok("單筆 tool packer 契約（不跳過 LLM）");
 
   const dirty =
     "很高興能為您服務！別擔心，訂單已出貨。希望這些資訊對您有幫助！若您還有任何疑問，歡迎隨時告訴我！祝您有美好的一天！訂單 A123。";
   const norm = normalizeCustomerFacingOrderReply(dirty, { mode: "order_lookup", replySource: "llm" });
-  assert(norm.changed, "normalizer 有變更");
-  const hitKinds = new Set(norm.rulesHit.map((r) => r.split("_")[0]));
-  assert(
-    norm.rulesHit.length >= 3 ||
-      (hitKinds.has("strip") && norm.rulesHit.includes("strip_comfort_lead")),
-    `normalizer 多規則 hit=${norm.rulesHit.join(",")}`
-  );
-  assert(norm.text.includes("A123") || norm.text.includes("訂單"), "保留訂單資訊");
-  ok("final normalizer 去除多類套話且保留實質內容");
+  assert(!norm.changed && norm.rulesHit.length === 0 && norm.text === dirty, "normalizer passthrough (rescue)");
+  ok("final normalizer 已停用（原樣交還 LLM）");
 
   const ultra = await assembleEnrichedSystemPrompt(1, { planMode: "order_lookup" });
   assert(ultra.prompt_profile === "order_lookup_ultra_lite", "profile");

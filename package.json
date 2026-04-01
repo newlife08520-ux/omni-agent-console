@@ -27,7 +27,12 @@
     "sync:orders": "tsx server/scripts/sync-orders-normalized.ts",
     "diagnose:review-db": "tsx server/scripts/diagnose-review-bundle-db.ts",
     "verify:r1": "npm run check:server && tsx server/r1-verify.ts",
-    "verify:r1:log": "node scripts/record-r1-verify.mjs"
+    "verify:r1:log": "node scripts/record-r1-verify.mjs",
+    "pack:external-review": "node scripts/pack-external-review-pack.mjs",
+    "pack:gemini-handoff": "node scripts/pack-gemini-handoff.mjs",
+    "pack:gemini-10mega": "node scripts/pack-gemini-10mega.mjs",
+    "pack:mini-review-10": "node scripts/pack-mini-review-10mega.mjs",
+    "pack:mini-review-10mega": "node scripts/pack-mini-review-10mega.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
