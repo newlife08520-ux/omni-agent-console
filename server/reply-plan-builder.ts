@@ -13,6 +13,20 @@
  * 7. answer_directly（商品問答、價格、smalltalk、其餘）
  */
 import type { ConversationState } from "./conversation-state-resolver";
+import type { AgentScenario } from "./services/phase1-types";
+import { classifyOrderNumber } from "./intent-and-order";
+import { extractOrderIdFromMixedSentence } from "./order-fast-path";
+
+/** 與 intent-router ORDER_CTX 對齊，供 plan bridge 判斷查單語境 */
+const PLAN_BRIDGE_ORDER_CTX = /訂單|查單|查詢訂單|我的訂單|單號|編號|物流|出貨|貨態|配送|進度|何時到/;
+
+/** Phase 1.5：硬規則快照傳入 plan，僅作輕量橋接 */
+export interface Phase1PreRouteSnapshot {
+  selected_scenario: AgentScenario;
+  confidence: number;
+  matched_intent: string;
+  route_source: string;
+}
 
 export type ReplyPlanMode =
   | "handoff"
@@ -68,11 +82,49 @@ export interface PlanBuilderInput {
   isReturnFirstRound?: boolean;
   /** 已有 active order 且本句為出貨／物流等追問（與首輪查單區隔） */
   orderFollowupTurn?: boolean;
+  /** Phase 1.5：本輪使用者原文（供 router→plan 橋接，可選） */
+  latestUserMessage?: string;
+  /** hybrid 硬規則預路由結果；僅在 enabled+hybrid_router 時由呼叫端傳入 */
+  phase1PreRoute?: Phase1PreRouteSnapshot | null;
+}
+
+function phase15BridgeToOrderLookup(
+  input: PlanBuilderInput,
+  isRefundReturnIntent: boolean,
+  primary_intent: string
+): ReplyPlan | null {
+  const { phase1PreRoute, latestUserMessage } = input;
+  if (
+    !phase1PreRoute ||
+    phase1PreRoute.selected_scenario !== "ORDER_LOOKUP" ||
+    phase1PreRoute.confidence < 0.72 ||
+    !latestUserMessage ||
+    isRefundReturnIntent
+  ) {
+    return null;
+  }
+  const um = latestUserMessage.trim();
+  const bridgeable =
+    primary_intent === "general" ||
+    primary_intent === "smalltalk" ||
+    primary_intent === "product_consult" ||
+    primary_intent === "price_purchase";
+  if (!bridgeable) return null;
+  const ot = classifyOrderNumber(um);
+  const mixed = extractOrderIdFromMixedSentence(um);
+  const compact = um.replace(/\s/g, "");
+  const looksOrder =
+    ot === "order_id" ||
+    ot === "logistics_id" ||
+    ot === "payment_id" ||
+    (ot === "pending_review" && /^[A-Z]{2,4}\d{5,}$/i.test(compact)) ||
+    (!!mixed && PLAN_BRIDGE_ORDER_CTX.test(um));
+  return looksOrder ? { mode: "order_lookup" } : null;
 }
 
 /** 依 state 與設定產出本輪唯一 ReplyPlan */
 export function buildReplyPlan(input: PlanBuilderInput): ReplyPlan {
-  const { state, returnFormUrl, isReturnFirstRound = false, orderFollowupTurn = false } = input;
+  const { state, returnFormUrl, isReturnFirstRound = false, orderFollowupTurn = false, latestUserMessage, phase1PreRoute } = input;
   const { primary_intent, return_reason_type, needs_human, human_reason, return_stage } = state;
 
   if (needs_human && human_reason) {
@@ -120,6 +172,9 @@ export function buildReplyPlan(input: PlanBuilderInput): ReplyPlan {
   if (primary_intent === "off_topic") {
     return { mode: "off_topic_guard" };
   }
+
+  const bridgedPlan = phase15BridgeToOrderLookup(input, isRefundReturnIntent, primary_intent);
+  if (bridgedPlan) return bridgedPlan;
 
   if (primary_intent === "product_consult" || primary_intent === "price_purchase" || primary_intent === "link_request") {
     return { mode: "answer_directly" };

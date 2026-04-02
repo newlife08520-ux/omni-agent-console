@@ -7,6 +7,7 @@
 import { storage } from "../storage";
 import * as assignment from "../assignment";
 import { getSuperLandingConfig, ensurePagesCacheLoaded, buildProductCatalogPrompt } from "../superlanding";
+import type { AgentScenario, ScenarioOverrideEntry } from "./phase1-types";
 const IMAGE_PRECISION_COT_BLOCK = `
 
 --- 圖片辨識與回覆規範 ---
@@ -82,22 +83,99 @@ export function buildHumanHoursPrompt(): string {
   return block + nowHint;
 }
 
+/** 情境隔離時附加的簡短行為邊界（不取代全域安全規則） */
+export function buildScenarioIsolationBlock(scenario: AgentScenario): string {
+  const blocks: Record<AgentScenario, string> = {
+    ORDER_LOOKUP: `
+
+--- 情境：訂單／物流 ---
+聚焦查單、物流與出貨進度；勿主動展開與當前查單無關的完整型錄或促銷。`,
+    AFTER_SALES: `
+
+--- 情境：售後／退換貨 ---
+優先同理與釐清；退換貨以品牌政策與表單為準，需專人判斷時使用 transfer_to_human。`,
+    PRODUCT_CONSULT: `
+
+--- 情境：商品諮詢 ---
+以規格、使用方式、優惠及知識庫為主；除非客戶同時提供明確訂單編號且意在查物流，否則勿主動查單。`,
+    GENERAL: `
+
+--- 情境：一般 ---
+簡潔有禮；不確定時可簡問需求或適度引導轉人工。`,
+  };
+  return blocks[scenario] || "";
+}
+
+/** 共用物流一句（情境流程區塊內可重用） */
+function resolveShippingHintLine(options: {
+  productScope?: string | null;
+  shippingHintOverride?: string;
+}): string {
+  if (options.shippingHintOverride?.trim()) return options.shippingHintOverride.trim();
+  if (options.productScope === "sweet") {
+    return "甜點/食品類：宅配約 3 工作天、超商約 3 工作天；7-ELEVEN 約 7～20 日到店。";
+  }
+  if (options.productScope && options.productScope !== "sweet") {
+    return "非甜點類：以 7-ELEVEN 到店約 7～20 日為準；宅配約 3 工作天。";
+  }
+  return "物流時效依通路不同，宅配約 7～20 日或 3 工作天；超商到店依門市。";
+}
+
+/**
+ * Phase 1.5：情境專屬流程區塊（取代 iso 模式下混合式 buildFlowPrinciplesPrompt，避免跨情境污染）。
+ */
+export function buildScenarioFlowBlock(
+  scenario: AgentScenario,
+  opts: { returnFormUrl?: string; productScope?: string | null; shippingHintOverride?: string }
+): string {
+  const returnFormUrl = opts.returnFormUrl || "https://www.lovethelife.shop/returns";
+  const ship = resolveShippingHintLine(opts);
+  switch (scenario) {
+    case "ORDER_LOOKUP":
+      return `
+
+--- 流程（訂單／物流）---
+${ship}
+有單號或已同意提供之身分線索時，使用查單相關工具；查無、例外或客戶堅持專人時可 transfer_to_human。本輪勿主動展開完整退換貨表單流程，除非客戶已明確提出售後需求。`;
+    case "AFTER_SALES":
+      return `
+
+--- 流程（售後／退換）---
+以同理與釐清為先；可提供退換貨表單連結 ${returnFormUrl}。需政策例外、僵持或高風險時使用 transfer_to_human。勿主動引導「全系統訂單查詢步驟」；僅在客戶要查物流且已提供單號時再協助查詢。`;
+    case "PRODUCT_CONSULT":
+      return `
+
+--- 流程（商品諮詢）---
+回答規格、用途、優惠與常見問題；不要主動索取訂單編號或進入查單流程，除非客戶同句已提供單號且明確要查物流。`;
+    case "GENERAL":
+    default:
+      return `
+
+--- 流程（一般）---
+簡潔有禮；超出權限或客戶要求專人時使用 transfer_to_human。不要主動進入查單或退貨程序。`;
+  }
+}
+
+/** 品牌 DB 全文易含跨情境規則；iso 模式下截斷為摘要，降低污染（flags 關閉仍用完整 buildBrandPersonaPrompt） */
+export function buildBrandPersonaPromptIsoThin(brandId?: number): string {
+  if (!brandId) return "";
+  const brand = storage.getBrand(brandId);
+  const raw = (brand?.system_prompt || "").trim();
+  if (!raw) return "";
+  const cap = 1400;
+  const body = raw.length > cap ? `${raw.slice(0, cap)}\n[以下品牌細節已截斷；請優先遵守本輪「情境」流程區塊]` : raw;
+  return "\n\n--- 品牌語氣與規範（摘要）---\n" + body;
+}
+
 /** 流程相關：高層轉人工原則（不重複承載 deterministic SOP，細節在程式）＋退換貨表單等簡短說明 */
 export function buildFlowPrinciplesPrompt(options: {
   returnFormUrl?: string;
   productScope?: string | null;
+  /** 品牌／設定覆寫物流說明，避免甜點／非甜點硬編碼 */
+  shippingHintOverride?: string;
 }): string {
   const returnFormUrl = options.returnFormUrl || "https://www.lovethelife.shop/returns";
-  const isSweet = options.productScope === "sweet";
-  const isNonSweetLocked = options.productScope && options.productScope !== "sweet";
-  let shippingHint: string;
-  if (isSweet) {
-    shippingHint = "甜點/食品類：宅配約 3 工作天、超商約 3 工作天；7-ELEVEN 約 7～20 日到店。";
-  } else if (isNonSweetLocked) {
-    shippingHint = "非甜點類：以 7-ELEVEN 到店約 7～20 日為準；宅配約 3 工作天。";
-  } else {
-    shippingHint = "物流時效依通路不同，宅配約 7～20 日或 3 工作天；超商到店依門市。";
-  }
+  const shippingHint = resolveShippingHintLine(options);
   return `
 
 --- 流程與轉接原則（高層）---
@@ -117,11 +195,10 @@ export async function buildCatalogPrompt(brandId?: number): Promise<string> {
 }
 
 /** 知識庫 */
-export function buildKnowledgePrompt(brandId?: number): string {
+export function buildKnowledgePrompt(brandId?: number, maxTotalChars = 80000): string {
   const files = storage.getKnowledgeFiles(brandId);
   const withContent = files.filter((f) => f.content && f.content.trim().length > 0);
   if (withContent.length === 0) return "";
-  const maxTotalChars = 80000;
   let totalChars = 0;
   const blocks: string[] = [];
   for (const f of withContent) {
@@ -165,6 +242,12 @@ export interface EnrichedPromptContext {
   hasActiveOrderContext?: boolean;
   /** 使用者最近一則含圖 */
   recentUserHasImage?: boolean;
+  /** Phase 1：情境隔離 */
+  selectedScenario?: AgentScenario;
+  scenarioIsolationEnabled?: boolean;
+  logisticsHintOverride?: string;
+  /** Phase 1.5：scenario_overrides 自 phase1_agent_ops_json */
+  scenarioOverrides?: Partial<Record<AgentScenario, ScenarioOverrideEntry>>;
 }
 
 export interface EnrichedPromptResult {
@@ -232,74 +315,104 @@ export async function assembleEnrichedSystemPrompt(
   context?: EnrichedPromptContext
 ): Promise<EnrichedPromptResult> {
   const useImageFull = !!context?.recentUserHasImage;
-  /** Phase 1.5：查單／追問專用 prompt 瘦身，略過型錄與購物流程區塊。 */
   const plan = context?.planMode || "";
-  const orderLookupDiet = plan === "order_lookup" || plan === "order_followup";
+  const orderLookupDietLegacy = plan === "order_lookup" || plan === "order_followup";
+  const iso = !!(context?.scenarioIsolationEnabled && context?.selectedScenario);
+  const sc = context?.selectedScenario;
+
+  let orderLookupDiet = orderLookupDietLegacy;
+  let skipCatalog = false;
+  let skipKnowledge = false;
+  let skipHumanHours = false;
+  let skipFlow = false;
+  let knowledgeMax = 80000;
+
+  const scenOverride = iso && sc ? context?.scenarioOverrides?.[sc] : undefined;
+
+  if (iso && sc) {
+    orderLookupDiet = sc === "ORDER_LOOKUP";
+    switch (sc) {
+      case "ORDER_LOOKUP":
+        skipCatalog = true;
+        skipKnowledge = true;
+        skipFlow = true;
+        skipHumanHours = true;
+        break;
+      case "AFTER_SALES":
+        skipCatalog = true;
+        break;
+      case "PRODUCT_CONSULT":
+        break;
+      case "GENERAL":
+        skipCatalog = true;
+        knowledgeMax = 24000;
+        break;
+    }
+    if (scenOverride?.knowledge_mode === "none") {
+      skipKnowledge = true;
+    } else if (scenOverride?.knowledge_mode === "minimal") {
+      skipKnowledge = false;
+      knowledgeMax = 12000;
+    } else if (scenOverride?.knowledge_mode === "full") {
+      skipKnowledge = false;
+      knowledgeMax = 80000;
+    }
+  }
+
+  const returnFormUrl = brandId ? storage.getBrand(brandId)?.return_form_url || undefined : undefined;
+  const flowPrinciplesOpts = {
+    returnFormUrl,
+    productScope: context?.productScope,
+    shippingHintOverride: context?.logisticsHintOverride,
+  };
+
+  const globalBlock = buildGlobalPolicyPrompt();
+  const brandBlock = iso && sc ? buildBrandPersonaPromptIsoThin(brandId) : buildBrandPersonaPrompt(brandId);
+  const humanHoursBlock = orderLookupDiet || skipHumanHours ? "" : buildHumanHoursPrompt();
+  /** iso + ORDER_LOOKUP 仍注入精簡「查單流程」區塊（舊版 order diet 會整段略過 flow） */
+  const includeFlowBlock =
+    (!orderLookupDiet && !skipFlow) || (iso && sc === "ORDER_LOOKUP");
+  const flowBlock = includeFlowBlock
+    ? iso && sc
+      ? buildScenarioFlowBlock(sc, flowPrinciplesOpts)
+      : buildFlowPrinciplesPrompt(flowPrinciplesOpts)
+    : "";
+  const catalogBlock = orderLookupDiet || skipCatalog ? "" : await buildCatalogPrompt(brandId);
+  const knowledgeBlock = orderLookupDiet || skipKnowledge ? "" : buildKnowledgePrompt(brandId, knowledgeMax);
+  const imageBlock = buildImagePrompt(brandId);
+  const scenarioBlock =
+    (iso && sc ? buildScenarioIsolationBlock(sc) : "") +
+    (iso && sc && scenOverride?.prompt_append ? `\n\n--- 品牌情境覆寫 ---\n${scenOverride.prompt_append.trim()}` : "");
 
   let prompt_profile: string;
-  let full_prompt: string;
-  let includes: EnrichedPromptResult["includes"];
-
   if (useImageFull) {
     prompt_profile = "image_lookup_full";
-    const globalBlock = buildGlobalPolicyPrompt();
-    const brandBlock = buildBrandPersonaPrompt(brandId);
-    const humanHoursBlock = orderLookupDiet ? "" : buildHumanHoursPrompt();
-    const flowBlock = orderLookupDiet
-      ? ""
-      : buildFlowPrinciplesPrompt({
-          returnFormUrl: brandId ? storage.getBrand(brandId)?.return_form_url || undefined : undefined,
-          productScope: context?.productScope,
-        });
-    const catalogBlock = orderLookupDiet ? "" : await buildCatalogPrompt(brandId);
-    const knowledgeBlock = orderLookupDiet ? "" : buildKnowledgePrompt(brandId);
-    const imageBlock = buildImagePrompt(brandId);
-    const raw =
-      globalBlock + brandBlock + humanHoursBlock + flowBlock + catalogBlock + knowledgeBlock + imageBlock;
-    full_prompt = normalizeSections(raw);
-    includes = {
-      global_policy: !!globalBlock.trim(),
-      brand_persona: !!brandBlock.trim(),
-      human_hours: !!humanHoursBlock.trim(),
-      flow_principles: !!flowBlock.trim(),
-      catalog: full_prompt.includes("--- CATALOG ---"),
-      knowledge: full_prompt.includes("--- KNOWLEDGE ---"),
-      image: full_prompt.includes("--- IMAGE ---"),
-    };
   } else {
-    /** order_lookup／order_followup：極致瘦身（無 catalog／flow／knowledge／human_hours）。 */
     prompt_profile = orderLookupDiet ? "order_lookup_prompt_diet" : "answer_directly_full";
-    const globalBlock = buildGlobalPolicyPrompt();
-    const brandBlock = buildBrandPersonaPrompt(brandId);
-    const humanHoursBlock = orderLookupDiet ? "" : buildHumanHoursPrompt();
-    const flowBlock = orderLookupDiet
-      ? ""
-      : buildFlowPrinciplesPrompt({
-          returnFormUrl: brandId ? storage.getBrand(brandId)?.return_form_url || undefined : undefined,
-          productScope: context?.productScope,
-        });
-    const catalogBlock = orderLookupDiet ? "" : await buildCatalogPrompt(brandId);
-    const knowledgeBlock = orderLookupDiet ? "" : buildKnowledgePrompt(brandId);
-    const imageBlock = buildImagePrompt(brandId);
-    const raw =
-      globalBlock +
-      brandBlock +
-      humanHoursBlock +
-      flowBlock +
-      catalogBlock +
-      knowledgeBlock +
-      imageBlock;
-    full_prompt = normalizeSections(raw);
-    includes = {
-      global_policy: !!globalBlock.trim(),
-      brand_persona: !!brandBlock.trim(),
-      human_hours: !!humanHoursBlock.trim(),
-      flow_principles: !!flowBlock.trim(),
-      catalog: full_prompt.includes("--- CATALOG ---"),
-      knowledge: full_prompt.includes("--- KNOWLEDGE ---"),
-      image: full_prompt.includes("--- IMAGE ---"),
-    };
   }
+  if (iso) {
+    prompt_profile += "_phase1_iso";
+  }
+
+  const raw =
+    globalBlock +
+    brandBlock +
+    humanHoursBlock +
+    flowBlock +
+    catalogBlock +
+    knowledgeBlock +
+    imageBlock +
+    scenarioBlock;
+  const full_prompt = normalizeSections(raw);
+  const includes: EnrichedPromptResult["includes"] = {
+    global_policy: !!globalBlock.trim(),
+    brand_persona: !!brandBlock.trim(),
+    human_hours: !!humanHoursBlock.trim(),
+    flow_principles: !!flowBlock.trim(),
+    catalog: full_prompt.includes("--- CATALOG ---"),
+    knowledge: full_prompt.includes("--- KNOWLEDGE ---"),
+    image: full_prompt.includes("--- IMAGE ---"),
+  };
 
   const sectionRe = /---\s*([^\n-]+?)\s*---/g;
   const matches: { key: string; title: string; index: number }[] = [];

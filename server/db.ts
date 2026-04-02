@@ -134,7 +134,9 @@ export function initDatabase() {
   migrateAiLogsTable();
   migrateAiLogsPhase0Observability();
   migrateAiLogsPhase27Telemetry();
+  migrateAiLogsPhase1Traceability();
   migrateBrandsAndChannels();
+  migrateBrandsPhase1AgentOpsJson();
   migrateShoplineFields();
   migrateSystemPrompt();
   migrateHardMuteAndAlerts();
@@ -1312,6 +1314,33 @@ function migrateAiLogsPhase27Telemetry() {
   );
   add("lookup_ack_sent_ms", "ALTER TABLE ai_logs ADD COLUMN lookup_ack_sent_ms INTEGER");
   add("queue_wait_ms", "ALTER TABLE ai_logs ADD COLUMN queue_wait_ms INTEGER");
+}
+
+/** Phase 1：Hybrid Router / 情境 / tools_available 可觀測性 */
+function migrateAiLogsPhase1Traceability() {
+  const columns = db.prepare("PRAGMA table_info(ai_logs)").all() as { name: string }[];
+  const names = new Set(columns.map((c) => c.name));
+  const add = (col: string, sql: string) => {
+    if (!names.has(col)) {
+      db.exec(sql);
+      names.add(col);
+    }
+  };
+  add("channel_id", "ALTER TABLE ai_logs ADD COLUMN channel_id INTEGER");
+  add("matched_intent", "ALTER TABLE ai_logs ADD COLUMN matched_intent TEXT");
+  add("route_source", "ALTER TABLE ai_logs ADD COLUMN route_source TEXT");
+  add("selected_scenario", "ALTER TABLE ai_logs ADD COLUMN selected_scenario TEXT");
+  add("route_confidence", "ALTER TABLE ai_logs ADD COLUMN route_confidence REAL");
+  add("tools_available_json", "ALTER TABLE ai_logs ADD COLUMN tools_available_json TEXT");
+  add("response_source_trace", "ALTER TABLE ai_logs ADD COLUMN response_source_trace TEXT");
+  add("phase1_config_ref", "ALTER TABLE ai_logs ADD COLUMN phase1_config_ref TEXT");
+}
+
+function migrateBrandsPhase1AgentOpsJson() {
+  const brandColNames = db.prepare("PRAGMA table_info(brands)").all() as { name: string }[];
+  if (!brandColNames.map((c) => c.name).includes("phase1_agent_ops_json")) {
+    db.exec("ALTER TABLE brands ADD COLUMN phase1_agent_ops_json TEXT");
+  }
 }
 
 function migrateBrandsAndChannels() {

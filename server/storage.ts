@@ -98,6 +98,14 @@ export interface IStorage {
     first_customer_visible_reply_ms?: number | null;
     lookup_ack_sent_ms?: number | null;
     queue_wait_ms?: number | null;
+    channel_id?: number | null;
+    matched_intent?: string | null;
+    route_source?: string | null;
+    selected_scenario?: string | null;
+    route_confidence?: number | null;
+    tools_available_json?: string | null;
+    response_source_trace?: string | null;
+    phase1_config_ref?: string | null;
   }): AiLog;
   getAiLogs(contactId: number): AiLog[];
   getAiLogStats(startDate: string, endDate: string, brandId?: number): {
@@ -904,11 +912,19 @@ export class SQLiteStorage implements IStorage {
     first_customer_visible_reply_ms?: number | null;
     lookup_ack_sent_ms?: number | null;
     queue_wait_ms?: number | null;
+    channel_id?: number | null;
+    matched_intent?: string | null;
+    route_source?: string | null;
+    selected_scenario?: string | null;
+    route_confidence?: number | null;
+    tools_available_json?: string | null;
+    response_source_trace?: string | null;
+    phase1_config_ref?: string | null;
   }): AiLog {
     try {
       const result = db.prepare(`
-      INSERT INTO ai_logs (contact_id, message_id, brand_id, prompt_summary, knowledge_hits, tools_called, transfer_triggered, transfer_reason, result_summary, token_usage, model, response_time_ms, reply_source, used_llm, plan_mode, reason_if_bypassed, used_first_llm, used_second_llm, reply_renderer, prompt_profile, first_customer_visible_reply_ms, lookup_ack_sent_ms, queue_wait_ms)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO ai_logs (contact_id, message_id, brand_id, prompt_summary, knowledge_hits, tools_called, transfer_triggered, transfer_reason, result_summary, token_usage, model, response_time_ms, reply_source, used_llm, plan_mode, reason_if_bypassed, used_first_llm, used_second_llm, reply_renderer, prompt_profile, first_customer_visible_reply_ms, lookup_ack_sent_ms, queue_wait_ms, channel_id, matched_intent, route_source, selected_scenario, route_confidence, tools_available_json, response_source_trace, phase1_config_ref)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       data.contact_id || null,
       data.message_id || null,
@@ -932,7 +948,15 @@ export class SQLiteStorage implements IStorage {
       data.prompt_profile ?? "",
       data.first_customer_visible_reply_ms ?? null,
       data.lookup_ack_sent_ms ?? null,
-      data.queue_wait_ms ?? null
+      data.queue_wait_ms ?? null,
+      data.channel_id ?? null,
+      data.matched_intent ?? null,
+      data.route_source ?? null,
+      data.selected_scenario ?? null,
+      data.route_confidence ?? null,
+      data.tools_available_json ?? null,
+      data.response_source_trace ?? null,
+      data.phase1_config_ref ?? null
     );
       return db.prepare("SELECT * FROM ai_logs WHERE id = ?").get(Number(result.lastInsertRowid)) as AiLog;
     } catch (e) {

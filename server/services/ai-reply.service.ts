@@ -56,6 +56,11 @@ import {
   SHORT_IMAGE_FALLBACK,
 } from "../safe-after-sale-classifier";
 import { orderLookupTools, humanHandoffTools, imageTools } from "../openai-tools";
+import { parsePhase1BrandFlags, isPhase1Active } from "./phase1-brand-config";
+import { runHybridIntentRouter, mapPlanToPhase1Scenario, computePhase15HardRoute, type HybridRouterInput } from "./intent-router.service";
+import type { HybridRouteResult, Phase1BrandFlags } from "./phase1-types";
+import { filterToolsForScenario, applyScenarioToolOverrides } from "./tool-scenario-filter";
+import { buildPhase1AiLogExtras } from "./phase1-trace-extras";
 
 /** Phase 1 法律/公關風險關鍵字，命中則走 legal_risk → high_risk_short_circuit */
 const LEGAL_RISK_KEYWORDS = [
@@ -612,9 +617,13 @@ ${contextStr}
     let transferReason: string | undefined;
     let totalTokens = 0;
     let orderLookupFailed = 0;
+    let phase1Flags = parsePhase1BrandFlags(undefined);
+    let phase1Route: HybridRouteResult | null = null;
+    let toolsAvailableNames: string[] = [];
 
     try {
       const effectiveBrandId = contact.brand_id || brandId;
+      phase1Flags = parsePhase1BrandFlags(effectiveBrandId ? storage.getBrand(effectiveBrandId) : undefined);
 
       storage.updateContactStatus(contact.id, "ai_handling");
       broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
@@ -785,13 +794,89 @@ ${contextStr}
         !!(ctxBeforePlan?.order_id && ctxBeforePlan.selected_order_id == null) &&
         !extractOrderIdFromMixedSentence(msgPlan) &&
         ORDER_FOLLOWUP_PATTERNS.test(msgPlan);
-      const plan = buildReplyPlan({ state, returnFormUrl, isReturnFirstRound, orderFollowupTurn });
+      const preHardForPlan =
+        isPhase1Active(phase1Flags) && phase1Flags.hybrid_router ? computePhase15HardRoute(userMessage) : null;
+      const phase1PreSnapshot =
+        preHardForPlan != null
+          ? {
+              selected_scenario: preHardForPlan.selected_scenario,
+              confidence: preHardForPlan.confidence,
+              matched_intent: preHardForPlan.matched_intent,
+              route_source: preHardForPlan.route_source,
+            }
+          : null;
+      const plan = buildReplyPlan({
+        state,
+        returnFormUrl,
+        isReturnFirstRound,
+        orderFollowupTurn,
+        latestUserMessage: userMessage,
+        phase1PreRoute: isPhase1Active(phase1Flags) && phase1Flags.hybrid_router ? phase1PreSnapshot : null,
+      });
       if (!isOrderLookupFamily(plan.mode)) {
         storage.clearActiveOrderContext(contact.id);
       }
       console.log("[AI Latency] contact", contact.id, "after_plan_ms", Date.now() - startTime, "mode=" + plan.mode);
 
-      if (plan.mode !== "handoff" && plan.mode !== "return_form_first" && orderFeatureFlags.orderFastPath) {
+      phase1Route = null;
+      if (
+        isPhase1Active(phase1Flags) &&
+        (phase1Flags.hybrid_router || phase1Flags.scenario_isolation || phase1Flags.tool_whitelist)
+      ) {
+        const routerInput: HybridRouterInput = {
+          userMessage,
+          recentUserTexts: recentUserMsgs.slice(-5),
+          planMode: plan.mode,
+          primaryIntent: state.primary_intent,
+          issueType: contact.issue_type,
+          apiKey: apiKey?.trim() ?? null,
+          preComputedHard:
+            phase1Flags.hybrid_router && preHardForPlan != null ? preHardForPlan : undefined,
+        };
+        phase1Route = phase1Flags.hybrid_router
+          ? await runHybridIntentRouter(routerInput)
+          : mapPlanToPhase1Scenario(routerInput);
+      }
+
+      const computePhase1TraceLogExtras = (responseSourceTrace: string): Record<string, unknown> => {
+        if (!isPhase1Active(phase1Flags) || !phase1Flags.trace_v2 || phase1Route == null) {
+          return {};
+        }
+        const hasImageAssets = storage.getImageAssets(effectiveBrandId || undefined).length > 0;
+        let names: string[];
+        if (phase1Flags.tool_whitelist) {
+          let atools = filterToolsForScenario(phase1Route.selected_scenario, {
+            hasImageAssets,
+            allowAfterSalesOrderVerify: phase1Flags.allow_after_sales_order_verify === true,
+          });
+          atools = applyScenarioToolOverrides(
+            atools,
+            phase1Route.selected_scenario,
+            phase1Flags.scenario_overrides?.[phase1Route.selected_scenario],
+          );
+          names = atools.map((t) => (t.type === "function" ? t.function?.name : "") || "").filter(Boolean);
+        } else {
+          const allT = [...orderLookupTools, ...humanHandoffTools, ...(hasImageAssets ? imageTools : [])];
+          names = allT.map((t) => (t.type === "function" ? t.function?.name : "") || "").filter(Boolean);
+        }
+        return buildPhase1AiLogExtras({
+          phase1Flags,
+          phase1Route,
+          channelId: contact.channel_id,
+          toolsAvailableNames: names,
+          replySource: responseSourceTrace,
+        });
+      };
+
+      const phase1OrderDetourOk =
+        !isPhase1Active(phase1Flags) || !phase1Route || phase1Route.selected_scenario === "ORDER_LOOKUP";
+
+      if (
+        phase1OrderDetourOk &&
+        plan.mode !== "handoff" &&
+        plan.mode !== "return_form_first" &&
+        orderFeatureFlags.orderFastPath
+      ) {
         const fpEarly = await tryOrderFastPath({
           userMessage,
           brandId: effectiveBrandId || undefined,
@@ -860,6 +945,7 @@ ${contextStr}
             first_customer_visible_reply_ms: Date.now() - startTime,
             lookup_ack_sent_ms: null,
             queue_wait_ms: queueWaitMs,
+            ...computePhase1TraceLogExtras("order_fast_path"),
           });
           return;
         }
@@ -925,6 +1011,7 @@ ${contextStr}
           used_llm: 0,
           plan_mode: plan.mode,
           reason_if_bypassed: `awkward_repeat: ${awkwardCheck.reason ?? "unknown"}`,
+          ...computePhase1TraceLogExtras("handoff"),
         });
         return;
       }
@@ -980,6 +1067,7 @@ ${contextStr}
           used_llm: 0,
           plan_mode: "handoff",
           reason_if_bypassed: "handoff_short_circuit",
+          ...computePhase1TraceLogExtras("handoff"),
         });
         return;
       }
@@ -1013,6 +1101,7 @@ ${contextStr}
           used_llm: 0,
           plan_mode: "return_form_first",
           reason_if_bypassed: "return_form_first",
+          ...computePhase1TraceLogExtras("return_form_first"),
         });
         return;
       }
@@ -1059,11 +1148,17 @@ ${contextStr}
             m.sender_type === "user" &&
             (m.message_type === "image" || !!(m.image_url && String(m.image_url).trim()))
         );
+      const scenarioIso =
+        isPhase1Active(phase1Flags) && phase1Flags.scenario_isolation && phase1Route != null;
       const enrichedPack = await assembleEnrichedSystemPrompt(contact.brand_id || brandId || undefined, {
         productScope: effectiveScope,
         planMode: plan.mode,
         hasActiveOrderContext: !!storage.getActiveOrderContext(contact.id)?.order_id,
         recentUserHasImage,
+        selectedScenario: scenarioIso ? phase1Route!.selected_scenario : undefined,
+        scenarioIsolationEnabled: scenarioIso,
+        logisticsHintOverride: phase1Flags.logistics_hint_override,
+        scenarioOverrides: isPhase1Active(phase1Flags) ? phase1Flags.scenario_overrides : undefined,
       });
       console.log(
         `[prompt_profile=${enrichedPack.prompt_profile}] prompt_chars=${enrichedPack.prompt_chars} catalog_included=${enrichedPack.includes.catalog} knowledge_included=${enrichedPack.includes.knowledge} image_included=${enrichedPack.includes.image} prompt_sections=${enrichedPack.sections.map((s) => s.key).join("|")} prompt_assembly_ms=${Date.now() - startTime}`
@@ -1088,7 +1183,7 @@ ${contextStr}
       if (isAftersalesComfortFirst(plan)) {
         systemPrompt += "\n\n??? ?????????????????????????????????????? ???????? ? ????/???? 7?20 ??? ? ??????????????????????????????????????????????????????**???????????**??????????????????**????**????????????????????????????";
       }
-      if (isOrderLookupFamily(plan.mode)) {
+      if (phase1OrderDetourOk && isOrderLookupFamily(plan.mode)) {
         const activeCtx = storage.getActiveOrderContext(contact.id);
         const msgTrim = (userMessage || "").trim();
         const CLEAR_ACTIVE_ORDER_KW = [
@@ -1163,6 +1258,7 @@ ${contextStr}
             used_llm: 0,
             plan_mode: plan.mode,
             reason_if_bypassed: "already_provided_not_found",
+            ...computePhase1TraceLogExtras("handoff"),
           });
           return;
         }
@@ -1172,7 +1268,7 @@ ${contextStr}
         systemPrompt += "\n\n??? ????????????????????????????????????" + parts.join("?") + "?????????";
       }
       /** Phase 2.2 / 2.4：多筆候選（篩選、第 N 筆、最新／最早、日期、帶出明細） */
-      if (isOrderLookupFamily(plan.mode)) {
+      if (phase1OrderDetourOk && isOrderLookupFamily(plan.mode)) {
         const multiFollow = storage.getActiveOrderContext(contact.id);
         const msgM = (userMessage || "").trim();
         if (multiFollow?.active_order_candidates && (multiFollow.candidate_count ?? 0) > 1) {
@@ -1388,13 +1484,14 @@ ${contextStr}
               first_customer_visible_reply_ms: Date.now() - startTime,
               lookup_ack_sent_ms: null,
               queue_wait_ms: queueWaitMs,
+              ...computePhase1TraceLogExtras("multi_order_router"),
             });
             return;
           }
         }
       }
       /** Phase 2.9：單筆 context 下問「還有其他訂單／全部訂單」→ 依手機重查並展開多筆 */
-      if (isOrderLookupFamily(plan.mode)) {
+      if (phase1OrderDetourOk && isOrderLookupFamily(plan.mode)) {
         const act29 = storage.getActiveOrderContext(contact.id);
         const msg29 = (userMessage || "").trim();
         const PHASE29_MORE_ORDERS_KW = [
@@ -1494,6 +1591,7 @@ ${contextStr}
                 first_customer_visible_reply_ms: Date.now() - startTime,
                 lookup_ack_sent_ms: null,
                 queue_wait_ms: queueWaitMs,
+                ...computePhase1TraceLogExtras("deterministic_tool"),
               });
               return;
             }
@@ -1532,7 +1630,28 @@ ${contextStr}
       }
 
       const hasImageAssets = storage.getImageAssets(effectiveBrandId || undefined).length > 0;
-      const allTools = [...orderLookupTools, ...humanHandoffTools, ...(hasImageAssets ? imageTools : [])];
+      let allTools = [...orderLookupTools, ...humanHandoffTools, ...(hasImageAssets ? imageTools : [])];
+      toolsAvailableNames = allTools
+        .map((t) => (t.type === "function" ? t.function?.name : "") || "")
+        .filter(Boolean);
+      if (
+        isPhase1Active(phase1Flags) &&
+        phase1Flags.tool_whitelist &&
+        phase1Route != null
+      ) {
+        allTools = filterToolsForScenario(phase1Route.selected_scenario, {
+          hasImageAssets,
+          allowAfterSalesOrderVerify: phase1Flags.allow_after_sales_order_verify === true,
+        });
+        allTools = applyScenarioToolOverrides(
+          allTools,
+          phase1Route.selected_scenario,
+          phase1Flags.scenario_overrides?.[phase1Route.selected_scenario]
+        );
+        toolsAvailableNames = allTools
+          .map((t) => (t.type === "function" ? t.function?.name : "") || "")
+          .filter(Boolean);
+      }
 
       const AI_TIMEOUT_MS = 45000;
       const TOOL_TIMEOUT_MS = 25000;
@@ -1868,6 +1987,13 @@ ${contextStr}
           used_llm: 1,
           plan_mode: plan.mode,
           reason_if_bypassed: null,
+          ...buildPhase1AiLogExtras({
+            phase1Flags,
+            phase1Route,
+            channelId: contact.channel_id,
+            toolsAvailableNames,
+            replySource: "handoff",
+          }),
         });
         return;
       }
@@ -1951,6 +2077,7 @@ ${contextStr}
         }
 
         const anyLlm = usedFirstLlmTelemetry > 0 || usedSecondLlmTelemetry > 0;
+        const replySourceFinal = secondLlmSkipped ? "deterministic_tool" : "llm";
         storage.createAiLog({
           contact_id: contact.id,
           message_id: aiMsg.id,
@@ -1964,7 +2091,7 @@ ${contextStr}
           token_usage: totalTokens,
           model: getOpenAIModel(),
           response_time_ms: Date.now() - startTime,
-          reply_source: secondLlmSkipped ? "deterministic_tool" : "llm",
+          reply_source: replySourceFinal,
           used_llm: anyLlm ? 1 : 0,
           plan_mode: plan.mode,
           reason_if_bypassed: secondLlmSkipped
@@ -1977,6 +2104,13 @@ ${contextStr}
           first_customer_visible_reply_ms: firstCustomerVisibleReplyMs ?? null,
           lookup_ack_sent_ms: lookupAckSentMs,
           queue_wait_ms: queueWaitMs,
+          ...buildPhase1AiLogExtras({
+            phase1Flags,
+            phase1Route,
+            channelId: contact.channel_id,
+            toolsAvailableNames,
+            replySource: replySourceFinal,
+          }),
         });
       }
     } catch (err) {
@@ -1996,6 +2130,13 @@ ${contextStr}
         used_llm: 0,
         plan_mode: null,
         reason_if_bypassed: `error: ${(err as Error).message}`.slice(0, 200),
+        ...buildPhase1AiLogExtras({
+          phase1Flags,
+          phase1Route,
+          channelId: contact.channel_id,
+          toolsAvailableNames,
+          replySource: "error",
+        }),
       });
     }
   }

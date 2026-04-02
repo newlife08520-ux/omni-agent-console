@@ -42,6 +42,8 @@ export interface Brand {
   shopline_store_domain: string;
   shopline_api_token: string;
   created_at: string;
+  /** Phase 1：Multi-Brand Agent Ops JSON（enable_hybrid_router 等），未遷移時可為空 */
+  phase1_agent_ops_json?: string | null;
 }
 
 export interface Channel {
@@ -491,6 +493,15 @@ export interface AiLog {
   first_customer_visible_reply_ms?: number | null;
   lookup_ack_sent_ms?: number | null;
   queue_wait_ms?: number | null;
+  /** Phase 1 可觀測性 */
+  channel_id?: number | null;
+  matched_intent?: string | null;
+  route_source?: string | null;
+  selected_scenario?: string | null;
+  route_confidence?: number | null;
+  tools_available_json?: string | null;
+  response_source_trace?: string | null;
+  phase1_config_ref?: string | null;
 }
 
 export interface LoginRequest {

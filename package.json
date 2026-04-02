@@ -26,7 +26,15 @@
     "audit:payloads": "npm run audit:superlanding && npm run audit:shopline",
     "sync:orders": "tsx server/scripts/sync-orders-normalized.ts",
     "diagnose:review-db": "tsx server/scripts/diagnose-review-bundle-db.ts",
-    "verify:r1": "npm run check:server && tsx server/r1-verify.ts"
+    "verify:r1": "npm run check:server && tsx server/r1-verify.ts",
+    "verify:phase1-ops": "tsx server/phase1-agent-ops-verify.ts",
+    "verify:phase15": "tsx server/phase15-verify.ts",
+    "verify:phase16": "tsx server/phase16-pilot-proof-harness.ts",
+    "bundle:impl-v2": "node scripts/build-implementation-bundle-v2.mjs",
+    "bundle:impl-v3": "node scripts/build-implementation-bundle-v3.mjs",
+    "bundle:impl-v4": "node scripts/build-implementation-bundle-v4.mjs",
+    "zip:evidence": "node scripts/zip-functional-evidence.mjs",
+    "zip:pilot-evidence": "node scripts/zip-pilot-evidence.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
