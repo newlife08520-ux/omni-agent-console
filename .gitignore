@@ -40,3 +40,10 @@ scripts/Omni-Agent-Console-REVIEW-*.zip
 
 # 救火階段產出的報告與證據封存，不推上遠端
 _rescue_archives/
+
+# 本機核心代碼濃縮包（外部 Code Review 用，勿推正式環境）
+_CORE_SYSTEM_DUMP.md
+
+# 隔離取證產物（腳本可重建）
+_evidence_run/data/
+_evidence_run/out/
