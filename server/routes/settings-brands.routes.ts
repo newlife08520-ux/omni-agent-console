@@ -156,7 +156,7 @@ export function registerSettingsBrandsRoutes(app: Express): void {
       return res.json({ success: true });
     });
 
-    app.get("/api/settings/openai-models", authMiddleware, superAdminOnly, (_req, res) => {
+    app.get("/api/settings/openai-models", authMiddleware, managerOrAbove, (_req, res) => {
       return res.json(describeOpenAIModelsForSettings());
     });
 

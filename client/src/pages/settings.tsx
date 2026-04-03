@@ -24,6 +24,7 @@ interface SettingsPageProps {
 }
 
 const OPENAI_MODEL_QUICK_PICKS = ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"] as const;
+const OPENAI_DEFAULT_MODEL_FALLBACK = "gpt-4o-mini";
 
 type OpenAIModelsPayload = {
   defaultMainModel: string;
@@ -152,16 +153,25 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
 
   const currentRole = authData?.user?.role || userRole || "cs_agent";
   const isSuperAdmin = currentRole === "super_admin";
+  /** 與 /settings 路由一致：行銷主管也需設定模型，但 API 金鑰仍僅超級管理員 */
+  const canConfigureOpenaiModels = isSuperAdmin || currentRole === "marketing_manager";
 
   const { data: settings = [], isLoading } = useQuery<Setting[]>({
     queryKey: ["/api/settings"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
 
-  const { data: openaiModels, isLoading: openaiModelsLoading } = useQuery<OpenAIModelsPayload>({
+  const {
+    data: openaiModels,
+    isLoading: openaiModelsLoading,
+    isError: openaiModelsIsError,
+    error: openaiModelsQueryError,
+  } = useQuery<OpenAIModelsPayload>({
     queryKey: ["/api/settings/openai-models"],
     queryFn: getQueryFn({ on401: "throw" }),
-    enabled: isSuperAdmin,
+    enabled: canConfigureOpenaiModels,
+    staleTime: 0,
+    refetchOnMount: "always",
   });
 
   useEffect(() => {
@@ -270,6 +280,63 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
         </p>
       </div>
 
+      {canConfigureOpenaiModels && (
+        <div
+          className="rounded-xl border-2 border-indigo-400/90 bg-gradient-to-br from-indigo-50 via-white to-violet-50 p-4 shadow-md ring-1 ring-indigo-100"
+          data-testid="banner-openai-models-hero"
+        >
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-bold uppercase tracking-wide text-indigo-900">OpenAI / ChatGPT · 目前生效模型</p>
+              {openaiModels ? (
+                <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-2 text-stone-900">
+                  <span className="text-sm">
+                    主模型{" "}
+                    <code className="rounded-md border border-indigo-200 bg-white px-2 py-1 font-mono text-base font-semibold text-indigo-950 shadow-sm">
+                      {openaiModels.main.effective}
+                    </code>
+                  </span>
+                  <span className="hidden text-stone-300 sm:inline">|</span>
+                  <span className="text-sm">
+                    Router{" "}
+                    <code className="rounded-md border border-indigo-200 bg-white px-2 py-1 font-mono text-base font-semibold text-indigo-950 shadow-sm">
+                      {openaiModels.router.effective}
+                    </code>
+                  </span>
+                </div>
+              ) : openaiModelsLoading ? (
+                <p className="mt-2 flex items-center gap-2 text-sm text-stone-600">
+                  <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                  正在向伺服器查詢生效模型…
+                </p>
+              ) : (
+                <div className="mt-2 text-sm text-amber-900">
+                  <p>尚未取得生效模型。請按右側「重新整理」，或確認已登入（超級管理員／行銷主管）。</p>
+                  {openaiModelsIsError && openaiModelsQueryError != null ? (
+                    <p className="mt-1 break-all font-mono text-xs text-red-700">
+                      {(openaiModelsQueryError as Error).message}
+                    </p>
+                  ) : null}
+                </div>
+              )}
+              <p className="mt-2 text-[11px] text-stone-600">
+                紫色邊框「OpenAI / ChatGPT」卡片在安全測試模式正下方，可編輯模型；API 金鑰僅超級管理員可見。
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="shrink-0 border-indigo-200 bg-white hover:bg-indigo-50"
+              onClick={() => queryClient.invalidateQueries({ queryKey: ["/api/settings/openai-models"] })}
+            >
+              <RefreshCw className="mr-1 h-3.5 w-3.5" />
+              重新整理模型狀態
+            </Button>
+          </div>
+        </div>
+      )}
+
       {isSuperAdmin && (
         <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
           <div className="flex items-center justify-between gap-3">
@@ -284,6 +351,324 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
           </div>
         </div>
       )}
+
+      {canConfigureOpenaiModels && (
+        <div className="space-y-4">
+            {apiKeyFields.map((field) =>
+              field.key === "openai_api_key" ? (
+                <div
+                  key={field.key}
+                  className="bg-white rounded-2xl border-2 border-indigo-200/90 p-5 shadow-md ring-1 ring-indigo-100"
+                  data-testid="section-openai-full"
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 rounded-xl bg-indigo-100 flex items-center justify-center">
+                        <Sparkles className="w-4 h-4 text-indigo-600" />
+                      </div>
+                      <div>
+                        <span className="text-sm font-semibold text-stone-800">OpenAI / ChatGPT</span>
+                        <p className="text-xs text-stone-500">
+                          頁首橫幅會顯示生效模型；此卡片可編輯模型 ID
+                          {isSuperAdmin ? " 與 API 金鑰（下方）。" : "（API 金鑰與測試連線僅超級管理員）。"}
+                        </p>
+                      </div>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="text-xs shrink-0"
+                      onClick={() => queryClient.invalidateQueries({ queryKey: ["/api/settings/openai-models"] })}
+                      data-testid="button-refresh-openai-models"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5 mr-1" />
+                      重新整理狀態
+                    </Button>
+                  </div>
+
+                  {openaiModelsIsError && (
+                    <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">
+                      無法載入生效模型：
+                      <span className="ml-1 break-all font-mono">{(openaiModelsQueryError as Error)?.message}</span>
+                    </div>
+                  )}
+                  {openaiModelsLoading && (
+                    <p className="mb-3 flex items-center gap-2 text-xs text-stone-500">
+                      <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+                      載入模型狀態中…
+                    </p>
+                  )}
+                  {openaiModels && (
+                    <>
+                      {(openaiModels.main.envVarSet || openaiModels.router.envVarSet) && (
+                        <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-4 flex items-start gap-2">
+                          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                          <div className="text-xs text-amber-900 space-y-1">
+                            {openaiModels.main.envVarSet && (
+                              <p>
+                                伺服器已設定 <span className="font-mono">OPENAI_MODEL</span>，會<strong>覆寫</strong>「主對話模型」的資料庫值。
+                              </p>
+                            )}
+                            {openaiModels.router.envVarSet && (
+                              <p>
+                                伺服器已設定 <span className="font-mono">OPENAI_ROUTER_MODEL</span>，會<strong>覆寫</strong>「Router 模型」的資料庫值。
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="grid gap-3 sm:grid-cols-2 mb-4">
+                        <div className="rounded-xl border border-stone-100 bg-stone-50/80 p-3">
+                          <p className="text-[10px] font-medium uppercase tracking-wide text-stone-500 mb-1">主對話模型（生效中）</p>
+                          <p className="font-mono text-sm font-semibold text-stone-900 break-all" data-testid="text-effective-main-model">
+                            {openaiModels.main.effective}
+                          </p>
+                          <p className="text-xs text-stone-500 mt-1">{mainModelSourceLabel(openaiModels.main.source)}</p>
+                          <p className="text-[10px] text-stone-400 mt-1">
+                            未設定時預設：<span className="font-mono">{openaiModels.defaultMainModel}</span>
+                          </p>
+                        </div>
+                        <div className="rounded-xl border border-stone-100 bg-stone-50/80 p-3">
+                          <p className="text-[10px] font-medium uppercase tracking-wide text-stone-500 mb-1">Hybrid Router 模型（生效中）</p>
+                          <p className="font-mono text-sm font-semibold text-stone-900 break-all" data-testid="text-effective-router-model">
+                            {openaiModels.router.effective}
+                          </p>
+                          <p className="text-xs text-stone-500 mt-1">{routerModelSourceLabel(openaiModels.router.source)}</p>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                  {!openaiModels && !openaiModelsLoading && !openaiModelsIsError && (
+                    <p className="mb-3 text-xs text-stone-500">尚未取得模型資料，請按右上角「重新整理狀態」。</p>
+                  )}
+
+                  <div className="space-y-4 mb-6">
+                        <div>
+                          <label className="text-xs font-medium text-stone-600 mb-1.5 block">
+                            主對話模型 ID（<span className="font-mono">openai_model</span>，可自填任意官方模型字串）
+                          </label>
+                          <p className="text-[11px] text-stone-400 mb-2">
+                            留空則使用預設{" "}
+                            <span className="font-mono">{openaiModels?.defaultMainModel ?? OPENAI_DEFAULT_MODEL_FALLBACK}</span>
+                            （若伺服器未設環境變數）。
+                          </p>
+                          <Input
+                            data-testid="input-openai-model"
+                            placeholder={openaiModels?.defaultMainModel ?? OPENAI_DEFAULT_MODEL_FALLBACK}
+                            value={formValues.openai_model ?? ""}
+                            onChange={(e) => setFormValues((prev) => ({ ...prev, openai_model: e.target.value }))}
+                            className="font-mono text-sm bg-stone-50 border-stone-200"
+                          />
+                          <div className="flex flex-wrap gap-1.5 mt-2">
+                            {OPENAI_MODEL_QUICK_PICKS.map((id) => (
+                              <Button
+                                key={id}
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                className="text-[10px] h-7 px-2 font-mono bg-stone-100"
+                                onClick={() => setFormValues((prev) => ({ ...prev, openai_model: id }))}
+                              >
+                                {id}
+                              </Button>
+                            ))}
+                          </div>
+                          <div className="flex justify-end mt-2">
+                            <Button
+                              onClick={() => handleSave("openai_model")}
+                              disabled={saving === "openai_model"}
+                              data-testid="button-save-openai-model"
+                              className="text-xs bg-emerald-600 hover:bg-emerald-700 text-white"
+                            >
+                              <Save className="w-3.5 h-3.5 mr-1" />
+                              {saving === "openai_model" ? "儲存中" : "儲存主模型"}
+                            </Button>
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="text-xs font-medium text-stone-600 mb-1.5 block">
+                            Router 模型 ID（<span className="font-mono">openai_router_model</span>）
+                          </label>
+                          <p className="text-[11px] text-stone-400 mb-2">
+                            Hybrid 意圖路由專用；<strong>留空</strong>則與主模型相同（若無 <span className="font-mono">OPENAI_ROUTER_MODEL</span>）。
+                          </p>
+                          <Input
+                            data-testid="input-openai-router-model"
+                            placeholder="留空＝沿用主模型"
+                            value={formValues.openai_router_model ?? ""}
+                            onChange={(e) => setFormValues((prev) => ({ ...prev, openai_router_model: e.target.value }))}
+                            className="font-mono text-sm bg-stone-50 border-stone-200"
+                          />
+                          <div className="flex flex-wrap gap-1.5 mt-2">
+                            {OPENAI_MODEL_QUICK_PICKS.map((id: (typeof OPENAI_MODEL_QUICK_PICKS)[number]) => (
+                              <Button
+                                key={`r-${id}`}
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                className="text-[10px] h-7 px-2 font-mono bg-stone-100"
+                                onClick={() => setFormValues((prev) => ({ ...prev, openai_router_model: id }))}
+                              >
+                                {id}
+                              </Button>
+                            ))}
+                          </div>
+                          <div className="flex justify-end mt-2">
+                            <Button
+                              onClick={() => handleSave("openai_router_model")}
+                              disabled={saving === "openai_router_model"}
+                              data-testid="button-save-openai-router-model"
+                              className="text-xs bg-emerald-600 hover:bg-emerald-700 text-white"
+                            >
+                              <Save className="w-3.5 h-3.5 mr-1" />
+                              {saving === "openai_router_model" ? "儲存中" : "儲存 Router 模型"}
+                            </Button>
+                          </div>
+                        </div>
+                  </div>
+
+                  {isSuperAdmin && (
+                  <div className="border-t border-stone-200 pt-5">
+                    <div className="flex items-center gap-2 mb-1">
+                      <div className="w-8 h-8 rounded-xl bg-stone-100 flex items-center justify-center">
+                        <field.icon className="w-4 h-4 text-stone-500" />
+                      </div>
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-semibold text-stone-800">{field.label}</span>
+                          {field.testType && apiHealth[field.testType] && (
+                            <StatusBadge status={apiHealth[field.testType].status as HealthStatus} message={apiHealth[field.testType].message} />
+                          )}
+                        </div>
+                        <p className="text-xs text-stone-500">{field.description}</p>
+                      </div>
+                    </div>
+                    <div className="flex gap-2 mt-3">
+                      <div className="relative flex-1">
+                        <Input
+                          data-testid={`input-${field.key}`}
+                          type={showKeys[field.key] ? "text" : "password"}
+                          placeholder={field.placeholder}
+                          value={formValues[field.key] || ""}
+                          onChange={(e) => setFormValues((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                          className="pr-10 bg-stone-50 border-stone-200"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => toggleKeyVisibility(field.key)}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-600"
+                          data-testid={`button-toggle-${field.key}`}
+                        >
+                          {showKeys[field.key] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                      {field.testType && (
+                        <Button
+                          variant="secondary"
+                          onClick={() => handleTestConnectionWithStatus(field.testType!)}
+                          disabled={testing === field.testType}
+                          data-testid={`button-test-${field.key}`}
+                          className="text-xs shrink-0 bg-stone-100 hover:bg-stone-200"
+                        >
+                          {testing === field.testType ? (
+                            <>
+                              <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />
+                              測試中
+                            </>
+                          ) : (
+                            <>
+                              <Plug className="w-3.5 h-3.5 mr-1" />
+                              測試連線
+                            </>
+                          )}
+                        </Button>
+                      )}
+                      <Button
+                        onClick={() => handleSave(field.key)}
+                        disabled={saving === field.key}
+                        data-testid={`button-save-${field.key}`}
+                        className="text-xs shrink-0 bg-emerald-600 hover:bg-emerald-700 text-white"
+                      >
+                        <Save className="w-3.5 h-3.5 mr-1" />
+                        {saving === field.key ? "儲存中" : "儲存"}
+                      </Button>
+                    </div>
+                  </div>
+                  )}
+                </div>
+              ) : (
+                <div key={field.key} className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
+                  <div className="flex items-center gap-2 mb-1">
+                    <div className="w-8 h-8 rounded-xl bg-stone-100 flex items-center justify-center">
+                      <field.icon className="w-4 h-4 text-stone-500" />
+                    </div>
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-semibold text-stone-800">{field.label}</span>
+                        {field.testType && apiHealth[field.testType] && (
+                          <StatusBadge status={apiHealth[field.testType].status as HealthStatus} message={apiHealth[field.testType].message} />
+                        )}
+                      </div>
+                      <p className="text-xs text-stone-500">{field.description}</p>
+                    </div>
+                  </div>
+                  <div className="flex gap-2 mt-3">
+                    <div className="relative flex-1">
+                      <Input
+                        data-testid={`input-${field.key}`}
+                        type={showKeys[field.key] ? "text" : "password"}
+                        placeholder={field.placeholder}
+                        value={formValues[field.key] || ""}
+                        onChange={(e) => setFormValues((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                        className="pr-10 bg-stone-50 border-stone-200"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => toggleKeyVisibility(field.key)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-600"
+                        data-testid={`button-toggle-${field.key}`}
+                      >
+                        {showKeys[field.key] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                    {field.testType && (
+                      <Button
+                        variant="secondary"
+                        onClick={() => handleTestConnectionWithStatus(field.testType!)}
+                        disabled={testing === field.testType}
+                        data-testid={`button-test-${field.key}`}
+                        className="text-xs shrink-0 bg-stone-100 hover:bg-stone-200"
+                      >
+                        {testing === field.testType ? (
+                          <>
+                            <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />
+                            測試中
+                          </>
+                        ) : (
+                          <>
+                            <Plug className="w-3.5 h-3.5 mr-1" />
+                            測試連線
+                          </>
+                        )}
+                      </Button>
+                    )}
+                    <Button
+                      onClick={() => handleSave(field.key)}
+                      disabled={saving === field.key}
+                      data-testid={`button-save-${field.key}`}
+                      className="text-xs shrink-0 bg-emerald-600 hover:bg-emerald-700 text-white"
+                    >
+                      <Save className="w-3.5 h-3.5 mr-1" />
+                      {saving === field.key ? "儲存中" : "儲存"}
+                    </Button>
+                  </div>
+                </div>
+              )
+            )}
+
 
       <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
         <div className="flex items-center gap-2 mb-4">
@@ -406,308 +791,11 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
         </div>
       )}
 
+        </div>
+      )}
+
       {isSuperAdmin && (
-        <>
-          <div className="space-y-4">
-            {apiKeyFields.map((field) =>
-              field.key === "openai_api_key" ? (
-                <div
-                  key={field.key}
-                  className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm"
-                  data-testid="section-openai-full"
-                >
-                  <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
-                    <div className="flex items-center gap-2">
-                      <div className="w-8 h-8 rounded-xl bg-indigo-100 flex items-center justify-center">
-                        <Sparkles className="w-4 h-4 text-indigo-600" />
-                      </div>
-                      <div>
-                        <span className="text-sm font-semibold text-stone-800">OpenAI / ChatGPT</span>
-                        <p className="text-xs text-stone-500">
-                          上方：目前生效模型與自訂模型 ID；下方：API 金鑰與連線測試
-                        </p>
-                      </div>
-                    </div>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="text-xs shrink-0"
-                      onClick={() => queryClient.invalidateQueries({ queryKey: ["/api/settings/openai-models"] })}
-                      data-testid="button-refresh-openai-models"
-                    >
-                      <RefreshCw className="w-3.5 h-3.5 mr-1" />
-                      重新整理狀態
-                    </Button>
-                  </div>
-
-                  {openaiModelsLoading || !openaiModels ? (
-                    <p className="text-xs text-stone-400 mb-4">載入模型狀態中...</p>
-                  ) : (
-                    <>
-                      {(openaiModels.main.envVarSet || openaiModels.router.envVarSet) && (
-                        <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-4 flex items-start gap-2">
-                          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                          <div className="text-xs text-amber-900 space-y-1">
-                            {openaiModels.main.envVarSet && (
-                              <p>
-                                伺服器已設定 <span className="font-mono">OPENAI_MODEL</span>，會<strong>覆寫</strong>「主對話模型」的資料庫值。
-                              </p>
-                            )}
-                            {openaiModels.router.envVarSet && (
-                              <p>
-                                伺服器已設定 <span className="font-mono">OPENAI_ROUTER_MODEL</span>，會<strong>覆寫</strong>「Router 模型」的資料庫值。
-                              </p>
-                            )}
-                          </div>
-                        </div>
-                      )}
-
-                      <div className="grid gap-3 sm:grid-cols-2 mb-4">
-                        <div className="rounded-xl border border-stone-100 bg-stone-50/80 p-3">
-                          <p className="text-[10px] font-medium uppercase tracking-wide text-stone-500 mb-1">主對話模型（生效中）</p>
-                          <p className="font-mono text-sm font-semibold text-stone-900 break-all" data-testid="text-effective-main-model">
-                            {openaiModels.main.effective}
-                          </p>
-                          <p className="text-xs text-stone-500 mt-1">{mainModelSourceLabel(openaiModels.main.source)}</p>
-                          <p className="text-[10px] text-stone-400 mt-1">
-                            未設定時預設：<span className="font-mono">{openaiModels.defaultMainModel}</span>
-                          </p>
-                        </div>
-                        <div className="rounded-xl border border-stone-100 bg-stone-50/80 p-3">
-                          <p className="text-[10px] font-medium uppercase tracking-wide text-stone-500 mb-1">Hybrid Router 模型（生效中）</p>
-                          <p className="font-mono text-sm font-semibold text-stone-900 break-all" data-testid="text-effective-router-model">
-                            {openaiModels.router.effective}
-                          </p>
-                          <p className="text-xs text-stone-500 mt-1">{routerModelSourceLabel(openaiModels.router.source)}</p>
-                        </div>
-                      </div>
-
-                      <div className="space-y-4 mb-6">
-                        <div>
-                          <label className="text-xs font-medium text-stone-600 mb-1.5 block">
-                            主對話模型 ID（<span className="font-mono">openai_model</span>，可自填任意官方模型字串）
-                          </label>
-                          <p className="text-[11px] text-stone-400 mb-2">
-                            留空則使用預設 <span className="font-mono">{openaiModels.defaultMainModel}</span>（若伺服器未設環境變數）。
-                          </p>
-                          <Input
-                            data-testid="input-openai-model"
-                            placeholder={openaiModels.defaultMainModel}
-                            value={formValues.openai_model ?? ""}
-                            onChange={(e) => setFormValues((prev) => ({ ...prev, openai_model: e.target.value }))}
-                            className="font-mono text-sm bg-stone-50 border-stone-200"
-                          />
-                          <div className="flex flex-wrap gap-1.5 mt-2">
-                            {OPENAI_MODEL_QUICK_PICKS.map((id) => (
-                              <Button
-                                key={id}
-                                type="button"
-                                variant="secondary"
-                                size="sm"
-                                className="text-[10px] h-7 px-2 font-mono bg-stone-100"
-                                onClick={() => setFormValues((prev) => ({ ...prev, openai_model: id }))}
-                              >
-                                {id}
-                              </Button>
-                            ))}
-                          </div>
-                          <div className="flex justify-end mt-2">
-                            <Button
-                              onClick={() => handleSave("openai_model")}
-                              disabled={saving === "openai_model"}
-                              data-testid="button-save-openai-model"
-                              className="text-xs bg-emerald-600 hover:bg-emerald-700 text-white"
-                            >
-                              <Save className="w-3.5 h-3.5 mr-1" />
-                              {saving === "openai_model" ? "儲存中" : "儲存主模型"}
-                            </Button>
-                          </div>
-                        </div>
-
-                        <div>
-                          <label className="text-xs font-medium text-stone-600 mb-1.5 block">
-                            Router 模型 ID（<span className="font-mono">openai_router_model</span>）
-                          </label>
-                          <p className="text-[11px] text-stone-400 mb-2">
-                            Hybrid 意圖路由專用；<strong>留空</strong>則與主模型相同（若無 <span className="font-mono">OPENAI_ROUTER_MODEL</span>）。
-                          </p>
-                          <Input
-                            data-testid="input-openai-router-model"
-                            placeholder="留空＝沿用主模型"
-                            value={formValues.openai_router_model ?? ""}
-                            onChange={(e) => setFormValues((prev) => ({ ...prev, openai_router_model: e.target.value }))}
-                            className="font-mono text-sm bg-stone-50 border-stone-200"
-                          />
-                          <div className="flex flex-wrap gap-1.5 mt-2">
-                            {OPENAI_MODEL_QUICK_PICKS.map((id: (typeof OPENAI_MODEL_QUICK_PICKS)[number]) => (
-                              <Button
-                                key={`r-${id}`}
-                                type="button"
-                                variant="secondary"
-                                size="sm"
-                                className="text-[10px] h-7 px-2 font-mono bg-stone-100"
-                                onClick={() => setFormValues((prev) => ({ ...prev, openai_router_model: id }))}
-                              >
-                                {id}
-                              </Button>
-                            ))}
-                          </div>
-                          <div className="flex justify-end mt-2">
-                            <Button
-                              onClick={() => handleSave("openai_router_model")}
-                              disabled={saving === "openai_router_model"}
-                              data-testid="button-save-openai-router-model"
-                              className="text-xs bg-emerald-600 hover:bg-emerald-700 text-white"
-                            >
-                              <Save className="w-3.5 h-3.5 mr-1" />
-                              {saving === "openai_router_model" ? "儲存中" : "儲存 Router 模型"}
-                            </Button>
-                          </div>
-                        </div>
-                      </div>
-                    </>
-                  )}
-
-                  <div className="border-t border-stone-200 pt-5">
-                    <div className="flex items-center gap-2 mb-1">
-                      <div className="w-8 h-8 rounded-xl bg-stone-100 flex items-center justify-center">
-                        <field.icon className="w-4 h-4 text-stone-500" />
-                      </div>
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-sm font-semibold text-stone-800">{field.label}</span>
-                          {field.testType && apiHealth[field.testType] && (
-                            <StatusBadge status={apiHealth[field.testType].status as HealthStatus} message={apiHealth[field.testType].message} />
-                          )}
-                        </div>
-                        <p className="text-xs text-stone-500">{field.description}</p>
-                      </div>
-                    </div>
-                    <div className="flex gap-2 mt-3">
-                      <div className="relative flex-1">
-                        <Input
-                          data-testid={`input-${field.key}`}
-                          type={showKeys[field.key] ? "text" : "password"}
-                          placeholder={field.placeholder}
-                          value={formValues[field.key] || ""}
-                          onChange={(e) => setFormValues((prev) => ({ ...prev, [field.key]: e.target.value }))}
-                          className="pr-10 bg-stone-50 border-stone-200"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => toggleKeyVisibility(field.key)}
-                          className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-600"
-                          data-testid={`button-toggle-${field.key}`}
-                        >
-                          {showKeys[field.key] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                        </button>
-                      </div>
-                      {field.testType && (
-                        <Button
-                          variant="secondary"
-                          onClick={() => handleTestConnectionWithStatus(field.testType!)}
-                          disabled={testing === field.testType}
-                          data-testid={`button-test-${field.key}`}
-                          className="text-xs shrink-0 bg-stone-100 hover:bg-stone-200"
-                        >
-                          {testing === field.testType ? (
-                            <>
-                              <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />
-                              測試中
-                            </>
-                          ) : (
-                            <>
-                              <Plug className="w-3.5 h-3.5 mr-1" />
-                              測試連線
-                            </>
-                          )}
-                        </Button>
-                      )}
-                      <Button
-                        onClick={() => handleSave(field.key)}
-                        disabled={saving === field.key}
-                        data-testid={`button-save-${field.key}`}
-                        className="text-xs shrink-0 bg-emerald-600 hover:bg-emerald-700 text-white"
-                      >
-                        <Save className="w-3.5 h-3.5 mr-1" />
-                        {saving === field.key ? "儲存中" : "儲存"}
-                      </Button>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div key={field.key} className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
-                  <div className="flex items-center gap-2 mb-1">
-                    <div className="w-8 h-8 rounded-xl bg-stone-100 flex items-center justify-center">
-                      <field.icon className="w-4 h-4 text-stone-500" />
-                    </div>
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-semibold text-stone-800">{field.label}</span>
-                        {field.testType && apiHealth[field.testType] && (
-                          <StatusBadge status={apiHealth[field.testType].status as HealthStatus} message={apiHealth[field.testType].message} />
-                        )}
-                      </div>
-                      <p className="text-xs text-stone-500">{field.description}</p>
-                    </div>
-                  </div>
-                  <div className="flex gap-2 mt-3">
-                    <div className="relative flex-1">
-                      <Input
-                        data-testid={`input-${field.key}`}
-                        type={showKeys[field.key] ? "text" : "password"}
-                        placeholder={field.placeholder}
-                        value={formValues[field.key] || ""}
-                        onChange={(e) => setFormValues((prev) => ({ ...prev, [field.key]: e.target.value }))}
-                        className="pr-10 bg-stone-50 border-stone-200"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => toggleKeyVisibility(field.key)}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-600"
-                        data-testid={`button-toggle-${field.key}`}
-                      >
-                        {showKeys[field.key] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                      </button>
-                    </div>
-                    {field.testType && (
-                      <Button
-                        variant="secondary"
-                        onClick={() => handleTestConnectionWithStatus(field.testType!)}
-                        disabled={testing === field.testType}
-                        data-testid={`button-test-${field.key}`}
-                        className="text-xs shrink-0 bg-stone-100 hover:bg-stone-200"
-                      >
-                        {testing === field.testType ? (
-                          <>
-                            <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />
-                            測試中
-                          </>
-                        ) : (
-                          <>
-                            <Plug className="w-3.5 h-3.5 mr-1" />
-                            測試連線
-                          </>
-                        )}
-                      </Button>
-                    )}
-                    <Button
-                      onClick={() => handleSave(field.key)}
-                      disabled={saving === field.key}
-                      data-testid={`button-save-${field.key}`}
-                      className="text-xs shrink-0 bg-emerald-600 hover:bg-emerald-700 text-white"
-                    >
-                      <Save className="w-3.5 h-3.5 mr-1" />
-                      {saving === field.key ? "儲存中" : "儲存"}
-                    </Button>
-                  </div>
-                </div>
-              )
-            )}
-          </div>
-
-          <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="section-superlanding">
+        <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="section-superlanding">
             <div className="flex items-center gap-2 mb-4">
               <div className="w-8 h-8 rounded-xl bg-orange-100 flex items-center justify-center"><ShoppingBag className="w-4 h-4 text-orange-600" /></div>
               <div className="flex-1">
@@ -757,7 +845,6 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
               </div>
             </div>
           </div>
-        </>
       )}
     </div>
   );
