@@ -75,6 +75,7 @@ import { recordAutoReplyBlocked } from "../auto-reply-blocked";
 import { handleLineWebhook } from "../controllers/line-webhook.controller";
 import { handleFacebookWebhook, handleFacebookVerify, type FacebookWebhookDeps } from "../controllers/facebook-webhook.controller";
 import { applyHandoff, normalizeHandoffReason } from "../services/handoff";
+import { ANALYTICS_CONCERN_KEYWORD_GROUPS } from "../analytics-concern-keywords";
 import { assembleEnrichedSystemPrompt } from "../services/prompt-builder";
 import { createToolExecutor } from "../services/tool-executor.service";
 import {
@@ -1325,23 +1326,12 @@ export function registerCoreRoutes(app: Express): void {
         .sort((a, b) => b.mentions - a.mentions)
         .slice(0, 8);
 
-      const concernKeywords: [string, string][] = [
-        ["物流配送", "未到貨|還沒到|物流|配送|出貨|貨態|追蹤|黑貓|新竹|超商取貨"],
-        ["退換貨", "退貨|退款|換貨|取消訂單|申請退"],
-        ["商品瑕疵", "瑕疵|壞掉|破掉|錯誤|缺件|漏寄|與描述不符"],
-        ["價格優惠", "價格|太貴|特價|折扣|優惠|活動|降價"],
-        ["效期保存", "效期|過期|保存|變質|日期"],
-        ["客服體驗", "客服|不理|態度|敷衍|沒人回"],
-        ["金流支付", "付款|刷卡|超商|轉帳|扣款|退款未到"],
-        ["其他疑慮", "詐騙|假的|投訴|檢舉"],
-      ];
       const concernCounts: Record<string, number> = {};
       for (const msg of userMessages) {
         const text = msg.content != null ? String(msg.content) : "";
         if (!text) continue;
-        for (const [concern, pattern] of concernKeywords) {
-          const alts = pattern.split("|").map((s) => s.trim()).filter((s) => s.length > 0);
-          if (alts.some((kw) => text.includes(kw))) {
+        for (const { concern, keywords } of ANALYTICS_CONCERN_KEYWORD_GROUPS) {
+          if (keywords.some((kw) => kw.length > 0 && text.includes(kw))) {
             concernCounts[concern] = (concernCounts[concern] || 0) + 1;
           }
         }

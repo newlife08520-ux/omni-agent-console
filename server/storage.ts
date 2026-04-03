@@ -1760,8 +1760,10 @@ export class SQLiteStorage implements IStorage {
     const keywordMap: Record<string, number> = {};
     const keywords = ["退換貨", "退貨", "換貨", "退款", "訂單", "查詢", "物流", "出貨", "寄送", "地址", "修改", "取消", "付款", "金額", "價格", "折扣", "優惠", "庫存", "缺貨", "商品", "尺寸", "顏色", "品質", "瑕疵", "損壞", "保固", "客訴", "投訴", "不滿", "真人", "轉接", "客服"];
     for (const msg of messages) {
+      const c = msg.content != null ? String(msg.content) : "";
+      if (!c) continue;
       for (const kw of keywords) {
-        if (msg.content.includes(kw)) {
+        if (c.includes(kw)) {
           keywordMap[kw] = (keywordMap[kw] || 0) + 1;
         }
       }
