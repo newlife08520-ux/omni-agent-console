@@ -7,10 +7,10 @@
 1. **是否經 ai-reply 主流程**：設計上僅經 `autoReplyWithAI`。無 OPENAI_API_KEY 時 harness exit 2，未寫四筆 log。
 2. **是否真用 OPENAI_API_KEY**：成功產出 JSON 時為是；無金鑰環境為否。
 3. **四 scenario 是否落庫**：成功跑完 `verify:phase16` 時為是；否則否。
-4. **route_source 分布**：成功後見 JSON 內 `route_source_summary`；預設四句多為 rule 或 legacy_fallback。
+4. **route_source 分布**：成功後見 JSON 內 `route_source_summary`；實測可為 **rule + llm** 混合（見下節），**legacy_fallback** 亦可能出現於其他訊息。
 5. **tools_available_json 與 whitelist**：成功路徑下與 `filterToolsForScenario` 一致。
 6. **tools_called**：視路徑而定，見各列與 `phase16_trace_summary_redacted.json` 之 `tools_called_present`。
-7. **是否足支持隔離單品牌 pilot**：程式可支持；證據包須含真 key 跑出的 zip。
+7. **是否足支持隔離單品牌 pilot**：程式可支持；**真 key 跑通 harness 並產 zip 後**，可支持「隔離 DATA_DIR、單品牌 flags on」之 pilot 論證（仍非 production 全站）。
 8. **為何不 merge main**：缺線上長鏈、多品牌、llm 樣本與運維演練；合併前應有可重現 pilot zip。
 
 ## 本機補齊證據
@@ -29,16 +29,51 @@
 - **未 merge `main`**。
 - **不納入版本庫**：各種 `*.zip`、`_BUNDLE_*_STAGING/`、`_evidence_run/` 下實跑產物（請本機產出後自行留存供審核）。
 
-## 本機真取證通過後請回填（審核用）
+## 本機真取證紀錄（已成功跑一次）
 
-於具 `OPENAI_API_KEY`、隔離 `DATA_DIR` 下執行 `npm run verify:phase16` 與 `npm run zip:pilot-evidence` 成功後，請將下列內容自 `pilot_ai_logs_evidence.json` 摘錄至此段（或另附檔）：
+以下摘自 `_evidence_run/phase16/pilot_ai_logs_evidence.json`（去敏；不含 API key）。
 
-| 項目 | 回填 |
+| 項目 | 實測 |
 |------|------|
-| verify:phase16 | （成功／失敗，exit code） |
-| route_source_summary | （JSON 物件） |
-| selected_scenario_summary | （JSON 物件） |
-| tools_called | （四筆是否皆非空；或列 tool 名稱／`return_form_first` 等） |
-| 足支持 isolated single-brand pilot | （是／否與一句理由） |
+| **環境** | local；`DATA_DIR` 隔離：`…\_evidence_run\phase16_final` |
+| **verify:phase16** | **成功**（exit **0**）；終端見 `[phase16-pilot-proof] OK wrote …pilot_ai_logs_evidence.json` |
+| **zip:pilot-evidence** | **成功**；產物：repo 根目錄 **`PHASE1_PILOT_FUNCTIONAL_EVIDENCE.zip`** |
+| **主流程** | `createAiReplyService().autoReplyWithAI`；**真使用** OpenAI（`used_llm: 1` 四筆） |
+| **Webhook** | 否（腳本直連；日誌 `[LINE] pushLineMessage` 因無真 token 可略） |
 
-**一併提交審核之檔案（本機產出，勿 commit 金鑰）**：`PHASE1_PILOT_FUNCTIONAL_EVIDENCE.zip`、本次終端完整輸出另存之 `verify_phase16.txt`、本檔更新後版本。
+### route_source_summary
+
+```json
+{ "rule": 2, "llm": 2 }
+```
+
+- **rule**：ORDER_LOOKUP（`order_id_in_sentence`）、AFTER_SALES（`return_refund_complaint`）
+- **llm**：PRODUCT_CONSULT、GENERAL（`llm_classified`）
+- **legacy_fallback**：本四則為 **0 筆**
+
+### selected_scenario_summary
+
+```json
+{ "ORDER_LOOKUP": 1, "AFTER_SALES": 1, "PRODUCT_CONSULT": 1, "GENERAL": 1 }
+```
+
+### tools_called 與 whitelist
+
+| 情境 | tools_available_json（摘要） | tools_called |
+|------|-----------------------------|--------------|
+| ORDER_LOOKUP | 含 `lookup_order_by_id` 等查單工具 + `transfer_to_human` | **`["lookup_order_by_id"]`**（LLM 呼叫查單） |
+| AFTER_SALES | 僅 `transfer_to_human` | `[]` |
+| PRODUCT_CONSULT | 僅 `transfer_to_human` | `[]` |
+| GENERAL | 僅 `transfer_to_human` | `[]` |
+
+`tools_available_json` 與 **tool whitelist／情境**一致；**response_source_trace** 四筆皆為 **`llm`**（回覆由 LLM 路徑產出）。
+
+### 是否足支持 isolated single-brand pilot
+
+**是**——在「隔離 DB、單一 pilot 品牌、flags 全開、真 key」前提下，四情境皆落庫且 trace 欄位齊備，並已產 **PHASE1_PILOT_FUNCTIONAL_EVIDENCE.zip**（內含 `pilot_ai_logs_evidence.json`、`README_PILOT_EVIDENCE.md`、`phase16_trace_summary_redacted.json`）。
+
+### 提交審核請附（本機檔案，勿 commit 金鑰／zip 可選是否進 repo）
+
+- `PHASE1_PILOT_FUNCTIONAL_EVIDENCE.zip`
+- 終端完整輸出另存之 **`verify_phase16.txt`**（建議 UTF-8）
+- 本檔（已更新）
