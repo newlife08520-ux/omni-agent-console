@@ -23,11 +23,14 @@ interface SettingsPageProps {
   userRole?: string;
 }
 
-const OPENAI_MODEL_QUICK_PICKS = ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"] as const;
-const OPENAI_DEFAULT_MODEL_FALLBACK = "gpt-4o-mini";
+/** 與 server/openai-model.ts BUILTIN 對齊；API 未回傳時作為快捷按鈕後備 */
+const OPENAI_QUICK_PICK_FALLBACK = ["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.4-pro", "gpt-5"] as const;
+const OPENAI_DEFAULT_MODEL_FALLBACK = "gpt-5.4";
 
 type OpenAIModelsPayload = {
   defaultMainModel: string;
+  builtInQuickPicks: string[];
+  modelQuickPicks: string[];
   main: { effective: string; source: string; envVarSet: boolean; storedInDb: string };
   router: { effective: string; source: string; envVarSet: boolean; storedInDb: string };
 };
@@ -174,6 +177,9 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
     refetchOnMount: "always",
   });
 
+  const openaiQuickPickIds: string[] =
+    openaiModels?.modelQuickPicks?.length ? openaiModels.modelQuickPicks : [...OPENAI_QUICK_PICK_FALLBACK];
+
   useEffect(() => {
     if (settings.length > 0) {
       const values: Record<string, string> = {};
@@ -187,7 +193,7 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
     try {
       await apiRequest("PUT", "/api/settings", { key, value: formValues[key] || "" });
       queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
-      if (key === "openai_model" || key === "openai_router_model") {
+      if (key === "openai_model" || key === "openai_router_model" || key === "openai_model_quick_picks_extra") {
         queryClient.invalidateQueries({ queryKey: ["/api/settings/openai-models"] });
       }
       toast({ title: "儲存成功", description: "設定已更新" });
@@ -462,7 +468,7 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
                             className="font-mono text-sm bg-stone-50 border-stone-200"
                           />
                           <div className="flex flex-wrap gap-1.5 mt-2">
-                            {OPENAI_MODEL_QUICK_PICKS.map((id) => (
+                            {openaiQuickPickIds.map((id: string) => (
                               <Button
                                 key={id}
                                 type="button"
@@ -503,7 +509,7 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
                             className="font-mono text-sm bg-stone-50 border-stone-200"
                           />
                           <div className="flex flex-wrap gap-1.5 mt-2">
-                            {OPENAI_MODEL_QUICK_PICKS.map((id: (typeof OPENAI_MODEL_QUICK_PICKS)[number]) => (
+                            {openaiQuickPickIds.map((id: string) => (
                               <Button
                                 key={`r-${id}`}
                                 type="button"
@@ -525,6 +531,41 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
                             >
                               <Save className="w-3.5 h-3.5 mr-1" />
                               {saving === "openai_router_model" ? "儲存中" : "儲存 Router 模型"}
+                            </Button>
+                          </div>
+                        </div>
+
+                        <div className="rounded-xl border border-violet-200/80 bg-violet-50/50 p-4">
+                          <label className="text-xs font-medium text-stone-700 mb-1 block">
+                            自訂快捷模型 ID（<span className="font-mono">openai_model_quick_picks_extra</span>）
+                          </label>
+                          <p className="text-[11px] text-stone-500 mb-2">
+                            每行一個模型 ID，或使用英文逗號分隔。儲存後會與內建清單<strong>合併</strong>為上方快捷按鈕（不重複）。
+                          </p>
+                          <p className="text-[10px] text-stone-400 mb-2 font-mono break-all">
+                            內建：
+                            {(openaiModels?.builtInQuickPicks ?? [...OPENAI_QUICK_PICK_FALLBACK]).join("、")}
+                          </p>
+                          <Textarea
+                            data-testid="textarea-openai-model-quick-picks-extra"
+                            placeholder={"例如：\ngpt-5.4-pro-2026-03-05\no3-mini"}
+                            value={formValues.openai_model_quick_picks_extra ?? ""}
+                            onChange={(e) =>
+                              setFormValues((prev) => ({ ...prev, openai_model_quick_picks_extra: e.target.value }))
+                            }
+                            rows={4}
+                            className="font-mono text-xs bg-white border-violet-100"
+                          />
+                          <div className="flex justify-end mt-2">
+                            <Button
+                              type="button"
+                              onClick={() => handleSave("openai_model_quick_picks_extra")}
+                              disabled={saving === "openai_model_quick_picks_extra"}
+                              data-testid="button-save-openai-model-quick-picks-extra"
+                              className="text-xs bg-violet-600 hover:bg-violet-700 text-white"
+                            >
+                              <Save className="w-3.5 h-3.5 mr-1" />
+                              {saving === "openai_model_quick_picks_extra" ? "儲存中" : "儲存自訂快捷清單"}
                             </Button>
                           </div>
                         </div>

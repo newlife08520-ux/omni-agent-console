@@ -4,7 +4,48 @@
  */
 import { storage } from "./storage";
 
-export const DEFAULT_OPENAI_MODEL = "gpt-4o-mini";
+/** 未設 env／DB 時的主對話模型（與 OpenAI 平台 5.4 系列對齊） */
+export const DEFAULT_OPENAI_MODEL = "gpt-5.4";
+
+/** 設定頁「快捷選模型」內建清單；可與 settings.openai_model_quick_picks_extra 合併 */
+export const BUILTIN_OPENAI_MODEL_QUICK_PICKS = [
+  "gpt-5.4",
+  "gpt-5.4-mini",
+  "gpt-5.4-nano",
+  "gpt-5.4-pro",
+  "gpt-5",
+] as const;
+
+const OPENAI_MODEL_QUICK_PICKS_EXTRA_KEY = "openai_model_quick_picks_extra";
+
+/** 解析自訂快捷：支援換行或逗號分隔 */
+export function parseExtraModelQuickPicks(raw: string | null | undefined): string[] {
+  if (!raw?.trim()) return [];
+  const parts = raw.split(/[\r\n,]+/);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const part of parts) {
+    const id = part.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+/** 內建 + DB 自訂，去重且內建順序在前 */
+export function getMergedOpenAIModelQuickPicks(): string[] {
+  const extra = parseExtraModelQuickPicks(storage.getSetting(OPENAI_MODEL_QUICK_PICKS_EXTRA_KEY));
+  const merged: string[] = [...BUILTIN_OPENAI_MODEL_QUICK_PICKS];
+  const seen = new Set(merged);
+  for (const id of extra) {
+    if (!seen.has(id)) {
+      merged.push(id);
+      seen.add(id);
+    }
+  }
+  return merged;
+}
 
 export type OpenAIMainModelSource = "env" | "database" | "default";
 export type OpenAIRouterModelSource = "env" | "database" | "inherits_main";
@@ -59,6 +100,8 @@ export function describeOpenAIModelsForSettings() {
   const router = getOpenAIRouterModelResolution();
   return {
     defaultMainModel: DEFAULT_OPENAI_MODEL,
+    builtInQuickPicks: [...BUILTIN_OPENAI_MODEL_QUICK_PICKS],
+    modelQuickPicks: getMergedOpenAIModelQuickPicks(),
     main,
     router,
   };

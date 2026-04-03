@@ -359,7 +359,7 @@ async function optionalOpenAI() {
   const base = (await assembleEnrichedSystemPrompt(undefined, { planMode: "order_followup" })).full_prompt;
   const openai = new OpenAI({ apiKey: key });
   const completion = await openai.chat.completions.create({
-    model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+    model: process.env.OPENAI_MODEL || "gpt-5.4",
     messages: [
       { role: "system", content: base },
       { role: "user", content: "請問何時出貨？" },
