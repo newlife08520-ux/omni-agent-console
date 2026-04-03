@@ -85,7 +85,7 @@ import {
 } from "../services/ai-reply.service";
 import { getTransferUnavailableSystemMessage as transferUnavailableSystemMessage } from "../transfer-unavailable-message";
 import { orderLookupTools, humanHandoffTools, imageTools } from "../openai-tools";
-import { resolveOpenAIModel } from "../openai-model";
+import { describeOpenAIModelsForSettings, resolveOpenAIModel } from "../openai-model";
 
 import OpenAI from "openai";
 import { parseFileContent, isImageFile } from "../file-parser";
@@ -156,21 +156,26 @@ export function registerSettingsBrandsRoutes(app: Express): void {
       return res.json({ success: true });
     });
 
+    app.get("/api/settings/openai-models", authMiddleware, superAdminOnly, (_req, res) => {
+      return res.json(describeOpenAIModelsForSettings());
+    });
+
     app.post("/api/settings/test-connection", authMiddleware, superAdminOnly, async (req, res) => {
       const { type } = req.body;
       try {
         if (type === "openai") {
           const apiKey = storage.getSetting("openai_api_key");
           if (!apiKey || apiKey.trim() === "") {
-            return res.json({ success: false, message: "???? OpenAI API Key" });
+            return res.json({ success: false, message: "請先設定 OpenAI API 金鑰" });
           }
           const openai = new OpenAI({ apiKey });
+          const model = getOpenAIModel();
           await openai.chat.completions.create({
-            model: getOpenAIModel(),
+            model,
             messages: [{ role: "user", content: "hi" }],
             max_completion_tokens: 5,
           });
-          return res.json({ success: true, message: `OpenAI ???????: ${getOpenAIModel()}?` });
+          return res.json({ success: true, message: `OpenAI 連線成功，使用模型：${model}` });
         }
 
         if (type === "line") {
