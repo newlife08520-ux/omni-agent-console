@@ -1,5 +1,13 @@
 # SHOPLINE_TRUTH_REPORT（R1-3）
 
+## 一句話結論（唯一真相 world：本機已量測 DB）
+
+**官網（SHOPLINE）即時 API 查詢：目前不可用。**  
+依據：`shopline_configured = 0`（無品牌同時具備有效 `shopline_api_token` + `shopline_store_domain`）。  
+**系統已降級**：官網意圖時不 fallback 一頁、不冒充官網結果；未設定 API 時對客說明無法代查（`order-fast-path.ts` / `unifiedLookup*`）。
+
+---
+
 ## 本環境可用性（實測）
 
 **指令：**
@@ -21,7 +29,8 @@ npx tsx server/scripts/diagnose-review-bundle-db.ts
 - `preferSource === "shopline"` 時：`unifiedLookupById` / `unifiedLookupByProductAndPhone` / `unifiedLookupByDateAndContact` **不再回落**一頁商店，避免假官網結果。
 - `isShoplineLookupConfiguredForBrand(brandId)`：用於 fast path **未設定即降級**，避免假裝可查 live 官網。
 
-## 有 Shopline 設定的環境要如何驗
+## 若未來某環境 `shopline_configured >= 1`（預期行為）
 
-1. 在該環境跑 `diagnose-review-bundle-db.ts`，確認 `shopline_configured >= 1`。
-2. 以 **遮罩後** 真實單號／手機在測試對話驗證（勿將 demo 當 live proof）。
+- `diagnose-review-bundle-db.ts` 之 `shopline_configured` 會 **≥ 1**。  
+- 程式允許走 Shopline live；**仍不會**在「客戶明講官網」時回落一頁冒充官網。  
+- 真實成功 case 須以 **遮罩後** 單號／手機在該環境對話驗收（**禁止**以 demo payload 冒充 live proof）。

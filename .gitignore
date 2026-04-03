@@ -47,3 +47,18 @@ _CORE_SYSTEM_DUMP.md
 # 隔離取證產物（腳本可重建）
 _evidence_run/data/
 _evidence_run/out/
+
+# --- Phase 97 & Agent Ops Staging Artifacts (Do Not Commit) ---
+*.zip
+_BUNDLE_*/
+_ZIP_STAGING/
+_FE_ZIP_STAGING/
+_PILOT_EVIDENCE_ZIP_STAGING/
+_DELTA_STAGING/
+_evidence_run/
+review_bundle*/
+review_runtime_addon_staging/
+*_log.txt
+*.log
+*_temp_verify_*.txt
+review_bundle_staging_sizes.txt

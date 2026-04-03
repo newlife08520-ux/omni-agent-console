@@ -34,6 +34,19 @@
 | Superlanding | `payment_status_raw`、`status`、`payment_method`、`prepaid`、`paid_at`、`shipping_method`、`delivery_target_type` |
 | Shopline | `payment_status_raw`（優先於純推測） |
 
+## Fixture 對照表（≥5 類，`verify:r1` 與本檔一致）
+
+| # | 案例 | 路徑 | 預期 `kind` | 對客標籤要點 |
+|---|------|------|-------------|----------------|
+| 1 | LINE Pay `payment_status_raw` 失敗 | 記憶體 `OrderInfo` fixture | `failed` | 付款失敗／訂單未成立 |
+| 2 | 一頁 CVS + `pending` + 非預付 | 記憶體 `OrderInfo` | `cod` | 貨到付款（到收／取件時付款） |
+| 3 | 信用卡新訂單未付 | 記憶體 `OrderInfo` | `pending` | 待付款或待確認 |
+| 4 | 紅叉／中文失敗 raw | 記憶體 `OrderInfo` | `failed` | 勿當 pending |
+| 5 | 狀態已取消 | 記憶體 `OrderInfo` | `failed` | 勿當待付款 |
+| 6 | **去識別真實結構** `superlanding-esc20981-linepay-fail.fixture.sanitized.json` | `mapSuperlandingOrderFromApiPayload` → `derivePaymentStatus` | `failed`（或依 raw 映射；與 superlanding 映射一致） | 與營運「未成立」語義一致 |
+
+> **Shopline**：本機唯一真相 world 無 API；**不**宣稱已完成 shopline raw fixture；僅 superlanding 走完整 JSON 路徑。
+
 ## 驗證
 
-- `npm run verify:r1` 內含：LINE Pay fail → failed、CVS pending → cod、卡類新訂單 → pending。
+- `npm run verify:r1`：含上表 1–6 相關斷言（含 sanitized JSON 全鏈）。
