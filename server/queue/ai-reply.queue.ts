@@ -49,12 +49,20 @@ export interface DebouncedMessage {
   eventId: string;
 }
 
-function getProducerConnection(): IORedis {
-  return new IORedis(REDIS_URL, {
-    maxRetriesPerRequest: 3,
-    enableReadyCheck: true,
-    retryStrategy: (times) => Math.min(times * 200, 2000),
-  });
+const producerRedisOptions = {
+  maxRetriesPerRequest: 3,
+  enableReadyCheck: true,
+  retryStrategy: (times: number) => Math.min(times * 200, 2000),
+} as const;
+
+/** Webhook / API 端與 BullMQ Queue 共用一條 IORedis，避免每次 enqueue 開新連線 */
+let sharedProducerRedis: IORedis | null = null;
+
+function getSharedProducerRedis(): IORedis {
+  if (!sharedProducerRedis) {
+    sharedProducerRedis = new IORedis(REDIS_URL, { ...producerRedisOptions });
+  }
+  return sharedProducerRedis;
 }
 
 function getWorkerConnection(): IORedis {
@@ -66,13 +74,11 @@ function getWorkerConnection(): IORedis {
 }
 
 let queue: Queue<AiReplyJobData> | null = null;
-let producerConn: IORedis | null = null;
 
 export function getAiReplyQueue(): Queue<AiReplyJobData> {
   if (!queue) {
-    producerConn = getProducerConnection();
     queue = new Queue<AiReplyJobData>(QUEUE_NAME, {
-      connection: producerConn as import("bullmq").ConnectionOptions,
+      connection: getSharedProducerRedis() as import("bullmq").ConnectionOptions,
       defaultJobOptions: {
         removeOnComplete: { count: 1000 },
         removeOnFail: { count: 500 },
@@ -118,7 +124,7 @@ export async function getWorkerHeartbeatStatus(): Promise<{ alive: boolean; ageS
     const raw = redis ? await redis.get(WORKER_HEARTBEAT_KEY) : null;
     if (!raw) {
       if (!redis) {
-        const conn = getProducerConnection();
+        const conn = getSharedProducerRedis();
         const fallbackRaw = await conn.get(WORKER_HEARTBEAT_KEY);
         if (!fallbackRaw) return { alive: false, ageSec: null };
         return parseHeartbeatRaw(fallbackRaw);
@@ -191,7 +197,7 @@ export async function enqueueDebouncedAiReply(
   channelToken: string | null,
   matchedBrandId?: number
 ): Promise<void> {
-  const redis = getProducerConnection();
+  const redis = getSharedProducerRedis();
   const key = pendingKey(platform, contactId);
   const payload = JSON.stringify({ text: message, eventId: inboundEventId } as DebouncedMessage);
 
@@ -232,15 +238,27 @@ export async function addAiReplyJob(data: {
 }): Promise<Job<AiReplyJobData> | null> {
   try {
     const q = getAiReplyQueue();
-    const job = await q.add("reply", {
-      contactId: data.contactId,
-      channelToken: data.channelToken,
-      matchedBrandId: data.matchedBrandId,
-      platform: data.platform,
-      enqueuedAtMs: Date.now(),
-    }, {
-      jobId: `${data.contactId}_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
-    });
+    const platform = data.platform ?? "line";
+    const jid = `ai-reply:${platform}:${data.contactId}`;
+    const existing = await q.getJob(jid);
+    if (existing) {
+      const state = await existing.getState();
+      if (state === "active" || state === "waiting") {
+        console.log("[Queue] addAiReplyJob skip, job already active/waiting:", jid);
+        return null;
+      }
+    }
+    const job = await q.add(
+      "reply",
+      {
+        contactId: data.contactId,
+        channelToken: data.channelToken,
+        matchedBrandId: data.matchedBrandId,
+        platform: data.platform,
+        enqueuedAtMs: Date.now(),
+      },
+      { jobId: jid }
+    );
     return job;
   } catch (err) {
     console.error("[Queue] addAiReplyJob failed:", err);
@@ -341,5 +359,8 @@ export async function closeAiReplyQueue(): Promise<void> {
   if (worker) { await worker.close(); worker = null; }
   if (workerConn) { await workerConn.quit(); workerConn = null; }
   if (queue) { await queue.close(); queue = null; }
-  if (producerConn) { await producerConn.quit(); producerConn = null; }
+  if (sharedProducerRedis) {
+    await sharedProducerRedis.quit();
+    sharedProducerRedis = null;
+  }
 }

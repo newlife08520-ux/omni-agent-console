@@ -21,7 +21,12 @@ export function ScheduleForm() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      const updated = await apiRequest("PUT", "/api/settings/schedule", form) as { work_start_time: string; work_end_time: string; lunch_start_time: string; lunch_end_time: string };
+      const updated = (await apiRequest("PUT", "/api/settings/schedule", form)) as unknown as {
+        work_start_time: string;
+        work_end_time: string;
+        lunch_start_time: string;
+        lunch_end_time: string;
+      };
       queryClient.setQueryData(["/api/settings/schedule"], updated);
       toast({ title: "已儲存客服時段" });
     } catch (_e) {

@@ -414,7 +414,7 @@ function listGetPriorityLabel(c: ContactWithPreview): "高" | "中" | "低" | nu
 }
 function listGetStatusSemantic(c: ContactWithPreview): keyof typeof STATUS_SEMANTIC {
   if (["closed", "resolved"].includes(c.status)) return "muted";
-  if (listIsUrgent(c) || (c as ContactWithPreview).reassign_count > 0) return "danger";
+  if (listIsUrgent(c) || ((c as ContactWithPreview).reassign_count ?? 0) > 0) return "danger";
   if (!(c as ContactWithPreview).assigned_agent_name && c.needs_human) return "muted";
   if ((c as ContactWithPreview).assigned_agent_name) {
     if ((c as ContactWithPreview).last_message_sender_type === "user") return "warning";
@@ -1562,9 +1562,9 @@ export default function ChatPage() {
     }
   };
 
-  const handleTogglePin = useCallback(async (contactId: number, currentPinned: number) => {
+  const handleTogglePin = useCallback(async (contactId: number, isPinned: boolean) => {
     try {
-      await apiRequest("PUT", `/api/contacts/${contactId}/pinned`, { is_pinned: currentPinned ? 0 : 1 });
+      await apiRequest("PUT", `/api/contacts/${contactId}/pinned`, { is_pinned: isPinned ? 0 : 1 });
       invalidateContactsAndStats();
     } catch (_e) { toast({ title: "操作失敗", variant: "destructive" }); }
   }, [invalidateContactsAndStats, toast]);
@@ -1908,7 +1908,7 @@ export default function ChatPage() {
   }, [effectiveSelectedContact?.tags]);
   const getStatusSemantic = (c: ContactWithPreview): keyof typeof STATUS_SEMANTIC => {
     if (["closed", "resolved"].includes(c.status)) return "muted";
-    if (isUrgent(c) || (c as ContactWithPreview).reassign_count > 0) return "danger";
+    if (isUrgent(c) || ((c as ContactWithPreview).reassign_count ?? 0) > 0) return "danger";
     if (!(c as ContactWithPreview).assigned_agent_name && c.needs_human) return "muted";
     if ((c as ContactWithPreview).assigned_agent_name) {
       if ((c as ContactWithPreview).last_message_sender_type === "user") return "warning";
@@ -2501,7 +2501,7 @@ export default function ChatPage() {
                             const avatarUrl = (effectiveSelectedContact as ContactWithPreview)?.assigned_agent_avatar_url ?? assignmentData?.assigned_agent_avatar_url;
                             return (
                               <div className="flex items-center gap-2">
-                                <Avatar className="w-10 h-10 shrink-0 ring-2 ring-white shadow-sm"><AvatarImage src={avatarUrl} alt={name} /><AvatarFallback className="bg-blue-100 text-blue-700 text-sm font-semibold">{name ? String(name).trim().slice(0, 1).toUpperCase() || "?" : "?"}</AvatarFallback></Avatar>
+                                <Avatar className="w-10 h-10 shrink-0 ring-2 ring-white shadow-sm"><AvatarImage src={avatarUrl ?? undefined} alt={name} /><AvatarFallback className="bg-blue-100 text-blue-700 text-sm font-semibold">{name ? String(name).trim().slice(0, 1).toUpperCase() || "?" : "?"}</AvatarFallback></Avatar>
                                 <div className="min-w-0 flex-1">
                                   <p className="text-sm font-semibold text-stone-800 truncate">{name}</p>
                                   <div className="flex items-center gap-1.5 flex-wrap text-[10px]">

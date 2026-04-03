@@ -147,7 +147,15 @@ export default function PerformancePage() {
   }
 
   const stats = isManager ? undefined : myStats;
-  const cards = dashboard?.cards ?? {};
+  const emptyCards: ManagerDashboard["cards"] = {
+    today_pending: 0,
+    urgent: 0,
+    unassigned: 0,
+    today_close_rate: 0,
+    closed_today: 0,
+    today_new: 0,
+  };
+  const cards: ManagerDashboard["cards"] = dashboard?.cards ?? emptyCards;
   const statusDist = dashboard?.status_distribution ?? [];
   const agentWorkload = dashboard?.agent_workload ?? [];
   const alerts = dashboard?.alerts ?? [];

@@ -183,7 +183,7 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
     enabled: !!selectedBrandId,
   });
 
-  const { data: allChannelsWithBrand = [] } = useQuery<Channel[] & { brand_name?: string }[]>({
+  const { data: allChannelsWithBrand = [] } = useQuery<(Channel & { brand_name?: string })[]>({
     queryKey: ["/api/channels"],
     queryFn: getQueryFn({ on401: "throw" }),
     enabled: !readOnly,

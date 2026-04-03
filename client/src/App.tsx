@@ -250,7 +250,16 @@ function CommentCenterRedirect() {
   return null;
 }
 
-function GuardedRoute({ path, component: Component, userRole }: { path: string; component: React.ComponentType; userRole: string }) {
+function GuardedRoute({
+  path,
+  component: Component,
+  userRole,
+}: {
+  path: string;
+  /** wouter Route 的 component 型別含 RouteComponentProps；實際頁面為預設匯出 */
+  component: React.ComponentType<any>;
+  userRole: string;
+}) {
   const allowedRoles = ROUTE_ACCESS[path];
   if (allowedRoles && !allowedRoles.includes(userRole)) {
     return <Route path={path} component={AccessDenied} />;

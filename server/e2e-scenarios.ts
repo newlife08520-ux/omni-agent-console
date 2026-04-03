@@ -13,7 +13,9 @@ import { resetGuardStats, getGuardStats, recordGuardHit } from "./content-guard-
 
 const returnFormUrl = "https://example.com/returns";
 
-function stubContact(overrides: Partial<Contact> & { product_scope_locked?: string | null; channel_id?: number | null }): Contact {
+function stubContact(
+  overrides: Partial<Contact> & { product_scope_locked?: string | null; channel_id?: number | null } = {}
+): Contact {
   return {
     id: 1,
     platform: "line",
@@ -128,7 +130,10 @@ async function runScenario(s: Scenario): Promise<{ pass: boolean; detail: string
       { sender_type: "user" as const, content: "訂單號 SL-E2E-001", message_type: "text" as const, image_url: null as string | null },
       { sender_type: "user" as const, content: lastTurn.userMessage, message_type: "text" as const, image_url: null as string | null },
     ];
-    const found = await searchOrderInfoThreeLayers(s.contact.id, withOrder, { imageFileToDataUri: () => null, openai: null });
+    const found = await searchOrderInfoThreeLayers(s.contact.id, withOrder, {
+      imageFileToDataUri: async () => null,
+      openai: null,
+    });
     const foundOk = s.expectAlreadyProvidedFound ? (found != null && (found.orderId || found.phone)) : (found == null || (!found.orderId && !found.phone));
     if (!foundOk) {
       return {

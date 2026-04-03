@@ -12,17 +12,17 @@ export function parseIdParam(value: string | string[] | undefined): number | nul
 
 export const authMiddleware = (req: Request, res: Response, next: NextFunction) => {
   if ((req as any).session?.authenticated === true) return next();
-  return res.status(401).json({ message: "????" });
+  return res.status(401).json({ message: "請先登入" });
 };
 
 export const superAdminOnly = (req: Request, res: Response, next: NextFunction) => {
   if ((req as any).session?.userRole === "super_admin") return next();
-  return res.status(403).json({ message: "???????" });
+  return res.status(403).json({ message: "權限不足，需要最高管理員" });
 };
 
 export const managerOrAbove = (req: Request, res: Response, next: NextFunction) => {
   if (["super_admin", "marketing_manager"].includes((req as any).session?.userRole)) return next();
-  return res.status(403).json({ message: "??????????" });
+  return res.status(403).json({ message: "權限不足，需要管理員以上" });
 };
 
 export function isSupervisor(req: Request): boolean {
