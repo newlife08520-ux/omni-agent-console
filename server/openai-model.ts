@@ -1,13 +1,21 @@
 /**
- * 統一 OpenAI 模型決策，避免不同路徑 fallback 不一致。
- * 所有呼叫 OpenAI 的地方應使用 resolveOpenAIModel()。
+ * 統一 AI 模型／供應商決策（主對話）。
+ * Hybrid Router 仍僅使用 OpenAI，見 resolveOpenAIRouterModel。
+ * 舊程式碼可繼續使用 resolveOpenAIModel()（回傳目前供應商下的 model id 字串）。
  */
 import { storage } from "./storage";
 
-/** 未設 env／DB 時的主對話模型（與 OpenAI 平台 5.4 系列對齊） */
-export const DEFAULT_OPENAI_MODEL = "gpt-5.4";
+export type AiProvider = "openai" | "anthropic";
 
-/** 設定頁「快捷選模型」內建清單；可與 settings.openai_model_quick_picks_extra 合併 */
+export interface ResolvedModel {
+  provider: AiProvider;
+  model: string;
+}
+
+/** OpenAI 模型 id 後備（對應預設字串 openai:gpt-4o） */
+export const DEFAULT_OPENAI_MODEL = "gpt-4o";
+
+/** 設定頁「快捷選模型」內建清單（僅 OpenAI id）；可與 settings.openai_model_quick_picks_extra 合併 */
 export const BUILTIN_OPENAI_MODEL_QUICK_PICKS = [
   "gpt-5.4",
   "gpt-5.4-mini",
@@ -47,6 +55,39 @@ export function getMergedOpenAIModelQuickPicks(): string[] {
   return merged;
 }
 
+/** 未經 OPENAI_MODEL 覆寫邏輯處理的原始設定字串（env → ai_model → openai_model → 預設） */
+function rawAiModelString(): string {
+  const envAi = process.env.AI_MODEL?.trim();
+  if (envAi) return envAi;
+  const dbAi = storage.getSetting("ai_model")?.trim();
+  if (dbAi) return dbAi;
+  const legacyOpenaiModel = storage.getSetting("openai_model")?.trim();
+  if (legacyOpenaiModel) {
+    if (legacyOpenaiModel.startsWith("anthropic:") || legacyOpenaiModel.startsWith("openai:")) {
+      return legacyOpenaiModel;
+    }
+    return `openai:${legacyOpenaiModel}`;
+  }
+  return "openai:gpt-4o";
+}
+
+/**
+ * 解析目前主對話供應商與模型 id。
+ * 環境變數 AI_MODEL：`openai:gpt-4o` 或 `anthropic:claude-sonnet-4-5`；無前綴視為 openai。
+ */
+export function resolveModel(): ResolvedModel {
+  const raw = rawAiModelString();
+  if (raw.startsWith("anthropic:")) {
+    return { provider: "anthropic", model: raw.slice("anthropic:".length) };
+  }
+  const legacyOpenai = process.env.OPENAI_MODEL?.trim();
+  if (legacyOpenai && !raw.includes(":")) {
+    return { provider: "openai", model: legacyOpenai };
+  }
+  const model = raw.startsWith("openai:") ? raw.slice("openai:".length) : raw;
+  return { provider: "openai", model };
+}
+
 export type OpenAIMainModelSource = "env" | "database" | "default";
 export type OpenAIRouterModelSource = "env" | "database" | "inherits_main";
 
@@ -54,7 +95,7 @@ export interface OpenAIMainModelResolution {
   effective: string;
   source: OpenAIMainModelSource;
   envVarSet: boolean;
-  /** 資料庫 settings.openai_model 原始值（可能為空） */
+  /** 資料庫 ai_model 或 openai_model 原始值（可能為空） */
   storedInDb: string;
 }
 
@@ -66,17 +107,24 @@ export interface OpenAIRouterModelResolution {
 }
 
 export function getOpenAIMainModelResolution(): OpenAIMainModelResolution {
-  const envVarSet = Boolean(process.env.OPENAI_MODEL?.trim());
-  const env = process.env.OPENAI_MODEL?.trim();
-  const rawStored = storage.getSetting("openai_model") || "";
-  const stored = rawStored.trim();
-  if (env) {
-    return { effective: env, source: "env", envVarSet: true, storedInDb: rawStored };
-  }
-  if (stored) {
-    return { effective: stored, source: "database", envVarSet: false, storedInDb: rawStored };
-  }
-  return { effective: DEFAULT_OPENAI_MODEL, source: "default", envVarSet: false, storedInDb: rawStored };
+  const rm = resolveModel();
+  const aiModelEnv = process.env.AI_MODEL?.trim();
+  const openaiEnv = process.env.OPENAI_MODEL?.trim();
+  const rawStoredAi = storage.getSetting("ai_model") || "";
+  const rawStoredLegacy = storage.getSetting("openai_model") || "";
+  const storedInDb = rawStoredAi.trim() || rawStoredLegacy.trim();
+  const envVarSet = Boolean(aiModelEnv || openaiEnv);
+
+  let source: OpenAIMainModelSource = "default";
+  if (aiModelEnv || openaiEnv) source = "env";
+  else if (storedInDb) source = "database";
+
+  return {
+    effective: rm.model,
+    source,
+    envVarSet,
+    storedInDb: rawStoredAi || rawStoredLegacy,
+  };
 }
 
 export function getOpenAIRouterModelResolution(): OpenAIRouterModelResolution {
@@ -98,20 +146,24 @@ export function getOpenAIRouterModelResolution(): OpenAIRouterModelResolution {
 export function describeOpenAIModelsForSettings() {
   const main = getOpenAIMainModelResolution();
   const router = getOpenAIRouterModelResolution();
+  const resolved = resolveModel();
   return {
     defaultMainModel: DEFAULT_OPENAI_MODEL,
     builtInQuickPicks: [...BUILTIN_OPENAI_MODEL_QUICK_PICKS],
     modelQuickPicks: getMergedOpenAIModelQuickPicks(),
     main,
     router,
+    provider: resolved.provider,
+    aiModelEnvSet: Boolean(process.env.AI_MODEL?.trim()),
   };
 }
 
+/** 向下相容：回傳目前解析到的「模型 id」字串（OpenAI 或 Anthropic 皆為官方 model 名）。 */
 export function resolveOpenAIModel(): string {
-  return getOpenAIMainModelResolution().effective;
+  return resolveModel().model;
 }
 
-/** Phase 1 Hybrid Router 專用：可獨立設定較小／較快模型；未設定則沿用主模型。 */
+/** Phase 1 Hybrid Router 專用：可獨立設定較小／較快模型；未設定則沿用主模型（仍為 OpenAI 用 id）。 */
 export function resolveOpenAIRouterModel(): string {
   return getOpenAIRouterModelResolution().effective;
 }

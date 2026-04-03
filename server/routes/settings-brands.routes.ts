@@ -85,9 +85,10 @@ import {
 } from "../services/ai-reply.service";
 import { getTransferUnavailableSystemMessage as transferUnavailableSystemMessage } from "../transfer-unavailable-message";
 import { orderLookupTools, humanHandoffTools, imageTools } from "../openai-tools";
-import { describeOpenAIModelsForSettings, resolveOpenAIModel } from "../openai-model";
+import { describeOpenAIModelsForSettings, resolveModel, resolveOpenAIModel } from "../openai-model";
 
 import OpenAI from "openai";
+import Anthropic from "@anthropic-ai/sdk";
 import { parseFileContent, isImageFile } from "../file-parser";
 import { authMiddleware, superAdminOnly, managerOrAbove, parseIdParam } from "../middlewares/auth.middleware";
 import { broadcastSSE, registerSseRoutes } from "../services/sse.service";
@@ -138,7 +139,7 @@ export function registerSettingsBrandsRoutes(app: Express): void {
       }
       const allSettings = storage.getAllSettings();
       if (role === "super_admin") return res.json(allSettings);
-      const sensitiveKeys = ["openai_api_key", "line_channel_secret", "line_channel_access_token", "superlanding_merchant_no", "superlanding_access_key"];
+      const sensitiveKeys = ["openai_api_key", "anthropic_api_key", "line_channel_secret", "line_channel_access_token", "superlanding_merchant_no", "superlanding_access_key"];
       const filtered = allSettings.filter((s) => !sensitiveKeys.includes(s.key));
       return res.json(filtered);
     });
@@ -146,7 +147,7 @@ export function registerSettingsBrandsRoutes(app: Express): void {
     app.put("/api/settings", authMiddleware, (req: any, res) => {
       const { key, value } = req.body;
       if (!key) return res.status(400).json({ message: "key is required" });
-      const sensitiveKeys = ["openai_api_key", "line_channel_secret", "line_channel_access_token", "superlanding_merchant_no", "superlanding_access_key"];
+      const sensitiveKeys = ["openai_api_key", "anthropic_api_key", "line_channel_secret", "line_channel_access_token", "superlanding_merchant_no", "superlanding_access_key"];
       if (sensitiveKeys.includes(key)) {
         if (req.session?.userRole !== "super_admin") return res.status(403).json({ message: "????? super_admin ???API Key ??" });
       } else {
@@ -169,13 +170,28 @@ export function registerSettingsBrandsRoutes(app: Express): void {
             return res.json({ success: false, message: "請先設定 OpenAI API 金鑰" });
           }
           const openai = new OpenAI({ apiKey });
-          const model = getOpenAIModel();
+          const rm = resolveModel();
+          const model = rm.provider === "openai" ? resolveOpenAIModel() : "gpt-4o-mini";
           await openai.chat.completions.create({
             model,
             messages: [{ role: "user", content: "hi" }],
             max_completion_tokens: 5,
           });
           return res.json({ success: true, message: `OpenAI 連線成功，使用模型：${model}` });
+        }
+
+        if (type === "anthropic") {
+          const apiKey = storage.getSetting("anthropic_api_key");
+          if (!apiKey || apiKey.trim() === "") {
+            return res.json({ success: false, message: "請先設定 Anthropic API 金鑰" });
+          }
+          const client = new Anthropic({ apiKey });
+          await client.messages.create({
+            model: "claude-haiku-4-5-20251001",
+            max_tokens: 10,
+            messages: [{ role: "user", content: "hi" }],
+          });
+          return res.json({ success: true, message: "Claude 連線成功，模型：claude-haiku" });
         }
 
         if (type === "line") {

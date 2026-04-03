@@ -58,7 +58,9 @@ import {
 import { ensureShippingSopCompliance } from "../sop-compliance-guard";
 import { deriveOrderLookupIntent } from "../order-lookup-policy";
 import type { ToolCallContext } from "./tool-executor.service";
-import { resolveOpenAIModel } from "../openai-model";
+import { resolveModel, resolveOpenAIModel } from "../openai-model";
+import type { ContentBlockParam } from "@anthropic-ai/sdk/resources/messages";
+import { callAiModel, type AiCallResult, type AiMessage } from "./ai-client.service";
 import { getDataDir } from "../data-dir";
 import {
   classifyMessageForSafeAfterSale,
@@ -146,6 +148,77 @@ const ASK_ORDER_PHONE_FOR_BYPASS_KW = ["請提供訂單編號", "訂單編號", 
 
 function isOrderLookupFamily(mode: string): boolean {
   return mode === "order_lookup" || mode === "order_followup";
+}
+
+function openaiChatMessagesToClaudeSeed(
+  msgs: OpenAI.Chat.Completions.ChatCompletionMessageParam[]
+): AiMessage[] | null {
+  const out: AiMessage[] = [];
+  for (const m of msgs) {
+    if (m.role === "system") {
+      if (typeof m.content !== "string") return null;
+      out.push({ role: "system", content: m.content });
+    } else if (m.role === "user") {
+      if (typeof m.content === "string") {
+        out.push({ role: "user", content: m.content });
+      } else if (Array.isArray(m.content)) {
+        return null;
+      }
+    } else if (m.role === "assistant") {
+      if (typeof m.content === "string") {
+        out.push({ role: "assistant", content: m.content ?? "" });
+      } else {
+        return null;
+      }
+    } else {
+      return null;
+    }
+  }
+  return out;
+}
+
+function aiCallResultToOpenAiAssistantMessage(r: AiCallResult): OpenAI.Chat.Completions.ChatCompletionMessage {
+  const tool_calls = r.tool_calls?.map((tc) => ({
+    id: tc.id,
+    type: "function" as const,
+    function: { name: tc.name, arguments: tc.arguments || "{}" },
+  }));
+  return {
+    role: "assistant",
+    content: r.content || null,
+    tool_calls: tool_calls && tool_calls.length > 0 ? tool_calls : undefined,
+    refusal: null,
+  } as OpenAI.Chat.Completions.ChatCompletionMessage;
+}
+
+function openAiAssistantToClaudeContentBlocks(
+  msg: OpenAI.Chat.Completions.ChatCompletionMessage
+): ContentBlockParam[] {
+  const blocks: ContentBlockParam[] = [];
+  const c = msg.content;
+  if (typeof c === "string" && c.trim()) {
+    blocks.push({ type: "text", text: c });
+  }
+  const tcs = msg.tool_calls;
+  if (tcs) {
+    for (const tc of tcs) {
+      if (tc.type !== "function") continue;
+      const fn = (tc as OpenAI.Chat.Completions.ChatCompletionMessageFunctionToolCall).function;
+      let input: Record<string, unknown> = {};
+      try {
+        input = JSON.parse(fn.arguments || "{}") as Record<string, unknown>;
+      } catch {
+        input = {};
+      }
+      blocks.push({
+        type: "tool_use",
+        id: tc.id,
+        name: fn.name,
+        input,
+      });
+    }
+  }
+  return blocks;
 }
 
 /** Minimal Safe Mode：永遠不走 active-order 確定性短路，強制經 LLM。 */
@@ -771,7 +844,7 @@ ${contextStr}
       const priority = computeCasePriority(intentLevel, [...currentTags, ...suggested]);
       storage.updateContactCasePriority(contact.id, priority);
 
-      const recentMessages = storage.getMessages(contact.id).slice(-20);
+      const recentMessages = storage.getMessages(contact.id).slice(-30);
       const recentAiMessages = recentMessages.filter((m) => m.sender_type === "ai").map((m) => m.content || "");
       const lastUserMsg = recentMessages.filter((m) => m.sender_type === "user").pop();
       const lastAiMsg = recentMessages.filter((m) => m.sender_type === "ai").pop();
@@ -1077,40 +1150,6 @@ ${contextStr}
           plan_mode: "handoff",
           reason_if_bypassed: "handoff_short_circuit",
           ...computePhase1TraceLogExtras("handoff"),
-        });
-        return;
-      }
-
-      // ??3???????????return_form_first
-      if (plan.mode === "return_form_first") {
-        const returnFormFirstText = `???????????? ???????????????????????????????????????????${returnFormUrl ? `\n?????${returnFormUrl}` : ""}\n??????????????????????????????????????????`;
-        const contactPlatform = platform || contact.platform || "line";
-        const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", returnFormFirstText);
-        storage.updateContactConversationFields(contact.id, { return_stage: 1, resolution_status: "awaiting_customer", waiting_for_customer: "return_form_submit" });
-        broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: effectiveBrandId || contact.brand_id });
-        broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-        if (contactPlatform === "messenger" && channelToken) {
-          await sendFBMessage(channelToken, contact.platform_user_id, returnFormFirstText);
-        } else if (channelToken) {
-          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: returnFormFirstText }], channelToken);
-        }
-        storage.createAiLog({
-          contact_id: contact.id,
-          message_id: aiMsg.id,
-          brand_id: effectiveBrandId || undefined,
-          prompt_summary: `return_form_first: ${userMessage.slice(0, 80)}`,
-          knowledge_hits: [],
-          tools_called: ["return_form_first"],
-          transfer_triggered: false,
-          result_summary: "?????????F2 ???",
-          token_usage: 0,
-          model: "reply-plan",
-          response_time_ms: Date.now() - startTime,
-          reply_source: "return_form_first",
-          used_llm: 0,
-          plan_mode: "return_form_first",
-          reason_if_bypassed: "return_form_first",
-          ...computePhase1TraceLogExtras("return_form_first"),
         });
         return;
       }
@@ -1591,7 +1630,123 @@ ${contextStr}
           }
         }
       }
-      const openai = new OpenAI({ apiKey });
+
+      if (plan.mode === "return_form_first") {
+        const returnFormRules = `
+
+--- 本輪強制規則（return_form_first）---
+你現在要處理顧客的退換貨或售後問題。請依以下順序回覆，不可省略：
+1. 第一句：先道歉並表示理解（例：「不好意思，讓您有這樣的困擾」「了解您的情況」）
+2. 第二句：告知會協助處理，引導填寫退換貨表單
+${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由專人進一步協助確認流程"}
+4. 最後一句：可補充「填好後我們專人會盡快與您聯繫」
+
+嚴格禁止：
+- 不可答應直接退款（要說「會由專人確認後續流程」）
+- 不可說「若為其他平台購買請洽該平台」
+- 不可先查訂單再給表單（這輪主流程是表單）
+- 不可超過 4 句話
+- 語氣要自然、有溫度，像你平常說話的風格
+`;
+        const returnFormSystemPrompt = systemPrompt + returnFormRules;
+        const returnFormFallback =
+          `了解，這邊先協助您處理。請先填寫退換貨表單，我們會盡快為您處理。${returnFormUrl ? `\n表單連結：${returnFormUrl}` : ""}\n填寫完成後專人會與您聯繫。`;
+
+        const recent10Rf = storage.getMessages(contact.id).slice(-10);
+        const histRf: AiMessage[] = [];
+        for (const msg of recent10Rf) {
+          if (msg.sender_type === "system") continue;
+          if (msg.sender_type === "user") {
+            histRf.push({ role: "user", content: String(msg.content ?? "") });
+          } else if (msg.sender_type === "ai" || msg.sender_type === "admin") {
+            histRf.push({ role: "assistant", content: String(msg.content ?? "") });
+          }
+        }
+        const rfMessages: AiMessage[] = [{ role: "system", content: returnFormSystemPrompt }, ...histRf];
+
+        let returnFormReply = returnFormFallback;
+        let rfTokens = 0;
+        try {
+          const { provider: rfProvider } = resolveModel();
+          if (rfProvider === "anthropic") {
+            const rfRes = await callAiModel({
+              messages: rfMessages,
+              maxTokens: 300,
+              temperature: 0.85,
+            });
+            rfTokens = rfRes.inputTokens + rfRes.outputTokens;
+            const t = (rfRes.content || "").trim();
+            if (t) returnFormReply = t;
+          } else {
+            const openaiRf = new OpenAI({ apiKey: apiKey.trim() });
+            const comp = await openaiRf.chat.completions.create({
+              model: resolveOpenAIModel(),
+              messages: rfMessages as OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+              max_completion_tokens: 300,
+              temperature: 0.85,
+            });
+            rfTokens = (comp.usage?.prompt_tokens ?? 0) + (comp.usage?.completion_tokens ?? 0);
+            const t = (comp.choices[0]?.message?.content || "").trim();
+            if (t) returnFormReply = t;
+          }
+        } catch (rfErr) {
+          console.error("[return_form_first] LLM failed, using fallback:", rfErr);
+          returnFormReply = returnFormFallback;
+        }
+
+        storage.updateContactConversationFields(contact.id, {
+          return_stage: 1,
+          resolution_status: "awaiting_customer",
+          waiting_for_customer: "return_form_submit",
+        });
+        const contactPlatformRf = platform || contact.platform || "line";
+        const aiMsgRf = storage.createMessage(contact.id, contactPlatformRf, "ai", returnFormReply);
+        broadcastSSE("new_message", { contact_id: contact.id, message: aiMsgRf, brand_id: effectiveBrandId || contact.brand_id });
+        broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+        if (contactPlatformRf === "messenger" && channelToken) {
+          await sendFBMessage(channelToken, contact.platform_user_id, returnFormReply);
+        } else if (channelToken) {
+          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: returnFormReply }], channelToken);
+        }
+        storage.createAiLog({
+          contact_id: contact.id,
+          message_id: aiMsgRf.id,
+          brand_id: effectiveBrandId || undefined,
+          prompt_summary: `return_form_first: ${userMessage.slice(0, 80)}`,
+          knowledge_hits: [],
+          tools_called: ["return_form_first"],
+          transfer_triggered: false,
+          result_summary: returnFormReply.slice(0, 200),
+          token_usage: rfTokens,
+          model: resolveOpenAIModel(),
+          response_time_ms: Date.now() - startTime,
+          reply_source: "return_form_first",
+          used_llm: 1,
+          used_first_llm: 1,
+          used_second_llm: 0,
+          plan_mode: "return_form_first",
+          reason_if_bypassed: "return_form_first",
+          ...computePhase1TraceLogExtras("return_form_first"),
+        });
+        return;
+      }
+
+      const replyStyleHint = `
+
+--- 回覆風格提醒 ---
+- 直接回答，不要用「您好！我是...」等制式開場白
+- 不要重複顧客剛說過的話
+- 回覆保持 1-4 句，簡潔有力
+- 若前面對話中顧客已提供過資訊（訂單編號、姓名等），不要再重複詢問
+- 遇到同樣問題不要給一模一樣的回覆，換個說法
+`;
+      systemPrompt += replyStyleHint;
+
+      let openaiClient: OpenAI | null = null;
+      const getOpenAI = (): OpenAI => {
+        if (!openaiClient) openaiClient = new OpenAI({ apiKey });
+        return openaiClient;
+      };
       let usedFirstLlmTelemetry = 0;
       let usedSecondLlmTelemetry = 0;
 
@@ -1601,6 +1756,7 @@ ${contextStr}
       const knowledgeHits: string[] = [];
 
       for (const msg of recentMessages) {
+        if (msg.sender_type === "system") continue;
         if (msg.sender_type === "user") {
           if (msg.message_type === "image" && msg.image_url) {
             const msgDataUri = await imageFileToDataUri(msg.image_url);
@@ -1615,7 +1771,7 @@ ${contextStr}
           } else {
             chatMessages.push({ role: "user", content: msg.content });
           }
-        } else if (msg.sender_type === "ai") {
+        } else if (msg.sender_type === "ai" || msg.sender_type === "admin") {
           chatMessages.push({ role: "assistant", content: msg.content });
         }
       }
@@ -1650,11 +1806,12 @@ ${contextStr}
       const streamAbortController = new AbortController();
       const streamTimeout = setTimeout(() => streamAbortController.abort(), AI_TIMEOUT_MS);
 
-      async function callOpenAIWithTimeout(params: Parameters<typeof openai.chat.completions.create>[0]) {
+      async function callOpenAIWithTimeout(params: Parameters<OpenAI["chat"]["completions"]["create"]>[0]) {
+        const oai = getOpenAI();
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
         try {
-          const result = await openai.chat.completions.create(params, { signal: controller.signal as any });
+          const result = await oai.chat.completions.create(params, { signal: controller.signal as any });
           return result;
         } finally {
           clearTimeout(timer);
@@ -1674,55 +1831,14 @@ ${contextStr}
         });
       }
 
+      const claudeSeed =
+        resolveModel().provider === "anthropic" && !isOrderLookupFamily(plan.mode)
+          ? openaiChatMessagesToClaudeSeed(chatMessages)
+          : null;
+
       let responseMessage: OpenAI.Chat.Completions.ChatCompletionMessage | undefined;
-      try {
-        responseMessage = await runOpenAIStream(
-          openai,
-          {
-            model: getOpenAIModel(),
-            messages: chatMessages,
-            tools: allTools,
-            max_completion_tokens: 1000,
-            temperature: isOrderLookupFamily(plan.mode) ? 0.28 : 0.7,
-          },
-          contact.id,
-          contact.brand_id ?? undefined,
-          streamAbortController.signal
-        );
-      } catch (timeoutErr: any) {
-        clearTimeout(streamTimeout);
-        if (timeoutErr?.name === "AbortError" || timeoutErr?.message?.includes("abort")) {
-          console.log("[AI Latency] contact", contact.id, "first_llm_timeout_or_error_ms", Date.now() - startTime);
-          console.log(`[AI Timeout] OpenAI ???? (>${AI_TIMEOUT_MS}ms) - contact ${contact.id}`);
-          const timeoutCount = storage.incrementConsecutiveTimeouts(contact.id);
-          storage.createSystemAlert({ alert_type: "timeout_escalation", details: `OpenAI ???? (?${timeoutCount}?)`, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
-          if (timeoutCount >= 2) {
-            applyHandoff({ contactId: contact.id, reason: "timeout_escalation", source: "webhook_ai_timeout", brandId: effectiveBrandId || undefined });
-            const comfortMsg = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, assignment.getUnavailableReason());
-            storage.createMessage(contact.id, contact.platform, "ai", comfortMsg);
-            if (platform === "messenger") {
-              sendFBMessage(channelToken || "", contact.platform_user_id, comfortMsg).catch(() => {});
-            } else if (channelToken) {
-              pushLineMessage(contact.platform_user_id, [{ type: "text", text: comfortMsg }], channelToken).catch(() => {});
-            }
-            broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-          } else {
-            const comfortMsg = "?????????????????????????????????????????????????";
-            storage.createMessage(contact.id, contact.platform, "ai", comfortMsg);
-            if (platform === "messenger") {
-              sendFBMessage(channelToken || "", contact.platform_user_id, comfortMsg).catch(() => {});
-            } else if (channelToken) {
-              pushLineMessage(contact.platform_user_id, [{ type: "text", text: comfortMsg }], channelToken).catch(() => {});
-            }
-            broadcastSSE("new_message", { contact_id: contact.id, brand_id: contact.brand_id });
-          }
-          return;
-        }
-        throw timeoutErr;
-      }
-      clearTimeout(streamTimeout);
-      usedFirstLlmTelemetry = 1;
-      console.log("[AI Latency] contact", contact.id, "after_first_llm_ms", Date.now() - startTime);
+      let usedClaudeMainPath = false;
+
       let loopCount = 0;
       const maxToolLoops = 3;
       const ORDER_LOOKUP_TOOL_NAMES = ["lookup_order_by_id", "lookup_order_by_product_and_phone", "lookup_order_by_date_and_contact", "lookup_more_orders", "lookup_more_orders_shopline", "lookup_order_by_phone"];
@@ -1732,193 +1848,240 @@ ${contextStr}
       let secondLlmSkipped = false;
       let deterministicToolMeta: { renderer?: string; tool_name?: string } = {};
 
-      while (responseMessage?.tool_calls && responseMessage.tool_calls.length > 0 && loopCount < maxToolLoops) {
-        loopCount++;
-        console.log(`[Webhook AI] ?? ${responseMessage.tool_calls.length} ? Tool Call?? ${loopCount} ??`);
-        chatMessages.push(responseMessage as OpenAI.Chat.Completions.ChatCompletionMessageParam);
+      if (claudeSeed) {
+        const claudeConversation: AiMessage[] = [...claudeSeed];
+        try {
+          const rFirst = await callAiModel({
+            messages: claudeConversation,
+            tools: allTools,
+            maxTokens: 1500,
+            temperature: 0.85,
+          });
+          totalTokens += rFirst.inputTokens + rFirst.outputTokens;
+          responseMessage = aiCallResultToOpenAiAssistantMessage(rFirst);
+          usedClaudeMainPath = true;
+          usedFirstLlmTelemetry = 1;
+          console.log("[AI Latency] contact", contact.id, "after_first_llm_ms", Date.now() - startTime, "provider=anthropic");
 
-        const hasOrderLookupTool = responseMessage.tool_calls.some((tc: any) => ORDER_LOOKUP_TOOL_NAMES.includes(tc?.function?.name || ""));
-        if (orderFeatureFlags.orderLookupAck && hasOrderLookupTool && !sentLookupAckThisTurn) {
-          sentLookupAckThisTurn = true;
-          lookupAckSentMs = Date.now() - startTime;
-          firstCustomerVisibleReplyMs = lookupAckSentMs;
-          console.log(
-            `[phase26_latency] lookup_ack_sent_ms=${lookupAckSentMs} contact=${contact.id} queue_wait_ms=0`
-          );
-          const lookupAckText = "我幫您查詢中～";
-          const ackMsg = storage.createMessage(contact.id, contact.platform || "line", "ai", lookupAckText);
-          broadcastSSE("new_message", { contact_id: contact.id, message: ackMsg, brand_id: effectiveBrandId || contact.brand_id });
-          broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-          if (channelToken && contact.platform === "messenger") {
-            sendFBMessage(channelToken, contact.platform_user_id, lookupAckText).catch(() => {});
-          } else if (channelToken) {
-            pushLineMessage(contact.platform_user_id, [{ type: "text", text: lookupAckText }], channelToken).catch(() => {});
-          }
-        }
+          while (responseMessage?.tool_calls && responseMessage.tool_calls.length > 0 && loopCount < maxToolLoops) {
+            loopCount++;
+            console.log(`[Webhook AI] Claude tool round ${loopCount} n=${responseMessage.tool_calls.length}`);
+            const assistBlocks = openAiAssistantToClaudeContentBlocks(responseMessage);
+            if (assistBlocks.length === 0) break;
+            claudeConversation.push({ role: "assistant", content: assistBlocks });
 
-        const recentUserMessagesForLookup = recentMessages
-          .filter((m: any) => m.sender_type === "user" && m.content && m.content !== "[????]")
-          .map((m: any) => (m.content || "").trim())
-          .filter(Boolean);
-        const actForLookupPolicy = storage.getActiveOrderContext(contact.id);
-        const lookupIntentForTools = deriveOrderLookupIntent(
-          userMessage || "",
-          recentUserMessagesForLookup,
-          actForLookupPolicy
-            ? {
-                order_id: actForLookupPolicy.order_id,
-                candidate_count: actForLookupPolicy.candidate_count,
-                active_order_candidates: actForLookupPolicy.active_order_candidates,
-                selected_order_id: actForLookupPolicy.selected_order_id,
+            const hasOrderLookupTool = responseMessage.tool_calls.some((tc: any) =>
+              ORDER_LOOKUP_TOOL_NAMES.includes(tc?.function?.name || "")
+            );
+            if (orderFeatureFlags.orderLookupAck && hasOrderLookupTool && !sentLookupAckThisTurn) {
+              sentLookupAckThisTurn = true;
+              lookupAckSentMs = Date.now() - startTime;
+              firstCustomerVisibleReplyMs = lookupAckSentMs;
+              console.log(
+                `[phase26_latency] lookup_ack_sent_ms=${lookupAckSentMs} contact=${contact.id} queue_wait_ms=0`
+              );
+              const lookupAckText = "我幫您查詢中～";
+              const ackMsg = storage.createMessage(contact.id, contact.platform || "line", "ai", lookupAckText);
+              broadcastSSE("new_message", { contact_id: contact.id, message: ackMsg, brand_id: effectiveBrandId || contact.brand_id });
+              broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+              if (channelToken && contact.platform === "messenger") {
+                sendFBMessage(channelToken, contact.platform_user_id, lookupAckText).catch(() => {});
+              } else if (channelToken) {
+                pushLineMessage(contact.platform_user_id, [{ type: "text", text: lookupAckText }], channelToken).catch(() => {});
               }
-            : null
-        );
-        const toolCtx = {
-          contactId: contact.id,
-          brandId: effectiveBrandId || undefined,
-          channelToken: channelToken || undefined,
-          platform: contact.platform,
-          platformUserId: contact.platform_user_id,
-          preferShopline: shouldPreferShoplineLookup(userMessage, recentUserMessagesForLookup),
-          userMessage: userMessage || "",
-          recentUserMessages: recentUserMessagesForLookup,
-          orderLookupSummaryOnly: lookupIntentForTools.summaryOnly === true,
-          startTime,
-          queueWaitMs,
-        };
+            }
 
-        const toolResults = await Promise.all(
-          responseMessage.tool_calls.map(async (toolCall) => {
-            const fn = (toolCall as { function?: { name?: string; arguments?: string } }).function;
-            const fnName = fn?.name ?? "";
-            let fnArgs: Record<string, string> = {};
-            try { fnArgs = JSON.parse(fn?.arguments ?? "{}"); } catch (_e) {}
-            toolsCalled.push(fnName);
-            const toolStartMs = Date.now();
-            console.log(`[Webhook AI] ?? Tool: ${fnName}???:`, fnArgs);
-            try {
-              const toolResult = await callToolWithTimeout(fnName, fnArgs, toolCtx);
-              console.log("[AI Latency] contact", contact.id, "tool", fnName, "ms", Date.now() - toolStartMs);
-              return { toolCall, toolResult };
-            } catch (toolErr: any) {
-              if (toolErr?.message === "TOOL_TIMEOUT") {
-                console.log(`[AI Timeout] ?? ${fnName} ?? (>${TOOL_TIMEOUT_MS}ms)`);
-                storage.createSystemAlert({ alert_type: "timeout_escalation", details: `?? ${fnName} ??`, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
-                return { toolCall, toolResult: JSON.stringify({ error: true, message: "????????????" }) };
+            const recentUserMessagesForLookup = recentMessages
+              .filter((m: any) => m.sender_type === "user" && m.content && m.content !== "[????]")
+              .map((m: any) => (m.content || "").trim())
+              .filter(Boolean);
+            const actForLookupPolicy = storage.getActiveOrderContext(contact.id);
+            const lookupIntentForTools = deriveOrderLookupIntent(
+              userMessage || "",
+              recentUserMessagesForLookup,
+              actForLookupPolicy
+                ? {
+                    order_id: actForLookupPolicy.order_id,
+                    candidate_count: actForLookupPolicy.candidate_count,
+                    active_order_candidates: actForLookupPolicy.active_order_candidates,
+                    selected_order_id: actForLookupPolicy.selected_order_id,
+                  }
+                : null
+            );
+            const toolCtx = {
+              contactId: contact.id,
+              brandId: effectiveBrandId || undefined,
+              channelToken: channelToken || undefined,
+              platform: contact.platform,
+              platformUserId: contact.platform_user_id,
+              preferShopline: shouldPreferShoplineLookup(userMessage, recentUserMessagesForLookup),
+              userMessage: userMessage || "",
+              recentUserMessages: recentUserMessagesForLookup,
+              orderLookupSummaryOnly: lookupIntentForTools.summaryOnly === true,
+              startTime,
+              queueWaitMs,
+            };
+
+            const toolResults = await Promise.all(
+              responseMessage.tool_calls.map(async (toolCall) => {
+                const fn = (toolCall as { function?: { name?: string; arguments?: string } }).function;
+                const fnName = fn?.name ?? "";
+                let fnArgs: Record<string, string> = {};
+                try { fnArgs = JSON.parse(fn?.arguments ?? "{}"); } catch (_e) {}
+                toolsCalled.push(fnName);
+                const toolStartMs = Date.now();
+                console.log(`[Webhook AI] ?? Tool: ${fnName}???:`, fnArgs);
+                try {
+                  const toolResult = await callToolWithTimeout(fnName, fnArgs, toolCtx);
+                  console.log("[AI Latency] contact", contact.id, "tool", fnName, "ms", Date.now() - toolStartMs);
+                  return { toolCall, toolResult };
+                } catch (toolErr: any) {
+                  if (toolErr?.message === "TOOL_TIMEOUT") {
+                    console.log(`[AI Timeout] ?? ${fnName} ?? (>${TOOL_TIMEOUT_MS}ms)`);
+                    storage.createSystemAlert({ alert_type: "timeout_escalation", details: `?? ${fnName} ??`, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
+                    return { toolCall, toolResult: JSON.stringify({ error: true, message: "????????????" }) };
+                  }
+                  throw toolErr;
+                }
+              })
+            );
+
+            const toolResultBlocks: ContentBlockParam[] = [];
+            let orderLookupDeterministicReply: string | null = null;
+            for (const { toolCall, toolResult } of toolResults) {
+              toolResultBlocks.push({
+                type: "tool_result",
+                tool_use_id: toolCall.id,
+                content: toolResult,
+              });
+              const fn = (toolCall as { function?: { name?: string; arguments?: string } }).function;
+              const fnName = fn?.name ?? "";
+              let fnArgs: Record<string, string> = {};
+              try { fnArgs = JSON.parse(fn?.arguments ?? "{}"); } catch (_e) {}
+
+              try {
+                const pr = JSON.parse(toolResult) as Record<string, unknown>;
+                if (
+                  orderFeatureFlags.genericDeterministicOrder &&
+                  isValidOrderDeterministicPayload(pr)
+                ) {
+                  orderLookupDeterministicReply = String(pr.deterministic_customer_reply).trim();
+                  deterministicToolMeta = {
+                    renderer: typeof pr.renderer === "string" ? pr.renderer : undefined,
+                    tool_name: fnName,
+                  };
+                }
+              } catch (_e) {
+                /* ignore */
               }
-              throw toolErr;
-            }
-          })
-        );
 
-        let orderLookupDeterministicReply: string | null = null;
-        /** 同輪多個 tool 皆帶 deterministic 時，以最後一筆為準（與 tool_calls 順序一致） */
-        for (const { toolCall, toolResult } of toolResults) {
-          chatMessages.push({ role: "tool", tool_call_id: toolCall.id, content: toolResult });
-          const fn = (toolCall as { function?: { name?: string; arguments?: string } }).function;
-          const fnName = fn?.name ?? "";
-          let fnArgs: Record<string, string> = {};
-          try { fnArgs = JSON.parse(fn?.arguments ?? "{}"); } catch (_e) {}
-
-          try {
-            const pr = JSON.parse(toolResult) as Record<string, unknown>;
-            if (
-              orderFeatureFlags.genericDeterministicOrder &&
-              isValidOrderDeterministicPayload(pr)
-            ) {
-              orderLookupDeterministicReply = String(pr.deterministic_customer_reply).trim();
-              deterministicToolMeta = {
-                renderer: typeof pr.renderer === "string" ? pr.renderer : undefined,
-                tool_name: fnName,
-              };
-            }
-          } catch (_e) {
-            /* ignore */
-          }
-
-          if (fnName === "transfer_to_human") {
-            transferTriggered = true;
-            transferReason = fnArgs.reason || "AI ????????";
-            (() => { const { reason, reason_detail } = normalizeHandoffReason(transferReason); applyHandoff({ contactId: contact.id, reason, reason_detail, source: "webhook_tool_call", brandId: effectiveBrandId || undefined }); })();
-            const assignedId = assignment.assignCase(contact.id);
-            if (assignedId == null && assignment.isAllAgentsUnavailable()) {
-              storage.updateContactNeedsAssignment(contact.id, 1);
-              const tags = JSON.parse(contact.tags || "[]");
-              if (!tags.includes("?????")) {
-                storage.updateContactTags(contact.id, [...tags, "?????"]);
+              if (fnName === "transfer_to_human") {
+                transferTriggered = true;
+                transferReason = fnArgs.reason || "AI ????????";
+                (() => { const { reason, reason_detail } = normalizeHandoffReason(transferReason); applyHandoff({ contactId: contact.id, reason, reason_detail, source: "webhook_tool_call", brandId: effectiveBrandId || undefined }); })();
+                const assignedId = assignment.assignCase(contact.id);
+                if (assignedId == null && assignment.isAllAgentsUnavailable()) {
+                  storage.updateContactNeedsAssignment(contact.id, 1);
+                  const tags = JSON.parse(contact.tags || "[]");
+                  if (!tags.includes("?????")) {
+                    storage.updateContactTags(contact.id, [...tags, "?????"]);
+                  }
+                  const reason = assignment.getUnavailableReason();
+                  storage.createMessage(contact.id, contact.platform, "system", getTransferUnavailableSystemMessage(reason));
+                }
+                const freshTc = storage.getContact(contact.id);
+                if (freshTc?.needs_human) {
+                  console.log(`[Webhook AI] transfer_to_human ?????? AI ????`);
+                }
               }
-              const reason = assignment.getUnavailableReason();
-              storage.createMessage(contact.id, contact.platform, "system", getTransferUnavailableSystemMessage(reason));
+
+              if (fnName.includes("lookup_order")) {
+                try {
+                  const parsed = JSON.parse(toolResult);
+                  if (parsed.found === false) {
+                    orderLookupFailed++;
+                    const orderSource = parsed.source || "unknown";
+                    storage.createSystemAlert({ alert_type: "order_lookup_fail", details: `???? (${orderSource})`, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
+                  }
+                  if (parsed.found === true && !contact.issue_type) {
+                    storage.updateContactIssueType(contact.id, "order_inquiry");
+                  }
+                } catch (_e) {}
+              }
             }
+
+            claudeConversation.push({ role: "user", content: toolResultBlocks });
+
             const freshContact = storage.getContact(contact.id);
-            if (freshContact?.needs_human) {
-              console.log(`[Webhook AI] transfer_to_human ?????? AI ????`);
+            if (freshContact?.needs_human) break;
+
+            if (orderLookupDeterministicReply) {
+              secondLlmSkipped = true;
+              console.log(
+                `deterministic_tool_reply_selected=true renderer=${deterministicToolMeta.renderer ?? ""} tool_name=${deterministicToolMeta.tool_name ?? ""} second_llm_skipped=true contact=${contact.id}`
+              );
+              console.log(
+                "[order_lookup] skip_second_llm contact=",
+                contact.id,
+                "reply_len=",
+                orderLookupDeterministicReply.length
+              );
+              responseMessage = {
+                role: "assistant",
+                content: orderLookupDeterministicReply,
+              } as OpenAI.Chat.Completions.ChatCompletionMessage;
+              break;
             }
+
+            usedSecondLlmTelemetry = 1;
+            const rNext = await callAiModel({
+              messages: claudeConversation,
+              tools: allTools,
+              maxTokens: hasOrderLookupTool ? 1000 : 1500,
+              temperature: hasOrderLookupTool ? 0.2 : 0.85,
+            });
+            totalTokens += rNext.inputTokens + rNext.outputTokens;
+            responseMessage = aiCallResultToOpenAiAssistantMessage(rNext);
           }
-
-          if (fnName.includes("lookup_order")) {
-            try {
-              const parsed = JSON.parse(toolResult);
-              if (parsed.found === false) {
-                orderLookupFailed++;
-                const orderSource = parsed.source || "unknown";
-                storage.createSystemAlert({ alert_type: "order_lookup_fail", details: `???? (${orderSource})`, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
-              }
-              if (parsed.found === true && !contact.issue_type) {
-                storage.updateContactIssueType(contact.id, "order_inquiry");
-              }
-            } catch (_e) {}
-          }
+        } catch (claudeErr) {
+          console.error("[AI] Claude main path failed, falling back to OpenAI:", claudeErr);
+          usedClaudeMainPath = false;
+          responseMessage = undefined;
+          loopCount = 0;
+          sentLookupAckThisTurn = false;
+          lookupAckSentMs = null;
+          secondLlmSkipped = false;
+          deterministicToolMeta = {};
         }
-
-        /** 防呆：LLM 回覆前檢查 loopCount/orderLookupFailed 等，避免重複查單迴圈 */
-
-        const freshContact = storage.getContact(contact.id);
-        if (freshContact?.needs_human) break;
-
-        if (orderLookupDeterministicReply) {
-          secondLlmSkipped = true;
-          console.log(
-            `deterministic_tool_reply_selected=true renderer=${deterministicToolMeta.renderer ?? ""} tool_name=${deterministicToolMeta.tool_name ?? ""} second_llm_skipped=true contact=${contact.id}`
-          );
-          console.log(
-            "[order_lookup] skip_second_llm contact=",
-            contact.id,
-            "reply_len=",
-            orderLookupDeterministicReply.length
-          );
-          responseMessage = {
-            role: "assistant",
-            content: orderLookupDeterministicReply,
-          } as OpenAI.Chat.Completions.ChatCompletionMessage;
-          break;
+        if (usedClaudeMainPath) {
+          clearTimeout(streamTimeout);
         }
+      }
 
-        const loopAbort = new AbortController();
-        const loopTimer = setTimeout(() => loopAbort.abort(), AI_TIMEOUT_MS);
-        usedSecondLlmTelemetry = 1;
+      if (!usedClaudeMainPath) {
         try {
           responseMessage = await runOpenAIStream(
-            openai,
+            getOpenAI(),
             {
               model: getOpenAIModel(),
               messages: chatMessages,
               tools: allTools,
-              max_completion_tokens: 1000,
-              temperature: hasOrderLookupTool ? 0.2 : 0.7,
+              max_completion_tokens: isOrderLookupFamily(plan.mode) ? 1000 : 1500,
+              temperature: isOrderLookupFamily(plan.mode) ? 0.28 : 0.85,
             },
             contact.id,
             contact.brand_id ?? undefined,
-            loopAbort.signal
+            streamAbortController.signal
           );
-        } catch (loopTimeoutErr: any) {
-          clearTimeout(loopTimer);
-          if (loopTimeoutErr?.name === "AbortError" || loopTimeoutErr?.message?.includes("abort")) {
-            console.log(`[AI Timeout] OpenAI ???????? - contact ${contact.id}`);
-            const loopTimeoutCount = storage.incrementConsecutiveTimeouts(contact.id);
-            storage.createSystemAlert({ alert_type: "timeout_escalation", details: `???????? (?${loopTimeoutCount}?)`, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
-            if (loopTimeoutCount >= 2) {
-              applyHandoff({ contactId: contact.id, reason: "timeout_escalation", source: "webhook_ai_loop_timeout", brandId: effectiveBrandId || undefined });
+        } catch (timeoutErr: any) {
+          clearTimeout(streamTimeout);
+          if (timeoutErr?.name === "AbortError" || timeoutErr?.message?.includes("abort")) {
+            console.log("[AI Latency] contact", contact.id, "first_llm_timeout_or_error_ms", Date.now() - startTime);
+            console.log(`[AI Timeout] OpenAI ???? (>${AI_TIMEOUT_MS}ms) - contact ${contact.id}`);
+            const timeoutCount = storage.incrementConsecutiveTimeouts(contact.id);
+            storage.createSystemAlert({ alert_type: "timeout_escalation", details: `OpenAI ???? (?${timeoutCount}?)`, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
+            if (timeoutCount >= 2) {
+              applyHandoff({ contactId: contact.id, reason: "timeout_escalation", source: "webhook_ai_timeout", brandId: effectiveBrandId || undefined });
               const comfortMsg = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, assignment.getUnavailableReason());
               storage.createMessage(contact.id, contact.platform, "ai", comfortMsg);
               if (platform === "messenger") {
@@ -1927,12 +2090,223 @@ ${contextStr}
                 pushLineMessage(contact.platform_user_id, [{ type: "text", text: comfortMsg }], channelToken).catch(() => {});
               }
               broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+            } else {
+              const comfortMsg = "?????????????????????????????????????????????????";
+              storage.createMessage(contact.id, contact.platform, "ai", comfortMsg);
+              if (platform === "messenger") {
+                sendFBMessage(channelToken || "", contact.platform_user_id, comfortMsg).catch(() => {});
+              } else if (channelToken) {
+                pushLineMessage(contact.platform_user_id, [{ type: "text", text: comfortMsg }], channelToken).catch(() => {});
+              }
+              broadcastSSE("new_message", { contact_id: contact.id, brand_id: contact.brand_id });
             }
+            return;
+          }
+          throw timeoutErr;
+        }
+        clearTimeout(streamTimeout);
+        usedFirstLlmTelemetry = 1;
+        console.log("[AI Latency] contact", contact.id, "after_first_llm_ms", Date.now() - startTime);
+
+        while (responseMessage?.tool_calls && responseMessage.tool_calls.length > 0 && loopCount < maxToolLoops) {
+          loopCount++;
+          console.log(`[Webhook AI] ?? ${responseMessage.tool_calls.length} ? Tool Call?? ${loopCount} ??`);
+          chatMessages.push(responseMessage as OpenAI.Chat.Completions.ChatCompletionMessageParam);
+
+          const hasOrderLookupTool = responseMessage.tool_calls.some((tc: any) => ORDER_LOOKUP_TOOL_NAMES.includes(tc?.function?.name || ""));
+          if (orderFeatureFlags.orderLookupAck && hasOrderLookupTool && !sentLookupAckThisTurn) {
+            sentLookupAckThisTurn = true;
+            lookupAckSentMs = Date.now() - startTime;
+            firstCustomerVisibleReplyMs = lookupAckSentMs;
+            console.log(
+              `[phase26_latency] lookup_ack_sent_ms=${lookupAckSentMs} contact=${contact.id} queue_wait_ms=0`
+            );
+            const lookupAckText = "我幫您查詢中～";
+            const ackMsg = storage.createMessage(contact.id, contact.platform || "line", "ai", lookupAckText);
+            broadcastSSE("new_message", { contact_id: contact.id, message: ackMsg, brand_id: effectiveBrandId || contact.brand_id });
+            broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+            if (channelToken && contact.platform === "messenger") {
+              sendFBMessage(channelToken, contact.platform_user_id, lookupAckText).catch(() => {});
+            } else if (channelToken) {
+              pushLineMessage(contact.platform_user_id, [{ type: "text", text: lookupAckText }], channelToken).catch(() => {});
+            }
+          }
+
+          const recentUserMessagesForLookupOai = recentMessages
+            .filter((m: any) => m.sender_type === "user" && m.content && m.content !== "[????]")
+            .map((m: any) => (m.content || "").trim())
+            .filter(Boolean);
+          const actForLookupPolicyOai = storage.getActiveOrderContext(contact.id);
+          const lookupIntentForToolsOai = deriveOrderLookupIntent(
+            userMessage || "",
+            recentUserMessagesForLookupOai,
+            actForLookupPolicyOai
+              ? {
+                  order_id: actForLookupPolicyOai.order_id,
+                  candidate_count: actForLookupPolicyOai.candidate_count,
+                  active_order_candidates: actForLookupPolicyOai.active_order_candidates,
+                  selected_order_id: actForLookupPolicyOai.selected_order_id,
+                }
+              : null
+          );
+          const toolCtxOai = {
+            contactId: contact.id,
+            brandId: effectiveBrandId || undefined,
+            channelToken: channelToken || undefined,
+            platform: contact.platform,
+            platformUserId: contact.platform_user_id,
+            preferShopline: shouldPreferShoplineLookup(userMessage, recentUserMessagesForLookupOai),
+            userMessage: userMessage || "",
+            recentUserMessages: recentUserMessagesForLookupOai,
+            orderLookupSummaryOnly: lookupIntentForToolsOai.summaryOnly === true,
+            startTime,
+            queueWaitMs,
+          };
+
+          const toolResultsOai = await Promise.all(
+            responseMessage.tool_calls.map(async (toolCall) => {
+              const fn = (toolCall as { function?: { name?: string; arguments?: string } }).function;
+              const fnName = fn?.name ?? "";
+              let fnArgs: Record<string, string> = {};
+              try { fnArgs = JSON.parse(fn?.arguments ?? "{}"); } catch (_e) {}
+              toolsCalled.push(fnName);
+              const toolStartMs = Date.now();
+              console.log(`[Webhook AI] ?? Tool: ${fnName}???:`, fnArgs);
+              try {
+                const toolResult = await callToolWithTimeout(fnName, fnArgs, toolCtxOai);
+                console.log("[AI Latency] contact", contact.id, "tool", fnName, "ms", Date.now() - toolStartMs);
+                return { toolCall, toolResult };
+              } catch (toolErr: any) {
+                if (toolErr?.message === "TOOL_TIMEOUT") {
+                  console.log(`[AI Timeout] ?? ${fnName} ?? (>${TOOL_TIMEOUT_MS}ms)`);
+                  storage.createSystemAlert({ alert_type: "timeout_escalation", details: `?? ${fnName} ??`, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
+                  return { toolCall, toolResult: JSON.stringify({ error: true, message: "????????????" }) };
+                }
+                throw toolErr;
+              }
+            })
+          );
+
+          let orderLookupDeterministicReplyOai: string | null = null;
+          for (const { toolCall, toolResult } of toolResultsOai) {
+            chatMessages.push({ role: "tool", tool_call_id: toolCall.id, content: toolResult });
+            const fn = (toolCall as { function?: { name?: string; arguments?: string } }).function;
+            const fnName = fn?.name ?? "";
+            let fnArgs: Record<string, string> = {};
+            try { fnArgs = JSON.parse(fn?.arguments ?? "{}"); } catch (_e) {}
+
+            try {
+              const pr = JSON.parse(toolResult) as Record<string, unknown>;
+              if (
+                orderFeatureFlags.genericDeterministicOrder &&
+                isValidOrderDeterministicPayload(pr)
+              ) {
+                orderLookupDeterministicReplyOai = String(pr.deterministic_customer_reply).trim();
+                deterministicToolMeta = {
+                  renderer: typeof pr.renderer === "string" ? pr.renderer : undefined,
+                  tool_name: fnName,
+                };
+              }
+            } catch (_e) {
+              /* ignore */
+            }
+
+            if (fnName === "transfer_to_human") {
+              transferTriggered = true;
+              transferReason = fnArgs.reason || "AI ????????";
+              (() => { const { reason, reason_detail } = normalizeHandoffReason(transferReason); applyHandoff({ contactId: contact.id, reason, reason_detail, source: "webhook_tool_call", brandId: effectiveBrandId || undefined }); })();
+              const assignedId = assignment.assignCase(contact.id);
+              if (assignedId == null && assignment.isAllAgentsUnavailable()) {
+                storage.updateContactNeedsAssignment(contact.id, 1);
+                const tags = JSON.parse(contact.tags || "[]");
+                if (!tags.includes("?????")) {
+                  storage.updateContactTags(contact.id, [...tags, "?????"]);
+                }
+                const reason = assignment.getUnavailableReason();
+                storage.createMessage(contact.id, contact.platform, "system", getTransferUnavailableSystemMessage(reason));
+              }
+              const freshContactOai = storage.getContact(contact.id);
+              if (freshContactOai?.needs_human) {
+                console.log(`[Webhook AI] transfer_to_human ?????? AI ????`);
+              }
+            }
+
+            if (fnName.includes("lookup_order")) {
+              try {
+                const parsed = JSON.parse(toolResult);
+                if (parsed.found === false) {
+                  orderLookupFailed++;
+                  const orderSource = parsed.source || "unknown";
+                  storage.createSystemAlert({ alert_type: "order_lookup_fail", details: `???? (${orderSource})`, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
+                }
+                if (parsed.found === true && !contact.issue_type) {
+                  storage.updateContactIssueType(contact.id, "order_inquiry");
+                }
+              } catch (_e) {}
+            }
+          }
+
+          const freshContactLoop = storage.getContact(contact.id);
+          if (freshContactLoop?.needs_human) break;
+
+          if (orderLookupDeterministicReplyOai) {
+            secondLlmSkipped = true;
+            console.log(
+              `deterministic_tool_reply_selected=true renderer=${deterministicToolMeta.renderer ?? ""} tool_name=${deterministicToolMeta.tool_name ?? ""} second_llm_skipped=true contact=${contact.id}`
+            );
+            console.log(
+              "[order_lookup] skip_second_llm contact=",
+              contact.id,
+              "reply_len=",
+              orderLookupDeterministicReplyOai.length
+            );
+            responseMessage = {
+              role: "assistant",
+              content: orderLookupDeterministicReplyOai,
+            } as OpenAI.Chat.Completions.ChatCompletionMessage;
             break;
           }
-          throw loopTimeoutErr;
+
+          const loopAbort = new AbortController();
+          const loopTimer = setTimeout(() => loopAbort.abort(), AI_TIMEOUT_MS);
+          usedSecondLlmTelemetry = 1;
+          try {
+            responseMessage = await runOpenAIStream(
+              getOpenAI(),
+              {
+                model: getOpenAIModel(),
+                messages: chatMessages,
+                tools: allTools,
+                max_completion_tokens: hasOrderLookupTool ? 1000 : 1500,
+                temperature: hasOrderLookupTool ? 0.2 : 0.85,
+              },
+              contact.id,
+              contact.brand_id ?? undefined,
+              loopAbort.signal
+            );
+          } catch (loopTimeoutErr: any) {
+            clearTimeout(loopTimer);
+            if (loopTimeoutErr?.name === "AbortError" || loopTimeoutErr?.message?.includes("abort")) {
+              console.log(`[AI Timeout] OpenAI ???????? - contact ${contact.id}`);
+              const loopTimeoutCount = storage.incrementConsecutiveTimeouts(contact.id);
+              storage.createSystemAlert({ alert_type: "timeout_escalation", details: `???????? (?${loopTimeoutCount}?)`, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
+              if (loopTimeoutCount >= 2) {
+                applyHandoff({ contactId: contact.id, reason: "timeout_escalation", source: "webhook_ai_loop_timeout", brandId: effectiveBrandId || undefined });
+                const comfortMsg = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, assignment.getUnavailableReason());
+                storage.createMessage(contact.id, contact.platform, "ai", comfortMsg);
+                if (platform === "messenger") {
+                  sendFBMessage(channelToken || "", contact.platform_user_id, comfortMsg).catch(() => {});
+                } else if (channelToken) {
+                  pushLineMessage(contact.platform_user_id, [{ type: "text", text: comfortMsg }], channelToken).catch(() => {});
+                }
+                broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+              }
+              break;
+            }
+            throw loopTimeoutErr;
+          }
+          clearTimeout(loopTimer);
         }
-        clearTimeout(loopTimer);
       }
 
       storage.resetConsecutiveTimeouts(contact.id);

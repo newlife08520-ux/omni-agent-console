@@ -89,11 +89,37 @@ export async function registerRoutes(
       return res.status(404).json({ message: "contact not found" });
     }
     const runStartMs = Date.now();
+    const AI_REPLY_TIMEOUT_MS = 30_000;
     console.log("[AI Latency] run-ai-reply start contactId=" + contactId);
     const enq =
       enqueueTimestampMs != null && !Number.isNaN(Number(enqueueTimestampMs))
         ? Number(enqueueTimestampMs)
         : undefined;
+
+    let responded = false;
+    const timeoutId = setTimeout(() => {
+      if (responded) return;
+      responded = true;
+      const totalMs = Date.now() - runStartMs;
+      console.error(
+        "[AI Timeout] run-ai-reply timeout contactId=" + contactId + " after " + totalMs + "ms"
+      );
+      try {
+        storage.updateContactHumanFlag(Number(contactId), 1);
+        storage.updateContactStatus(Number(contactId), "awaiting_human");
+        storage.createSystemAlert({
+          alert_type: "timeout_escalation",
+          details: `run-ai-reply timeout after ${AI_REPLY_TIMEOUT_MS}ms`,
+          contact_id: Number(contactId),
+          brand_id: contact.brand_id ?? undefined,
+        });
+        broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+      } catch (alertErr) {
+        console.error("[AI Timeout] failed to set needs_human:", alertErr);
+      }
+      res.status(504).json({ message: "AI reply timeout, contact escalated to human" });
+    }, AI_REPLY_TIMEOUT_MS);
+
     autoReplyWithAI(
       contact, String(message), channelToken ?? undefined,
       matchedBrandId != null ? Number(matchedBrandId) : undefined,
@@ -101,11 +127,17 @@ export async function registerRoutes(
       enq != null ? { enqueueTimestampMs: enq } : undefined
     )
       .then(() => {
+        if (responded) return;
+        responded = true;
+        clearTimeout(timeoutId);
         const totalMs = Date.now() - runStartMs;
         console.log("[AI Latency] run-ai-reply done contactId=" + contactId + " in " + totalMs + "ms");
         res.status(200).json({ ok: true });
       })
       .catch((err) => {
+        if (responded) return;
+        responded = true;
+        clearTimeout(timeoutId);
         const totalMs = Date.now() - runStartMs;
         console.error("[AI Latency] run-ai-reply failed contactId=" + contactId + " after " + totalMs + "ms", err);
         res.status(500).json({ message: err?.message || "Internal Server Error" });

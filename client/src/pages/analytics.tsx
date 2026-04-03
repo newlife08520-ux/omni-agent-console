@@ -41,7 +41,7 @@ export default function AnalyticsPage() {
     ? `?range=custom&start=${format(customStart, "yyyy-MM-dd")}&end=${format(customEnd, "yyyy-MM-dd")}`
     : `?range=${range}`;
 
-  const { data, isLoading } = useQuery<AnalyticsData>({
+  const { data, isLoading, isError, error, refetch } = useQuery<AnalyticsData>({
     queryKey: ["/api/analytics", range, customStart?.toISOString(), customEnd?.toISOString()],
     queryFn: async () => {
       const res = await fetch(`/api/analytics${queryParams}`, { credentials: "include" });
@@ -67,6 +67,17 @@ export default function AnalyticsPage() {
       return res.json();
     },
   });
+
+  if (isError) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full gap-3 p-6" data-testid="analytics-error">
+        <p className="text-stone-600 text-center">數據戰情室載入失敗（{(error as Error)?.message || "錯誤"}）。請確認已以主管／管理員身分登入，或稍後再試。</p>
+        <Button type="button" variant="outline" size="sm" onClick={() => refetch()}>
+          重新載入
+        </Button>
+      </div>
+    );
+  }
 
   if (isLoading || !data) {
     return <div className="flex items-center justify-center h-full"><p className="text-stone-400">載入數據中...</p></div>;

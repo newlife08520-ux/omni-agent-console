@@ -25,7 +25,13 @@ interface SettingsPageProps {
 
 /** 與 server/openai-model.ts BUILTIN 對齊；API 未回傳時作為快捷按鈕後備 */
 const OPENAI_QUICK_PICK_FALLBACK = ["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.4-pro", "gpt-5"] as const;
-const OPENAI_DEFAULT_MODEL_FALLBACK = "gpt-5.4";
+const OPENAI_DEFAULT_MODEL_FALLBACK = "gpt-4o";
+
+const AI_MODEL_PRESETS = [
+  { value: "openai:gpt-4o", label: "GPT-4o（品質最好）" },
+  { value: "openai:gpt-4o-mini", label: "GPT-4o Mini（速度快、成本低）" },
+  { value: "anthropic:claude-sonnet-4-5", label: "Claude Sonnet（回覆自然）" },
+] as const;
 
 type OpenAIModelsPayload = {
   defaultMainModel: string;
@@ -33,10 +39,12 @@ type OpenAIModelsPayload = {
   modelQuickPicks: string[];
   main: { effective: string; source: string; envVarSet: boolean; storedInDb: string };
   router: { effective: string; source: string; envVarSet: boolean; storedInDb: string };
+  provider: "openai" | "anthropic";
+  aiModelEnvSet: boolean;
 };
 
 function mainModelSourceLabel(source: string): string {
-  if (source === "env") return "環境變數 OPENAI_MODEL（優先）";
+  if (source === "env") return "環境變數 AI_MODEL／OPENAI_MODEL（優先）";
   if (source === "database") return "資料庫設定";
   return "系統預設";
 }
@@ -275,6 +283,14 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
       description: "金鑰用於呼叫 OpenAI。請先看本區塊上方「生效中」模型是否正確，再按測試連線驗證。",
       testType: "openai",
     },
+    {
+      key: "anthropic_api_key",
+      label: "Anthropic API 金鑰（Claude）",
+      icon: Key,
+      placeholder: "sk-ant-...",
+      description: "用於 Claude 模型（後台選擇 anthropic:claude-sonnet-4-5 或環境變數 AI_MODEL 後生效）。",
+      testType: "anthropic",
+    },
   ];
 
   return (
@@ -293,11 +309,12 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
         >
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0 flex-1">
-              <p className="text-xs font-bold uppercase tracking-wide text-indigo-900">OpenAI / ChatGPT · 目前生效模型</p>
+              <p className="text-xs font-bold uppercase tracking-wide text-indigo-900">AI · 目前生效供應商與主模型</p>
               {openaiModels ? (
                 <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-2 text-stone-900">
                   <span className="text-sm">
-                    主模型{" "}
+                    <span className="text-stone-500">{openaiModels.provider}</span>
+                    {" · "}
                     <code className="rounded-md border border-indigo-200 bg-white px-2 py-1 font-mono text-base font-semibold text-indigo-950 shadow-sm">
                       {openaiModels.main.effective}
                     </code>
@@ -360,10 +377,7 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
 
       {canConfigureOpenaiModels && (
         <div className="space-y-4">
-            {apiKeyFields.map((field) =>
-              field.key === "openai_api_key" ? (
                 <div
-                  key={field.key}
                   className="bg-white rounded-2xl border-2 border-indigo-200/90 p-5 shadow-md ring-1 ring-indigo-100"
                   data-testid="section-openai-full"
                 >
@@ -373,9 +387,9 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
                         <Sparkles className="w-4 h-4 text-indigo-600" />
                       </div>
                       <div>
-                        <span className="text-sm font-semibold text-stone-800">OpenAI / ChatGPT</span>
+                        <span className="text-sm font-semibold text-stone-800">AI / LLM（OpenAI 與 Claude）</span>
                         <p className="text-xs text-stone-500">
-                          頁首橫幅會顯示生效模型；此卡片可編輯模型 ID
+                          頁首橫幅會顯示生效供應商與模型；此卡片可選擇主模型、進階 OpenAI 欄位
                           {isSuperAdmin ? " 與 API 金鑰（下方）。" : "（API 金鑰與測試連線僅超級管理員）。"}
                         </p>
                       </div>
@@ -407,13 +421,18 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
                   )}
                   {openaiModels && (
                     <>
-                      {(openaiModels.main.envVarSet || openaiModels.router.envVarSet) && (
+                      {(openaiModels.aiModelEnvSet || openaiModels.main.envVarSet || openaiModels.router.envVarSet) && (
                         <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-4 flex items-start gap-2">
                           <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
                           <div className="text-xs text-amber-900 space-y-1">
-                            {openaiModels.main.envVarSet && (
+                            {openaiModels.aiModelEnvSet && (
                               <p>
-                                伺服器已設定 <span className="font-mono">OPENAI_MODEL</span>，會<strong>覆寫</strong>「主對話模型」的資料庫值。
+                                伺服器已設定 <span className="font-mono">AI_MODEL</span>，會<strong>覆寫</strong>後台「主模型（ai_model）」資料庫值。
+                              </p>
+                            )}
+                            {openaiModels.main.envVarSet && !openaiModels.aiModelEnvSet && (
+                              <p>
+                                伺服器已設定 <span className="font-mono">OPENAI_MODEL</span>（且主設定字串無「:」時可能優先），會影響主對話模型解析。
                               </p>
                             )}
                             {openaiModels.router.envVarSet && (
@@ -427,7 +446,10 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
 
                       <div className="grid gap-3 sm:grid-cols-2 mb-4">
                         <div className="rounded-xl border border-stone-100 bg-stone-50/80 p-3">
-                          <p className="text-[10px] font-medium uppercase tracking-wide text-stone-500 mb-1">主對話模型（生效中）</p>
+                          <p className="text-[10px] font-medium uppercase tracking-wide text-stone-500 mb-1">主對話（生效中）</p>
+                          <p className="text-[11px] text-stone-600 mb-1">
+                            供應商：<span className="font-mono font-semibold">{openaiModels.provider}</span>
+                          </p>
                           <p className="font-mono text-sm font-semibold text-stone-900 break-all" data-testid="text-effective-main-model">
                             {openaiModels.main.effective}
                           </p>
@@ -453,7 +475,58 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
                   <div className="space-y-4 mb-6">
                         <div>
                           <label className="text-xs font-medium text-stone-600 mb-1.5 block">
-                            主對話模型 ID（<span className="font-mono">openai_model</span>，可自填任意官方模型字串）
+                            主模型（<span className="font-mono">ai_model</span>）
+                          </label>
+                          <p className="text-[11px] text-stone-400 mb-2">
+                            選擇後按儲存；格式為 <span className="font-mono">openai:…</span> 或 <span className="font-mono">anthropic:…</span>。亦可由環境變數{" "}
+                            <span className="font-mono">AI_MODEL</span> 覆寫。
+                          </p>
+                          {(() => {
+                            const rawAi = (formValues.ai_model ?? "").trim() || "openai:gpt-4o";
+                            const inPreset = AI_MODEL_PRESETS.some((p) => p.value === rawAi);
+                            return (
+                              <Select
+                                value={rawAi}
+                                onValueChange={(v) => setFormValues((prev) => ({ ...prev, ai_model: v }))}
+                              >
+                                <SelectTrigger
+                                  className="bg-stone-50 border-stone-200 font-mono text-sm"
+                                  data-testid="select-ai-model"
+                                >
+                                  <SelectValue placeholder="選擇主模型" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {AI_MODEL_PRESETS.map((p) => (
+                                    <SelectItem key={p.value} value={p.value} className="font-mono text-xs">
+                                      {p.label}
+                                    </SelectItem>
+                                  ))}
+                                  {!inPreset ? (
+                                    <SelectItem value={rawAi} className="font-mono text-xs">
+                                      {rawAi}（目前值）
+                                    </SelectItem>
+                                  ) : null}
+                                </SelectContent>
+                              </Select>
+                            );
+                          })()}
+                          <div className="flex justify-end mt-2">
+                            <Button
+                              type="button"
+                              onClick={() => handleSave("ai_model")}
+                              disabled={saving === "ai_model"}
+                              data-testid="button-save-ai-model"
+                              className="text-xs bg-emerald-600 hover:bg-emerald-700 text-white"
+                            >
+                              <Save className="w-3.5 h-3.5 mr-1" />
+                              {saving === "ai_model" ? "儲存中" : "儲存主模型"}
+                            </Button>
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="text-xs font-medium text-stone-600 mb-1.5 block">
+                            OpenAI 專用模型 ID（<span className="font-mono">openai_model</span>，進階／相容舊資料）
                           </label>
                           <p className="text-[11px] text-stone-400 mb-2">
                             留空則使用預設{" "}
@@ -572,7 +645,9 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
                   </div>
 
                   {isSuperAdmin && (
-                  <div className="border-t border-stone-200 pt-5">
+                  <div className="border-t border-stone-200 pt-5 space-y-8">
+                    {apiKeyFields.map((field) => (
+                    <div key={field.key}>
                     <div className="flex items-center gap-2 mb-1">
                       <div className="w-8 h-8 rounded-xl bg-stone-100 flex items-center justify-center">
                         <field.icon className="w-4 h-4 text-stone-500" />
@@ -637,79 +712,13 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
                         {saving === field.key ? "儲存中" : "儲存"}
                       </Button>
                     </div>
+                    </div>
+                    ))}
                   </div>
                   )}
                 </div>
-              ) : (
-                <div key={field.key} className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
-                  <div className="flex items-center gap-2 mb-1">
-                    <div className="w-8 h-8 rounded-xl bg-stone-100 flex items-center justify-center">
-                      <field.icon className="w-4 h-4 text-stone-500" />
-                    </div>
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-semibold text-stone-800">{field.label}</span>
-                        {field.testType && apiHealth[field.testType] && (
-                          <StatusBadge status={apiHealth[field.testType].status as HealthStatus} message={apiHealth[field.testType].message} />
-                        )}
-                      </div>
-                      <p className="text-xs text-stone-500">{field.description}</p>
-                    </div>
-                  </div>
-                  <div className="flex gap-2 mt-3">
-                    <div className="relative flex-1">
-                      <Input
-                        data-testid={`input-${field.key}`}
-                        type={showKeys[field.key] ? "text" : "password"}
-                        placeholder={field.placeholder}
-                        value={formValues[field.key] || ""}
-                        onChange={(e) => setFormValues((prev) => ({ ...prev, [field.key]: e.target.value }))}
-                        className="pr-10 bg-stone-50 border-stone-200"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => toggleKeyVisibility(field.key)}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-600"
-                        data-testid={`button-toggle-${field.key}`}
-                      >
-                        {showKeys[field.key] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                      </button>
-                    </div>
-                    {field.testType && (
-                      <Button
-                        variant="secondary"
-                        onClick={() => handleTestConnectionWithStatus(field.testType!)}
-                        disabled={testing === field.testType}
-                        data-testid={`button-test-${field.key}`}
-                        className="text-xs shrink-0 bg-stone-100 hover:bg-stone-200"
-                      >
-                        {testing === field.testType ? (
-                          <>
-                            <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />
-                            測試中
-                          </>
-                        ) : (
-                          <>
-                            <Plug className="w-3.5 h-3.5 mr-1" />
-                            測試連線
-                          </>
-                        )}
-                      </Button>
-                    )}
-                    <Button
-                      onClick={() => handleSave(field.key)}
-                      disabled={saving === field.key}
-                      data-testid={`button-save-${field.key}`}
-                      className="text-xs shrink-0 bg-emerald-600 hover:bg-emerald-700 text-white"
-                    >
-                      <Save className="w-3.5 h-3.5 mr-1" />
-                      {saving === field.key ? "儲存中" : "儲存"}
-                    </Button>
-                  </div>
-                </div>
-              )
-            )}
-
+        </div>
+      )}
 
       <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
         <div className="flex items-center gap-2 mb-4">
@@ -829,9 +838,6 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
       {isSuperAdmin && (
         <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm" data-testid="section-tag-shortcuts">
           <TagShortcutsManager />
-        </div>
-      )}
-
         </div>
       )}
 

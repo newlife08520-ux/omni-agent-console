@@ -46,9 +46,17 @@ async function callInternalRunAiReply(payload: {
     headers: { "Content-Type": "application/json", "X-Internal-Secret": INTERNAL_API_SECRET },
     body: JSON.stringify(payload),
   });
+  if (res.status === 504) {
+    console.log(
+      "[Worker] run-ai-reply timeout (504) contactId=" +
+        payload.contactId +
+        " - already escalated to human, marking job as done"
+    );
+    return;
+  }
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`internal/run-ai-reply ${res.status}: ${text.slice(0, 300)}`);
+    const errText = await res.text().catch(() => "");
+    throw new Error(`internal/run-ai-reply ${res.status}: ${errText.slice(0, 300)}`);
   }
 }
 
