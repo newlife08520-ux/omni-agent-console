@@ -76,7 +76,6 @@ async function main() {
   if (first) {
     const assembledFull = await assembleEnrichedSystemPrompt(first.id, {
       planMode: "",
-      productScope: null,
       hasActiveOrderContext: false,
       recentUserHasImage: false,
     });
