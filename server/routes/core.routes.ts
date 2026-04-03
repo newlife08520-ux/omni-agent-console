@@ -1193,14 +1193,19 @@ export function registerCoreRoutes(app: Express): void {
 
       const totalMsgs = userMsgs + aiMsgs + adminMsgs;
       const messageSplit = [
-        { name: "????", value: userMsgs, pct: totalMsgs > 0 ? Math.round((userMsgs / totalMsgs) * 1000) / 10 : 0 },
-        { name: "AI ??", value: aiMsgs, pct: totalMsgs > 0 ? Math.round((aiMsgs / totalMsgs) * 1000) / 10 : 0 },
-        { name: "????", value: adminMsgs, pct: totalMsgs > 0 ? Math.round((adminMsgs / totalMsgs) * 1000) / 10 : 0 },
+        { name: "客戶", value: userMsgs, pct: totalMsgs > 0 ? Math.round((userMsgs / totalMsgs) * 1000) / 10 : 0 },
+        { name: "AI 回覆", value: aiMsgs, pct: totalMsgs > 0 ? Math.round((aiMsgs / totalMsgs) * 1000) / 10 : 0 },
+        { name: "真人客服", value: adminMsgs, pct: totalMsgs > 0 ? Math.round((adminMsgs / totalMsgs) * 1000) / 10 : 0 },
       ];
 
       const statusLabels: Record<string, string> = {
-        pending: "???", processing: "???", resolved: "???",
-        ai_handling: "AI ???", awaiting_human: "???", high_risk: "???", closed: "???",
+        pending: "待處理",
+        processing: "處理中",
+        resolved: "已解決",
+        ai_handling: "AI 處理中",
+        awaiting_human: "待人工",
+        high_risk: "高風險",
+        closed: "已結案",
       };
       const statusDistribution = Object.entries(statusMap)
         .map(([status, count]) => ({ name: statusLabels[status] || status, value: count }))
@@ -1214,8 +1219,13 @@ export function registerCoreRoutes(app: Express): void {
         GROUP BY c.issue_type ORDER BY count DESC
       `).all(startDate, endDate, ...brandParam) as { issue_type: string; count: number }[];
       const issueTypeLabels: Record<string, string> = {
-        order_inquiry: "????", product_consult: "????", return_refund: "????",
-        complaint: "??", order_modify: "????", general: "????", other: "??",
+        order_inquiry: "訂單查詢",
+        product_consult: "商品諮詢",
+        return_refund: "退換貨",
+        complaint: "客訴",
+        order_modify: "修改訂單",
+        general: "一般",
+        other: "其他",
       };
       for (const it of issueTypeCounts) {
         issueTypeDistribution.push({ name: issueTypeLabels[it.issue_type] || it.issue_type, value: it.count });
@@ -1231,11 +1241,11 @@ export function registerCoreRoutes(app: Express): void {
       } else if (userMsgs > 0) {
         const topKeywords = storage.getTopKeywordsFromMessages(startDate, endDate, brandId);
         const intentCategories: [string, string[]][] = [
-          ["????", ["??", "??", "??", "??", "??", "??", "??"]],
-          ["???", ["??", "??", "??", "??", "??"]],
-          ["????", ["??", "??", "??", "??"]],
-          ["????", ["??", "??", "??", "??", "??", "??", "??", "??", "??"]],
-          ["??/??", ["??", "??", "??", "??", "??", "??", "?"]],
+          ["訂單物流", ["訂單", "查詢", "物流", "出貨", "貨態", "配送", "到貨", "單號"]],
+          ["商品諮詢", ["商品", "規格", "尺寸", "顏色", "庫存"]],
+          ["退換貨", ["退貨", "退款", "換貨", "取消訂單"]],
+          ["客訴不滿", ["投訴", "客訴", "抱怨", "不滿", "申訴", "誇張", "生氣", "失望"]],
+          ["其他／一般", ["謝謝", "你好", "請問", "想問", "緊急", "急"]],
         ];
         for (const [category, kws] of intentCategories) {
           let catCount = 0;
@@ -1330,13 +1340,9 @@ export function registerCoreRoutes(app: Express): void {
         const text = msg.content != null ? String(msg.content) : "";
         if (!text) continue;
         for (const [concern, pattern] of concernKeywords) {
-          try {
-            const regex = new RegExp(pattern);
-            if (regex.test(text)) {
-              concernCounts[concern] = (concernCounts[concern] || 0) + 1;
-            }
-          } catch {
-            /* 略過無效 pattern，避免整支 API 失敗 */
+          const alts = pattern.split("|").map((s) => s.trim()).filter((s) => s.length > 0);
+          if (alts.some((kw) => text.includes(kw))) {
+            concernCounts[concern] = (concernCounts[concern] || 0) + 1;
           }
         }
       }
@@ -1349,44 +1355,44 @@ export function registerCoreRoutes(app: Express): void {
       const suggestions: string[] = [];
 
       if (transferRate !== null && transferRate > 15) {
-        painPoints.push(`????? ${transferRate}%?${transferCount}/${active} ??????????`);
+        painPoints.push(`轉人工率偏高 ${transferRate}%（${transferCount}/${active} 位活躍對話），建議檢視常見原因與 SOP。`);
       }
       if (issueTypeDistribution.length > 0) {
-        const returnIssues = issueTypeDistribution.find(i => i.name === "????");
+        const returnIssues = issueTypeDistribution.find((i) => i.name === issueTypeLabels.return_refund);
         if (returnIssues && active > 0 && (returnIssues.value / active) * 100 > 20) {
-          painPoints.push(`??????????${returnIssues.value} ??? ${Math.round((returnIssues.value / active) * 100)}%??`);
-          suggestions.push("??????? SOP ? AI ???????");
+          painPoints.push(`退換貨議題較多：${returnIssues.value} 筆，約佔活躍對話 ${Math.round((returnIssues.value / active) * 100)}%。`);
+          suggestions.push("可檢視退換貨 SOP 與 AI 引導是否足夠清楚。");
         }
       }
       if (completionRate !== null && completionRate < 30 && active > 3) {
-        painPoints.push(`?????? ${completionRate}%?${resolvedCount}/${active}??????????`);
-        suggestions.push("?????????????????????");
+        painPoints.push(`處理完成率偏低 ${completionRate}%（${resolvedCount}/${active}），建議追蹤未結案原因。`);
+        suggestions.push("可加強結案追蹤與客服負載分配。");
       }
       const alertTimeouts = (db.prepare(`
         SELECT COUNT(*) as cnt FROM system_alerts WHERE alert_type = 'timeout_escalation' AND created_at >= ? AND created_at <= ?
       `).get(startDate, endDate) as { cnt: number })?.cnt || 0;
       if (alertTimeouts > 0) {
-        painPoints.push(`??/?????? ${alertTimeouts} ???????????`);
-        suggestions.push("???? API ????????");
+        painPoints.push(`本期間有 ${alertTimeouts} 筆 AI／工具逾時警示，請留意穩定性。`);
+        suggestions.push("建議檢查 API 連線與逾時設定。");
       }
       if (customerConcerns.length > 0) {
         const topConcern = customerConcerns[0];
         if (topConcern.count >= 2) {
-          painPoints.push(`?????${topConcern.concern}????${topConcern.count} ?????????`);
+          painPoints.push(`客戶訊息中「${topConcern.concern}」相關敘述出現 ${topConcern.count} 次以上，可優先關注。`);
         }
       }
       if (!aiHasData && aiMsgs === 0) {
-        suggestions.push("???? AI ????????? AI ??????????");
+        suggestions.push("本期間幾乎無 AI 回覆紀錄；若已啟用 AI，請確認 Webhook 與開關設定。");
       }
       if (orderQueryHasData && orderQuerySuccessRate !== null && orderQuerySuccessRate < 50) {
-        suggestions.push(`?????? ${orderQuerySuccessRate}%??????? API ??????????`);
+        suggestions.push(`查單成功率僅 ${orderQuerySuccessRate}%，建議檢查訂單 API 與顧客輸入引導。`);
       }
       if (allTransferReasons.length > 0) {
         const topReason = allTransferReasons[0];
-        suggestions.push(`??????????${topReason.reason}??${topReason.count} ???????????? AI ???`);
+        suggestions.push(`轉人工主因常見為「${topReason.reason}」（${topReason.count} 次），可據此優化 AI 劇本。`);
       }
       if (hotProducts.length > 0) {
-        suggestions.push(`???????${hotProducts.slice(0, 3).map(p => p.name).join("?")}???????????`);
+        suggestions.push(`熱門關鍵字含：${hotProducts.slice(0, 3).map((p) => p.name).join("、")}，可搭配知識庫補強。`);
       }
 
       return res.json({
@@ -1443,12 +1449,12 @@ export function registerCoreRoutes(app: Express): void {
       }));
 
       const alertTypeLabels: Record<string, string> = {
-        webhook_sig_fail: "Webhook ????",
-        dedupe_hit: "??????",
-        lock_timeout: "?????",
-        order_lookup_fail: "??????",
-        timeout_escalation: "AI ????",
-        transfer: "????",
+        webhook_sig_fail: "Webhook 簽章失敗",
+        dedupe_hit: "去重命中",
+        lock_timeout: "鎖定逾時",
+        order_lookup_fail: "查單失敗",
+        timeout_escalation: "AI 逾時升級",
+        transfer: "轉人工",
       };
 
       const alertsByTypeLabeled = alertStats.alertsByType.map(a => ({
