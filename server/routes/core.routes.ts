@@ -538,14 +538,16 @@ export function registerCoreRoutes(app: Express): void {
           .trim();
         db.prepare("UPDATE brands SET system_prompt = ? WHERE id = 2").run(b2);
 
-        const brand1 = db.prepare("SELECT shopline_store_domain FROM brands WHERE id = 1").get() as {
+        const b1row = db.prepare("SELECT shopline_store_domain FROM brands WHERE id = 1").get() as {
           shopline_store_domain?: string | null;
         } | undefined;
-        if (!brand1?.shopline_store_domain?.trim()) {
+        let shoplineDomainOut = b1row?.shopline_store_domain?.trim() ?? "";
+        if (!shoplineDomainOut) {
           db.prepare("UPDATE brands SET shopline_store_domain = ? WHERE id = 1").run(
             "enjoythelife.shoplineapp.com"
           );
           console.log("[sync-prompts] 品牌 1 shopline_store_domain 已補設");
+          shoplineDomainOut = "enjoythelife.shoplineapp.com";
         }
 
         return res.json({
@@ -553,6 +555,7 @@ export function registerCoreRoutes(app: Express): void {
           global: globalPrompt.length + " chars",
           brand1: b1.length + " chars",
           brand2: b2.length + " chars",
+          shopline_domain: shoplineDomainOut || "已補設",
         });
       } catch (e) {
         console.error("[sync-prompts] error:", e);

@@ -31,6 +31,39 @@ import { classifyOrderNumber } from "../intent-and-order";
 import { applyHandoff, normalizeHandoffReason } from "./handoff";
 import { finalizeLlmToolJsonString } from "../tool-llm-sanitize";
 
+function formatOrdersToolFormattedList(
+  rows: Array<{
+    order_id: string;
+    product_list?: string | null;
+    amount?: unknown;
+    status?: string;
+    payment_status_label?: string;
+  }>
+): string {
+  return rows
+    .map((o) => {
+      const products = String(o.product_list ?? "未提供商品名稱").slice(0, 40);
+      return `- ${o.order_id} | ${products} | $${o.amount ?? ""} | ${o.status || ""} | ${o.payment_status_label ?? ""}`;
+    })
+    .join("\n");
+}
+
+function paymentWarningFromKind(kind: string): string {
+  if (kind === "failed") return "【警告】此訂單付款失敗，絕對不可說會出貨";
+  if (kind === "pending") return "【注意】此訂單尚未付款，提醒客人先完成付款";
+  return "";
+}
+
+function appendFailedPaymentMultiNote(baseNote: string, hasFailed: boolean): string {
+  if (!hasFailed) return baseNote;
+  return `${baseNote}\n其中有付款失敗的訂單，請特別注意。`;
+}
+
+function orderItemsStructuredPayload(o: OrderInfo): unknown {
+  const x = o as OrderInfo & { items?: unknown };
+  return x.items_structured ?? x.items ?? [];
+}
+
 export interface ToolExecutorDeps {
   storage: IStorage;
   pushLineMessage: (userId: string, messages: object[], token?: string | null) => Promise<void>;
@@ -208,7 +241,9 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
         if (context?.contactId) {
           storage.updateContactOrderNumberType(context.contactId, numberType);
         }
-        if (numberType === "payment_id") {
+        const orderIdNorm = orderIdRaw.replace(/\s/g, "");
+        const isLikelyShoplineId = /^202\d{12,19}$/.test(orderIdNorm);
+        if (numberType === "payment_id" && !isLikelyShoplineId) {
           return toolJson({
             success: true,
             found: false,
@@ -384,6 +419,9 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
                 source: src,
                 payment_status: kind,
                 payment_status_label: label,
+                payment_interpretation: getPaymentInterpretationForAI(o, st, src),
+                payment_warning: paymentWarningFromKind(kind),
+                items_structured: orderItemsStructuredPayload(o),
                 created_at: o.created_at,
               };
             });
@@ -404,7 +442,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
               const src = o.source || orderSource;
               const st = getUnifiedStatusLabel(o.status, src);
               const { label } = payKindForOrder(o, st, src);
-              const tag = src === "shopline" ? "[官網]" : src === "superlanding" ? "[一頁]" : "";
+              const tag = "";
               return `${i + 1}. ${tag}${o.global_order_id}｜${o.created_at || ""}｜${label}｜${st}`;
             });
             const deterministicReply =
@@ -452,6 +490,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
               });
             }
             console.log(`[order_lookup] product_phone local_multi deterministic n=${n}`);
+            const hasFailedLocal = orderSummaries.some((x) => x.payment_status === "failed");
             return toolJson({
               success: true,
               found: true,
@@ -462,8 +501,11 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
               deterministic_skip_llm: false,
               ...orderDeterministicContractFields(),
               renderer: "deterministic_product_phone_local",
-              note: `本地商品+手機命中 ${n} 筆；請依 orders 產生對客回覆。`,
-              formatted_list: orderSummaries.map((o) => `- **${o.order_id}** | ${o.payment_status_label}`).join("\n"),
+              note: appendFailedPaymentMultiNote(
+                `本地商品+手機命中 ${n} 筆；請依 orders 產生對客回覆。`,
+                hasFailedLocal
+              ),
+              formatted_list: formatOrdersToolFormattedList(orderSummaries),
             });
           }
         }
@@ -704,31 +746,45 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           });
         }
 
-        const orderSummaries = uniqueOrders.map(o => ({
-          order_id: o.global_order_id,
-          status: getUnifiedStatusLabel(o.status, o.source || orderSource),
-          amount: o.final_total_order_amount,
-          product_list: o.product_list,
-          buyer_name: o.buyer_name,
-          buyer_phone: o.buyer_phone,
-          address: o.address,
-          full_address: o.full_address,
-          cvs_brand: o.cvs_brand,
-          cvs_store_name: o.cvs_store_name,
-          delivery_target_type: o.delivery_target_type,
-          tracking_number: o.tracking_number,
-          created_at: o.created_at,
-          shipped_at: o.shipped_at,
-          shipping_method: o.shipping_method,
-          payment_method: o.payment_method,
-          source: o.source || orderSource,
-        }));
+        const orderSummaries = uniqueOrders.map((o) => {
+          const src = o.source || orderSource;
+          const st = getUnifiedStatusLabel(o.status, src);
+          const { kind, label } = payKindForOrder(o, st, src);
+          return {
+            order_id: o.global_order_id,
+            status: st,
+            amount: o.final_total_order_amount,
+            product_list: o.product_list,
+            buyer_name: o.buyer_name,
+            buyer_phone: o.buyer_phone,
+            address: o.address,
+            full_address: o.full_address,
+            cvs_brand: o.cvs_brand,
+            cvs_store_name: o.cvs_store_name,
+            delivery_target_type: o.delivery_target_type,
+            tracking_number: o.tracking_number,
+            created_at: o.created_at,
+            shipped_at: o.shipped_at,
+            shipping_method: o.shipping_method,
+            payment_method: o.payment_method,
+            source: src,
+            items_structured: orderItemsStructuredPayload(o),
+            payment_status: kind,
+            payment_status_label: label,
+            payment_interpretation: getPaymentInterpretationForAI(o, st, src),
+            payment_warning: paymentWarningFromKind(kind),
+          };
+        });
 
         console.log("[AI Tool Call] ??", uniqueOrders.length, "?????????");
-        const formattedList = orderSummaries.map(o => `- **${o.order_id}** | ${o.created_at || ""} | $${o.amount ?? ""} | **${o.status || ""}**`).join("\n");
-        const onePageBlocks = orderSummaries.map(o => formatOrderOnePage(o));
+        const formattedList = formatOrdersToolFormattedList(orderSummaries);
+        const onePageBlocks = orderSummaries.map((o) => formatOrderOnePage(o));
         const one_page_full = onePageBlocks.join("\n\n---\n\n");
-        const multiOrderNote = `【重要】以下共 ${uniqueOrders.length} 筆訂單。回覆時必須逐筆列出每筆的完整資訊（訂單編號、姓名、下單日期、金額、狀態、付款方式、配送方式等），不可只列一筆。請直接將下方 one_page_full 的內容完整呈現給客戶。\n簡表：\n${formattedList}`;
+        const hasFailedProductMulti = orderSummaries.some((x) => x.payment_status === "failed");
+        const multiOrderNote = appendFailedPaymentMultiNote(
+          `【重要】以下共 ${uniqueOrders.length} 筆訂單。回覆時必須逐筆列出每筆的完整資訊（訂單編號、姓名、下單日期、金額、狀態、付款方式、配送方式等），不可只列一筆。請直接將下方 one_page_full 的內容完整呈現給客戶。\n簡表：\n${formattedList}`,
+          hasFailedProductMulti
+        );
         console.log("[AI Latency] tool lookup_order_by_product_and_phone done in", Date.now() - toolStartMs, "ms");
         return toolJson({ success: true, found: true, total: uniqueOrders.length, orders: orderSummaries, note: multiOrderNote, formatted_list: formattedList, one_page_full });
       }
@@ -881,6 +937,11 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
               shipping_method: o0.shipping_method,
               payment_method: o0.payment_method,
               source: o0.source || dateOrderSource,
+              items_structured: orderItemsStructuredPayload(o0),
+              payment_status: pk0.kind,
+              payment_status_label: pk0.label,
+              payment_interpretation: getPaymentInterpretationForAI(o0, st0, o0.source || dateOrderSource),
+              payment_warning: paymentWarningFromKind(pk0.kind),
             },
           ];
           console.log("[AI Latency] tool lookup_order_by_date_and_contact done in", Date.now() - dateToolStartMs, "ms");
@@ -899,33 +960,48 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           });
         }
 
-        const orderSummaries = matched.map(o => ({
-          order_id: o.global_order_id,
-          status: getUnifiedStatusLabel(o.status, o.source || dateOrderSource),
-          amount: o.final_total_order_amount,
-          product_list: o.product_list,
-          buyer_name: o.buyer_name,
-          buyer_phone: o.buyer_phone,
-          address: o.address,
-          full_address: o.full_address,
-          cvs_brand: o.cvs_brand,
-          cvs_store_name: o.cvs_store_name,
-          delivery_target_type: o.delivery_target_type,
-          tracking_number: o.tracking_number,
-          created_at: o.created_at,
-          shipped_at: o.shipped_at,
-          shipping_method: o.shipping_method,
-          payment_method: o.payment_method,
-          source: o.source || dateOrderSource,
-        }));
+        const orderSummaries = matched.map((o) => {
+          const src = o.source || dateOrderSource;
+          const st = getUnifiedStatusLabel(o.status, src);
+          const { kind, label } = payKindForOrder(o, st, src);
+          return {
+            order_id: o.global_order_id,
+            status: st,
+            amount: o.final_total_order_amount,
+            product_list: o.product_list,
+            buyer_name: o.buyer_name,
+            buyer_phone: o.buyer_phone,
+            address: o.address,
+            full_address: o.full_address,
+            cvs_brand: o.cvs_brand,
+            cvs_store_name: o.cvs_store_name,
+            delivery_target_type: o.delivery_target_type,
+            tracking_number: o.tracking_number,
+            created_at: o.created_at,
+            shipped_at: o.shipped_at,
+            shipping_method: o.shipping_method,
+            payment_method: o.payment_method,
+            source: src,
+            items_structured: orderItemsStructuredPayload(o),
+            payment_status: kind,
+            payment_status_label: label,
+            payment_interpretation: getPaymentInterpretationForAI(o, st, src),
+            payment_warning: paymentWarningFromKind(kind),
+          };
+        });
 
         console.log("[AI Tool Call] ??", matched.length, "?????????");
-        const dateFormattedList = orderSummaries.map(o => `- **${o.order_id}** | ${o.created_at || ""} | $${o.amount ?? ""} | **${o.status || ""}**`).join("\n");
-        const onePageBlocks = orderSummaries.map(o => formatOrderOnePage(o));
+        const dateFormattedList = formatOrdersToolFormattedList(orderSummaries);
+        const onePageBlocks = orderSummaries.map((o) => formatOrderOnePage(o));
         const one_page_full = onePageBlocks.join("\n\n---\n\n");
-        const multiOrderNote = matched.length > 1
-          ? `【重要】以下共 ${matched.length} 筆訂單。回覆時必須逐筆列出每筆的完整資訊（訂單編號、姓名、下單日期、金額、狀態、付款方式、配送方式等），不可只列一筆。請直接將下方 one_page_full 的內容完整呈現給客戶。\n簡表：\n${dateFormattedList}`
-          : undefined;
+        const hasFailedDateMulti = orderSummaries.some((x) => x.payment_status === "failed");
+        const multiOrderNote =
+          matched.length > 1
+            ? appendFailedPaymentMultiNote(
+                `【重要】以下共 ${matched.length} 筆訂單。回覆時必須逐筆列出每筆的完整資訊（訂單編號、姓名、下單日期、金額、狀態、付款方式、配送方式等），不可只列一筆。請直接將下方 one_page_full 的內容完整呈現給客戶。\n簡表：\n${dateFormattedList}`,
+                hasFailedDateMulti
+              )
+            : undefined;
         console.log("[AI Latency] tool lookup_order_by_date_and_contact done in", Date.now() - dateToolStartMs, "ms");
         return toolJson({ success: true, found: true, total: matched.length, orders: orderSummaries, truncated, note: multiOrderNote, formatted_list: matched.length > 1 ? dateFormattedList : undefined, one_page_summary: matched.length === 1 ? onePageBlocks[0] : undefined, one_page_full });
       }
@@ -963,31 +1039,45 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             })
           );
         }
-        const orderSummaries = orders.map(o => ({
-          order_id: o.global_order_id,
-          status: getUnifiedStatusLabel(o.status, "superlanding"),
-          amount: o.final_total_order_amount,
-          product_list: o.product_list,
-          buyer_name: o.buyer_name,
-          buyer_phone: o.buyer_phone,
-          address: o.address,
-          full_address: o.full_address,
-          cvs_brand: o.cvs_brand,
-          cvs_store_name: o.cvs_store_name,
-          delivery_target_type: o.delivery_target_type,
-          tracking_number: o.tracking_number,
-          created_at: o.created_at,
-          shipped_at: o.shipped_at,
-          shipping_method: o.shipping_method,
-          payment_method: o.payment_method,
-          source: "superlanding",
-        }));
-        const formattedList = orderSummaries.map(o => `- **${o.order_id}** | ${o.created_at || ""} | $${o.amount ?? ""} | **${o.status || ""}**`).join("\n");
-        const onePageBlocks = orderSummaries.map(o => formatOrderOnePage(o));
+        const orderSummaries = orders.map((o) => {
+          const st = getUnifiedStatusLabel(o.status, "superlanding");
+          const { kind, label } = payKindForOrder(o, st, "superlanding");
+          return {
+            order_id: o.global_order_id,
+            status: st,
+            amount: o.final_total_order_amount,
+            product_list: o.product_list,
+            buyer_name: o.buyer_name,
+            buyer_phone: o.buyer_phone,
+            address: o.address,
+            full_address: o.full_address,
+            cvs_brand: o.cvs_brand,
+            cvs_store_name: o.cvs_store_name,
+            delivery_target_type: o.delivery_target_type,
+            tracking_number: o.tracking_number,
+            created_at: o.created_at,
+            shipped_at: o.shipped_at,
+            shipping_method: o.shipping_method,
+            payment_method: o.payment_method,
+            source: "superlanding" as const,
+            items_structured: orderItemsStructuredPayload(o),
+            payment_status: kind,
+            payment_status_label: label,
+            payment_interpretation: getPaymentInterpretationForAI(o, st, "superlanding"),
+            payment_warning: paymentWarningFromKind(kind),
+          };
+        });
+        const formattedList = formatOrdersToolFormattedList(orderSummaries);
+        const onePageBlocks = orderSummaries.map((o) => formatOrderOnePage(o));
         const one_page_full = onePageBlocks.join("\n\n---\n\n");
-        const multiOrderNote = orders.length > 1
-          ? `【重要】以下共 ${orders.length} 筆訂單。回覆時必須逐筆列出。\n簡表：\n${formattedList}`
-          : undefined;
+        const hasFailedMoreSl = orderSummaries.some((x) => x.payment_status === "failed");
+        const multiOrderNote =
+          orders.length > 1
+            ? appendFailedPaymentMultiNote(
+                `【重要】以下共 ${orders.length} 筆訂單。回覆時必須逐筆列出。\n簡表：\n${formattedList}`,
+                hasFailedMoreSl
+              )
+            : undefined;
         if (orders.length === 1) {
           const o0 = orders[0];
           const st0 = getUnifiedStatusLabel(o0.status, "superlanding");
@@ -1083,28 +1173,38 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           packed.api_hit = !localHit;
           return toolJson(packed);
         }
-        const orderSummaries = orders.map((o) => ({
-          order_id: o.global_order_id,
-          status: getUnifiedStatusLabel(o.status, "shopline"),
-          amount: o.final_total_order_amount,
-          product_list: o.product_list,
-          buyer_name: o.buyer_name,
-          buyer_phone: o.buyer_phone,
-          address: o.address,
-          full_address: o.full_address,
-          cvs_brand: o.cvs_brand,
-          cvs_store_name: o.cvs_store_name,
-          delivery_target_type: o.delivery_target_type,
-          tracking_number: o.tracking_number,
-          created_at: o.created_at,
-          shipped_at: o.shipped_at,
-          shipping_method: o.shipping_method,
-          payment_method: o.payment_method,
-          source: "shopline" as const,
-        }));
-        const formattedList = orderSummaries.map((o) => `- **${o.order_id}** | ${o.created_at || ""} | $${o.amount ?? ""} | **${o.status || ""}**`).join("\n");
+        const orderSummaries = orders.map((o) => {
+          const st = getUnifiedStatusLabel(o.status, "shopline");
+          const { kind, label } = payKindForOrder(o, st, "shopline");
+          return {
+            order_id: o.global_order_id,
+            status: st,
+            amount: o.final_total_order_amount,
+            product_list: o.product_list,
+            buyer_name: o.buyer_name,
+            buyer_phone: o.buyer_phone,
+            address: o.address,
+            full_address: o.full_address,
+            cvs_brand: o.cvs_brand,
+            cvs_store_name: o.cvs_store_name,
+            delivery_target_type: o.delivery_target_type,
+            tracking_number: o.tracking_number,
+            created_at: o.created_at,
+            shipped_at: o.shipped_at,
+            shipping_method: o.shipping_method,
+            payment_method: o.payment_method,
+            source: "shopline" as const,
+            items_structured: orderItemsStructuredPayload(o),
+            payment_status: kind,
+            payment_status_label: label,
+            payment_interpretation: getPaymentInterpretationForAI(o, st, "shopline"),
+            payment_warning: paymentWarningFromKind(kind),
+          };
+        });
+        const formattedList = formatOrdersToolFormattedList(orderSummaries);
         const onePageBlocks = orderSummaries.map((o) => formatOrderOnePage(o));
         const one_page_full = onePageBlocks.join("\n\n---\n\n");
+        const hasFailedShoplineList = orderSummaries.some((x) => x.payment_status === "failed");
         if (orders.length === 1) {
           const o0 = orders[0];
           const st0 = getUnifiedStatusLabel(o0.status, "shopline");
@@ -1139,7 +1239,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             orders: orderSummaries,
             source: "shopline",
             local_hit: localHit,
-            note: `共 1 筆官網訂單。\n${formattedList}`,
+            note: appendFailedPaymentMultiNote(`共 1 筆官網訂單。\n${formattedList}`, hasFailedShoplineList),
             formatted_list: formattedList,
             one_page_full,
             one_page_summary: obS,
@@ -1157,7 +1257,10 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           orders: orderSummaries,
           source: "shopline",
           local_hit: localHit,
-          note: `共 ${orders.length} 筆官網訂單，請逐筆呈現給客戶。\n${formattedList}`,
+          note: appendFailedPaymentMultiNote(
+            `共 ${orders.length} 筆官網訂單，請逐筆呈現給客戶。\n${formattedList}`,
+            hasFailedShoplineList
+          ),
           formatted_list: formattedList,
           one_page_full,
         });
@@ -1248,15 +1351,23 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             payment_method: o.payment_method,
             payment_status: kind,
             payment_status_label: label,
+            payment_interpretation: getPaymentInterpretationForAI(o, st, src),
+            payment_warning: paymentWarningFromKind(kind),
+            items_structured: orderItemsStructuredPayload(o),
             source: src,
           };
         });
-        const formattedList = orderSummaries.map(o => `- **${o.order_id}** | ${o.created_at || ""} | $${o.amount ?? ""} | **${o.status || ""}** | ${o.payment_status_label}`).join("\n");
-        const onePageBlocks = orderSummaries.map(o => formatOrderOnePage(o));
+        const formattedList = formatOrdersToolFormattedList(orderSummaries);
+        const onePageBlocks = orderSummaries.map((o) => formatOrderOnePage(o));
         const one_page_full = onePageBlocks.join("\n\n---\n\n");
-        const multiOrderNote = orders.length > 1
-          ? `【重要】以下共 ${orders.length} 筆訂單。回覆時必須逐筆列出。\n簡表：\n${formattedList}`
-          : undefined;
+        const hasFailedPhoneMulti = orderSummaries.some((x) => x.payment_status === "failed");
+        const multiOrderNote =
+          orders.length > 1
+            ? appendFailedPaymentMultiNote(
+                `【重要】以下共 ${orders.length} 筆訂單。回覆時必須逐筆列出。\n簡表：\n${formattedList}`,
+                hasFailedPhoneMulti
+              )
+            : undefined;
 
         if (orders.length > 1) {
           const n = orders.length;
@@ -1282,7 +1393,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             const src = o.source || orderSource;
             const st = getUnifiedStatusLabel(o.status, src);
             const { label } = payKindForOrder(o, st, src);
-            const srcTag = src === "shopline" ? "[官網]" : src === "superlanding" ? "[一頁]" : "";
+            const srcTag = "";
             return `${i + 1}. ${srcTag}${o.global_order_id}｜${o.created_at || ""}｜${label}｜${st}`;
           });
           const deterministicReply =

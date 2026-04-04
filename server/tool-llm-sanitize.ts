@@ -76,35 +76,47 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
-/** 將內部運送碼轉白話；無法判斷則刪除原欄位 */
+/** 將配送相關欄位轉成人類可讀，保留欄位不刪除 */
 function humanizeShippingFields(o: Record<string, unknown>): void {
   const sm = String(o.shipping_method ?? "").trim();
   const dtt = String(o.delivery_target_type ?? "").trim();
   const joint = `${sm} ${dtt}`.toLowerCase();
-  const codeLike = (s: string) =>
-    Boolean(s && /^[a-z0-9_\-]+$/i.test(s) && !/[一-龥]/.test(s));
 
   let human: string | undefined;
   if (/to_store|cvs|seven|family|hilife|超商|門市|取貨|pickup/.test(joint)) {
-    human = "超商／門市取貨";
+    human = "超商取貨";
   } else if (/home|宅配|到府|address|delivery/.test(joint)) {
     human = "宅配到府";
+  }
+
+  const storeName = String(o.cvs_store_name ?? "").trim();
+  if (human && storeName) {
+    human = `${human}（${storeName}）`;
+  }
+
+  if (human) {
+    o.shipping_display = human;
+  } else if (sm && !/^[a-z0-9_\-]+$/i.test(sm)) {
+    o.shipping_display = sm;
+  } else {
+    o.shipping_display = "一般配送";
+  }
+
+  if (/to_store/i.test(sm)) {
+    o.shipping_method = "超商取貨";
+  }
+  if (/home|delivery/i.test(dtt)) {
+    o.delivery_target_type = "宅配";
+  } else if (/cvs|store/i.test(dtt)) {
+    o.delivery_target_type = "超商";
   }
 
   const statusText = String(o.status ?? "");
   if (/預購|pre[-_]?order/i.test(`${joint} ${statusText}`)) {
     o.fulfillment_timing_hint = "預購";
-  } else if (human || (sm && !codeLike(sm))) {
+  } else {
     o.fulfillment_timing_hint = "現貨";
   }
-
-  delete o.delivery_target_type;
-  if (codeLike(sm) || /to_store/i.test(sm)) {
-    delete o.shipping_method;
-  } else if (sm && !/[一-龥]/.test(sm)) {
-    delete o.shipping_method;
-  }
-  if (human) o.shipping_fulfillment_human = human;
 }
 
 function stripRawAndGateway(o: Record<string, unknown>): void {
