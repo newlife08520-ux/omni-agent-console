@@ -23,6 +23,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "sync:prompt": "tsx server/scripts/sync-global-prompt.ts",
+    "sync:brand-prompts": "tsx server/scripts/sync-brand-prompts.ts",
+    "sync:all-prompts": "tsx server/scripts/sync-global-prompt.ts && tsx server/scripts/sync-brand-prompts.ts",
     "pilot:precheck": "tsx server/scripts/pilot-precheck.ts",
     "db:push": "drizzle-kit push",
     "audit:superlanding": "tsx server/scripts/audit-superlanding-order-payload.ts",
