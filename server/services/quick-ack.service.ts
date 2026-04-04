@@ -1,7 +1,22 @@
 /**
  * Quick Ack：主 LLM 前先送短確認；隨機池降低「固定一句像機器人」感。
+ * 僅查單（ORDER_LOOKUP）與售後（AFTER_SALES）送出；一般問候（GENERAL）與商品諮詢不送。
  */
 import { brandMessage } from "../phase2-output";
+
+/** 是否應送 Quick Ack（與工具回合內查單 ack 共用條件） */
+export function shouldSendQuickAck(params: {
+  orderLookupAckEnabled: boolean;
+  sentLookupAckThisTurn: boolean;
+  planMode: string;
+  scenarioKey: string;
+  userMessage?: string;
+}): boolean {
+  const { orderLookupAckEnabled, sentLookupAckThisTurn, planMode, scenarioKey } = params;
+  if (!orderLookupAckEnabled || sentLookupAckThisTurn) return false;
+  if (planMode === "handoff" || planMode === "off_topic_guard") return false;
+  return scenarioKey === "ORDER_LOOKUP" || scenarioKey === "AFTER_SALES";
+}
 
 const quickAckPools: Record<string, string[]> = {
   ORDER_LOOKUP: [
@@ -56,6 +71,7 @@ export async function sendQuickAckIfNeeded(
     alreadySent: boolean;
     planMode: string;
     scenario: string;
+    userMessage?: string;
     brandId?: number;
     contactId: number;
     platform: string;
@@ -71,6 +87,7 @@ export async function sendQuickAckIfNeeded(
     alreadySent,
     planMode,
     scenario,
+    userMessage,
     brandId,
     contactId,
     platform,
@@ -81,7 +98,15 @@ export async function sendQuickAckIfNeeded(
     queueWaitMs,
   } = params;
 
-  if (!enabled || alreadySent || planMode === "handoff" || planMode === "off_topic_guard") {
+  if (
+    !shouldSendQuickAck({
+      orderLookupAckEnabled: enabled,
+      sentLookupAckThisTurn: alreadySent,
+      planMode,
+      scenarioKey: scenario,
+      userMessage,
+    })
+  ) {
     return { sent: false, ackMs: null, firstVisibleMs: null };
   }
 

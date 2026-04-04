@@ -16,6 +16,7 @@ import {
 } from "../conversation-state-resolver";
 import { buildReplyPlan, shouldNotLeadWithOrderLookup, type ReplyPlanMode } from "../reply-plan-builder";
 import {
+  brandMessage,
   enforceOutputGuard,
   HANDOFF_MANDATORY_OPENING,
   buildHandoffReply,
@@ -77,7 +78,7 @@ import { runHybridIntentRouter, mapPlanToPhase1Scenario, computePhase15HardRoute
 import type { HybridRouteResult, Phase1BrandFlags } from "./phase1-types";
 import { filterToolsForScenario, applyScenarioToolOverrides } from "./tool-scenario-filter";
 import { buildPhase1AiLogExtras } from "./phase1-trace-extras";
-import { sendQuickAckIfNeeded } from "./quick-ack.service";
+import { pickRandomAck, sendQuickAckIfNeeded, shouldSendQuickAck } from "./quick-ack.service";
 import { runPostGenerationPipeline } from "./guard-pipeline";
 
 /** Phase 1 法律/公關風險關鍵字，命中則走 legal_risk → high_risk_short_circuit */
@@ -1861,6 +1862,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           alreadySent: sentLookupAckThisTurn,
           planMode: planModeForAck,
           scenario: scenarioKey,
+          userMessage: userMessage || "",
           brandId: effectiveBrandId || undefined,
           contactId: contact.id,
           platform: platform || contact.platform || "line",
@@ -1903,21 +1905,35 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             const hasOrderLookupTool = responseMessage.tool_calls.some((tc: any) =>
               ORDER_LOOKUP_TOOL_NAMES.includes(tc?.function?.name || "")
             );
-            if (orderFeatureFlags.orderLookupAck && hasOrderLookupTool && !sentLookupAckThisTurn) {
+            if (
+              hasOrderLookupTool &&
+              shouldSendQuickAck({
+                orderLookupAckEnabled: orderFeatureFlags.orderLookupAck,
+                sentLookupAckThisTurn,
+                planMode: planModeForAck,
+                scenarioKey,
+                userMessage: userMessage || "",
+              })
+            ) {
               sentLookupAckThisTurn = true;
               lookupAckSentMs = Date.now() - startTime;
               firstCustomerVisibleReplyMs = lookupAckSentMs;
               console.log(
                 `[phase26_latency] lookup_ack_sent_ms=${lookupAckSentMs} contact=${contact.id} queue_wait_ms=0`
               );
-              const lookupAckText = "我幫您查詢中～";
-              const ackMsg = storage.createMessage(contact.id, contact.platform || "line", "ai", lookupAckText);
+              const lookupAckText = pickRandomAck(scenarioKey);
+              const lookupAckFinal = brandMessage(
+                effectiveBrandId || undefined,
+                "quick_ack_" + scenarioKey.toLowerCase(),
+                lookupAckText
+              );
+              const ackMsg = storage.createMessage(contact.id, contact.platform || "line", "ai", lookupAckFinal);
               broadcastSSE("new_message", { contact_id: contact.id, message: ackMsg, brand_id: effectiveBrandId || contact.brand_id });
               broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
               if (channelToken && contact.platform === "messenger") {
-                sendFBMessage(channelToken, contact.platform_user_id, lookupAckText).catch(() => {});
+                sendFBMessage(channelToken, contact.platform_user_id, lookupAckFinal).catch(() => {});
               } else if (channelToken) {
-                pushLineMessage(contact.platform_user_id, [{ type: "text", text: lookupAckText }], channelToken).catch(() => {});
+                pushLineMessage(contact.platform_user_id, [{ type: "text", text: lookupAckFinal }], channelToken).catch(() => {});
               }
             }
 
@@ -2147,21 +2163,35 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           chatMessages.push(responseMessage as OpenAI.Chat.Completions.ChatCompletionMessageParam);
 
           const hasOrderLookupTool = responseMessage.tool_calls.some((tc: any) => ORDER_LOOKUP_TOOL_NAMES.includes(tc?.function?.name || ""));
-          if (orderFeatureFlags.orderLookupAck && hasOrderLookupTool && !sentLookupAckThisTurn) {
+          if (
+            hasOrderLookupTool &&
+            shouldSendQuickAck({
+              orderLookupAckEnabled: orderFeatureFlags.orderLookupAck,
+              sentLookupAckThisTurn,
+              planMode: planModeForAck,
+              scenarioKey,
+              userMessage: userMessage || "",
+            })
+          ) {
             sentLookupAckThisTurn = true;
             lookupAckSentMs = Date.now() - startTime;
             firstCustomerVisibleReplyMs = lookupAckSentMs;
             console.log(
               `[phase26_latency] lookup_ack_sent_ms=${lookupAckSentMs} contact=${contact.id} queue_wait_ms=0`
             );
-            const lookupAckText = "我幫您查詢中～";
-            const ackMsg = storage.createMessage(contact.id, contact.platform || "line", "ai", lookupAckText);
+            const lookupAckText = pickRandomAck(scenarioKey);
+            const lookupAckFinal = brandMessage(
+              effectiveBrandId || undefined,
+              "quick_ack_" + scenarioKey.toLowerCase(),
+              lookupAckText
+            );
+            const ackMsg = storage.createMessage(contact.id, contact.platform || "line", "ai", lookupAckFinal);
             broadcastSSE("new_message", { contact_id: contact.id, message: ackMsg, brand_id: effectiveBrandId || contact.brand_id });
             broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
             if (channelToken && contact.platform === "messenger") {
-              sendFBMessage(channelToken, contact.platform_user_id, lookupAckText).catch(() => {});
+              sendFBMessage(channelToken, contact.platform_user_id, lookupAckFinal).catch(() => {});
             } else if (channelToken) {
-              pushLineMessage(contact.platform_user_id, [{ type: "text", text: lookupAckText }], channelToken).catch(() => {});
+              pushLineMessage(contact.platform_user_id, [{ type: "text", text: lookupAckFinal }], channelToken).catch(() => {});
             }
           }
 

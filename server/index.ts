@@ -8,6 +8,7 @@ import RedisStore from "connect-redis";
 import path from "path";
 import * as assignment from "./assignment";
 import { getUploadsDir, getDataDir } from "./data-dir";
+import db from "./db";
 
 const app = express();
 const httpServer = createServer(app);
@@ -184,6 +185,51 @@ app.use((req, res, next) => {
             console.error("[assignment] runOverdueReassign error:", e);
           }
         }, 60 * 1000);
+      }
+
+      function cleanupOldNormalizedOrders() {
+        try {
+          const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000)
+            .toISOString()
+            .slice(0, 19)
+            .replace("T", " ");
+          const result = db.prepare("DELETE FROM orders_normalized WHERE created_at < ?").run(cutoff);
+          if (result.changes > 0) {
+            console.log(`[OrderCleanup] 清理了 ${result.changes} 筆超過 90 天的訂單快取`);
+          }
+        } catch (e) {
+          console.error("[OrderCleanup] 清理失敗:", (e as Error)?.message);
+        }
+      }
+
+      setInterval(cleanupOldNormalizedOrders, 24 * 60 * 60 * 1000);
+
+      if (process.env.ENABLE_ORDER_SYNC === "true") {
+        import("./scripts/sync-orders-normalized")
+          .then(({ runOrderSync }) => {
+            setTimeout(() => {
+              console.log("[OrderSync] 首次同步開始（近 7 天）...");
+              runOrderSync({ days: 7 }).catch((e) =>
+                console.error("[OrderSync] 首次同步失敗:", (e as Error)?.message || e)
+              );
+            }, 120_000);
+
+            setInterval(() => {
+              runOrderSync({ days: 3 }).catch((e) =>
+                console.error("[OrderSync] 定時同步失敗:", (e as Error)?.message || e)
+              );
+            }, 30 * 60 * 1000);
+
+            console.log("[server] 訂單定時同步已啟用（每 30 分鐘同步近 3 天）");
+          })
+          .catch((e) => {
+            console.error(
+              "[server] 訂單同步模組載入失敗（runOrderSync 可能未 export）:",
+              (e as Error)?.message || e
+            );
+          });
+      } else {
+        console.log("[server] ENABLE_ORDER_SYNC 未啟用；若需定時同步請設 ENABLE_ORDER_SYNC=true");
       }
 
       // 24 小時閒置結案：每 15 分鐘掃描一次，客戶最後一則為 user 且超過 idle_close_hours 未回則結案（排除 awaiting_human / high_risk）。

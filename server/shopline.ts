@@ -387,6 +387,15 @@ export async function lookupShoplineOrderById(
   orderId: string
 ): Promise<OrderInfo | null> {
   const normalizedId = orderId.trim();
+  const domain = String(config.storeDomain || "").trim();
+  const token = String(config.apiToken || "").trim();
+  console.log("[SHOPLINE_DEBUG] 查詢開始", {
+    action: "lookup_by_id",
+    query: normalizedId,
+    domain: domain?.slice(0, 30),
+    hasToken: !!token,
+    tokenPrefix: token?.slice(0, 8),
+  });
   console.log(`[SHOPLINE] 查詢單號（精準）: ${normalizedId}`);
 
   try {
@@ -400,14 +409,40 @@ export async function lookupShoplineOrderById(
         console.log(
           `[SHOPLINE] 精準命中 ${o.global_order_id} pagesFetched=${pagesFetched} 狀態=${o.status}`
         );
+        const payload = { hit: true, global_order_id: o.global_order_id, status: o.status, pagesFetched, scanned: raws.length };
+        console.log("[SHOPLINE_DEBUG] 查詢結果", {
+          action: "lookup_by_id",
+          query: normalizedId,
+          resultCount: 1,
+          firstResult: JSON.stringify(payload).slice(0, 300),
+        });
         return o;
       }
     }
     console.log("[SHOPLINE] 查無精準符合訂單:", normalizedId, "pagesFetched=", pagesFetched);
+    const dbgMiss = {
+      hit: false,
+      pagesFetched,
+      scanned: raws.length,
+      sampleIds: raws.slice(0, 3).map((r: any) => r?.order_number ?? r?.name ?? r?.id),
+    };
+    console.log("[SHOPLINE_DEBUG] 查詢結果", {
+      action: "lookup_by_id",
+      query: normalizedId,
+      resultCount: 0,
+      firstResult: JSON.stringify(dbgMiss).slice(0, 300),
+    });
     return null;
-  } catch (err: any) {
-    console.error("[SHOPLINE] 查詢單號失敗:", err.message);
-    throw err;
+  } catch (e: unknown) {
+    const err = e as Error;
+    console.error("[SHOPLINE_DEBUG] 查詢失敗", {
+      action: "lookup_by_id",
+      query: normalizedId,
+      error: err?.message,
+      stack: err?.stack?.slice(0, 300),
+    });
+    console.error("[SHOPLINE] 查詢單號失敗:", err?.message);
+    throw e;
   }
 }
 
@@ -418,31 +453,71 @@ export async function lookupShoplineOrdersByPhoneExact(
   opts?: { maxPages?: number }
 ): Promise<ShoplineDateFilterResult> {
   const digits = normalizeShoplinePhoneDigits(phone);
+  const domain = String(config.storeDomain || "").trim();
+  const token = String(config.apiToken || "").trim();
+  const queryStr = phone.replace(/[-\s]/g, "").trim() || digits;
+  console.log("[SHOPLINE_DEBUG] 查詢開始", {
+    action: "lookup_by_phone",
+    query: queryStr,
+    domain: domain?.slice(0, 30),
+    hasToken: !!token,
+    tokenPrefix: token?.slice(0, 8),
+  });
   console.log("[SHOPLINE] 手機精準查詢 digits=", digits);
   if (digits.length < 8) {
+    console.log("[SHOPLINE_DEBUG] 查詢結果", {
+      action: "lookup_by_phone",
+      query: queryStr,
+      resultCount: 0,
+      firstResult: JSON.stringify({ reason: "digits_too_short", digitsLen: digits.length }).slice(0, 300),
+    });
     return { orders: [], totalFetched: 0, truncated: false, source: "shopline", pagesFetched: 0 };
   }
-  const query = phone.replace(/[-\s]/g, "").trim() || digits;
-  const { raws, pagesFetched, truncated } = await fetchShoplineSearchAllPages(config, query, {
-    maxPages: opts?.maxPages ?? 30,
-    perPage: 100,
-  });
-  const matched: OrderInfo[] = [];
-  for (const raw of raws) {
-    const o = mapShoplineOrder(raw);
-    if (normalizeShoplinePhoneDigits(o.buyer_phone || "") === digits) matched.push(o);
+  const query = queryStr;
+  try {
+    const { raws, pagesFetched, truncated } = await fetchShoplineSearchAllPages(config, query, {
+      maxPages: opts?.maxPages ?? 30,
+      perPage: 100,
+    });
+    const matched: OrderInfo[] = [];
+    for (const raw of raws) {
+      const o = mapShoplineOrder(raw);
+      if (normalizeShoplinePhoneDigits(o.buyer_phone || "") === digits) matched.push(o);
+    }
+    matched.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+    console.log(
+      `[SHOPLINE] 手機精準: pagesFetched=${pagesFetched} scanned=${raws.length} matched=${matched.length} truncated=${truncated}`
+    );
+    const dbgResult = {
+      matchedCount: matched.length,
+      pagesFetched,
+      scanned: raws.length,
+      truncated,
+      firstOrderId: matched[0]?.global_order_id,
+    };
+    console.log("[SHOPLINE_DEBUG] 查詢結果", {
+      action: "lookup_by_phone",
+      query,
+      resultCount: matched.length,
+      firstResult: JSON.stringify(dbgResult).slice(0, 300),
+    });
+    return {
+      orders: matched,
+      totalFetched: raws.length,
+      truncated,
+      source: "shopline",
+      pagesFetched,
+    };
+  } catch (e: unknown) {
+    const err = e as Error;
+    console.error("[SHOPLINE_DEBUG] 查詢失敗", {
+      action: "lookup_by_phone",
+      query,
+      error: err?.message,
+      stack: err?.stack?.slice(0, 300),
+    });
+    throw e;
   }
-  matched.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
-  console.log(
-    `[SHOPLINE] 手機精準: pagesFetched=${pagesFetched} scanned=${raws.length} matched=${matched.length} truncated=${truncated}`
-  );
-  return {
-    orders: matched,
-    totalFetched: raws.length,
-    truncated,
-    source: "shopline",
-    pagesFetched,
-  };
 }
 
 export async function lookupShoplineOrdersByPhone(

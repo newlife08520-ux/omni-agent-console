@@ -44,18 +44,21 @@ function maskPiiFieldsOnOrderLike(o: Record<string, unknown>): void {
 export const SHIPPING_SOP_INSTRUCTION =
   "（出貨／久候小抄—請融進一段話，勿列點唸稿）先致歉；現貨約五工作天內寄出、預購約七到二十工作天；別保證幾號一定到；可說會幫問倉儲／物流並在需要時幫催或加急。";
 
-/** 僅出貨進度／久候語意（避免「付款」等也套用到出貨 SOP） */
-const SHIPPING_SOP_TRIGGER =
-  /出貨|物流|久候|還沒到|什麼時候到|什麼時候出貨|何時出貨|配送|寄出|沒收到|追蹤|催促|加急|貨到哪|哪天會到|幾天會到|還沒寄|何時會到|到貨|進度/i;
-
 export function shouldInjectShippingSopForToolContext(
   userMessage?: string,
   recentUserMessages?: string[]
 ): boolean {
-  const cur = (userMessage || "").trim();
-  if (SHIPPING_SOP_TRIGGER.test(cur)) return true;
-  const recent = (recentUserMessages || []).slice(-5).join("\n");
-  return SHIPPING_SOP_TRIGGER.test(recent);
+  const shippingKeywords =
+    /出貨|寄出|物流|配送|到貨|久等|多久|何時出|什麼時候.*寄|還沒收到|還沒到|等很久|怎麼還沒|貨態|包裹|寄了嗎|出了嗎|發貨/;
+
+  if (userMessage && shippingKeywords.test(userMessage)) return true;
+
+  if (recentUserMessages?.length) {
+    const last = recentUserMessages[recentUserMessages.length - 1];
+    if (last && shippingKeywords.test(last)) return true;
+  }
+
+  return false;
 }
 
 const LOOKUP_TOOL_NAMES = new Set([

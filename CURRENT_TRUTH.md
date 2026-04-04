@@ -1,6 +1,22 @@
 # 系統現狀（Single Source of Truth）
 
-> 最後更新：2026-04-04（第五輪 5A + 5B 部分）
+> 最後更新：2026-04-04（第五輪 5A + 5B 部分 + hotfix／訂單同步）
+
+## 緊急修復摘要
+
+- **FIX-1**：Quick Ack 限制為 ORDER_LOOKUP + AFTER_SALES 才觸發（PRODUCT_CONSULT 和 GENERAL 不送）
+- **FIX-2**：SOP 出貨 Guard 改為嚴格關鍵字觸發（只有客戶問出貨相關才注入）
+- **FIX-3**：Global + Brand Prompt 加入付款狀態判讀絕對規則（付款失敗不可說會出貨）
+- **FIX-4**：Shopline 查詢加入 debug log
+- **FIX-5**：DB system_prompt 已同步（`npm run sync:prompt`）
+
+## 訂單查詢優化
+
+- 本地索引：`orders_normalized` 表存最近 60–90 天訂單（同步腳本預設 90 天）
+- 定時同步：`ENABLE_ORDER_SYNC=true` 後每 30 分鐘同步近 3 天
+- 自動清理：超過 90 天的訂單快取每天自動清理
+- 查詢流程：**[已確認]** `unifiedLookupById`／`unifiedLookupByPhoneGlobal` 先查本地 `order_lookup_cache`／`orders_normalized`（`getOrderByOrderId`、`getOrdersByPhone*`），再即時 API；結果寫回 cache／索引
+- 首次部署：需手動跑 `npx tsx server/scripts/sync-orders-normalized.ts [brand_id] 60`
 
 ## 版本
 

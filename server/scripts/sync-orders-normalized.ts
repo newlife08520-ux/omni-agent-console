@@ -9,34 +9,35 @@
  * - **--backfill**：歷史回填，一頁商店與 Shopline 皆用 **365** 天視窗
  * - Shopline：列表 API 分頁後以 created_at 過濾時間窗內訂單
  */
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { storage } from "../storage";
-import { getSuperLandingConfig } from "../superlanding";
-import { fetchOrders } from "../superlanding";
+import { getSuperLandingConfig, fetchOrders } from "../superlanding";
 import { upsertOrderNormalized, getOrderIndexStats } from "../order-index";
 import { fetchShoplineOrdersListPaginated } from "../shopline";
 
-async function main() {
-  const argv = process.argv.slice(2);
-  const backfill = argv.includes("--backfill") || argv.includes("--full");
-  const rest = argv.filter((a) => a !== "--backfill" && a !== "--full");
-  const brandIdArgResolved = rest[0] && /^\d+$/.test(rest[0]) ? rest[0] : undefined;
-  const daysFromArg = rest[1] && /^\d+$/.test(rest[1]) ? rest[1] : undefined;
-  const days = backfill
-    ? 365
-    : Math.min(365, Math.max(1, parseInt(String(daysFromArg || "90"), 10) || 90));
+export async function runOrderSync(options?: {
+  brandId?: number;
+  days?: number;
+  backfill?: boolean;
+}): Promise<{ synced: number; errors: number }> {
+  const backfill = options?.backfill === true;
+  const days = backfill ? 365 : Math.min(365, Math.max(1, options?.days ?? 90));
+
+  let totalSynced = 0;
+  let totalErrors = 0;
 
   console.log(
     `[sync-orders-normalized] mode=${backfill ? "HISTORICAL_BACKFILL_365D" : "DEFAULT_RECENT"} days=${days} (default_recent=90, backfill=365)`
   );
 
   const brands = storage.getBrands();
-  const targetBrands = brandIdArgResolved
-    ? brands.filter((b) => String(b.id) === brandIdArgResolved)
-    : brands;
+  const targetBrands =
+    options?.brandId != null ? brands.filter((b) => b.id === options.brandId) : brands;
 
   if (targetBrands.length === 0) {
     console.log("無符合品牌（請傳正確 brand_id）");
-    process.exit(0);
+    return { synced: 0, errors: 0 };
   }
 
   const end = new Date();
@@ -70,7 +71,9 @@ async function main() {
           if (page > maxPages) break;
         }
         console.log(`[Sync SL] Brand ${brand.id} 寫入 ${total} 筆`);
+        totalSynced += total;
       } catch (e: any) {
+        totalErrors++;
         console.error(`[Sync SL] Brand ${brand.id} 失敗:`, e?.message || e);
       }
     }
@@ -95,7 +98,9 @@ async function main() {
           n++;
         }
         console.log(`[Sync Shopline] Brand ${brand.id} pages=${pagesFetched} 寫入 ${n} 筆（時間窗內）`);
+        totalSynced += n;
       } catch (e: any) {
+        totalErrors++;
         console.error(`[Sync Shopline] Brand ${brand.id} 失敗:`, e?.message || e);
       }
     }
@@ -107,9 +112,38 @@ async function main() {
   } catch (_e) {
     /* ignore */
   }
+
+  return { synced: totalSynced, errors: totalErrors };
 }
 
-main().then(() => process.exit(0)).catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+function isDirectCliRun(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return path.resolve(entry) === path.resolve(fileURLToPath(import.meta.url));
+  } catch {
+    return entry.includes("sync-orders-normalized");
+  }
+}
+
+if (isDirectCliRun()) {
+  const argv = process.argv.slice(2);
+  const backfill = argv.includes("--backfill") || argv.includes("--full");
+  const rest = argv.filter((a) => a !== "--backfill" && a !== "--full");
+  const brandIdArgResolved = rest[0] && /^\d+$/.test(rest[0]) ? parseInt(rest[0], 10) : undefined;
+  const daysFromArg = rest[1] && /^\d+$/.test(rest[1]) ? parseInt(rest[1], 10) : undefined;
+
+  runOrderSync({
+    brandId: brandIdArgResolved,
+    days: daysFromArg,
+    backfill,
+  })
+    .then((r) => {
+      console.log(`同步完成：${r.synced} 筆成功，${r.errors} 筆失敗（區塊錯誤計數）`);
+      process.exit(0);
+    })
+    .catch((e) => {
+      console.error("同步失敗:", e);
+      process.exit(1);
+    });
+}

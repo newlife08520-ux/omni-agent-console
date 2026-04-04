@@ -26,4 +26,10 @@ describe("ensureShippingSopCompliance", () => {
     expect(result).toContain("不好意思");
     expect(result).toContain(reply);
   });
+
+  it("order_followup 但客戶未問出貨／物流 → 不注入前綴", () => {
+    const reply = "好的，這款有黑色跟白色喔";
+    const result = ensureShippingSopCompliance(reply, "order_followup", "", "有什麼顏色", ["有什麼顏色"]);
+    expect(result).toBe(reply);
+  });
 });
