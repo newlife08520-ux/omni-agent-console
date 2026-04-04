@@ -21,6 +21,21 @@ export function normalizePhone(phone: string): string {
   return (phone || "").replace(/\D/g, "");
 }
 
+/** 台灣門號常見誤輸：多一碼，或 090 開頭多一個 0 */
+function taiwanPhoneLookupVariants(normalizedDigits: string): string[] {
+  const out: string[] = [];
+  if (!normalizedDigits) return out;
+  out.push(normalizedDigits);
+  if (normalizedDigits.length === 11 && normalizedDigits.startsWith("09")) {
+    out.push(normalizedDigits.slice(0, 10));
+  }
+  if (normalizedDigits.length === 11 && normalizedDigits.startsWith("090")) {
+    const tail = normalizedDigits.slice(3);
+    if (tail.length === 8) out.push(`09${tail}`);
+  }
+  return [...new Set(out)];
+}
+
 export function normalizeProductName(s: string): string {
   return (s || "").replace(/\s/g, "").toLowerCase();
 }
@@ -81,23 +96,25 @@ export function getOrdersByPhone(
 ): OrderInfo[] {
   const norm = normalizePhone(phone);
   if (!norm) return [];
+  const variants = taiwanPhoneLookupVariants(norm);
+  const ph = variants.map(() => "?").join(", ");
   let rows: { payload: string; source: string }[];
   if (sourceHint === "any") {
     rows = db
       .prepare(
         `SELECT payload, source FROM orders_normalized
-         WHERE brand_id = ? AND buyer_phone_normalized = ?
+         WHERE brand_id = ? AND buyer_phone_normalized IN (${ph})
          ORDER BY datetime(COALESCE(NULLIF(trim(order_created_at),''), created_at)) DESC, datetime(synced_at) DESC`
       )
-      .all(brandId, norm) as { payload: string; source: string }[];
+      .all(brandId, ...variants) as { payload: string; source: string }[];
   } else {
     rows = db
       .prepare(
         `SELECT payload, source FROM orders_normalized
-         WHERE brand_id = ? AND buyer_phone_normalized = ? AND source = ?
+         WHERE brand_id = ? AND source = ? AND buyer_phone_normalized IN (${ph})
          ORDER BY datetime(COALESCE(NULLIF(trim(order_created_at),''), created_at)) DESC, datetime(synced_at) DESC`
       )
-      .all(brandId, norm, sourceHint) as { payload: string; source: string }[];
+      .all(brandId, sourceHint, ...variants) as { payload: string; source: string }[];
   }
   const seen = new Set<string>();
   const out: OrderInfo[] = [];
@@ -273,17 +290,26 @@ export function lookupOrdersByProductAliasAndPhoneLocal(
   const norm = normalizePhone(phone);
   const q = normalizeProductName(productQuery);
   if (!norm || q.length < 1) return [];
+  const variants = taiwanPhoneLookupVariants(norm);
+  const ph = variants.map(() => "?").join(", ");
   const like = `%${q}%`;
+  const likeRaw = `%${(productQuery || "").trim()}%`;
   const rows = db
     .prepare(
       `
     SELECT DISTINCT o.payload, o.source
     FROM orders_normalized o
-    WHERE o.brand_id = ? AND o.buyer_phone_normalized = ?
+    WHERE o.brand_id = ? AND o.buyer_phone_normalized IN (${ph})
       AND (
         EXISTS (
           SELECT 1 FROM order_items_normalized i
-          WHERE i.order_normalized_id = o.id AND i.product_name_normalized IS NOT NULL AND i.product_name_normalized LIKE ?
+          WHERE i.order_normalized_id = o.id AND (
+            (i.product_name_normalized IS NOT NULL AND i.product_name_normalized LIKE ?)
+            OR (i.product_name IS NOT NULL AND (
+              replace(lower(i.product_name), ' ', '') LIKE ?
+              OR i.product_name LIKE ?
+            ))
+          )
         )
         OR (o.page_id IS NOT NULL AND o.page_id != '' AND o.page_id IN (
           SELECT pa.page_id FROM product_aliases pa
@@ -294,7 +320,7 @@ export function lookupOrdersByProductAliasAndPhoneLocal(
     ORDER BY datetime(COALESCE(NULLIF(trim(o.order_created_at),''), o.created_at)) DESC
   `
     )
-    .all(brandId, norm, like, like, like) as { payload: string; source: string }[];
+    .all(brandId, ...variants, like, like, likeRaw, like, like) as { payload: string; source: string }[];
   const seen = new Set<string>();
   const out: OrderInfo[] = [];
   for (const row of rows) {

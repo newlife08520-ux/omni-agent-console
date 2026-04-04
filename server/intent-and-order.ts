@@ -75,6 +75,12 @@ export function classifyOrderNumber(input: string): OrderNumberType {
   if (s.length <= 5 && /^\d+$/.test(s)) return "pending_review";
   if (/^\d{5}$/.test(s) && /末五碼|後五碼|尾碼/.test(input)) return "payment_id";
 
+  /** Shopline 等官網：15～22 位純數字訂單號（略早於下方 pending_review 的 \d{6,}） */
+  if (/^\d{15,22}$/.test(s)) {
+    if (/交易序號|金流|付款\s*編號|授權碼|刷卡碼/i.test(input)) return "payment_id";
+    return "order_id";
+  }
+
   if (/^(KBT|ORD|MRQ|MRH|DEN|EC|SL)\s*\d+/i.test(s) || /^[A-Z]{2,4}\d{5,}$/i.test(s)) return "order_id";
   if (/^T\d{10,}$/i.test(s) || /交易序號|金流|付款.*編號/i.test(input)) return "payment_id";
   if (/^[0-9]{10,14}$/.test(s) && !/^09/.test(s)) return "logistics_id";

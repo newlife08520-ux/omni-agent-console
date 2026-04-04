@@ -1994,6 +1994,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
 
             const toolResultBlocks: ContentBlockParam[] = [];
             let orderLookupDeterministicReply: string | null = null;
+            const deterministicCandidates: { fnName: string; pr: Record<string, unknown> }[] = [];
             for (const { toolCall, toolResult } of toolResults) {
               toolResultBlocks.push({
                 type: "tool_result",
@@ -2011,11 +2012,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
                   orderFeatureFlags.genericDeterministicOrder &&
                   isValidOrderDeterministicPayload(pr)
                 ) {
-                  orderLookupDeterministicReply = String(pr.deterministic_customer_reply).trim();
-                  deterministicToolMeta = {
-                    renderer: typeof pr.renderer === "string" ? pr.renderer : undefined,
-                    tool_name: fnName,
-                  };
+                  deterministicCandidates.push({ fnName, pr });
                 }
               } catch (_e) {
                 /* ignore */
@@ -2054,6 +2051,16 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
                   }
                 } catch (_e) {}
               }
+            }
+
+            if (deterministicCandidates.length > 0) {
+              const byId = deterministicCandidates.find((c) => c.fnName === "lookup_order_by_id");
+              const picked = byId ?? deterministicCandidates[0]!;
+              orderLookupDeterministicReply = String(picked.pr.deterministic_customer_reply).trim();
+              deterministicToolMeta = {
+                renderer: typeof picked.pr.renderer === "string" ? picked.pr.renderer : undefined,
+                tool_name: picked.fnName,
+              };
             }
 
             claudeConversation.push({ role: "user", content: toolResultBlocks });
@@ -2251,6 +2258,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           );
 
           let orderLookupDeterministicReplyOai: string | null = null;
+          const deterministicCandidatesOai: { fnName: string; pr: Record<string, unknown> }[] = [];
           for (const { toolCall, toolResult } of toolResultsOai) {
             chatMessages.push({ role: "tool", tool_call_id: toolCall.id, content: toolResult });
             const fn = (toolCall as { function?: { name?: string; arguments?: string } }).function;
@@ -2264,11 +2272,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
                 orderFeatureFlags.genericDeterministicOrder &&
                 isValidOrderDeterministicPayload(pr)
               ) {
-                orderLookupDeterministicReplyOai = String(pr.deterministic_customer_reply).trim();
-                deterministicToolMeta = {
-                  renderer: typeof pr.renderer === "string" ? pr.renderer : undefined,
-                  tool_name: fnName,
-                };
+                deterministicCandidatesOai.push({ fnName, pr });
               }
             } catch (_e) {
               /* ignore */
@@ -2307,6 +2311,16 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
                 }
               } catch (_e) {}
             }
+          }
+
+          if (deterministicCandidatesOai.length > 0) {
+            const byIdOai = deterministicCandidatesOai.find((c) => c.fnName === "lookup_order_by_id");
+            const pickedOai = byIdOai ?? deterministicCandidatesOai[0]!;
+            orderLookupDeterministicReplyOai = String(pickedOai.pr.deterministic_customer_reply).trim();
+            deterministicToolMeta = {
+              renderer: typeof pickedOai.pr.renderer === "string" ? pickedOai.pr.renderer : undefined,
+              tool_name: pickedOai.fnName,
+            };
           }
 
           const freshContactLoop = storage.getContact(contact.id);

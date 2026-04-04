@@ -6,7 +6,7 @@ import type { ReplyPlanMode } from "../reply-plan-builder";
 import type { HybridRouteResult, AgentScenario } from "./phase1-types";
 import { resolveOpenAIRouterModel } from "../openai-model";
 import { classifyOrderNumber } from "../intent-and-order";
-import { extractOrderIdFromMixedSentence } from "../order-fast-path";
+import { extractOrderIdFromMixedSentence, extractLongNumericOrderIdFromMixedSentence } from "../order-fast-path";
 
 export interface HybridRouterInput {
   userMessage: string;
@@ -110,6 +110,17 @@ export function computePhase15HardRoute(userMessage: string): HybridRouteResult 
       matched_intent: "order_id_in_sentence",
       route_source: "rule",
       confidence: 0.88,
+      used_llm_router: false,
+    };
+  }
+
+  const longNumId = extractLongNumericOrderIdFromMixedSentence(t);
+  if (longNumId && (ORDER_CTX.test(t) || /訂單|單號|官網|幫查|查單|查詢/.test(t))) {
+    return {
+      selected_scenario: "ORDER_LOOKUP",
+      matched_intent: "shopline_numeric_order_in_sentence",
+      route_source: "rule",
+      confidence: 0.9,
       used_llm_router: false,
     };
   }

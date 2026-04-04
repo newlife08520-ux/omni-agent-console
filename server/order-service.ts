@@ -14,6 +14,7 @@ import {
   upsertOrderNormalized,
   cacheKeyOrderId,
   cacheKeyPhone,
+  lookupOrdersByProductAliasAndPhoneLocal,
 } from "./order-index";
 import { filterOrdersByProductQuery } from "./order-product-filter";
 import { derivePaymentStatus } from "./order-payment-utils";
@@ -60,6 +61,15 @@ export function isShoplineLookupConfiguredForBrand(brandId?: number): boolean {
 /** Phase 32/33：薄封裝；clear/unknown 皆不 prefer shopline */
 export function shouldPreferShoplineLookup(userMessage: string, recentUserMessages?: string[]): boolean {
   return resolveOrderSourceIntent(userMessage, recentUserMessages ?? []) === "shopline";
+}
+
+/** 商品關鍵字 + 手機：本地 order_items_normalized／別名表（與 tool 共用索引邏輯） */
+export function lookupOrdersByProductAndPhone(
+  brandId: number,
+  productNameKeyword: string,
+  phone: string
+): OrderInfo[] {
+  return lookupOrdersByProductAliasAndPhoneLocal(brandId, phone, productNameKeyword);
 }
 
 export type OrderLookupPreferSource = "superlanding" | "shopline";
