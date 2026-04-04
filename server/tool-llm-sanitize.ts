@@ -185,7 +185,7 @@ export interface FinalizeLlmToolJsonOptions {
 
 /** Phase 96：語氣小抄—避免「照念營運指導」腔（仍保留邊界） */
 const WARM_GUIDE_PHONE_SUMMARY_ONLY =
-  "（語氣小抄）客人只留手機、且多筆未指定商品時：像聊天一樣請他補一個「買的商品名稱」方便對單；不要念有幾筆、不要報別人明細。";
+  "（語氣小抄）訂單太多無法全列，像聊天一樣請客人說一下買了什麼商品或大概什麼時候下的單。";
 
 const WARM_GUIDE_SHOPLINE_ID_MISS =
   "（語氣小抄）官網這邊沒查到單：口氣要像真人櫃台，溫和說明並問是否可能在一頁式或別通路下過，別只丟一句查無。";

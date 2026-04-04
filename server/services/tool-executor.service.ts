@@ -1213,18 +1213,16 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
         }
         const orders = result.orders;
         const orderSource = result.source;
-        if (context?.orderLookupSummaryOnly && orders.length > 0) {
-          const ch =
-            orderSource === "shopline" ? "官網" : orderSource === "superlanding" ? "一頁商店" : "多來源";
+        // summaryOnly 意圖：僅在筆數過多時隱藏明細；5 筆以內一律回傳完整 orders 供 AI 列出
+        if (context?.orderLookupSummaryOnly && orders.length > 5) {
           return toolJson({
             success: true,
             found: true,
             summary_only: true,
             total: orders.length,
             source: orderSource,
-            sys_note:
-              "【營運指導】：為了保護客戶隱私，請用溫暖真誠的語氣，委婉請客戶提供『商品名稱』以便核對，絕對不要像機器人一樣直接播報筆數。",
-            message: `此手機在${ch}共找到 ${orders.length} 筆訂單。請客戶提供商品名稱後再查，勿揭露各筆明細。`,
+            sys_note: "訂單較多，請客人說一下大概買了什麼商品或下單時間，方便幫他找。",
+            message: `此手機共找到 ${orders.length} 筆訂單，數量較多。請客戶提供商品名稱或大概日期，方便縮小範圍。`,
           });
         }
         const orderSummaries = orders.map((o) => {
