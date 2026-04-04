@@ -503,6 +503,19 @@ export function registerCoreRoutes(app: Express): void {
       }
     });
 
+    /** super_admin：手動觸發訂單同步（背景執行，不等待完成） */
+    app.post("/api/admin/sync-orders", authMiddleware, superAdminOnly, async (_req, res) => {
+      try {
+        const { runOrderSync } = await import("../scripts/sync-orders-normalized");
+        runOrderSync({ days: 30 })
+          .then((r) => console.log("[ManualSync] 完成:", r))
+          .catch((e) => console.error("[ManualSync] 失敗:", e));
+        return res.json({ ok: true, message: "同步已啟動（背景執行），約需 10-15 分鐘" });
+      } catch (e) {
+        return res.status(500).json({ error: (e as Error).message });
+      }
+    });
+
     app.get("/api/debug/runtime-flags", authMiddleware, (_req: any, res) => {
       try {
         return res.json({
