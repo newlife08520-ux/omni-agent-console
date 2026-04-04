@@ -611,6 +611,16 @@ export async function fetchShoplineOrdersListPaginated(
   config: ShoplineConfig,
   opts?: { maxPages?: number; perPage?: number; createdAfter?: string }
 ): Promise<{ orders: OrderInfo[]; pagesFetched: number }> {
+  const domain = String(config.storeDomain || "").trim();
+  const token = String(config.apiToken || "").trim();
+  console.log(
+    "[SHOPLINE_DEBUG] fetchShoplineOrdersListPaginated domain:",
+    domain,
+    "token:",
+    token ? `${token.slice(0, 8)}...` : "(empty)",
+    "createdAfter:",
+    opts?.createdAfter ?? "(none)"
+  );
   const maxPages = opts?.maxPages ?? 40;
   const perPage = Math.min(250, Math.max(1, opts?.perPage ?? 100));
   const params: Record<string, string> = { per_page: String(perPage) };
@@ -625,6 +635,8 @@ export async function fetchShoplineOrdersListPaginated(
     for (const raw of rawList) out.push(mapShoplineOrder(raw));
     if (rawList.length < perPage) break;
   }
+  const dbg = { action: "list_paginated", ordersCount: out.length, pagesFetched };
+  console.log("[SHOPLINE_DEBUG] result:", JSON.stringify(dbg).slice(0, 500));
   return { orders: out, pagesFetched };
 }
 

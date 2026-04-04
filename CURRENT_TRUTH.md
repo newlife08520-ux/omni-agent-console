@@ -17,6 +17,17 @@
 - 自動清理：超過 90 天的訂單快取每天自動清理
 - 查詢流程：**[已確認]** `unifiedLookupById`／`unifiedLookupByPhoneGlobal` 先查本地 `order_lookup_cache`／`orders_normalized`（`getOrderByOrderId`、`getOrdersByPhone*`），再即時 API；結果寫回 cache／索引
 - 首次部署：需手動跑 `npx tsx server/scripts/sync-orders-normalized.ts [brand_id] 60`
+- Shopline 列表同步（`fetchShoplineOrdersListPaginated`）會輸出 `[SHOPLINE_DEBUG]`（domain、token 前綴、拉單筆數摘要），與單號／手機查詢的 debug 一併利於除錯
+
+### OPT-1～7（cursor-hotfix-and-order-optimization.md）
+
+- **OPT-1**：手動 `npx tsx server/scripts/sync-orders-normalized.ts <brand_id> <days>` 可運作；成功時可見 `[Sync SL]`／`[Sync Shopline]` 與寫入筆數。
+- **OPT-2**：**[已確認]** 見上「查詢流程」— 實作於 `server/order-service.ts`（`getOrderLookupCache`／`getOrderByOrderId`／`getOrdersByPhone*` 前置）。
+- **OPT-3**：`server/scripts/sync-orders-normalized.ts` 已 **`export async function runOrderSync`**，CLI（`isDirectCliRun`）行為不變。
+- **OPT-4**：`server/index.ts` 於 **`ENABLE_ORDER_SYNC=true`** 時 **`import("./scripts/sync-orders-normalized")`**，載入失敗僅 log、不阻擋啟動；啟動約 2 分鐘後首次同步近 7 天，之後每 30 分鐘同步近 3 天。
+- **OPT-5**：同檔 **`cleanupOldNormalizedOrders`**（`orders_normalized` 超過 90 天）以 **`setInterval` 每 24 小時** 執行。
+- **OPT-6**：**`.env.example`** 已含 **`ENABLE_ORDER_SYNC`** 註解與手動同步提示。
+- **OPT-7**：本節與「緊急修復摘要」對齊文件現況；無需重複貼全文。
 
 ## 版本
 
