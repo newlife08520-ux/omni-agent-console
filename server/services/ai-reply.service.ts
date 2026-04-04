@@ -15,9 +15,13 @@ import {
   isAiHandlableIntent,
 } from "../conversation-state-resolver";
 import { buildReplyPlan, shouldNotLeadWithOrderLookup, type ReplyPlanMode } from "../reply-plan-builder";
-import { enforceOutputGuard, HANDOFF_MANDATORY_OPENING, buildHandoffReply, getHandoffReplyForCustomer } from "../phase2-output";
-import { runPostGenerationGuard, isModeNoPromo, runOfficialChannelGuard, runGlobalPlatformGuard } from "../content-guard";
-import { recordGuardHit } from "../content-guard-stats";
+import {
+  enforceOutputGuard,
+  HANDOFF_MANDATORY_OPENING,
+  buildHandoffReply,
+  getHandoffReplyForCustomer,
+} from "../phase2-output";
+import { isModeNoPromo } from "../content-guard";
 import { searchOrderInfoThreeLayers, searchOrderInfoInRecentMessages, extractOrderInfoFromImage } from "../already-provided-search";
 import { shouldHandoffDueToAwkwardOrRepeat } from "../awkward-repeat-handoff";
 import { getSuperLandingConfig } from "../superlanding";
@@ -58,7 +62,7 @@ import {
 import { ensureShippingSopCompliance } from "../sop-compliance-guard";
 import { deriveOrderLookupIntent } from "../order-lookup-policy";
 import type { ToolCallContext } from "./tool-executor.service";
-import { resolveModel, resolveOpenAIModel } from "../openai-model";
+import { resolveModelWithBrandOverride, resolveOpenAIModel } from "../openai-model";
 import type { ContentBlockParam } from "@anthropic-ai/sdk/resources/messages";
 import { callAiModel, type AiCallResult, type AiMessage } from "./ai-client.service";
 import { getDataDir } from "../data-dir";
@@ -73,6 +77,8 @@ import { runHybridIntentRouter, mapPlanToPhase1Scenario, computePhase15HardRoute
 import type { HybridRouteResult, Phase1BrandFlags } from "./phase1-types";
 import { filterToolsForScenario, applyScenarioToolOverrides } from "./tool-scenario-filter";
 import { buildPhase1AiLogExtras } from "./phase1-trace-extras";
+import { sendQuickAckIfNeeded } from "./quick-ack.service";
+import { runPostGenerationPipeline } from "./guard-pipeline";
 
 /** Phase 1 法律/公關風險關鍵字，命中則走 legal_risk → high_risk_short_circuit */
 const LEGAL_RISK_KEYWORDS = [
@@ -229,16 +235,6 @@ function planAllowsActiveOrderDeterministic(_mode: string): boolean {
 function looksLikeOrderIdInput(s: string): boolean {
   const t = (s || "").trim();
   return t.length <= 10 && t.length >= 1 && /^[0-9A-Za-z\-]+$/.test(t);
-}
-
-const BAG_KEYWORDS = ["包", "包包", "托特包", "手提包", "肩背包", "後背包", "側背包"];
-const SWEET_KEYWORDS = ["甜", "甜點", "糖", "糖果", "巧克力", "蛋糕", "養乾"];
-
-function getProductScopeFromMessage(text: string): "bag" | "sweet" | null {
-  const t = (text || "").trim();
-  if (BAG_KEYWORDS.some((k) => t.includes(k))) return "bag";
-  if (SWEET_KEYWORDS.some((k) => t.includes(k))) return "sweet";
-  return null;
 }
 
 /** @deprecated 請改用 resolveOpenAIModel from ../openai-model */
@@ -404,7 +400,6 @@ export function createAiReplyService(deps: AiReplyDeps) {
     } catch (_e) { /* ???????????? vision ?? */ }
     const recentMessages = storage.getMessages(contactId).slice(-10);
     const tags = (contact?.tags && typeof contact.tags === "string") ? (() => { try { return JSON.parse(contact.tags) as string[]; } catch { return []; } })() : [];
-    const productScope = (contact as any)?.product_scope_locked ?? null;
     const contextParts: string[] = [];
     for (const m of recentMessages) {
       if (m.sender_type === "user" && m.content && m.content !== "[????]" && !m.content.startsWith("[??")) {
@@ -414,7 +409,6 @@ export function createAiReplyService(deps: AiReplyDeps) {
       }
     }
     if (tags.length) contextParts.push(`?????${tags.join("?")}`);
-    if (productScope) contextParts.push(`????????${productScope === "bag" ? "??/??" : "???"}`);
     const contextStr = contextParts.length ? contextParts.join("\n") : "?????????";
 
     const systemPrompt = await getEnrichedSystemPrompt(brandId ?? undefined);
@@ -702,10 +696,12 @@ ${contextStr}
     let phase1Flags = parsePhase1BrandFlags(undefined);
     let phase1Route: HybridRouteResult | null = null;
     let toolsAvailableNames: string[] = [];
+    let phase1ModelOverride: string | undefined;
 
     try {
       const effectiveBrandId = contact.brand_id || brandId;
       phase1Flags = parsePhase1BrandFlags(effectiveBrandId ? storage.getBrand(effectiveBrandId) : undefined);
+      phase1ModelOverride = isPhase1Active(phase1Flags) ? phase1Flags.ai_model_override : undefined;
 
       storage.updateContactStatus(contact.id, "ai_handling");
       broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
@@ -718,7 +714,7 @@ ${contextStr}
         storage.createMessage(contact.id, contact.platform, "system",
           `(????) ?????????????????????????${riskCheck.reasons.join("?")}`);
         broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-        const handoffReplyLegal = buildHandoffReply({ customerEmotion: "high_risk" });
+        const handoffReplyLegal = buildHandoffReply({ customerEmotion: "high_risk", brandId: effectiveBrandId || undefined });
         const handoffTextLegal = getHandoffReplyForCustomer(handoffReplyLegal, assignment.getUnavailableReason());
         const aiMsgRisk = storage.createMessage(contact.id, contact.platform, "ai", handoffTextLegal);
         broadcastSSE("new_message", { contact_id: contact.id, message: aiMsgRisk, brand_id: contact.brand_id });
@@ -749,8 +745,7 @@ ${contextStr}
         return;
       }
 
-      // ????????????????????????? ? ????????????????
-      // ???????????????????????????????????????????????????
+      // [已確認無需改動] safe_confirm 模板已傳 contact.brand_id 至 getMetaCommentTemplateByCategory／getMetaPageSettingsList
       const safeConfirmDm = classifyMessageForSafeAfterSale(userMessage);
       if (safeConfirmDm.matched && !isLinkRequestMessage(userMessage)) {
         const categoryByType: Record<string, string> = {
@@ -807,6 +802,14 @@ ${contextStr}
             used_llm: 0,
             plan_mode: null,
             reason_if_bypassed: "safe_confirm",
+            channel_id: contact.channel_id ?? undefined,
+            matched_intent: safeConfirmDm.type || "safe_confirm",
+            route_source: "classifier",
+            selected_scenario: "AFTER_SALES",
+            route_confidence: null,
+            tools_available_json: JSON.stringify(["safe_confirm_template"]),
+            response_source_trace: "safe_confirm_template",
+            phase1_config_ref: isPhase1Active(phase1Flags) ? JSON.stringify({ v: "1.5_safe_confirm" }) : undefined,
           });
         }
         return;
@@ -859,7 +862,7 @@ ${contextStr}
         recentAiMessages,
         lastMessageAtBySender,
       });
-      let returnFormUrl = "https://www.lovethelife.shop/returns";
+      let returnFormUrl = "";
       if (effectiveBrandId) {
         const brandData = storage.getBrand(effectiveBrandId);
         if (brandData?.return_form_url) returnFormUrl = brandData.return_form_url;
@@ -1065,7 +1068,7 @@ ${contextStr}
           storage.updateContactNeedsAssignment(contact.id, 1);
           storage.createMessage(contact.id, contact.platform, "system", getTransferUnavailableSystemMessage(assignment.getUnavailableReason()));
         }
-        const handoffReplyAwk = buildHandoffReply({ customerEmotion: state.customer_emotion });
+        const handoffReplyAwk = buildHandoffReply({ customerEmotion: state.customer_emotion, brandId: effectiveBrandId || undefined });
         const handoffTextAwk = getHandoffReplyForCustomer(handoffReplyAwk, assignment.getUnavailableReason());
         const contactPlatformAwk = platform || contact.platform || "line";
         const aiMsgAwk = storage.createMessage(contact.id, contactPlatformAwk, "ai", handoffTextAwk);
@@ -1120,6 +1123,7 @@ ${contextStr}
           humanReason: state.human_reason ?? undefined,
           isOrderLookupContext: ORDER_LOOKUP_PATTERNS.test(userMessage),
           hasOrderInfo: !!orderInfoInRecent.orderId,
+          brandId: effectiveBrandId || undefined,
         });
         const unavailableReason = assignment.getUnavailableReason();
         const handoffTextToSend = getHandoffReplyForCustomer(handoffReply, unavailableReason);
@@ -1162,10 +1166,6 @@ ${contextStr}
       } else if (plan.mode === "off_topic_guard") {
         storage.updateContactConversationFields(contact.id, { product_scope_locked: null, customer_goal_locked: null });
       } else if (isOrderLookupFamily(plan.mode) || plan.mode === "answer_directly") {
-        const inferredScope = getProductScopeFromMessage(userMessage);
-        if (inferredScope) {
-          storage.updateContactConversationFields(contact.id, { product_scope_locked: inferredScope });
-        }
         if (isOrderLookupFamily(plan.mode)) {
           storage.updateContactConversationFields(contact.id, { customer_goal_locked: "order_lookup" });
         }
@@ -1185,9 +1185,7 @@ ${contextStr}
         goalLocked = (contact as any)?.customer_goal_locked ?? null;
       }
 
-      const effectiveScope =
-        state.product_scope_locked ||
-        ((isOrderLookupFamily(planMode) || planMode === "answer_directly") ? getProductScopeFromMessage(userMessage) : null);
+      const effectiveScope = state.product_scope_locked || null;
 
       const recentUserHasImage = recentMessages
         .slice(-10)
@@ -1667,12 +1665,13 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
         let returnFormReply = returnFormFallback;
         let rfTokens = 0;
         try {
-          const { provider: rfProvider } = resolveModel();
-          if (rfProvider === "anthropic") {
+          const rfResolved = resolveModelWithBrandOverride(phase1ModelOverride);
+          if (rfResolved.provider === "anthropic") {
             const rfRes = await callAiModel({
               messages: rfMessages,
               maxTokens: 300,
               temperature: 0.85,
+              modelOverride: phase1ModelOverride,
             });
             rfTokens = rfRes.inputTokens + rfRes.outputTokens;
             const t = (rfRes.content || "").trim();
@@ -1680,7 +1679,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           } else {
             const openaiRf = new OpenAI({ apiKey: apiKey.trim() });
             const comp = await openaiRf.chat.completions.create({
-              model: resolveOpenAIModel(),
+              model: rfResolved.model,
               messages: rfMessages as OpenAI.Chat.Completions.ChatCompletionMessageParam[],
               max_completion_tokens: 300,
               temperature: 0.85,
@@ -1718,7 +1717,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           transfer_triggered: false,
           result_summary: returnFormReply.slice(0, 200),
           token_usage: rfTokens,
-          model: resolveOpenAIModel(),
+          model: resolveModelWithBrandOverride(phase1ModelOverride).model,
           response_time_ms: Date.now() - startTime,
           reply_source: "return_form_first",
           used_llm: 1,
@@ -1832,7 +1831,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
       }
 
       const claudeSeed =
-        resolveModel().provider === "anthropic" && !isOrderLookupFamily(plan.mode)
+        resolveModelWithBrandOverride(phase1ModelOverride).provider === "anthropic" && !isOrderLookupFamily(plan.mode)
           ? openaiChatMessagesToClaudeSeed(chatMessages)
           : null;
 
@@ -1848,6 +1847,36 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
       let secondLlmSkipped = false;
       let deterministicToolMeta: { renderer?: string; tool_name?: string } = {};
 
+      const planModeForAck = plan.mode as string;
+      const scenarioKey = phase1Route?.selected_scenario || "GENERAL";
+      const quickAckResult = await sendQuickAckIfNeeded(
+        {
+          createMessage: (cid, plat, st, txt) => storage.createMessage(cid, plat, st, txt),
+          broadcastSSE,
+          pushLineMessage,
+          sendFBMessage,
+        },
+        {
+          enabled: orderFeatureFlags.orderLookupAck,
+          alreadySent: sentLookupAckThisTurn,
+          planMode: planModeForAck,
+          scenario: scenarioKey,
+          brandId: effectiveBrandId || undefined,
+          contactId: contact.id,
+          platform: platform || contact.platform || "line",
+          platformUserId: contact.platform_user_id,
+          channelToken: channelToken ?? null,
+          contactBrandId: contact.brand_id,
+          startTime,
+          queueWaitMs,
+        }
+      );
+      if (quickAckResult.sent) {
+        sentLookupAckThisTurn = true;
+        lookupAckSentMs = quickAckResult.ackMs;
+        firstCustomerVisibleReplyMs = quickAckResult.firstVisibleMs;
+      }
+
       if (claudeSeed) {
         const claudeConversation: AiMessage[] = [...claudeSeed];
         try {
@@ -1856,6 +1885,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             tools: allTools,
             maxTokens: 1500,
             temperature: 0.85,
+            modelOverride: phase1ModelOverride,
           });
           totalTokens += rFirst.inputTokens + rFirst.outputTokens;
           responseMessage = aiCallResultToOpenAiAssistantMessage(rFirst);
@@ -2039,6 +2069,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
               tools: allTools,
               maxTokens: hasOrderLookupTool ? 1000 : 1500,
               temperature: hasOrderLookupTool ? 0.2 : 0.85,
+              modelOverride: phase1ModelOverride,
             });
             totalTokens += rNext.inputTokens + rNext.outputTokens;
             responseMessage = aiCallResultToOpenAiAssistantMessage(rNext);
@@ -2048,8 +2079,10 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           usedClaudeMainPath = false;
           responseMessage = undefined;
           loopCount = 0;
-          sentLookupAckThisTurn = false;
-          lookupAckSentMs = null;
+          if (!orderFeatureFlags.orderLookupAck) {
+            sentLookupAckThisTurn = false;
+            lookupAckSentMs = null;
+          }
           secondLlmSkipped = false;
           deterministicToolMeta = {};
         }
@@ -2274,7 +2307,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             responseMessage = await runOpenAIStream(
               getOpenAI(),
               {
-                model: getOpenAIModel(),
+                model: resolveModelWithBrandOverride(phase1ModelOverride).model,
                 messages: chatMessages,
                 tools: allTools,
                 max_completion_tokens: hasOrderLookupTool ? 1000 : 1500,
@@ -2323,6 +2356,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           humanReason: state.human_reason ?? undefined,
           isOrderLookupContext: ORDER_LOOKUP_PATTERNS.test(userMessage),
           hasOrderInfo: !!orderInfoForHandoff.orderId,
+          brandId: effectiveBrandId || undefined,
         });
         const unavailableReasonPost = assignment.getUnavailableReason();
         const handoffTextToSendPost = getHandoffReplyForCustomer(handoffReply, unavailableReasonPost);
@@ -2363,38 +2397,12 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
         return;
       }
 
-      const rawReply = responseMessage?.content;
-      let reply = rawReply && rawReply.trim() ? enforceOutputGuard(rawReply.trim(), plan.mode) : rawReply;
-      // Post-generation content guard?????? mode ?????????
-      if (reply && reply.trim()) {
-        const guardResult = runPostGenerationGuard(reply, plan.mode, effectiveScope);
-        if (!guardResult.pass) {
-          const useCleaned = guardResult.cleaned && guardResult.cleaned.trim();
-          reply = useCleaned ? guardResult.cleaned : "????????????????????";
-          const outcome = useCleaned ? "cleaned" : "fallback";
-          for (const r of (guardResult.reason || "").split(";").filter(Boolean)) {
-            recordGuardHit(r as import("../content-guard-stats").GuardRuleId, outcome);
-          }
-        }
-      }
-      // Official channel hard guard??????????????????????????????????
-      if (reply && reply.trim() && contact.channel_id) {
-        const officialGuard = runOfficialChannelGuard(reply);
-        if (!officialGuard.pass) {
-          const useCleaned = officialGuard.cleaned && officialGuard.cleaned.trim();
-          reply = useCleaned ? officialGuard.cleaned : "??????????????";
-          recordGuardHit("official_channel_forbidden", useCleaned ? "cleaned" : "fallback");
-        }
-      }
-      // ?? platform hard guard??????????????????????????? mode
-      if (reply && reply.trim()) {
-        const globalPlatformGuard = runGlobalPlatformGuard(reply);
-        if (!globalPlatformGuard.pass) {
-          const useCleaned = globalPlatformGuard.cleaned && globalPlatformGuard.cleaned.trim();
-          reply = useCleaned ? globalPlatformGuard.cleaned : "??????????????";
-          recordGuardHit("global_platform_forbidden", useCleaned ? "cleaned" : "fallback");
-        }
-      }
+      let reply = runPostGenerationPipeline({
+        rawReply: responseMessage?.content,
+        planMode: plan.mode,
+        productScope: effectiveScope,
+        channelId: contact.channel_id,
+      });
       if (reply && reply.trim()) {
         if (firstCustomerVisibleReplyMs == null) {
           firstCustomerVisibleReplyMs = Date.now() - startTime;
@@ -2424,7 +2432,14 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           .filter((m: { sender_type?: string }) => m.sender_type === "user")
           .map((m: { content?: string | null }) => String(m.content || ""))
           .slice(-5);
-        reply = ensureShippingSopCompliance(reply, plan.mode, "", userMessage, recentUserTextsForRecency);
+        reply = ensureShippingSopCompliance(
+          reply,
+          plan.mode,
+          "",
+          userMessage,
+          recentUserTextsForRecency,
+          effectiveBrandId || undefined
+        );
         const totalMs = Date.now() - startTime;
         const finalRenderer = secondLlmSkipped ? (deterministicToolMeta.renderer || "deterministic_tool") : "llm";
         console.log("[AI Latency] contact", contact.id, "reply_sent_total_ms", totalMs, "tools=" + (toolsCalled.length ? toolsCalled.join(",") : "none"));
@@ -2489,7 +2504,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
         transfer_triggered: false,
         result_summary: `??: ${(err as Error).message}`,
         token_usage: totalTokens,
-        model: getOpenAIModel(),
+        model: resolveModelWithBrandOverride(phase1ModelOverride).model,
         response_time_ms: Date.now() - startTime,
         reply_source: "error",
         used_llm: 0,

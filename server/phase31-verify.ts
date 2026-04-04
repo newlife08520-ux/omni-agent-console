@@ -1,6 +1,10 @@
 /**
  * Phase 31 驗收：Policy Reset + local_only 單筆 guard + 部署一致性 + bundle 資安。
  * 行為級：phone-only 不輕易單筆定案、local_only single 觸發 guard、export 不輸出 raw secret。
+ *
+ * @deprecated Phase 31 靜態驗證——已被 vitest 行為測試取代。
+ * 本檔僅做 fs.readFileSync + includes 字串檢查，不測試實際行為。
+ * 保留供歷史參考，新功能請寫 server/__tests__/*.test.ts。
  */
 import fs from "fs";
 import path from "path";

@@ -1,5 +1,9 @@
 /**
  * Phase 2.4 收斂自驗：npx tsx server/phase24-verify.ts
+ *
+ * @deprecated Phase 24 靜態驗證——已被 vitest 行為測試取代。
+ * 本檔僅做 fs.readFileSync + includes 字串檢查，不測試實際行為。
+ * 保留供歷史參考，新功能請寫 server/__tests__/*.test.ts。
  */
 import fs from "fs";
 import path from "path";

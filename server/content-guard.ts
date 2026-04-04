@@ -7,7 +7,8 @@
 import type { ReplyPlanMode } from "./reply-plan-builder";
 
 /** 非甜點品類時，回覆不得出現的詞（甜點專屬知識／補充） */
-const SWEET_ONLY_SOURCE = "甜點|巴斯克|蛋糕|餅乾|甜點較快|甜點通常|甜點類.*出貨|3\\s*天內出貨";
+/** @deprecated Phase 1.5: 品類檢查改由品牌設定驅動 */
+const SWEET_ONLY_SOURCE = "";
 
 /** 退貨／取消／handoff／order_lookup 模式下禁止：賣點、行銷、推薦、價格組合、主動銷售 */
 const MODE_FORBIDDEN_PROMO_SOURCE = "高密度|泡附著|熱銷|超值|優惠組合|規格組合|不同價格|推薦購買|推薦您|推薦|建議您.*買|其實.*很好用|促購|行銷|賣點|限時優惠|組合價|特價|折扣.*%|買.*送|加購|考慮留下";
@@ -33,12 +34,22 @@ export interface GuardResult {
  */
 export function runPostGenerationGuard(
   reply: string,
-  _planMode: ReplyPlanMode,
+  planMode: ReplyPlanMode,
   _productScope: string | null
 ): GuardResult {
-  /** Minimal Safe Mode：passthrough，不再事後砍語氣或促銷句。 */
   const text = (reply || "").trim();
-  return { pass: true, cleaned: text || reply };
+  if (!text) return { pass: true, cleaned: reply };
+
+  if (isModeNoPromo(planMode)) {
+    const promoRe =
+      /推薦您|推薦購買|建議您.*買|超值|優惠組合|限時優惠|組合價|特價|折扣.*%|買.*送|加購|考慮留下|促購/;
+    if (promoRe.test(text)) {
+      const cleaned = text.replace(promoRe, "").replace(/\s{2,}/g, " ").trim();
+      return { pass: false, cleaned: cleaned || text, reason: "mode_no_promo" };
+    }
+  }
+
+  return { pass: true, cleaned: text };
 }
 
 /** 是否為「禁止賣點/推薦」的 mode */
@@ -57,18 +68,57 @@ export const PLATFORM_FORBIDDEN_PATTERNS = [
   "不是我們這邊的單",
 ];
 
-/** Phase 1.5：Passthrough，不再刪減平台相關語氣。 */
+/** 攔截「其他平台」「不是我們的單」等推責話術；命中時移除含禁語的整句，保留其餘。 */
 export function runGlobalPlatformGuard(reply: string): GuardResult {
   const text = (reply || "").trim();
-  return { pass: true, cleaned: text || reply };
+  if (!text) return { pass: true, cleaned: text || reply };
+
+  for (const pattern of PLATFORM_FORBIDDEN_PATTERNS) {
+    if (text.includes(pattern)) {
+      const sentences = text.split(/(?<=[。！\n])/);
+      const cleaned = sentences
+        .filter((s) => !PLATFORM_FORBIDDEN_PATTERNS.some((p) => s.includes(p)))
+        .join("")
+        .trim();
+      return {
+        pass: false,
+        cleaned: cleaned || text,
+        reason: "global_platform_forbidden",
+      };
+    }
+  }
+  return { pass: true, cleaned: text };
 }
 
+const OFFICIAL_CHANNEL_FORBIDDEN_PHRASES = [
+  "是否在官網下單",
+  "是否官方下單",
+  "是在官網",
+  "是否為官方",
+  "請問是在哪個通路",
+  "您是在哪裡下單",
+];
+
 /**
- * 若 current contact 已知為官方渠道，回覆不得出現「是否官方下單」「若是其他平台購買」等。
- * 命中則清洗後回傳 { pass: false, cleaned }。
+ * 官方渠道（LINE 官方帳號等）回覆不得出現「是否在官網下單」等多餘反問；命中則移除該句。
  */
-/** Phase 1.5：Passthrough，不再刪減官方渠道話術。 */
 export function runOfficialChannelGuard(reply: string): GuardResult {
   const text = (reply || "").trim();
-  return { pass: true, cleaned: text || reply };
+  if (!text) return { pass: true, cleaned: text || reply };
+
+  for (const phrase of OFFICIAL_CHANNEL_FORBIDDEN_PHRASES) {
+    if (text.includes(phrase)) {
+      const sentences = text.split(/(?<=[。！？\n])/);
+      const cleaned = sentences
+        .filter((s) => !OFFICIAL_CHANNEL_FORBIDDEN_PHRASES.some((p) => s.includes(p)))
+        .join("")
+        .trim();
+      return {
+        pass: false,
+        cleaned: cleaned || text,
+        reason: "official_channel_forbidden",
+      };
+    }
+  }
+  return { pass: true, cleaned: text };
 }

@@ -21,8 +21,8 @@ export const orderFeatureFlags = {
   /** Phase 30：為 true 時，若資料為 local_only（僅本地索引），不單筆定案，改回帶說明讓 LLM 補問或補查 */
   conservativeSingleOrder: envBool("CONSERVATIVE_SINGLE_ORDER", true),
   /**
-   * Phase 33：查單工具執行前是否先送「我幫您查詢中～」。預設關閉，避免與後續確定結果並存造成雙回覆體感。
-   * 需舊行為時設 ENABLE_ORDER_LOOKUP_ACK=1。
+   * Quick Ack：LLM 回覆前先送一則確認（全情境；查單工具輪若已送過則不重複）。
+   * 關閉時設 ENABLE_ORDER_LOOKUP_ACK=0。
    */
-  orderLookupAck: envBool("ENABLE_ORDER_LOOKUP_ACK", false),
+  orderLookupAck: envBool("ENABLE_ORDER_LOOKUP_ACK", true),
 } as const;

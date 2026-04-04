@@ -51,6 +51,8 @@ export function parsePhase1BrandFlags(brand: Brand | undefined): Phase1BrandFlag
       logistics_hint_override:
         typeof o.logistics_hint_override === "string" ? o.logistics_hint_override : undefined,
       scenario_overrides: parseScenarioOverrides(o.scenario_overrides),
+      ai_model_override:
+        typeof o.ai_model_override === "string" ? o.ai_model_override.trim() || undefined : undefined,
     };
   } catch {
     return { ...DEFAULT_FLAGS };

@@ -88,6 +88,20 @@ export function resolveModel(): ResolvedModel {
   return { provider: "openai", model };
 }
 
+/**
+ * 品牌級覆寫（phase1_agent_ops_json.ai_model_override）。
+ * 格式同 AI_MODEL：`openai:gpt-4o`、`anthropic:claude-sonnet-4-5`；無前綴視為 OpenAI model id。
+ */
+export function resolveModelWithBrandOverride(modelOverride?: string | null): ResolvedModel {
+  const t = modelOverride?.trim();
+  if (t) {
+    if (t.startsWith("anthropic:")) return { provider: "anthropic", model: t.slice("anthropic:".length) };
+    if (t.startsWith("openai:")) return { provider: "openai", model: t.slice("openai:".length) };
+    return { provider: "openai", model: t };
+  }
+  return resolveModel();
+}
+
 export type OpenAIMainModelSource = "env" | "database" | "default";
 export type OpenAIRouterModelSource = "env" | "database" | "inherits_main";
 

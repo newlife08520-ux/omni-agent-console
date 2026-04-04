@@ -1,10 +1,31 @@
 /**
  * Phase 2 輸出常數與 output guard，供 routes 與 phase2-verify 共用，確保文案驗收與實際送出一致。
  */
+import { storage } from "./storage";
+
+/**
+ * 品牌覆寫查詢：若品牌 phase1_agent_ops_json 內有 message_overrides，優先使用。
+ * 沒有覆寫則回 fallback（即原本的硬編碼文案）。
+ */
+export function brandMessage(brandId: number | undefined, key: string, fallback: string): string {
+  if (!brandId) return fallback;
+  try {
+    const brand = storage.getBrand(brandId);
+    if (!brand?.phase1_agent_ops_json) return fallback;
+    const json = JSON.parse(brand.phase1_agent_ops_json);
+    const overrides = json?.message_overrides;
+    if (overrides && typeof overrides[key] === "string" && overrides[key].trim()) {
+      return overrides[key].trim();
+    }
+  } catch {
+    /* ignore invalid JSON */
+  }
+  return fallback;
+}
 
 /** Phase 2 off_topic_guard：品牌外問題短句收邊界；不得推薦菜單／餐廳 */
 export const OFF_TOPIC_GUARD_MESSAGE =
-  "這部分比較不是我們服務範圍～若有商品或訂單相關問題，可以跟我說，我幫您處理😊";
+  "這部分比較不是我們服務範圍，若有商品或訂單相關問題，隨時跟我說，我來幫您處理。";
 
 /**
  * Handoff 強制告知句（程式層保證）：只要進入轉接真人流程，回覆第一句必須明確告知「已轉接真人專員」。
@@ -58,26 +79,47 @@ export function buildHandoffReply(options: {
   isOrderLookupContext?: boolean;
   /** 是否已有訂單編號或產品名稱+手機；有則不補訂單提示 */
   hasOrderInfo?: boolean;
+  brandId?: number;
 }): string {
-  const { customerEmotion, humanReason, isOrderLookupContext, hasOrderInfo } = options;
+  const { customerEmotion, humanReason, isOrderLookupContext, hasOrderInfo, brandId } = options;
+  const opening = brandMessage(brandId, "handoff_opening", HANDOFF_MANDATORY_OPENING);
   const emotionOnly = (customerEmotion === "angry" || customerEmotion === "high_risk" || customerEmotion === "frustrated");
-  if (emotionOnly) return HANDOFF_MANDATORY_OPENING;
+  if (emotionOnly) return opening;
   const mayAddHint = humanReason === "explicit_human_request" && isOrderLookupContext === true && hasOrderInfo !== true;
   if (mayAddHint) {
-    return HANDOFF_MANDATORY_OPENING + "\n" + HANDOFF_OPTIONAL_ORDER_HINT;
+    return opening + "\n" + HANDOFF_OPTIONAL_ORDER_HINT;
   }
-  return HANDOFF_MANDATORY_OPENING;
+  return opening;
 }
 
-/** order_lookup 回覆上限（字） */
-export const OUTPUT_GUARD_MAX_CHARS = 140;
-/** 其餘 mode 回覆上限（字） */
-export const OUTPUT_GUARD_MAX_CHARS_RELAXED = 200;
+/** order_lookup / order_followup 回覆建議上限（與 enforceOutputGuard 對齊） */
+export const OUTPUT_GUARD_MAX_CHARS = 200;
+/** 其餘 mode 回覆建議上限 */
+export const OUTPUT_GUARD_MAX_CHARS_RELAXED = 350;
 
 /**
- * Phase 2 output guard：首輪回覆長度上限；超標時截斷至最後一句完整句或字數上限＋「…」。
+ * 回覆長度控制：查單／出貨跟進較嚴、一般較寬；避免 LINE 上超長 wall of text。
  */
-export function enforceOutputGuard(text: string, _planMode: string): string {
-  /** Minimal Safe Mode：不再截斷語氣與長度，交給單一 system prompt。 */
-  return (text || "").trim();
+export function enforceOutputGuard(text: string, planMode: string): string {
+  const trimmed = (text || "").trim();
+  if (!trimmed) return trimmed;
+
+  const maxChars =
+    planMode === "order_lookup" || planMode === "order_followup" ? 200 : 350;
+
+  if (trimmed.length <= maxChars) return trimmed;
+
+  const candidates = [
+    trimmed.lastIndexOf("。", maxChars),
+    trimmed.lastIndexOf("！", maxChars),
+    trimmed.lastIndexOf("～", maxChars),
+    trimmed.lastIndexOf("\n", maxChars),
+  ].filter((i) => i >= Math.floor(maxChars * 0.5) && i < maxChars);
+
+  if (candidates.length > 0) {
+    const cutAt = Math.max(...candidates) + 1;
+    return trimmed.slice(0, cutAt);
+  }
+
+  return trimmed.slice(0, maxChars - 1) + "…";
 }

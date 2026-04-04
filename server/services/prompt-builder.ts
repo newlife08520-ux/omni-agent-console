@@ -81,20 +81,29 @@ export function buildScenarioIsolationBlock(scenario: AgentScenario): string {
   const blocks: Record<AgentScenario, string> = {
     ORDER_LOOKUP: `
 
---- 情境：訂單／物流 ---
-本輪聚焦查單／物流；勿主動展開無關型錄。`,
+--- 情境：訂單／物流（本輪唯一焦點）---
+本輪你只負責查單與物流。
+✅ 可以做：查單、回報物流狀態、協助追蹤。
+❌ 禁止做：推薦商品、展開型錄、主動提起促銷活動、討論退換貨流程。
+若客戶同時問了其他類型問題，簡短回應後引導回查單主題。`,
     AFTER_SALES: `
 
---- 情境：售後／退換貨 ---
-本輪聚焦售後；政策與話術以全域／品牌指令為準；需專人時 transfer_to_human。`,
+--- 情境：售後／退換貨（本輪唯一焦點）---
+本輪你只負責售後處理。
+✅ 可以做：安撫客戶、了解問題、引導退換流程、必要時轉接真人。
+❌ 禁止做：推薦其他商品、展開型錄、主動提起促銷或新品。
+需專人時使用 transfer_to_human。`,
     PRODUCT_CONSULT: `
 
---- 情境：商品諮詢 ---
-本輪聚焦商品諮詢；除非本句已含單號且要查物流，否則勿主動查單。`,
+--- 情境：商品諮詢（本輪唯一焦點）---
+本輪你只負責商品諮詢。
+✅ 可以做：回答規格、價格、庫存、使用方式，提供購買連結。
+❌ 禁止做：主動查單（除非客戶本句已含單號）、展開退換貨流程。`,
     GENERAL: `
 
---- 情境：一般 ---
-本輪一般問答；不確定時可簡問或引導轉人工。`,
+--- 情境：一般問答 ---
+本輪為一般對話。不確定客戶需求時可簡單詢問或引導轉人工。
+❌ 禁止做：未經確認就主動查單或展開退換貨。`,
   };
   return blocks[scenario] || "";
 }
@@ -146,8 +155,18 @@ export function buildBrandPersonaPromptIsoThin(brandId?: number): string {
   const brand = storage.getBrand(brandId);
   const raw = (brand?.system_prompt || "").trim();
   if (!raw) return "";
-  const cap = 1400;
-  const body = raw.length > cap ? `${raw.slice(0, cap)}\n[以下品牌細節已截斷；請優先遵守本輪「情境」流程區塊]` : raw;
+  const cap = 1800;
+  if (raw.length <= cap) {
+    return "\n\n--- 品牌語氣與規範（摘要）---\n" + raw;
+  }
+  const forbiddenIdx = raw.lastIndexOf("禁止");
+  if (forbiddenIdx > 0 && forbiddenIdx < raw.length - 10) {
+    const head = raw.slice(0, Math.min(cap - 400, forbiddenIdx));
+    const tail = raw.slice(forbiddenIdx);
+    const body = head + "\n...\n" + tail;
+    return "\n\n--- 品牌語氣與規範（摘要）---\n" + body;
+  }
+  const body = raw.slice(0, cap) + "\n[以下品牌細節已截斷；請優先遵守本輪「情境」流程區塊]";
   return "\n\n--- 品牌語氣與規範（摘要）---\n" + body;
 }
 

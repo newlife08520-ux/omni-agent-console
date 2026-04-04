@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
 import type { ContentBlockParam, MessageParam } from "@anthropic-ai/sdk/resources/messages";
-import { resolveModel } from "../openai-model";
+import { resolveModelWithBrandOverride } from "../openai-model";
 import { storage } from "../storage";
 
 /** system 僅字串；user/assistant 可為 Claude 多模態／tool_use／tool_result 區塊 */
@@ -14,6 +14,8 @@ export interface AiCallOptions {
   tools?: object[];
   maxTokens?: number;
   temperature?: number;
+  /** 品牌級覆寫（Phase 1 enabled 時由 ai-reply 傳入）；格式 openai:…／anthropic:… 或純 OpenAI id */
+  modelOverride?: string;
 }
 
 export interface AiCallResult {
@@ -39,7 +41,7 @@ function openAiToolToClaudeSchema(t: Record<string, unknown>): Anthropic.Tool {
 }
 
 export async function callAiModel(options: AiCallOptions): Promise<AiCallResult> {
-  const { provider, model } = resolveModel();
+  const { provider, model } = resolveModelWithBrandOverride(options.modelOverride);
   const { messages, tools, maxTokens = 1500, temperature = 0.85 } = options;
 
   if (provider === "anthropic") {

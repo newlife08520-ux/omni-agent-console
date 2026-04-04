@@ -1,5 +1,9 @@
 /**
  * Phase 2.5 驗證：npx tsx server/phase25-verify.ts
+ *
+ * @deprecated Phase 25 靜態驗證——已被 vitest 行為測試取代。
+ * 本檔僅做 fs.readFileSync + includes 字串檢查，不測試實際行為。
+ * 保留供歷史參考，新功能請寫 server/__tests__/*.test.ts。
  */
 import fs from "fs";
 import path from "path";

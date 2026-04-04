@@ -1,6 +1,10 @@
 /**
  * Phase 33：scenario-based verify（非僅靜態字串）。
  * Tickets 33-1, 33-2, 33-6, 33-7, 33-4（flag）, 33-9
+ *
+ * @deprecated Phase 33 靜態驗證——已被 vitest 行為測試取代。
+ * 本檔僅做 fs.readFileSync + includes 字串檢查，不測試實際行為。
+ * 保留供歷史參考，新功能請寫 server/__tests__/*.test.ts。
  */
 import fs from "fs";
 import path from "path";

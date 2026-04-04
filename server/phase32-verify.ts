@@ -8,6 +8,10 @@
  * - Ticket 8: 前端 SSE/polling 可辨識
  * - Ticket 9: bundle safety
  * - Ticket 10: 行為級 verify
+ *
+ * @deprecated Phase 32 靜態驗證——已被 vitest 行為測試取代。
+ * 本檔僅做 fs.readFileSync + includes 字串檢查，不測試實際行為。
+ * 保留供歷史參考，新功能請寫 server/__tests__/*.test.ts。
  */
 import fs from "fs";
 import path from "path";

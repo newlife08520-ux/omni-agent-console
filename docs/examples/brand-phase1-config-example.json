@@ -1,0 +1,30 @@
+{
+  "_comment": "品牌 phase1_agent_ops_json 範例——複製到 brands 表的 phase1_agent_ops_json 欄位",
+
+  "enabled": true,
+  "hybrid_router": true,
+  "scenario_isolation": true,
+  "tool_whitelist": true,
+  "trace_v2": true,
+  "allow_after_sales_order_verify": false,
+
+  "ai_model_override": "openai:gpt-4o",
+
+  "message_overrides": {
+    "handoff_opening": "我先幫您轉接客服夥伴處理，請稍後。",
+    "shipping_sop_prefix": "不好意思讓您等了，現貨品大約五個工作天寄出，預購品約七到二十天。\n\n",
+    "quick_ack_order_lookup": "收到，查詢中～",
+    "quick_ack_after_sales": "了解，我先看看",
+    "image_dm_generic": "收到您的圖片了，想確認一下這是關於訂單、商品問題、還是其他呢？"
+  },
+
+  "scenario_overrides": {
+    "ORDER_LOOKUP": {
+      "prompt_append": "本品牌出貨較慢，客戶問進度時請先道歉"
+    },
+    "AFTER_SALES": {
+      "knowledge_mode": "minimal",
+      "prompt_append": "退換貨七天內受理，超過請轉人工"
+    }
+  }
+}

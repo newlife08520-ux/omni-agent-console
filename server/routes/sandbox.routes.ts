@@ -65,7 +65,7 @@ export function registerSandboxRoutes(
             recentUserMessages: [testMessage],
             recentAiMessages: [],
           });
-          const returnFormUrl = brand?.return_form_url || "https://www.lovethelife.shop/returns";
+          const returnFormUrl = brand?.return_form_url || "";
           const plan = buildReplyPlan({ state, returnFormUrl, isReturnFirstRound: true });
           if (plan.mode === "off_topic_guard") {
             simulatedReplySource = "off_topic_guard";

@@ -1,5 +1,9 @@
 /**
  * Phase 2.9 緊急止血：靜態回歸檢查（無外部 API）。
+ *
+ * @deprecated Phase 29 靜態驗證——已被 vitest 行為測試取代。
+ * 本檔僅做 fs.readFileSync + includes 字串檢查，不測試實際行為。
+ * 保留供歷史參考，新功能請寫 server/__tests__/*.test.ts。
  */
 import fs from "fs";
 import path from "path";

@@ -108,10 +108,13 @@ const state5 = resolveConversationState({
 });
 const plan5 = buildReplyPlan({ state: state5, returnFormUrl, isReturnFirstRound: true });
 ok("我要查訂單 → order_lookup", plan5.mode === "order_lookup");
-// output guard：order_lookup 回覆上限 140 字，長文會被截斷
-const longReply = "您好，為您查詢訂單需要以下資訊之一：請提供訂單編號，或產品名稱＋手機號碼。我們會盡快為您確認。謝謝。若有其他問題也可以跟我說。";
-const guardedOrderLookup = enforceOutputGuard(longReply, "order_lookup");
-ok("order_lookup 回覆上限 140 字", guardedOrderLookup.length <= OUTPUT_GUARD_MAX_CHARS);
+// output guard：order_lookup 回覆上限 200 字，長文會截斷至句點或字數＋…
+const longOrderLookup =
+  "您好，為您查詢訂單需要以下資訊之一：請提供訂單編號，或產品名稱＋手機號碼。我們會盡快為您確認。謝謝。" +
+  "若有其他問題也可以跟我說。補充說明：週一至週五工作天處理，遇假日順延。為保護您的權益，請勿將完整卡號提供於對話中。" +
+  "若您已於其他通路下單，也請一併告知，方便我們比對。再次感謝您的耐心等候，我們會持續為您服務。";
+const guardedOrderLookup = enforceOutputGuard(longOrderLookup, "order_lookup");
+ok("order_lookup 經 enforceOutputGuard 後 ≤200 字", guardedOrderLookup.length <= OUTPUT_GUARD_MAX_CHARS);
 
 // 我要查包包尺寸，有圖片嗎 → answer_directly，scope=bag
 const msg6 = "我要查包包尺寸，有圖片嗎";

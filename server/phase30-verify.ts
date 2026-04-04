@@ -2,6 +2,10 @@
  * Phase 30 信任恢復：行為級與靜態檢查。
  * - 靜態：視窗合併、data_coverage、conservative 單筆、前端可觀測
  * - 行為：UnifiedOrderResult 形狀、conservativeSingleOrder 旗標、DataCoverage 型別
+ *
+ * @deprecated Phase 30 靜態驗證——已被 vitest 行為測試取代。
+ * 本檔僅做 fs.readFileSync + includes 字串檢查，不測試實際行為。
+ * 保留供歷史參考，新功能請寫 server/__tests__/*.test.ts。
  */
 import fs from "fs";
 import path from "path";

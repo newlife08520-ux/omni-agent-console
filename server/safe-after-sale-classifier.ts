@@ -3,6 +3,7 @@
  * 供「公開留言」與「私訊（Facebook/IG 等）」共用，避免兩套邏輯分叉。
  * 使用層：comment guardrail、comment auto-execute、suggest-reply、contact/DM 處理。
  */
+import { brandMessage } from "./phase2-output";
 
 /** 粉專未設定售後 LINE 時，模板內 {after_sale_line_url} 的 fallback 文案（不輸出空連結） */
 export const FALLBACK_AFTER_SALE_LINE_LABEL = "請私訊官方 LINE（由客服提供）";
@@ -72,13 +73,20 @@ export function isImageSupplementContent(content: string | undefined): boolean {
 export type ImageDmTemplateName = "IMAGE_DM_GENERIC" | "IMAGE_DM_ORDER_SHIPPING" | "IMAGE_DM_FRAUD_PAYMENT" | "IMAGE_DM_PRODUCT_ISSUE";
 
 /** 依圖片＋短文字的關鍵字 hint 選一則補充模板（不猜責任，只引導補資訊） */
-export function getImageDmReplyForShortCaption(text: string): string {
-  const { text: out } = getImageDmReplyAndTemplateForShortCaption(text);
+export function getImageDmReplyForShortCaption(text: string, brandId?: number): string {
+  const { text: out } = getImageDmReplyAndTemplateForShortCaption(text, brandId);
   return out;
 }
 
 /** 回傳補充模板內文與模板名稱（供 log） */
-export function getImageDmReplyAndTemplateForShortCaption(text: string): { text: string; templateName: ImageDmTemplateName } {
+export function getImageDmReplyAndTemplateForShortCaption(
+  text: string,
+  brandId?: number
+): { text: string; templateName: ImageDmTemplateName } {
+  if (brandId) {
+    const override = brandMessage(brandId, "image_dm_generic", "");
+    if (override.trim()) return { text: override.trim(), templateName: "IMAGE_DM_GENERIC" };
+  }
   if (!text || typeof text !== "string") return { text: IMAGE_DM_GENERIC, templateName: "IMAGE_DM_GENERIC" };
   const t = text.trim();
   if (/詐騙|被騙|假客服|轉帳|匯款|騙/.test(t)) return { text: IMAGE_DM_FRAUD_PAYMENT, templateName: "IMAGE_DM_FRAUD_PAYMENT" };
@@ -108,8 +116,8 @@ export function shouldEscalateImageSupplement(messages: { sender_type: string; c
 export const IMAGE_SUPPLEMENT_ESCALATE_MESSAGE = "已為您轉接專人檢視，請稍候。";
 
 /** 回傳套用的模板名稱（供 log；與 getImageDmReplyAndTemplateForShortCaption 一致） */
-export function getImageDmTemplateNameForShortCaption(text: string): ImageDmTemplateName {
-  return getImageDmReplyAndTemplateForShortCaption(text).templateName;
+export function getImageDmTemplateNameForShortCaption(text: string, brandId?: number): ImageDmTemplateName {
+  return getImageDmReplyAndTemplateForShortCaption(text, brandId).templateName;
 }
 
 /** 平台關鍵字：命中時視為他平台訂單或待確認來源 */
