@@ -4,6 +4,7 @@
  * 執行：
  *   npx tsx server/scripts/sync-orders-normalized.ts [brand_id] [days]
  *   npx tsx server/scripts/sync-orders-normalized.ts [brand_id] --backfill
+ *   npx tsx server/scripts/sync-orders-normalized.ts [brand_id] --from YYYY-MM-DD --to YYYY-MM-DD
  *
  * - 預設 days：**90**（Phase 2.9 由 7 調高，避免 older orders 進不了索引）
  * - **--backfill**：歷史回填，一頁商店與 Shopline 皆用 **365** 天視窗
@@ -17,10 +18,18 @@ import { getSuperLandingConfig, fetchOrders } from "../superlanding";
 import { upsertOrderNormalized, getOrderIndexStats } from "../order-index";
 import { fetchShoplineOrdersListPaginated } from "../shopline";
 
+function isYmd(s: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(s.trim());
+}
+
 export async function runOrderSync(options?: {
   brandId?: number;
   days?: number;
   backfill?: boolean;
+  /** 與 toDate 併用：YYYY-MM-DD，分段拉歷史 */
+  fromDate?: string;
+  /** 與 fromDate 併用：YYYY-MM-DD（含當日） */
+  toDate?: string;
 }): Promise<{ synced: number; errors: number }> {
   const backfill = options?.backfill === true;
   const days = backfill ? 365 : Math.min(365, Math.max(1, options?.days ?? 90));
@@ -28,9 +37,42 @@ export async function runOrderSync(options?: {
   let totalSynced = 0;
   let totalErrors = 0;
 
-  console.log(
-    `[sync-orders-normalized] mode=${backfill ? "HISTORICAL_BACKFILL_365D" : "DEFAULT_RECENT"} days=${days} (default_recent=90, backfill=365)`
-  );
+  const fromOpt = options?.fromDate?.trim();
+  const toOpt = options?.toDate?.trim();
+
+  let beginDate: string;
+  let endDate: string;
+  let startMs: number;
+  /** null 表示沿用原行為：僅下限（到今天為止由 API 分頁決定） */
+  let endMs: number | null;
+
+  if (fromOpt && toOpt) {
+    if (!isYmd(fromOpt) || !isYmd(toOpt)) {
+      throw new Error("fromDate / toDate 須為 YYYY-MM-DD");
+    }
+    if (fromOpt > toOpt) {
+      throw new Error("from 不可晚於 to");
+    }
+    beginDate = fromOpt;
+    endDate = toOpt;
+    startMs = new Date(`${beginDate}T00:00:00.000Z`).getTime();
+    endMs = new Date(`${endDate}T23:59:59.999Z`).getTime();
+    console.log(
+      `[sync-orders-normalized] mode=DATE_RANGE ${beginDate} ~ ${endDate} (backfill=${backfill}, maxPages=${backfill ? 200 : 100})`
+    );
+  } else if (fromOpt || toOpt) {
+    throw new Error("請同時提供 fromDate 與 toDate（或皆不傳，改用 days）");
+  } else {
+    const end = new Date();
+    const start = new Date(end.getTime() - days * 24 * 60 * 60 * 1000);
+    beginDate = start.toISOString().split("T")[0];
+    endDate = end.toISOString().split("T")[0];
+    startMs = start.getTime();
+    endMs = null;
+    console.log(
+      `[sync-orders-normalized] mode=${backfill ? "HISTORICAL_BACKFILL_365D" : "DEFAULT_RECENT"} days=${days} (default_recent=90, backfill=365)`
+    );
+  }
 
   const brands = storage.getBrands();
   const targetBrands =
@@ -41,16 +83,14 @@ export async function runOrderSync(options?: {
     return { synced: 0, errors: 0 };
   }
 
-  const end = new Date();
-  const start = new Date(end.getTime() - days * 24 * 60 * 60 * 1000);
-  const beginDate = start.toISOString().split("T")[0];
-  const endDate = end.toISOString().split("T")[0];
-  const startMs = start.getTime();
-
   for (const brand of targetBrands) {
     const config = getSuperLandingConfig(brand.id);
     if (config.merchantNo && config.accessKey) {
-      console.log(`[Sync SL] Brand ${brand.id} (${brand.name}) ${beginDate} ~ ${endDate}（${days} 天）...`);
+      console.log(
+        `[Sync SL] Brand ${brand.id} (${brand.name}) ${beginDate} ~ ${endDate}${
+          endMs != null ? "（指定區間）" : `（${days} 天）`
+        }...`
+      );
       let page = 1;
       const perPage = 200;
       const maxPages = backfill ? 200 : 100;
@@ -81,7 +121,11 @@ export async function runOrderSync(options?: {
 
     const token = brand.shopline_api_token?.trim();
     if (token) {
-      console.log(`[Sync Shopline] Brand ${brand.id} (${brand.name}) 最近 ${days} 天 ...`);
+      console.log(
+        `[Sync Shopline] Brand ${brand.id} (${brand.name}) ${
+          endMs != null ? `區間 ${beginDate} ~ ${endDate}` : `最近 ${days} 天`
+        } ...`
+      );
       try {
         const cfg = {
           storeDomain: (brand.shopline_store_domain || "").trim(),
@@ -95,6 +139,7 @@ export async function runOrderSync(options?: {
         for (const o of orders) {
           const t = new Date(o.created_at || o.order_created_at || 0).getTime();
           if (t < startMs) continue;
+          if (endMs != null && t > endMs) continue;
           upsertOrderNormalized(brand.id, "shopline", o);
           n++;
         }
@@ -127,10 +172,31 @@ function isDirectCliRun(): boolean {
   }
 }
 
+function argvFlagValue(args: string[], flag: string): string | undefined {
+  const i = args.indexOf(flag);
+  if (i < 0) return undefined;
+  const v = args[i + 1];
+  if (v == null || v.startsWith("-")) return undefined;
+  return v;
+}
+
 if (isDirectCliRun()) {
   const argv = process.argv.slice(2);
   const backfill = argv.includes("--backfill") || argv.includes("--full");
-  const rest = argv.filter((a) => a !== "--backfill" && a !== "--full");
+  const fromArg = argvFlagValue(argv, "--from");
+  const toArg = argvFlagValue(argv, "--to");
+
+  if ((fromArg && !toArg) || (!fromArg && toArg)) {
+    console.error("同步失敗: 請同時提供 --from YYYY-MM-DD 與 --to YYYY-MM-DD");
+    process.exit(1);
+  }
+
+  const rest = argv.filter((a, i) => {
+    if (a === "--backfill" || a === "--full") return false;
+    if (a === "--from" || a === "--to") return false;
+    if (i > 0 && (argv[i - 1] === "--from" || argv[i - 1] === "--to")) return false;
+    return true;
+  });
   const brandIdArgResolved = rest[0] && /^\d+$/.test(rest[0]) ? parseInt(rest[0], 10) : undefined;
   const daysFromArg = rest[1] && /^\d+$/.test(rest[1]) ? parseInt(rest[1], 10) : undefined;
 
@@ -138,6 +204,8 @@ if (isDirectCliRun()) {
     brandId: brandIdArgResolved,
     days: daysFromArg,
     backfill,
+    fromDate: fromArg,
+    toDate: toArg,
   })
     .then((r) => {
       console.log(`同步完成：${r.synced} 筆成功，${r.errors} 筆失敗（區塊錯誤計數）`);
