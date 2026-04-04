@@ -214,6 +214,7 @@ app.use((req, res, next) => {
               );
             }, 120_000);
 
+            // runOrderSync：非 backfill 時 SuperLanding maxPages=100（每頁 200 筆≈2 萬筆上限），定時近 3 天足夠；大量歷史請分批手動跑
             setInterval(() => {
               runOrderSync({ days: 3 }).catch((e) =>
                 console.error("[OrderSync] 定時同步失敗:", (e as Error)?.message || e)

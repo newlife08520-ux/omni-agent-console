@@ -8,6 +8,7 @@
  * - 預設 days：**90**（Phase 2.9 由 7 調高，避免 older orders 進不了索引）
  * - **--backfill**：歷史回填，一頁商店與 Shopline 皆用 **365** 天視窗
  * - Shopline：列表 API 分頁後以 created_at 過濾時間窗內訂單
+ * - 分頁上限：一般 maxPages=100（SL 每頁 200≈2 萬筆／次）、backfill 時 200；超量請分批執行
  */
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -52,7 +53,7 @@ export async function runOrderSync(options?: {
       console.log(`[Sync SL] Brand ${brand.id} (${brand.name}) ${beginDate} ~ ${endDate}（${days} 天）...`);
       let page = 1;
       const perPage = 200;
-      const maxPages = backfill ? 80 : 50;
+      const maxPages = backfill ? 200 : 100;
       let total = 0;
       try {
         while (true) {
@@ -87,7 +88,7 @@ export async function runOrderSync(options?: {
           apiToken: token,
         };
         const { orders, pagesFetched } = await fetchShoplineOrdersListPaginated(cfg, {
-          maxPages: backfill ? 80 : 50,
+          maxPages: backfill ? 200 : 100,
           perPage: 100,
         });
         let n = 0;
