@@ -69,6 +69,7 @@ import {
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
+import { fileURLToPath } from "url";
 import { addAiReplyJob, enqueueDebouncedAiReply, WORKER_HEARTBEAT_KEY, getWorkerHeartbeatStatus, getQueueJobCounts } from "../queue/ai-reply.queue";
 import { getRedisClient } from "../redis-client";
 import { recordAutoReplyBlocked } from "../auto-reply-blocked";
@@ -128,6 +129,9 @@ const FULFILLMENT_PROCESSING_KW = ["已確認", "待出貨", "出貨中"];
 const FULFILLMENT_NEW_KW = ["新訂單"];
 
 const FB_VERIFY_TOKEN = process.env.FB_VERIFY_TOKEN || "omnichannel_fb_verify_2024";
+
+/** 專案根目錄（從 repo 讀 persona 同步至 DB） */
+const PROMPT_SYNC_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
 export function registerCoreRoutes(app: Express): void {
     app.get("/api/health", (_req, res) => {
@@ -511,6 +515,38 @@ export function registerCoreRoutes(app: Express): void {
           .then((r) => console.log("[ManualSync] 完成:", r))
           .catch((e) => console.error("[ManualSync] 失敗:", e));
         return res.json({ ok: true, message: "同步已啟動（背景執行），約需 10-15 分鐘" });
+      } catch (e) {
+        return res.status(500).json({ error: (e as Error).message });
+      }
+    });
+
+    /** super_admin：從 docs/persona 同步 Global + 品牌 system_prompt 至 DB */
+    app.post("/api/admin/sync-prompts", authMiddleware, (req: any, res) => {
+      if (!req.session?.userRole || req.session.userRole !== "super_admin") {
+        return res.status(403).json({ error: "forbidden" });
+      }
+      try {
+        const globalPrompt = fs
+          .readFileSync(path.join(PROMPT_SYNC_ROOT, "docs/persona/PHASE97_MASTER_SLIM.txt"), "utf-8")
+          .trim();
+        db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('system_prompt', ?)").run(globalPrompt);
+
+        const b1 = fs
+          .readFileSync(path.join(PROMPT_SYNC_ROOT, "docs/persona/brands/brand_1_phase97_slim.txt"), "utf-8")
+          .trim();
+        db.prepare("UPDATE brands SET system_prompt = ? WHERE id = 1").run(b1);
+
+        const b2 = fs
+          .readFileSync(path.join(PROMPT_SYNC_ROOT, "docs/persona/brands/brand_2_phase97_slim.txt"), "utf-8")
+          .trim();
+        db.prepare("UPDATE brands SET system_prompt = ? WHERE id = 2").run(b2);
+
+        return res.json({
+          ok: true,
+          global: globalPrompt.length + " 字元",
+          brand1: b1.length + " 字元",
+          brand2: b2.length + " 字元",
+        });
       } catch (e) {
         return res.status(500).json({ error: (e as Error).message });
       }
