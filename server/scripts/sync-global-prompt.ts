@@ -4,11 +4,9 @@
  */
 import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
 import { storage } from "../storage";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const root = path.join(__dirname, "../..");
+const root = process.cwd();
 
 const promptPath = path.join(root, "docs/persona/PHASE97_MASTER_SLIM.txt");
 if (!fs.existsSync(promptPath)) {
