@@ -4,7 +4,7 @@
 import type { OrderInfo, ActiveOrderContext } from "@shared/schema";
 import type { IStorage } from "./storage";
 import { getUnifiedStatusLabel } from "./order-service";
-import { payKindForOrder } from "./order-reply-utils";
+import { payKindForOrder, customerFacingStatusLabel } from "./order-reply-utils";
 import { buildActiveOrderContextFromOrder } from "./order-active-context";
 import { orderDeterministicContractFields } from "./deterministic-order-contract";
 
@@ -54,7 +54,7 @@ export function packDeterministicMultiOrderToolResult(params: {
     const src = o.source || orderSource;
     const st = getUnifiedStatusLabel(o.status, src);
     const { label } = payKindForOrder(o, st, src);
-    return `${i + 1}. ${o.global_order_id}｜${o.created_at || o.order_created_at || ""}｜${label}｜${st}`;
+    return `${i + 1}. ${o.global_order_id}｜${o.created_at || o.order_created_at || ""}｜${label}｜${customerFacingStatusLabel(st)}`;
   });
   const deterministicReply =
     `${headerLine}共 ${n} 筆。${aggStr}。\n` +
@@ -71,7 +71,7 @@ export function packDeterministicMultiOrderToolResult(params: {
       order_id: o.global_order_id,
       payment_status: kind as "success" | "failed" | "pending" | "cod" | "unknown",
       payment_status_label: label,
-      fulfillment_status: st,
+      fulfillment_status: customerFacingStatusLabel(st),
       order_time: o.created_at || o.order_created_at,
       source: (src === "shopline" || src === "superlanding" ? src : undefined) as
         | "shopline"

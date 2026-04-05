@@ -21,6 +21,7 @@ import {
   formatOrderOnePage,
   formatLocalOnlyCandidateSummary,
   payKindForOrder,
+  customerFacingStatusLabel,
 } from "../order-reply-utils";
 import { packDeterministicSingleOrderToolResult } from "../order-single-renderer";
 import { orderDeterministicContractFields } from "../deterministic-order-contract";
@@ -60,7 +61,7 @@ function formatOrdersToolFormattedList(
           .join("、");
       }
       products = products ? products.slice(0, 40) : "未提供商品名稱";
-      return `- ${o.order_id} | ${products} | $${o.amount ?? ""} | ${o.status || ""} | ${o.payment_status_label ?? ""}`;
+      return `- ${o.order_id} | ${products} | $${o.amount ?? ""} | ${customerFacingStatusLabel(o.status || "")} | ${o.payment_status_label ?? ""}`;
     })
     .join("\n");
 }
@@ -332,7 +333,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
         const pkId = payKindForOrder(order, statusLabel, order.source || result.source);
         const orderPayload = {
           order_id: order.global_order_id,
-          status: statusLabel,
+          status: customerFacingStatusLabel(statusLabel),
           amount: order.final_total_order_amount,
           product_list: order.product_list,
           items_structured: orderItemsStructuredPayload(order),
@@ -412,7 +413,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
               const payment_interpretation = getPaymentInterpretationForAI(order, statusLabel, order.source || orderSource);
               const orderPayload = {
                 order_id: order.global_order_id,
-                status: statusLabel,
+                status: customerFacingStatusLabel(statusLabel),
                 amount: order.final_total_order_amount,
                 product_list: order.product_list,
                 buyer_name: order.buyer_name,
@@ -463,7 +464,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
               const { kind, label } = payKindForOrder(o, st, src);
               return {
                 order_id: o.global_order_id,
-                status: st,
+                status: customerFacingStatusLabel(st),
                 amount: o.final_total_order_amount,
                 product_list: o.product_list,
                 buyer_name: o.buyer_name,
@@ -493,7 +494,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
               const st = getUnifiedStatusLabel(o.status, src);
               const { label } = payKindForOrder(o, st, src);
               const tag = "";
-              return `${i + 1}. ${tag}${o.global_order_id}｜${o.created_at || ""}｜${label}｜${st}`;
+              return `${i + 1}. ${tag}${o.global_order_id}｜${o.created_at || ""}｜${label}｜${customerFacingStatusLabel(st)}`;
             });
             const deterministicReply =
               `商品「${productName.slice(0, 40)}」+ 手機｜${n} 筆｜${aggStr}\n` +
@@ -510,7 +511,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
                 order_id: o.global_order_id,
                 payment_status: kind as "success" | "failed" | "pending" | "cod" | "unknown",
                 payment_status_label: label,
-                fulfillment_status: st,
+                fulfillment_status: customerFacingStatusLabel(st),
                 order_time: o.created_at || o.order_created_at,
                 source: (src === "shopline" || src === "superlanding" ? src : undefined) as
                   | "shopline"
@@ -738,7 +739,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           const pk0 = payKindForOrder(o0, st0, o0.source || orderSource);
           const ol = {
             order_id: o0.global_order_id,
-            status: st0,
+            status: customerFacingStatusLabel(st0),
             amount: o0.final_total_order_amount,
             product_list: o0.product_list,
             buyer_name: o0.buyer_name,
@@ -768,7 +769,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             orders: [
               {
                 order_id: o0.global_order_id,
-                status: st0,
+                status: customerFacingStatusLabel(st0),
                 amount: o0.final_total_order_amount,
                 product_list: o0.product_list,
                 buyer_name: o0.buyer_name,
@@ -802,7 +803,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           const { kind, label } = payKindForOrder(o, st, src);
           return {
             order_id: o.global_order_id,
-            status: st,
+            status: customerFacingStatusLabel(st),
             amount: o.final_total_order_amount,
             product_list: o.product_list,
             buyer_name: o.buyer_name,
@@ -947,7 +948,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           const pk0 = payKindForOrder(o0, st0, o0.source || dateOrderSource);
           const ob0 = formatOrderOnePage({
             order_id: o0.global_order_id,
-            status: st0,
+            status: customerFacingStatusLabel(st0),
             amount: o0.final_total_order_amount,
             product_list: o0.product_list,
             buyer_name: o0.buyer_name,
@@ -971,7 +972,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           const orderSummariesOne = [
             {
               order_id: o0.global_order_id,
-              status: st0,
+              status: customerFacingStatusLabel(st0),
               amount: o0.final_total_order_amount,
               product_list: o0.product_list,
               buyer_name: o0.buyer_name,
@@ -1016,7 +1017,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           const { kind, label } = payKindForOrder(o, st, src);
           return {
             order_id: o.global_order_id,
-            status: st,
+            status: customerFacingStatusLabel(st),
             amount: o.final_total_order_amount,
             product_list: o.product_list,
             buyer_name: o.buyer_name,
@@ -1094,7 +1095,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           const { kind, label } = payKindForOrder(o, st, "superlanding");
           return {
             order_id: o.global_order_id,
-            status: st,
+            status: customerFacingStatusLabel(st),
             amount: o.final_total_order_amount,
             product_list: o.product_list,
             buyer_name: o.buyer_name,
@@ -1134,7 +1135,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           const pkMo = payKindForOrder(o0, st0, "superlanding");
           const opMo = {
             order_id: o0.global_order_id,
-            status: st0,
+            status: customerFacingStatusLabel(st0),
             amount: o0.final_total_order_amount,
             product_list: o0.product_list,
             buyer_name: o0.buyer_name,
@@ -1228,7 +1229,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           const { kind, label } = payKindForOrder(o, st, "shopline");
           return {
             order_id: o.global_order_id,
-            status: st,
+            status: customerFacingStatusLabel(st),
             amount: o.final_total_order_amount,
             product_list: o.product_list,
             buyer_name: o.buyer_name,
@@ -1261,7 +1262,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           const pkS = payKindForOrder(o0, st0, "shopline");
           const opS = {
             order_id: o0.global_order_id,
-            status: st0,
+            status: customerFacingStatusLabel(st0),
             amount: o0.final_total_order_amount,
             product_list: o0.product_list,
             buyer_name: o0.buyer_name,
@@ -1384,7 +1385,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           const { kind, label } = payKindForOrder(o, st, src);
           return {
             order_id: o.global_order_id,
-            status: st,
+            status: customerFacingStatusLabel(st),
             amount: o.final_total_order_amount,
             product_list: o.product_list,
             buyer_name: o.buyer_name,
@@ -1438,7 +1439,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             const st = getUnifiedStatusLabel(o.status, src);
             const { label } = payKindForOrder(o, st, src);
             const srcTag = "";
-            return `${i + 1}. ${srcTag}${o.global_order_id}｜${o.created_at || ""}｜${label}｜${st}`;
+            return `${i + 1}. ${srcTag}${o.global_order_id}｜${o.created_at || ""}｜${label}｜${customerFacingStatusLabel(st)}`;
           });
           const deterministicReply =
             `${n} 筆｜${aggStr}\n` +
@@ -1455,7 +1456,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
               order_id: o.global_order_id,
               payment_status: kind as "success" | "failed" | "pending" | "cod" | "unknown",
               payment_status_label: label,
-              fulfillment_status: st,
+              fulfillment_status: customerFacingStatusLabel(st),
               order_time: o.created_at || o.order_created_at,
               source: (src === "shopline" || src === "superlanding" ? src : undefined) as
                 | "shopline"
@@ -1508,7 +1509,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           const pk = payKindForOrder(o0, statusLabel0, o0.source || orderSource);
           const onePagePayload = {
             order_id: o0.global_order_id,
-            status: statusLabel0,
+            status: customerFacingStatusLabel(statusLabel0),
             amount: o0.final_total_order_amount,
             product_list: o0.product_list,
             buyer_name: o0.buyer_name,
@@ -1538,7 +1539,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
                 const pk = payKindForOrder(o0, st, o0.source || orderSource);
                 const payload = {
                   order_id: o0.global_order_id,
-                  status: st,
+                  status: customerFacingStatusLabel(st),
                   amount: o0.final_total_order_amount,
                   product_list: o0.product_list,
                   buyer_name: o0.buyer_name,
