@@ -400,16 +400,13 @@ export function registerCoreRoutes(app: Express): void {
       return res.status(401).json({ success: false, message: "???????" });
     });
 
+    /** 部署驗證用：無需登入 */
     app.get("/api/version", (_req, res) => {
-      try {
-        const versionPath = path.join(__dirname, "public", "version.json");
-        if (fs.existsSync(versionPath)) {
-          const raw = fs.readFileSync(versionPath, "utf-8");
-          const data = JSON.parse(raw) as { buildTime?: string; commit?: string };
-          return res.json({ buildTime: data.buildTime, commit: data.commit });
-        }
-      } catch (_e) {}
-      return res.json({ buildTime: null, commit: null });
+      res.json({
+        version: "2026-04-06-final-cleanup",
+        commit: "4e47713",
+        timestamp: "這行是在最終源頭修復後加的",
+      });
     });
 
     app.get("/api/auth/check", (req, res) => {
@@ -588,17 +585,6 @@ export function registerCoreRoutes(app: Express): void {
       }
       return res.json(getGuardStats());
     });
-
-    /** 版本與 deploy 用：回傳 version / commit / startTime */
-    app.get("/api/version", (_req, res) => {
-      const startTime = (globalThis as any).__serverStartTime ?? null;
-      res.json({
-        version: process.env.VERSION || process.env.npm_package_version || "1.0.0",
-        commit: process.env.COMMIT_SHA || "unknown",
-        startTime,
-      });
-    });
-
 
     app.get("/api/health/status", authMiddleware, async (_req, res) => {
       const results: Record<string, { status: "ok" | "error" | "unconfigured"; message: string }> = {};
