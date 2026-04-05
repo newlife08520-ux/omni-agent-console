@@ -21,7 +21,6 @@ import {
   formatOrderOnePage,
   formatLocalOnlyCandidateSummary,
   payKindForOrder,
-  sourceChannelLabel,
 } from "../order-reply-utils";
 import { packDeterministicSingleOrderToolResult } from "../order-single-renderer";
 import { orderDeterministicContractFields } from "../deterministic-order-contract";
@@ -447,8 +446,6 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             const fail = orderSummaries.filter((x) => x.payment_status === "failed").length;
             const pend = orderSummaries.filter((x) => x.payment_status === "pending").length;
             const codn = orderSummaries.filter((x) => x.payment_status === "cod").length;
-            const ch =
-              orderSource === "shopline" ? "官網" : orderSource === "superlanding" ? "一頁商店" : "多來源";
             const partsAgg: string[] = [];
             if (succ) partsAgg.push(`${succ} 筆付款成功`);
             if (fail) partsAgg.push(`${fail} 筆未成立／失敗`);
@@ -464,7 +461,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
               return `${i + 1}. ${tag}${o.global_order_id}｜${o.created_at || ""}｜${label}｜${st}`;
             });
             const deterministicReply =
-              `商品「${productName.slice(0, 40)}」+ 手機｜${n} 筆｜${ch}｜${aggStr}\n` +
+              `商品「${productName.slice(0, 40)}」+ 手機｜${n} 筆｜${aggStr}\n` +
               lines.join("\n") +
               (n > 3 ? `\n另有 ${n - 3} 筆未列出` : "") +
               `\n回覆訂單編號以選定訂單`;
@@ -499,7 +496,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
                 last_lookup_source: orderSource,
                 aggregate_payment_summary: aggStr,
                 one_page_summary: deterministicReply,
-                candidate_source_summary: `${ch}（商品+手機）`,
+                candidate_source_summary: "商品+手機",
                 successful_order_ids,
                 failed_order_ids,
                 pending_order_ids,
@@ -1158,7 +1155,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           localHit = false;
           const b = storage.getBrand(bid);
           if (!b?.shopline_api_token?.trim()) {
-            return toolJson({ success: true, found: false, message: "本地無官網訂單且品牌未設定 Shopline" });
+            return toolJson({ success: true, found: false, message: "本地無符合訂單且品牌未設定商店串接" });
           }
           const r = await lookupShoplineOrdersByPhoneExact(
             { storeDomain: (b.shopline_store_domain || "").trim(), apiToken: b.shopline_api_token.trim() },
@@ -1169,7 +1166,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
         }
         orders.forEach((o) => { o.source = "shopline"; });
         if (orders.length === 0) {
-          return toolJson({ success: true, found: false, message: "此條件下無其他官網訂單", local_hit: localHit });
+          return toolJson({ success: true, found: false, message: "此條件下無其他訂單", local_hit: localHit });
         }
         console.log(
           `[order_lookup] lookup_more_orders_shopline local_hit=${localHit} n=${orders.length} cache_hit=${localHit}`
@@ -1181,7 +1178,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           const packed = packDeterministicMultiOrderToolResult({
             orders,
             orderSource: "shopline",
-            headerLine: "官網此手機查到",
+            headerLine: "此手機查到",
             contactId: context.contactId,
             storage,
             matchedBy: "text",
@@ -1257,7 +1254,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             orders: orderSummaries,
             source: "shopline",
             local_hit: localHit,
-            note: appendFailedPaymentMultiNote(`共 1 筆官網訂單。\n${formattedList}`, hasFailedShoplineList),
+            note: appendFailedPaymentMultiNote(`共 1 筆訂單。\n${formattedList}`, hasFailedShoplineList),
             formatted_list: formattedList,
             one_page_full,
             one_page_summary: obS,
@@ -1276,7 +1273,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           source: "shopline",
           local_hit: localHit,
           note: appendFailedPaymentMultiNote(
-            `共 ${orders.length} 筆官網訂單，請逐筆呈現給客戶。\n${formattedList}`,
+            `共 ${orders.length} 筆訂單，請逐筆呈現給客戶。\n${formattedList}`,
             hasFailedShoplineList
           ),
           formatted_list: formattedList,
@@ -1316,8 +1313,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           console.log("[order_lookup] lookup_miss", JSON.stringify(lookupDiag));
           if (preferSource === "shopline") {
             const hintNoCfg = shoplineOk
-              ? "官網（SHOPLINE）這支手機目前查無訂單。可請客戶提供訂單編號或當初留的 Email 再查；若在一頁商店下單請說明，勿將一頁訂單當官網結果。"
-              : "官網（SHOPLINE）尚未正確綁定 API 或商店網域，無法查官網訂單。請客戶提供訂單編號，或確認品牌後台 Shopline 設定。";
+              ? "此條件下查無訂單。可請客戶提供訂單編號或當初留的 Email 再查；若訂單在其他管道建立請說明，避免混淆查詢結果。"
+              : "商店串接尚未完成，無法查詢部分訂單。請客戶提供訂單編號，或請管理員確認後台 API 與網域設定。";
             return toolJson({
               success: true,
               found: false,
@@ -1393,12 +1390,6 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           const fail = orderSummaries.filter((x) => x.payment_status === "failed").length;
           const pend = orderSummaries.filter((x) => x.payment_status === "pending").length;
           const codn = orderSummaries.filter((x) => x.payment_status === "cod").length;
-          const ch =
-            orderSource === "shopline"
-              ? "官網"
-              : orderSource === "superlanding"
-                ? "一頁商店"
-                : "多來源";
           const partsAgg: string[] = [];
           if (succ) partsAgg.push(`${succ} 筆付款成功`);
           if (fail) partsAgg.push(`${fail} 筆付款失敗未成立`);
@@ -1415,7 +1406,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             return `${i + 1}. ${srcTag}${o.global_order_id}｜${o.created_at || ""}｜${label}｜${st}`;
           });
           const deterministicReply =
-            `${n} 筆｜${ch}｜${aggStr}\n` +
+            `${n} 筆｜${aggStr}\n` +
             lines.join("\n") +
             (n > 3 ? `\n另有 ${n - 3} 筆未列出` : "") +
             `\n回覆訂單編號以選定訂單`;
@@ -1449,7 +1440,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             last_lookup_source: orderSource,
             aggregate_payment_summary: aggStr,
             one_page_summary: deterministicReply,
-            candidate_source_summary: ch,
+            candidate_source_summary: "手機查詢",
             successful_order_ids,
             failed_order_ids,
             pending_order_ids,
@@ -1535,7 +1526,6 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
                     created_at: o0.created_at || o0.order_created_at,
                     product_list: o0.product_list,
                     items_structured: o0.items_structured,
-                    source_channel: sourceChannelLabel(o0.source || orderSource),
                     status_short: st,
                   });
                 }
@@ -1589,7 +1579,6 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
                     created_at: orders[0].created_at || orders[0].order_created_at,
                     product_list: orders[0].product_list,
                     items_structured: orders[0].items_structured,
-                    source_channel: sourceChannelLabel(orders[0].source || orderSource),
                     status_short: getUnifiedStatusLabel(orders[0].status, orders[0].source || orderSource),
                   })
                 : onePageBlocks[0]

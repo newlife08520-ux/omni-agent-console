@@ -72,7 +72,7 @@ async function main() {
   const afterFlow = buildScenarioFlowBlock("AFTER_SALES", { returnFormUrl: "https://x.example/ret" });
   ok("AFTER_SALES iso flow 不含「有單號直接查」", !afterFlow.includes("有單號直接查"));
   const legacyFlow = buildFlowPrinciplesPrompt({ returnFormUrl: "https://x.example/ret" });
-  ok("legacy flow 仍含查單句（flags off 路徑）", legacyFlow.includes("有單號直接查"));
+  ok("legacy flow 仍含查單／工具約束（flags off 路徑）", legacyFlow.includes("查單／售後") && legacyFlow.includes("transfer_to_human"));
 
   const genFlow = buildScenarioFlowBlock("GENERAL", {});
   ok("GENERAL flow 不含全系統查單步驟", !genFlow.includes("有單號直接查"));
