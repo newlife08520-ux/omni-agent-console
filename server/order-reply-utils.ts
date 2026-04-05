@@ -5,6 +5,20 @@
 import type { OrderInfo, ActiveOrderContext } from "@shared/schema";
 import { derivePaymentStatus, type PaymentKind } from "./order-payment-utils";
 
+/** 訂單狀態轉成客人聽得懂的人話 */
+export function customerFacingStatusLabel(raw: string): string {
+  const s = (raw || "").trim();
+  if (/待處理|pending/i.test(s)) return "訂單已收到，正在安排中";
+  if (/處理中|processing/i.test(s)) return "正在安排出貨";
+  if (/確認中/i.test(s)) return "付款確認中";
+  if (/已出貨|shipped/i.test(s)) return "已出貨";
+  if (/已完成|completed|delivered/i.test(s)) return "已完成";
+  if (/已取消|cancelled/i.test(s)) return "已取消";
+  if (/新訂單/i.test(s)) return "新訂單，準備中";
+  if (/\[本地快取/i.test(s)) return "確認中";
+  return s;
+}
+
 const CVS_SHIPPING_KEYWORDS = ["超商", "門市", "7-11", "7-ELEVEN", "全家", "OK", "萊爾富"];
 
 /**
@@ -120,9 +134,6 @@ export function formatOrderOnePage(o: {
 }): string {
   const lines: string[] = [];
   if (o.order_id) lines.push(`訂單編號：${o.order_id}`);
-  if (o.source_channel) lines.push(`來源：${o.source_channel}`);
-  if (o.buyer_name) lines.push(`收件人：${o.buyer_name}`);
-  if (o.buyer_phone) lines.push(`電話：${o.buyer_phone}`);
   if (o.created_at) lines.push(`下單時間：${o.created_at}`);
   lines.push(`付款方式：${displayPaymentMethod(o.payment_method)}`);
   if (o.payment_status_label) lines.push(`付款狀態：${o.payment_status_label}`);
@@ -142,7 +153,7 @@ export function formatOrderOnePage(o: {
     items_structured: (o as { items_structured?: unknown }).items_structured,
   });
   if (prodLine) lines.push(`商品：${prodLine}`);
-  if (o.status) lines.push(`狀態：${o.status}`);
+  if (o.status) lines.push(`狀態：${customerFacingStatusLabel(o.status)}`);
   if (o.shipped_at) lines.push(`出貨時間：${o.shipped_at}`);
   return lines.join("\n");
 }
@@ -168,7 +179,7 @@ export function findCustomerFacingRawLeak(text: string): string | null {
 
 /**
  * Phase34B：local_only 單筆僅給「候選摘要」，非 final order card。
- * 僅含：編號、時間、商品摘要、來源、狀態一句、下一步引導（不含電話／地址／金額／付款方式列）。
+ * 僅含：編號、時間、商品摘要、狀態一句、下一步引導（不含電話／地址／金額／付款方式列）。
  */
 export function formatLocalOnlyCandidateSummary(o: {
   order_id: string;
@@ -183,16 +194,15 @@ export function formatLocalOnlyCandidateSummary(o: {
     items_structured: o.items_structured,
   });
   const lines: string[] = [
-    "【候選訂單摘要】（僅依目前已同步資料，非最終定案）",
+    "以下是目前查到的訂單資訊：",
     `訂單編號：${o.order_id}`,
   ];
   if (o.created_at) lines.push(`下單／建立時間：${o.created_at}`);
   if (prod) lines.push(`商品摘要：${prod}`);
-  if (o.source_channel) lines.push(`來源：${o.source_channel}`);
-  if (o.status_short) lines.push(`狀態（參考）：${o.status_short}`);
+  if (o.status_short) lines.push(`狀態：${customerFacingStatusLabel(o.status_short)}`);
   lines.push(
     "",
-    "下一步：若要確認是否還有其他訂單，請回「還有其他訂單嗎」；或補「商品名稱／下單日」方便核對。完整取貨、付款與地址等明細需待系統或人員再確認後提供。"
+    "若要看其他訂單或確認更多細節，隨時跟我說。"
   );
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }

@@ -34,7 +34,7 @@ import {
 } from "../order-service";
 import { packDeterministicMultiOrderToolResult } from "../order-multi-renderer";
 import { tryOrderFastPath, extractOrderIdFromMixedSentence } from "../order-fast-path";
-import { formatOrderOnePage, payKindForOrder, sourceChannelLabel } from "../order-reply-utils";
+import { formatOrderOnePage, payKindForOrder } from "../order-reply-utils";
 import { normalizeCustomerFacingOrderReply } from "../customer-reply-normalizer";
 import { isValidOrderDeterministicPayload } from "../deterministic-order-contract";
 import { orderFeatureFlags } from "../order-feature-flags";
@@ -386,7 +386,6 @@ export function createAiReplyService(deps: AiReplyDeps) {
               product_list: order.product_list,
               status: statusLabel,
               shipped_at: order.shipped_at,
-              source_channel: sourceChannelLabel(order.source || result.source),
             });
             storage.linkOrderForContact(contactId, order.global_order_id, "ai_lookup");
             storage.setActiveOrderContext(
@@ -1281,8 +1280,8 @@ ${contextStr}
             knowledge_hits: [],
             tools_called: ["already_provided_handoff"],
             transfer_triggered: true,
-            transfer_reason: "?????????????????",
-            result_summary: "????????????",
+            transfer_reason: "查無訂單且客人已提供資訊，轉人工",
+            result_summary: "查無訂單，已轉人工",
             token_usage: 0,
             model: "reply-plan",
             response_time_ms: Date.now() - startTime,
@@ -1437,7 +1436,6 @@ ${contextStr}
                 shipping_method: o.shipping_method,
                 payment_method: o.payment_method,
                 payment_status_label: pk.label,
-                source_channel: sourceChannelLabel(o.source),
               };
               const onePage = formatOrderOnePage(onePagePayload);
               multiAns = `${multiAns}\n${onePage}`;

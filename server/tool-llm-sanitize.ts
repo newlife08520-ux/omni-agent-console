@@ -183,6 +183,20 @@ function walkPayload(root: Record<string, unknown>, dataCoverage?: string): void
     sanitizeOrderLike(ord, { localOnly: localRoot });
   }
 
+  // 清洗已組好的字串摘要（移除可能殘留的來源、收件人、電話）
+  const STRING_KEYS_TO_SANITIZE = ["one_page_summary", "one_page_full", "formatted_list", "deterministicReply"];
+  for (const key of STRING_KEYS_TO_SANITIZE) {
+    const val = root[key];
+    if (typeof val === "string" && val.length > 0) {
+      root[key] = val
+        .replace(/來源：[^\n]*/g, "")
+        .replace(/收件人：[^\n]*/g, "")
+        .replace(/電話：[^\n]*/g, "")
+        .replace(/\n{2,}/g, "\n")
+        .trim();
+    }
+  }
+
   for (const k of Object.keys(root)) {
     if (k.endsWith("_raw") || k === "gateway_status") {
       delete root[k];

@@ -78,7 +78,18 @@ function appendFailedPaymentMultiNote(baseNote: string, hasFailed: boolean): str
 
 function orderItemsStructuredPayload(o: OrderInfo): unknown {
   const x = o as OrderInfo & { items?: unknown };
-  return x.items_structured ?? x.items ?? [];
+  const raw = x.items_structured ?? x.items ?? [];
+  if (!Array.isArray(raw)) return raw;
+  return raw.map((it: unknown) => {
+    if (it == null || typeof it !== "object") return it;
+    const row = it as Record<string, unknown>;
+    const resolved =
+      String(row.product_name ?? row.name ?? row.item_name ?? row.title ?? "").trim() || undefined;
+    if (resolved && !row.product_name) {
+      return { ...row, product_name: resolved };
+    }
+    return it;
+  });
 }
 
 export interface ToolExecutorDeps {
@@ -252,7 +263,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
       return !!shopBrand?.shopline_api_token?.trim();
     })();
     if (!hasAnyCreds) {
-      return JSON.stringify({ success: false, error: "查單功能未設定完成，請聯繫管理員確認 API 金鑰。" });
+      return JSON.stringify({ success: false, error: "目前暫時無法查詢訂單，我先幫您記下來，由專人確認後回覆您。" });
     }
 
     /** 付款狀態與主流程一致；formatOrderOnePage 使用 order-reply-utils 單一實作 */
