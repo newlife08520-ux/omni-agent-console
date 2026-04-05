@@ -35,6 +35,7 @@ function formatOrdersToolFormattedList(
   rows: Array<{
     order_id: string;
     product_list?: string | null;
+    items_structured?: any;
     amount?: unknown;
     status?: string;
     payment_status_label?: string;
@@ -42,7 +43,21 @@ function formatOrdersToolFormattedList(
 ): string {
   return rows
     .map((o) => {
-      const products = String(o.product_list ?? "未提供商品名稱").slice(0, 40);
+      let products = String(o.product_list ?? "").trim();
+      let structured = o.items_structured;
+      if (typeof structured === "string") {
+        try {
+          structured = JSON.parse(structured);
+        } catch {
+          structured = null;
+        }
+      }
+      if (!products && Array.isArray(structured) && structured.length > 0) {
+        products = structured
+          .map((item: any) => item.product_name || item.name || "未知商品")
+          .join("、");
+      }
+      products = products ? products.slice(0, 40) : "未提供商品名稱";
       return `- ${o.order_id} | ${products} | $${o.amount ?? ""} | ${o.status || ""} | ${o.payment_status_label ?? ""}`;
     })
     .join("\n");
@@ -231,7 +246,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
       if (toolName === "lookup_order_by_id") {
         const orderIdRaw = (args.order_id || "").trim();
         const orderId = orderIdRaw.toUpperCase();
-        console.log(`[AI Tool Call] lookup_order_by_id???: ${orderId} (?????)???ID: ${context?.brandId || "?"}`);
+        console.log(`[AI Tool Call] lookup_order_by_id orderId=${orderId} brandId=${context?.brandId || "?"}`);
 
         if (!orderId) {
           return toolJson({ success: false, error: "請提供訂單編號" });
@@ -267,13 +282,13 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
         const result = await unifiedLookupById(config, orderId, context?.brandId, preferSource, false);
 
         if (!result.found || result.orders.length === 0) {
-          console.log(`[AI Tool Call] ????: ${orderId}`);
-          return toolJson({ success: true, found: false, message: `查無訂單編號 ${orderId}，請確認是否正確，或改用商品名稱＋手機查詢。` });
+          console.log(`[AI Tool Call] lookup_order_by_id 查無: ${orderId}`);
+          return toolJson({ success: true, found: false, message: `查無單號 ${orderId}。請確認單號正確，或改用手機號碼查詢。` });
         }
 
         const order = result.orders[0];
         const statusLabel = getUnifiedStatusLabel(order.status, result.source);
-        console.log(`[AI Tool Call] ????: ${orderId}???: ${result.source}???: ${statusLabel}`);
+        console.log(`[AI Tool Call] lookup_order_by_id 命中: ${orderId} source=${result.source} status=${statusLabel}`);
 
         if (context?.contactId) {
           storage.updateContactOrderSource(context.contactId, result.source);
@@ -286,6 +301,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           status: statusLabel,
           amount: order.final_total_order_amount,
           product_list: order.product_list,
+          items_structured: orderItemsStructuredPayload(order),
           buyer_name: order.buyer_name,
           buyer_phone: order.buyer_phone,
           address: order.address,
@@ -298,7 +314,9 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           shipped_at: order.shipped_at,
           shipping_method: order.shipping_method,
           payment_method: order.payment_method,
+          payment_status: pkId.kind,
           payment_status_label: pkId.label,
+          payment_warning: paymentWarningFromKind(pkId.kind),
         };
         const one_page_summary = formatOrderOnePage(orderPayload);
         if (context?.contactId) {
@@ -522,13 +540,13 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
 
         if (productIndex > 0 && productIndex <= pages.length) {
           matchedPages = [pages[productIndex - 1]];
-          console.log("[AI Tool Call] ?? product_index #" + productIndex + " ????:", matchedPages[0].productName);
+          console.log("[AI Tool Call] product_index #" + productIndex + " 命中:", matchedPages[0].productName);
         }
 
         if (matchedPages.length === 0 && productName) {
           const cleanInput = stripClean(productName);
           const inputTokens = productName.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, "").split(/\s+/).filter(t => t.length > 0);
-          console.log("[AI Tool Call] ????????:", cleanInput, "??:", inputTokens);
+          console.log("[AI Tool Call] 商品關鍵字:", cleanInput, "tokens:", inputTokens);
 
           matchedPages = pages.filter(p => stripClean(p.productName) === cleanInput);
 
@@ -593,7 +611,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
               const cleanInput = stripClean(productName);
               const matched = allNames.some(n => n.length >= 2 && (n.includes(cleanInput) || cleanInput.includes(n)));
               if (matched) {
-                console.log(`[AI Tool Call] ???????: ?${productName}???${officialName}?page_id=${pageId}`);
+                console.log(`[AI Tool Call] 知識庫命中: ${productName} -> ${officialName} page_id=${pageId}`);
                 matchedPages = [{ id: String(pageId), pageId: pageId.toString(), prefix: officialName, productName: officialName }];
                 break;
               }
@@ -606,7 +624,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           console.log("[AI Tool Call] 無法匹配商品或 page_id:", productName);
           return toolJson({
             success: false,
-            error: `無法從「${productName}」對應到商品或 page_id，請客人說明完整商品名稱或提供訂單編號。`,
+            error: `找不到商品 ${productName} 的對應資訊，請改用純手機查詢。`,
             require_product: true,
           });
         }
@@ -647,7 +665,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
 
         if (allResults.length === 0) {
           console.log("[AI Latency] tool lookup_order_by_product_and_phone (no match) done in", Date.now() - toolStartMs, "ms");
-          return toolJson({ success: true, found: false, message: `一頁商店與官網皆查無此手機＋商品的訂單（已比對 ${matchedPages.length} 個可能商品）。` });
+          return toolJson({ success: true, found: false, message: "在此手機與商品條件下查無訂單。" });
         }
 
         const seenIds = new Set<string>();
@@ -776,7 +794,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           };
         });
 
-        console.log("[AI Tool Call] ??", uniqueOrders.length, "?????????");
+        console.log("[AI Tool Call] lookup_order_by_product_and_phone 多筆訂單 n=", uniqueOrders.length);
         const formattedList = formatOrdersToolFormattedList(orderSummaries);
         const onePageBlocks = orderSummaries.map((o) => formatOrderOnePage(o));
         const one_page_full = onePageBlocks.join("\n\n---\n\n");
@@ -813,7 +831,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
         if (pageId) {
           fetchParams.page_id = pageId;
         } else {
-          console.warn("[AI Tool Call] lookup_order_by_date_and_contact ??? page_id??????????????31??????");
+          console.warn("[AI Tool Call] lookup_order_by_date_and_contact 未傳 page_id，將以日期區間搜尋（最多 31 天）");
         }
 
         let page = 1;
@@ -852,7 +870,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
         let dateOrderSource: string = "superlanding";
 
         if (matched.length === 0) {
-          console.log("[AI Tool Call] SuperLanding ??????????? SHOPLINE...");
+          console.log("[AI Tool Call] SuperLanding 無命中，改查 SHOPLINE...");
           const preferSourceDate = context?.preferShopline ? "shopline" as const : undefined;
           const unifiedResult = await unifiedLookupByDateAndContact(config, contact, beginDate, endDate, pageId, context?.brandId, preferSourceDate);
           if (unifiedResult.found) {
@@ -862,7 +880,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
         }
 
         if (matched.length === 0) {
-          return toolJson({ success: true, found: false, message: "一頁商店與官網皆查無符合條件的訂單" });
+          return toolJson({ success: true, found: false, message: "此日期區間查無訂單" });
         }
 
         if (context?.contactId) {
@@ -990,7 +1008,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           };
         });
 
-        console.log("[AI Tool Call] ??", matched.length, "?????????");
+        console.log("[AI Tool Call] lookup_order_by_date_and_contact 命中 n=", matched.length);
         const dateFormattedList = formatOrdersToolFormattedList(orderSummaries);
         const onePageBlocks = orderSummaries.map((o) => formatOrderOnePage(o));
         const one_page_full = onePageBlocks.join("\n\n---\n\n");
@@ -1583,10 +1601,10 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
         });
       }
 
-      return toolJson({ success: false, error: `不支援的工具：${toolName}` });
+      return toolJson({ success: false, error: `未知的工具: ${toolName}` });
     } catch (err: any) {
-      console.error("[AI Tool Call] ????:", toolName, err.message);
-      return toolJson({ success: false, error: `查單發生錯誤：${err.message}` });
+      console.error("[AI Tool Call] tool error:", toolName, err.message);
+      return toolJson({ success: false, error: `工具執行錯誤: ${err.message}` });
     }
   }
 
