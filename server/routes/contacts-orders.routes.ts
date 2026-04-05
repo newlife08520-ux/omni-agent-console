@@ -351,7 +351,7 @@ export function registerContactsOrdersRoutes(app: Express): void {
       if (assignedAgentId == null && assignment.isAllAgentsUnavailable()) {
         storage.updateContactNeedsAssignment(contactId, 1);
         const tags = JSON.parse(contact.tags || "[]");
-        if (!tags.includes("?????")) storage.updateContactTags(contactId, [...tags, "?????"]);
+        if (!tags.includes("待指派")) storage.updateContactTags(contactId, [...tags, "待指派"]);
         const reason = assignment.getUnavailableReason();
         storage.createMessage(contactId, contact.platform, "system", transferUnavailableSystemMessage(storage, reason));
       }
@@ -382,7 +382,7 @@ export function registerContactsOrdersRoutes(app: Express): void {
         waiting_for_customer: null,
       });
       const tags = JSON.parse(contact.tags || "[]") as string[];
-      const withoutPending = tags.filter((t) => t !== "?????");
+      const withoutPending = tags.filter((t) => t !== "待指派");
       if (withoutPending.length !== tags.length) storage.updateContactTags(contactId, withoutPending);
       const prevAgentId = contact.assigned_agent_id;
       storage.updateContactAssignment(contactId, null, undefined, undefined, 0);

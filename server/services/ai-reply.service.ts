@@ -403,36 +403,38 @@ export function createAiReplyService(deps: AiReplyDeps) {
     const tags = (contact?.tags && typeof contact.tags === "string") ? (() => { try { return JSON.parse(contact.tags) as string[]; } catch { return []; } })() : [];
     const contextParts: string[] = [];
     for (const m of recentMessages) {
-      if (m.sender_type === "user" && m.content && m.content !== "[????]" && !m.content.startsWith("[??")) {
-        contextParts.push(`???${m.content.slice(0, 80)}`);
+      if (m.sender_type === "user" && m.content && m.content !== "[圖片訊息]" && !m.content.startsWith("[圖片")) {
+        contextParts.push(`客：${m.content.slice(0, 80)}`);
       } else if (m.sender_type === "ai" && m.content) {
-        contextParts.push(`???${m.content.slice(0, 80)}`);
+        contextParts.push(`服：${m.content.slice(0, 80)}`);
       }
     }
-    if (tags.length) contextParts.push(`?????${tags.join("?")}`);
-    const contextStr = contextParts.length ? contextParts.join("\n") : "?????????";
+    if (tags.length) contextParts.push(`標籤：${tags.join("、")}`);
+    const contextStr = contextParts.length ? contextParts.join("\n") : "（尚無文字脈絡）";
 
     const systemPrompt = await getEnrichedSystemPrompt(brandId ?? undefined);
     const visionInstruction = `
-????? - Vision First???????????????????????????
-??????????
-- order_screenshot???/??/???????????
-- product_issue_defect?????????????
-- product_page_size????????????
-- off_brand????????????????????
-- unreadable??????????????
+你正在執行 Vision First：請判斷圖片意圖並產生簡短對客回覆。
 
-???
+意圖分類：
+- order_screenshot：訂單截圖／出貨單／付款畫面
+- product_issue_defect：商品瑕疵或損壞
+- product_page_size：尺寸表或規格圖
+- off_brand：與本品牌無關
+- unreadable：難以辨識
+
+近期對話脈絡：
 ${contextStr}
 
-????? JSON ??????{"intent":"?????","confidence":"high ? low","reply_to_customer":"??????????????"}
-???
-- ? confidence ? low ? intent ? unreadable??? reply_to_customer ????? ""???????? fallback ???????
-- ? confidence ? high?order_screenshot ???????????????????????????????product_issue_defect ?????????product_page_size ??????????off_brand ????????????
-- reply_to_customer ?????? 50?120 ????????????????`;
+請輸出 JSON：{"intent":"上述其一","confidence":"high 或 low","reply_to_customer":"對客的一句話"}
+
+規則：
+- 若 confidence 為 low、或 intent 為 unreadable、或 reply_to_customer 為空，請讓 reply_to_customer 為空字串以便系統走 fallback
+- confidence 為 high 時：order_screenshot 表達已看到訂單相關資訊並引導下一步；product_issue_defect 表達已了解並引導後續；product_page_size 簡述尺寸重點；off_brand 禮貌說明非本店範圍
+- reply_to_customer 約 50～120 字，口語溫暖具體`;
 
     const userContent: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [
-      { type: "text", text: "??????????????? JSON?" },
+      { type: "text", text: "請分析此圖並回傳 JSON。" },
       { type: "image_url", image_url: { url: dataUri } },
     ];
 
@@ -503,7 +505,7 @@ ${contextStr}
                 currentImageIncluded = true;
               }
               chatMessages.push({ role: "user", content: [
-                { type: "text", text: msg.content || "???????" },
+                { type: "text", text: msg.content || "（客戶傳圖）" },
                 { type: "image_url", image_url: { url: msgDataUri } },
               ]});
             } else {
@@ -518,7 +520,7 @@ ${contextStr}
       }
       if (!currentImageIncluded) {
         chatMessages.push({ role: "user", content: [
-          { type: "text", text: "???????" },
+          { type: "text", text: "（客戶傳圖）" },
           { type: "image_url", image_url: { url: currentImageDataUri } },
         ]});
       }
@@ -573,7 +575,7 @@ ${contextStr}
       const finalContact = storage.getContact(contactId);
       if (finalContact?.needs_human) return;
 
-      const reply = responseMessage?.content || "?????????????????";
+      const reply = responseMessage?.content || "不好意思，系統暫時無法回覆，請稍後再試或轉接人工客服。";
       const aiMsg = storage.createMessage(contactId, contactPlatform, "ai", reply);
       broadcastSSE("new_message", { contact_id: contactId, message: aiMsg, brand_id: contact?.brand_id });
       broadcastSSE("contacts_updated", { brand_id: contact?.brand_id });
@@ -589,7 +591,7 @@ ${contextStr}
       }
     } catch (err) {
       console.error("OpenAI Vision analysis error:", err);
-      storage.createMessage(contactId, contactPlatform, "ai", "??????????????????");
+      storage.createMessage(contactId, contactPlatform, "ai", "不好意思，系統遇到問題，我幫您轉接人工客服處理。");
     }
   }
 
@@ -781,7 +783,7 @@ ${contextStr}
           const recentForCaption = storage.getMessages(contact.id).slice(-6);
           const hadRecentImage = recentForCaption.some(
             (m: { sender_type: string; message_type?: string; content?: string }) =>
-              m.sender_type === "user" && (m.message_type === "image" || m.content === "[????]" || (m.content && m.content.startsWith("[??")))
+              m.sender_type === "user" && (m.message_type === "image" || m.content === "[圖片訊息]" || (m.content && m.content.startsWith("[圖片")))
           );
           const resultSummary = hadRecentImage
             ? `safe_confirm_template: ${tplCategory} | image_clear_caption`
@@ -1065,7 +1067,7 @@ ${contextStr}
         const assignedIdAwk = assignment.assignCase(contact.id);
         if (assignedIdAwk == null && assignment.isAllAgentsUnavailable()) {
           const tags = JSON.parse(contact.tags || "[]");
-          if (!tags.includes("?????")) storage.updateContactTags(contact.id, [...tags, "?????"]);
+          if (!tags.includes("待指派")) storage.updateContactTags(contact.id, [...tags, "待指派"]);
           storage.updateContactNeedsAssignment(contact.id, 1);
           storage.createMessage(contact.id, contact.platform, "system", getTransferUnavailableSystemMessage(assignment.getUnavailableReason()));
         }
@@ -1111,8 +1113,8 @@ ${contextStr}
         if (assignedId == null && assignment.isAllAgentsUnavailable()) {
           storage.updateContactNeedsAssignment(contact.id, 1);
           const tags = JSON.parse(contact.tags || "[]");
-          if (!tags.includes("?????")) {
-            storage.updateContactTags(contact.id, [...tags, "?????"]);
+          if (!tags.includes("待指派")) {
+            storage.updateContactTags(contact.id, [...tags, "待指派"]);
           }
           const reason = assignment.getUnavailableReason();
           storage.createMessage(contact.id, contact.platform, "system", getTransferUnavailableSystemMessage(reason));
@@ -1762,7 +1764,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             const msgDataUri = await imageFileToDataUri(msg.image_url);
             if (msgDataUri) {
               chatMessages.push({ role: "user", content: [
-                { type: "text", text: msg.content || "???????" },
+                { type: "text", text: msg.content || "（客戶傳圖）" },
                 { type: "image_url", image_url: { url: msgDataUri } },
               ]});
             } else {
@@ -1938,7 +1940,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             }
 
             const recentUserMessagesForLookup = recentMessages
-              .filter((m: any) => m.sender_type === "user" && m.content && m.content !== "[????]")
+              .filter((m: any) => m.sender_type === "user" && m.content && m.content !== "[圖片訊息]")
               .map((m: any) => (m.content || "").trim())
               .filter(Boolean);
             const actForLookupPolicy = storage.getActiveOrderContext(contact.id);
@@ -1985,7 +1987,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
                   if (toolErr?.message === "TOOL_TIMEOUT") {
                     console.log(`[AI Timeout] ?? ${fnName} ?? (>${TOOL_TIMEOUT_MS}ms)`);
                     storage.createSystemAlert({ alert_type: "timeout_escalation", details: `?? ${fnName} ??`, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
-                    return { toolCall, toolResult: JSON.stringify({ error: true, message: "????????????" }) };
+                    return { toolCall, toolResult: JSON.stringify({ error: true, message: "查單工具執行逾時，請稍後再試或轉人工。" }) };
                   }
                   throw toolErr;
                 }
@@ -2020,14 +2022,14 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
 
               if (fnName === "transfer_to_human") {
                 transferTriggered = true;
-                transferReason = fnArgs.reason || "AI ????????";
+                transferReason = fnArgs.reason || "AI 判斷需要轉人工";
                 (() => { const { reason, reason_detail } = normalizeHandoffReason(transferReason); applyHandoff({ contactId: contact.id, reason, reason_detail, source: "webhook_tool_call", brandId: effectiveBrandId || undefined }); })();
                 const assignedId = assignment.assignCase(contact.id);
                 if (assignedId == null && assignment.isAllAgentsUnavailable()) {
                   storage.updateContactNeedsAssignment(contact.id, 1);
                   const tags = JSON.parse(contact.tags || "[]");
-                  if (!tags.includes("?????")) {
-                    storage.updateContactTags(contact.id, [...tags, "?????"]);
+                  if (!tags.includes("待指派")) {
+                    storage.updateContactTags(contact.id, [...tags, "待指派"]);
                   }
                   const reason = assignment.getUnavailableReason();
                   storage.createMessage(contact.id, contact.platform, "system", getTransferUnavailableSystemMessage(reason));
@@ -2147,7 +2149,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
               }
               broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
             } else {
-              const comfortMsg = "?????????????????????????????????????????????????";
+              const comfortMsg = "不好意思讓您久等了，系統正在處理中，請稍等一下。";
               storage.createMessage(contact.id, contact.platform, "ai", comfortMsg);
               if (platform === "messenger") {
                 sendFBMessage(channelToken || "", contact.platform_user_id, comfortMsg).catch(() => {});
@@ -2203,7 +2205,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           }
 
           const recentUserMessagesForLookupOai = recentMessages
-            .filter((m: any) => m.sender_type === "user" && m.content && m.content !== "[????]")
+            .filter((m: any) => m.sender_type === "user" && m.content && m.content !== "[圖片訊息]")
             .map((m: any) => (m.content || "").trim())
             .filter(Boolean);
           const actForLookupPolicyOai = storage.getActiveOrderContext(contact.id);
@@ -2250,7 +2252,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
                 if (toolErr?.message === "TOOL_TIMEOUT") {
                   console.log(`[AI Timeout] ?? ${fnName} ?? (>${TOOL_TIMEOUT_MS}ms)`);
                   storage.createSystemAlert({ alert_type: "timeout_escalation", details: `?? ${fnName} ??`, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
-                  return { toolCall, toolResult: JSON.stringify({ error: true, message: "????????????" }) };
+                  return { toolCall, toolResult: JSON.stringify({ error: true, message: "查單工具執行逾時，請稍後再試或轉人工。" }) };
                 }
                 throw toolErr;
               }
@@ -2280,14 +2282,14 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
 
             if (fnName === "transfer_to_human") {
               transferTriggered = true;
-              transferReason = fnArgs.reason || "AI ????????";
+              transferReason = fnArgs.reason || "AI 判斷需要轉人工";
               (() => { const { reason, reason_detail } = normalizeHandoffReason(transferReason); applyHandoff({ contactId: contact.id, reason, reason_detail, source: "webhook_tool_call", brandId: effectiveBrandId || undefined }); })();
               const assignedId = assignment.assignCase(contact.id);
               if (assignedId == null && assignment.isAllAgentsUnavailable()) {
                 storage.updateContactNeedsAssignment(contact.id, 1);
                 const tags = JSON.parse(contact.tags || "[]");
-                if (!tags.includes("?????")) {
-                  storage.updateContactTags(contact.id, [...tags, "?????"]);
+                if (!tags.includes("待指派")) {
+                  storage.updateContactTags(contact.id, [...tags, "待指派"]);
                 }
                 const reason = assignment.getUnavailableReason();
                 storage.createMessage(contact.id, contact.platform, "system", getTransferUnavailableSystemMessage(reason));
