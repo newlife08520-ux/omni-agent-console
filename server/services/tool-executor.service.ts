@@ -30,6 +30,9 @@ import { classifyOrderNumber } from "../intent-and-order";
 import { applyHandoff, normalizeHandoffReason } from "./handoff";
 import { finalizeLlmToolJsonString } from "../tool-llm-sanitize";
 
+/** 與 ai-reply 轉人工備援句一致，避免客人只看到轉接、沒有任何 AI 對話 */
+export const TRANSFER_TOOL_CUSTOMER_ACK = "好的，我這邊幫您轉給專人處理，請稍等一下。";
+
 function formatOrdersToolFormattedList(
   rows: Array<{
     order_id: string;
@@ -103,6 +106,8 @@ export interface ToolCallContext {
   /** 外層 autoReplyWithAI / 佇列處理開始時間（用於日誌與耗時對齊） */
   startTime?: number;
   queueWaitMs?: number;
+  /** true：本輪 post-handoff 會略過對客句（ai-handlable 意圖），須在此工具內先送轉接確認給客人 */
+  expectPostHandoffSkipped?: boolean;
 }
 
 export function createToolExecutor(deps: ToolExecutorDeps) {
@@ -200,6 +205,25 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
         (() => { const norm = normalizeHandoffReason(reason); applyHandoff({ contactId: context.contactId, reason: norm.reason, reason_detail: norm.reason_detail, source: "sandbox_tool_call", platform: context?.platform, brandId: context?.brandId }); })();
         storage.createMessage(context.contactId, context?.platform || "line", "system",
           `(轉接) AI 已觸發轉接人工：${reason}`);
+        /** 本輪若會略過 ai-reply post-handoff 對客句，必須在此先送一句給客人（避免 ghosting） */
+        if (context.expectPostHandoffSkipped === true) {
+          const c = storage.getContact(context.contactId);
+          const plat = context.platform || c?.platform || "line";
+          const handoffMsg = TRANSFER_TOOL_CUSTOMER_ACK;
+          const aiM = storage.createMessage(context.contactId, plat, "ai", handoffMsg);
+          const bid = c?.brand_id ?? undefined;
+          if (bid != null) {
+            broadcastSSE("new_message", { contact_id: context.contactId, message: aiM, brand_id: bid });
+            broadcastSSE("contacts_updated", { brand_id: bid });
+          }
+          if (context.channelToken && context.platformUserId) {
+            if (context.platform === "messenger") {
+              sendFBMessage(context.channelToken, context.platformUserId, handoffMsg).catch(() => {});
+            } else {
+              pushLineMessage(context.platformUserId, [{ type: "text", text: handoffMsg }], context.channelToken).catch(() => {});
+            }
+          }
+        }
       }
       return JSON.stringify({ success: true, message: "已轉接人工客服，AI 不再回覆此對話。" });
     }

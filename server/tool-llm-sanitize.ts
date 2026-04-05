@@ -40,6 +40,20 @@ function maskPiiFieldsOnOrderLike(o: Record<string, unknown>): void {
   }
 }
 
+/** 對客友善：避免 LLM 唸出「同步中」等工程感狀態 */
+function humanizeStatusFields(o: Record<string, unknown>): void {
+  const payStatus = String(o.payment_status_label || o.payment_status || "").trim();
+  if (/同步中|確認中|processing|syncing/i.test(payStatus)) {
+    o.payment_status_label = "確認中（請稍候）";
+  }
+  const orderStatus = String(o.status || "").trim();
+  if (/同步中|syncing|processing/i.test(orderStatus)) {
+    o.status = "處理中";
+  } else if (/\[本地快取.*\]/i.test(orderStatus)) {
+    o.status = "確認中";
+  }
+}
+
 /** Phase 96：營運小抄—請融進自己的話，不要條列照唸（降低工程腔） */
 export const SHIPPING_SOP_INSTRUCTION =
   "（出貨／久候小抄—請融進一段話，勿列點唸稿）先致歉；現貨約五工作天內寄出、預購約七到二十工作天；別保證幾號一定到；可說會幫問倉儲／物流並在需要時幫催或加急。";
@@ -150,6 +164,7 @@ function sanitizeOrderLike(o: Record<string, unknown>, opts: { localOnly?: boole
       }
     }
   }
+  humanizeStatusFields(o);
 }
 
 function walkPayload(root: Record<string, unknown>, dataCoverage?: string): void {
