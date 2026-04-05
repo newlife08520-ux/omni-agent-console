@@ -93,9 +93,9 @@ export function buildHandoffReply(options: {
 }
 
 /** order_lookup / order_followup 回覆建議上限（與 enforceOutputGuard 對齊） */
-export const OUTPUT_GUARD_MAX_CHARS = 200;
+export const OUTPUT_GUARD_MAX_CHARS = 600;
 /** 其餘 mode 回覆建議上限 */
-export const OUTPUT_GUARD_MAX_CHARS_RELAXED = 350;
+export const OUTPUT_GUARD_MAX_CHARS_RELAXED = 800;
 
 /**
  * 回覆長度控制：查單／出貨跟進較嚴、一般較寬；避免 LINE 上超長 wall of text。
@@ -105,7 +105,7 @@ export function enforceOutputGuard(text: string, planMode: string): string {
   if (!trimmed) return trimmed;
 
   const maxChars =
-    planMode === "order_lookup" || planMode === "order_followup" ? 200 : 350;
+    planMode === "order_lookup" || planMode === "order_followup" ? 600 : 800;
 
   if (trimmed.length <= maxChars) return trimmed;
 

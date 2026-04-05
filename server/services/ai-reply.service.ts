@@ -1039,18 +1039,22 @@ ${contextStr}
       function isUserProvidingOrderDetails(lastAiMessage: string | null | undefined, currentUserMessage: string): boolean {
         if (!lastAiMessage || !ASK_ORDER_PHONE_FOR_BYPASS_KW.some((k) => lastAiMessage.includes(k))) return false;
         const trimmed = (currentUserMessage || "").trim();
-        if (trimmed.length >= 15) return false;
+        if (trimmed.length >= 30) return false;
         if (isHumanRequestMessage(trimmed)) return false;
         return true;
       }
 
-      // ????????????????????????????????? AI ??????? ? ?????
-      const awkwardCheck = shouldHandoffDueToAwkwardOrRepeat({
-        userMessage,
-        recentMessages: recentMessages.map((m: any) => ({ sender_type: m.sender_type, content: m.content })),
-        primaryIntentOrderLookup: state.primary_intent === "order_lookup",
-      });
-      // ?????????????????????????????/??????
+      const userTextClean = (userMessage || "").replace(/[^A-Za-z0-9]/g, "");
+      const isLikelyOrderNumber =
+        /^\d{15,22}$/.test(userTextClean) || /^[A-Za-z0-9\-]{5,15}$/.test(userTextClean);
+
+      const awkwardCheck = isLikelyOrderNumber
+        ? { shouldHandoff: false as const }
+        : shouldHandoffDueToAwkwardOrRepeat({
+            userMessage,
+            recentMessages: recentMessages.map((m: any) => ({ sender_type: m.sender_type, content: m.content })),
+            primaryIntentOrderLookup: state.primary_intent === "order_lookup",
+          });
       const activeCtxForBypass = isOrderLookupFamily(plan.mode) ? storage.getActiveOrderContext(contact.id) : null;
       const isOrderFollowUpForBypass = activeCtxForBypass && (
         ORDER_FOLLOWUP_PATTERNS.test((userMessage || "").trim()) ||

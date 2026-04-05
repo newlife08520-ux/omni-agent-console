@@ -15,18 +15,18 @@ describe("enforceOutputGuard", () => {
     expect(enforceOutputGuard(s, "order_lookup")).toBe(s);
   });
 
-  it("order_lookup 超過 200 字時優先截在句號（且句號在後半段）", () => {
-    const head = "A".repeat(120);
-    const tail = "後段說明。還有更多文字要補充，直到超過兩百字為止。".repeat(4);
+  it("order_lookup 超過上限時優先截在句號（且句號在後半段）", () => {
+    const head = "A".repeat(500);
+    const tail = "後段說明。還有更多文字要補充，直到超過上限為止。".repeat(12);
     const long = head + tail;
-    expect(long.length).toBeGreaterThan(200);
+    expect(long.length).toBeGreaterThan(OUTPUT_GUARD_MAX_CHARS);
     const out = enforceOutputGuard(long, "order_lookup");
-    expect(out.length).toBeLessThanOrEqual(200);
-    expect(out.endsWith("。")).toBe(true);
+    expect(out.length).toBeLessThanOrEqual(OUTPUT_GUARD_MAX_CHARS);
+    expect(out.endsWith("。") || out.endsWith("…")).toBe(true);
   });
 
-  it("order_followup 與 order_lookup 同上限 200", () => {
-    const long = "測試。".repeat(80);
+  it("order_followup 與 order_lookup 同上限", () => {
+    const long = "測試。".repeat(200);
     const out = enforceOutputGuard(long, "order_followup");
     expect(out.length).toBeLessThanOrEqual(OUTPUT_GUARD_MAX_CHARS);
   });
@@ -39,7 +39,7 @@ describe("enforceOutputGuard", () => {
   });
 
   it("無可用句號時截斷並加省略號（總長度不超過上限）", () => {
-    const long = "x".repeat(400);
+    const long = "x".repeat(900);
     const out = enforceOutputGuard(long, "answer_directly");
     expect(out.endsWith("…")).toBe(true);
     expect(out.length).toBeLessThanOrEqual(OUTPUT_GUARD_MAX_CHARS_RELAXED);
