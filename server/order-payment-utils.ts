@@ -4,8 +4,9 @@
  */
 import type { OrderInfo } from "@shared/schema";
 
+/** Shopline 常見：payment_type cash_on_delivery、中文「貨到付款／到收」、超商取貨付款等 */
 const COD_METHOD_REGEX =
-  /貨到付款|到收|取件時付款|取貨付款|到店付款|cash_on_delivery|cash\s*on\s*delivery|cod|現金\s*與\s*刷卡/i;
+  /貨到付款|到收|取件時付款|取件時付|取貨付款|取貨時付款|取貨時付|到店付款|超商取貨付(?:款)?|便利商店取貨付(?:款)?|宅配代收|宅配.*貨到付款|7[\s\-／/]*11[\s、，,]*取貨付(?:款)?|全家[\s、，,]*取貨付(?:款)?|cash_on_delivery|cash\s*on\s*delivery|payment\s*on\s*delivery|\bcod\b|現金\s*與\s*刷卡/i;
 
 function isSuperLandingCvsCod(order: OrderInfo): boolean {
   if ((order.source || "") !== "superlanding") return false;
@@ -23,7 +24,7 @@ function isSuperLandingCvsCod(order: OrderInfo): boolean {
 
 export function isCodPaymentMethod(order: OrderInfo): boolean {
   if (COD_METHOD_REGEX.test(order.payment_method || "")) return true;
-  if (/^到收$|^取件時付款$/i.test((order.payment_method || "").trim())) return true;
+  if (/^到收$|^取件時付款$|^取件時付$/i.test((order.payment_method || "").trim())) return true;
   if (isSuperLandingCvsCod(order)) return true;
   return false;
 }
@@ -89,7 +90,7 @@ export type PaymentKind = "success" | "failed" | "pending" | "cod" | "unknown";
 
 /** Phase 3.0：fallback pending 時對客顯示（取代冰冷「待付款或待確認」） */
 export const PENDING_FALLBACK_CUSTOMER_LABEL =
-  "金流狀態同步中（若您稍早剛完成付款，請稍候系統連線更新）";
+  "確認中（付款資訊更新中，請稍等）";
 
 export function derivePaymentStatus(
   order: OrderInfo,
