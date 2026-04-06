@@ -155,6 +155,8 @@ export function formatOrderOnePage(o: {
   order_id?: string;
   buyer_name?: string;
   buyer_phone?: string;
+  /** 手機查單時 API／快取若未帶收件電話，用客人提供的號碼做隱碼顯示 */
+  display_phone_if_missing?: string;
   created_at?: string;
   payment_method?: string;
   payment_status_label?: string;
@@ -181,7 +183,8 @@ export function formatOrderOnePage(o: {
 
   if (o.buyer_name) lines.push(`收件人：${maskName(o.buyer_name)}`);
 
-  if (o.buyer_phone) lines.push(`電話：${maskPhone(o.buyer_phone)}`);
+  const phoneLine = String(o.buyer_phone || "").trim() || String(o.display_phone_if_missing || "").trim();
+  if (phoneLine) lines.push(`電話：${maskPhone(phoneLine)}`);
 
   if (o.created_at) lines.push(`下單時間：${o.created_at}`);
 

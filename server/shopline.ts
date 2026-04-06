@@ -164,18 +164,27 @@ function mapShoplineOrder(o: any): OrderInfo {
 
   const buyerName =
     o.customer_name ??
+    deliveryData?.recipient_name ??
     deliveryAddr?.recipient_name ??
     o.shipping_address?.name ??
     o.customer?.name ??
+    o.buyer?.name ??
     o.billing_address?.name ??
     o.recipient_name ??
+    o.recipient?.name ??
     "";
   const buyerPhone =
     o.customer_phone ??
+    deliveryData?.recipient_phone ??
     deliveryAddr?.recipient_phone ??
     o.shipping_address?.phone ??
     o.customer?.phone ??
+    o.buyer?.phone ??
     o.billing_address?.phone ??
+    o.mobile ??
+    o.phone ??
+    o.recipient_phone ??
+    o.recipient?.phone ??
     "";
   const buyerEmail = o.customer_email ?? o.customer?.email ?? o.email ?? "";
 

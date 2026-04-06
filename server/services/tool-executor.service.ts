@@ -1401,6 +1401,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           const src = o.source || orderSource;
           const st = getUnifiedStatusLabel(o.status, src);
           const { kind, label } = payKindForOrder(o, st, src);
+          const displayPhoneIfMissing =
+            !String(o.buyer_phone || "").trim() && phone.trim() ? phone.trim() : undefined;
           return {
             order_id: o.global_order_id,
             status: customerFacingStatusLabel(st),
@@ -1408,6 +1410,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             product_list: o.product_list,
             buyer_name: o.buyer_name,
             buyer_phone: o.buyer_phone,
+            display_phone_if_missing: displayPhoneIfMissing,
             address: o.address,
             full_address: o.full_address,
             cvs_brand: o.cvs_brand,
@@ -1436,7 +1439,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             : appendFailedPaymentMultiNote(
                 (() => {
                   if (orders.length <= 3) {
-                    return `【重要】以下共 ${orders.length} 筆訂單。請直接使用 one_page_full 裡的完整卡片逐筆回覆給客人，不要用簡表。每筆都要顯示：訂單編號、商品、金額、付款、配送、狀態。`;
+                    return `【重要】以下共 ${orders.length} 筆訂單。請直接使用 one_page_full 裡的完整卡片逐筆回覆給客人，不要用簡表、不要刪行。每筆都要完整呈現卡片上的欄位，包含：訂單編號、收件人（已隱碼）、電話（已隱碼）、下單時間、商品、金額、付款、配送、取貨門市或地址、狀態。`;
                   }
                   if (orders.length <= 5) {
                     return `以下共 ${orders.length} 筆訂單。\n簡表：\n${formattedList}\n\n請列出簡表讓客人選擇要看哪一筆。`;
@@ -1555,6 +1558,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             items_structured: orderItemsStructuredPayload(o0),
             buyer_name: o0.buyer_name,
             buyer_phone: o0.buyer_phone,
+            display_phone_if_missing:
+              !String(o0.buyer_phone || "").trim() && phone.trim() ? phone.trim() : undefined,
             address: o0.address,
             full_address: o0.full_address,
             cvs_brand: o0.cvs_brand,
@@ -1587,6 +1592,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
                   items_structured: orderItemsStructuredPayload(o0),
                   buyer_name: o0.buyer_name,
                   buyer_phone: o0.buyer_phone,
+                  display_phone_if_missing:
+                    !String(o0.buyer_phone || "").trim() && phone.trim() ? phone.trim() : undefined,
                   address: o0.address,
                   full_address: o0.full_address,
                   cvs_brand: o0.cvs_brand,
