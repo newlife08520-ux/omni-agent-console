@@ -1,0 +1,104 @@
+# Pattern: 多筆|multiple|narrow|clarif|商品名|product_name|askProduct|候選|candidate|摘要|summary|one_page|local_only|needs_live_confirm|conservativeSingle
+# Files: ai-reply.service.ts order-service.ts order-lookup-policy.ts tool-llm-sanitize.ts
+
+=== server/services/ai-reply.service.ts ===
+154:const ASK_ORDER_PHONE_FOR_BYPASS_KW = ["請提供訂單編號", "訂單編號", "請提供", "手機號碼", "商品名稱", "下訂手機", "收件人", "請提供賃訊"];
+372:            const one_page_summary = formatOrderOnePage({
+395:              buildActiveOrderContextFromOrder(order, result.source, statusLabel, one_page_summary, "image")
+397:            return { reply: "已查到訂單，摘要如下：\n\n" + one_page_summary, usedFallback: false, intent: IMAGE_INTENT_ORDER };
+627:          prompt_summary: userMessage.slice(0, 200),
+631:          result_summary: "gate_skip:status",
+655:          prompt_summary: userMessage.slice(0, 200),
+659:          result_summary: "gate_skip:needs_human",
+676:        prompt_summary: userMessage.slice(0, 200),
+680:        result_summary: "gate_skip:ai_muted",
+732:          prompt_summary: `?????: ${userMessage.slice(0, 100)}`,
+737:          result_summary: "??/?????????",
+793:            prompt_summary: userMessage.slice(0, 150),
+798:            result_summary: resultSummary,
+1015:            prompt_summary: `order_fast_path:${fpEarly.fastPathType}:${(userMessage || "").slice(0, 60)}`,
+1019:            result_summary: `fast_path_${fpEarly.fastPathType}`,
+1060:      const skipAwkwardHandoffDueToActiveOrder = !!(isOrderFollowUpForBypass && activeCtxForBypass?.one_page_summary);
+1087:          prompt_summary: `awkward_repeat_handoff: ${awkwardCheck.reason ?? "unknown"} - ${userMessage.slice(0, 60)}`,
+1092:          result_summary: "??????????",
+1144:          prompt_summary: `handoff_short_circuit: ${userMessage.slice(0, 80)}`,
+1149:          result_summary: "??????????????",
+1244:        if (activeCtx?.one_page_summary && isOrderFollowUp) {
+1245:          systemPrompt += "\n\n【目前已查到的訂單摘要，回覆時可引用】\n\n" + activeCtx.one_page_summary;
+1277:            prompt_summary: `already_provided_not_found: ${userMessage.slice(0, 60)}`,
+1282:            result_summary: "????????????",
+1299:      /** Phase 2.2 / 2.4：多筆候選（篩選、第 N 筆、最新／最早、日期、帶出明細） */
+1303:        if (multiFollow?.active_order_candidates && (multiFollow.candidate_count ?? 0) > 1) {
+1305:          const sortedC = sortCandidatesNewestFirst(multiFollow.active_order_candidates);
+1323:            multiFollow.one_page_summary
+1325:            multiAns = multiFollow.one_page_summary;
+1444:                candidate_count: multiFollow.candidate_count,
+1445:                active_order_candidates: multiFollow.active_order_candidates,
+1447:                aggregate_payment_summary: multiFollow.aggregate_payment_summary,
+1448:                one_page_summary: multiFollow.one_page_summary,
+1449:                candidate_source_summary: multiFollow.candidate_source_summary,
+1498:              prompt_summary: `multi_order_followup: ${msgM.slice(0, 40)}`,
+1502:              result_summary: "multi_order_deterministic",
+1522:      /** Phase 2.9：單筆 context 下問「還有其他訂單／全部訂單」→ 依手機重查並展開多筆 */
+1547:          (!act29.candidate_count || act29.candidate_count <= 1) &&
+1605:                prompt_summary: `phase29_more_orders: ${msg29.slice(0, 50)}`,
+1609:                result_summary: `n=${result29.orders.length}`,
+1715:          prompt_summary: `return_form_first: ${userMessage.slice(0, 80)}`,
+1719:          result_summary: returnFormReply.slice(0, 200),
+1951:                    candidate_count: actForLookupPolicy.candidate_count,
+1952:                    active_order_candidates: actForLookupPolicy.active_order_candidates,
+1966:              orderLookupSummaryOnly: lookupIntentForTools.summaryOnly === true,
+2216:                  candidate_count: actForLookupPolicyOai.candidate_count,
+2217:                  active_order_candidates: actForLookupPolicyOai.active_order_candidates,
+2231:            orderLookupSummaryOnly: lookupIntentForToolsOai.summaryOnly === true,
+2420:          prompt_summary: userMessage.slice(0, 200),
+2425:          result_summary: "?????????????",
+2457:          !!activeOrd?.one_page_summary &&
+2509:          prompt_summary: userMessage.slice(0, 200),
+2514:          result_summary: reply.slice(0, 300),
+2545:        prompt_summary: userMessage.slice(0, 200),
+2549:        result_summary: `??: ${(err as Error).message}`,
+
+=== server/order-service.ts ===
+23:/** Phase 30：local_only 表示僅來自本地索引，可能不完整，不可單筆定案 */
+24:export type DataCoverage = "local_only" | "api_only" | "merged_local_api";
+26:/** Phase 31：覆蓋信心 — local_only 單筆為 low，API 或合併為 high */
+35:  /** 若為 local_only，表示未打 API，資料可能不全，不應單筆直接定案 */
+37:  /** Phase 31：覆蓋信心；local_only 單筆為 low */
+39:  /** Phase 31：單筆且 local_only 時為 true，不可直接當最終真相 */
+40:  needs_live_confirm?: boolean;
+436:          data_coverage: "local_only",
+438:          needs_live_confirm: single,
+454:          data_coverage: "local_only",
+456:          needs_live_confirm: single,
+478:          data_coverage: "local_only",
+480:          needs_live_confirm: single,
+499:        return { orders: result.orders, source: "shopline", found: true, data_coverage: "api_only", coverage_confidence: "high", needs_live_confirm: false };
+513:        return { orders: result.orders, source: "superlanding", found: true, data_coverage: "api_only", coverage_confidence: "high", needs_live_confirm: false };
+556:      result = { orders: merged, source: src, found: true, data_coverage: "merged_local_api", coverage_confidence: "high", needs_live_confirm: false };
+
+=== server/order-lookup-policy.ts ===
+3: * 目標：有單號直接查；沒單號預設商品+手機；純手機僅在「查全部/其他訂單」時允許，且 local_only 單筆不得定案。
+11:  candidate_count?: number | null;
+12:  active_order_candidates?: unknown[] | null;
+30:  /** 單筆結果是否需先 live API 確認才能當最終答案（local_only 單筆時為 true） */
+32:  /** 純手機等情境：Tool 層只允許摘要、不得對 LLM 輸出單筆明細 */
+33:  summaryOnly: boolean;
+137:      summaryOnly: false,
+149:        summaryOnly: false,
+161:      summaryOnly: false,
+174:      summaryOnly: true,
+189:      summaryOnly: false,
+200:      summaryOnly: true,
+211:      summaryOnly: false,
+220:    summaryOnly: true,
+261:/** 單筆結果是否需先 live API 確認才能當最終答案（local_only 單筆時由 call 方設為 true） */
+264:  dataCoverage: "local_only" | "api_only" | "merged_local_api" | undefined,
+269:  if (dataCoverage === "local_only") return true;
+
+=== server/tool-llm-sanitize.ts ===
+2: * Minimal Safe Mode：在 Tool JSON 送進 LLM 前做物理清洗（刪 raw、內部英文運送碼、local_only 狀態覆寫）。
+144:  const localRoot = dataCoverage === "local_only" || root.data_coverage === "local_only";
+188:  "（語氣小抄）客人只留手機、且多筆未指定商品時：像聊天一樣請他補一個「買的商品名稱」方便對單；不要念有幾筆、不要報別人明細。";
+194:  "（語氣小抄）多筆混在一起：用人話幫他整理每筆大概狀態就好，不要講官網、一頁式等內部來源名詞。";
+224:  if (toolName === "lookup_order_by_phone" && p.summary_only === true) {

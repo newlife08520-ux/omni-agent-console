@@ -345,6 +345,10 @@ export async function fetchShoplineSearchAllPages(
     if (items.length < perPage) break;
   }
   if (pagesFetched >= maxPages && raws.length > 0) truncated = true;
+  /** 暫時診斷：map 之前看 Shopline /orders/search 原始訂單結構（商品明細欄位名） */
+  if (raws.length > 0) {
+    console.log("[SHOPLINE_RAW_ITEM_DEBUG]", JSON.stringify(raws[0]).slice(0, 2000));
+  }
   return { raws, pagesFetched, truncated };
 }
 
@@ -377,6 +381,11 @@ export async function fetchShoplineOrders(
   if (!Array.isArray(orders)) {
     console.error("[SHOPLINE] 回傳格式異常，非陣列:", typeof orders);
     return [];
+  }
+
+  /** 暫時診斷：map 之前看 Shopline 原始訂單（/orders 或 /orders/search） */
+  if (orders.length > 0) {
+    console.log("[SHOPLINE_RAW_ITEM_DEBUG]", JSON.stringify(orders[0]).slice(0, 2000));
   }
 
   return orders.map(mapShoplineOrder);
@@ -632,6 +641,10 @@ export async function fetchShoplineOrdersListPaginated(
     const rawList = parseOrdersResponse(data);
     pagesFetched++;
     if (!rawList.length) break;
+    /** 暫時診斷：GET /orders 分頁同步時第一頁第一筆原始結構 */
+    if (page === 1 && rawList.length > 0) {
+      console.log("[SHOPLINE_RAW_ITEM_DEBUG]", JSON.stringify(rawList[0]).slice(0, 2000));
+    }
     for (const raw of rawList) out.push(mapShoplineOrder(raw));
     if (rawList.length < perPage) break;
   }
