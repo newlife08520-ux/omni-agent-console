@@ -220,9 +220,9 @@ app.use((req, res, next) => {
               runOrderSync({ days: 3 }).catch((e) =>
                 console.error("[OrderSync] 定時同步失敗:", (e as Error)?.message || e)
               );
-            }, 30 * 60 * 1000);
+            }, 15 * 60 * 1000);
 
-            console.log("[server] 訂單定時同步已啟用（每 30 分鐘同步近 3 天）");
+            console.log("[server] 訂單定時同步已啟用（每 15 分鐘同步近 3 天）");
           })
           .catch((e) => {
             console.error(
