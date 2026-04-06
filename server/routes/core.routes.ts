@@ -58,7 +58,7 @@ import {
   pickCandidateByOrderDate,
   filterCandidatesBySource,
 } from "../order-multi-selector";
-import { lookupShoplineOrdersByPhoneExact } from "../shopline";
+import { lookupShoplineOrdersByPhoneExact, syncShoplineProductsToCatalog } from "../shopline";
 import * as assignment from "../assignment";
 import {
   detectIntentLevel,
@@ -408,7 +408,7 @@ export function registerCoreRoutes(app: Express): void {
     app.get("/api/version", (_req, res) => {
       const buildTime = new Date().toISOString();
       res.json({
-        version: "phase2-product-rag",
+        version: "phase2-shopline-sync",
         build_time: buildTime,
         features: [
           "gemini-3.1-pro",
@@ -417,8 +417,38 @@ export function registerCoreRoutes(app: Express): void {
           "product-catalog",
           "recommend-products-tool",
           "excel-import",
+          "shopline-product-sync",
         ],
       });
+    });
+
+    app.post("/api/admin/sync-products", authMiddleware, async (_req, res) => {
+      try {
+        const brands = db.prepare("SELECT id, shopline_store_domain, shopline_api_token FROM brands").all() as {
+          id: number;
+          shopline_store_domain: string;
+          shopline_api_token: string;
+        }[];
+
+        const results: unknown[] = [];
+        for (const brand of brands) {
+          const config = { storeDomain: brand.shopline_store_domain, apiToken: brand.shopline_api_token };
+          if (!String(config.storeDomain || "").trim() || !String(config.apiToken || "").trim()) {
+            results.push({ brand_id: brand.id, status: "skipped", reason: "missing config" });
+            continue;
+          }
+          try {
+            const r = await syncShoplineProductsToCatalog(brand.id, config);
+            results.push({ brand_id: brand.id, status: "ok", ...r });
+          } catch (e) {
+            results.push({ brand_id: brand.id, status: "error", error: (e as Error).message });
+          }
+        }
+
+        return res.json({ ok: true, results });
+      } catch (e) {
+        return res.status(500).json({ error: (e as Error).message });
+      }
     });
 
     app.post(

@@ -234,6 +234,63 @@ app.use((req, res, next) => {
         console.log("[server] ENABLE_ORDER_SYNC 未啟用；若需定時同步請設 ENABLE_ORDER_SYNC=true");
       }
 
+      const PRODUCT_SYNC_INTERVAL = 6 * 60 * 60 * 1000;
+      const PRODUCT_SYNC_INITIAL_DELAY = 30 * 1000;
+
+      setTimeout(async () => {
+        try {
+          const { syncShoplineProductsToCatalog } = await import("./shopline");
+          const brands = db.prepare("SELECT id, shopline_store_domain, shopline_api_token FROM brands").all() as {
+            id: number;
+            shopline_store_domain: string;
+            shopline_api_token: string;
+          }[];
+
+          for (const brand of brands) {
+            const config = { storeDomain: brand.shopline_store_domain, apiToken: brand.shopline_api_token };
+            if (!String(config.storeDomain || "").trim() || !String(config.apiToken || "").trim()) {
+              console.log(`[product-sync] 品牌 ${brand.id} 缺少 Shopline 設定，跳過`);
+              continue;
+            }
+            try {
+              await syncShoplineProductsToCatalog(brand.id, config);
+            } catch (e) {
+              console.error(`[product-sync] 品牌 ${brand.id} 同步失敗:`, e);
+            }
+          }
+
+          console.log("[product-sync] 首次商品同步完成");
+        } catch (e) {
+          console.error("[product-sync] 首次同步失敗:", e);
+        }
+
+        setInterval(async () => {
+          try {
+            const { syncShoplineProductsToCatalog } = await import("./shopline");
+            const brands = db.prepare("SELECT id, shopline_store_domain, shopline_api_token FROM brands").all() as {
+              id: number;
+              shopline_store_domain: string;
+              shopline_api_token: string;
+            }[];
+
+            for (const brand of brands) {
+              const config = { storeDomain: brand.shopline_store_domain, apiToken: brand.shopline_api_token };
+              if (!String(config.storeDomain || "").trim() || !String(config.apiToken || "").trim()) continue;
+              try {
+                await syncShoplineProductsToCatalog(brand.id, config);
+              } catch (e) {
+                console.error(`[product-sync] 品牌 ${brand.id} 定時同步失敗:`, e);
+              }
+            }
+            console.log("[product-sync] 定時商品同步完成");
+          } catch (e) {
+            console.error("[product-sync] 定時同步失敗:", e);
+          }
+        }, PRODUCT_SYNC_INTERVAL);
+      }, PRODUCT_SYNC_INITIAL_DELAY);
+
+      console.log("[server] 商品定時同步已啟用（每 6 小時，啟動 30 秒後首次同步）");
+
       // 24 小時閒置結案：每 15 分鐘掃描一次，客戶最後一則為 user 且超過 idle_close_hours 未回則結案（排除 awaiting_human / high_risk）。
       setInterval(async () => {
         try {

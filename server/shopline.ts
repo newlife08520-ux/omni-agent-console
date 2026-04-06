@@ -1,4 +1,5 @@
 import type { OrderInfo, DeliveryTargetType } from "@shared/schema";
+import { storage } from "./storage";
 
 const SHOPLINE_API_VERSION = "v1";
 
@@ -759,4 +760,220 @@ export function detectQueryType(
   }
 
   return "name";
+}
+
+/**
+ * 從 Shopline API 取得商品列表。
+ * GET /v1/products
+ * 文件：https://developer.shopline.io/
+ */
+export async function fetchShoplineProducts(
+  config: { storeDomain: string; apiToken: string },
+  limit = 250
+): Promise<any[]> {
+  const allProducts: any[] = [];
+  let page = 1;
+  const maxPages = 10;
+
+  while (page <= maxPages) {
+    const url = `${SHOPLINE_OPEN_API_BASE}/${SHOPLINE_API_VERSION}/products?page=${page}&limit=${limit}`;
+    console.log(`[shopline-products] 抓取第 ${page} 頁: ${url}`);
+
+    try {
+      const token = String(config.apiToken || "").trim();
+      if (!token) break;
+
+      const res = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          "User-Agent": process.env.SHOPLINE_USER_AGENT || "OmniAgentConsole/1.0",
+        },
+      });
+
+      if (!res.ok) {
+        console.error(`[shopline-products] API 回傳 ${res.status}: ${await res.text().catch(() => "")}`);
+        break;
+      }
+
+      const data = (await res.json()) as any;
+      const items = data.items || data.products || data.data || [];
+
+      if (!Array.isArray(items) || items.length === 0) {
+        console.log(`[shopline-products] 第 ${page} 頁無資料，結束`);
+        break;
+      }
+
+      if (page === 1 && items.length > 0) {
+        console.log("[SHOPLINE_PRODUCT_RAW_DEBUG]", JSON.stringify(items[0]).slice(0, 3000));
+      }
+
+      allProducts.push(...items);
+      console.log(`[shopline-products] 第 ${page} 頁取得 ${items.length} 個商品，累計 ${allProducts.length}`);
+
+      if (items.length < limit) break;
+      page++;
+    } catch (err) {
+      console.error(`[shopline-products] 抓取失敗:`, err);
+      break;
+    }
+  }
+
+  return allProducts;
+}
+
+/**
+ * 把 Shopline 原始商品資料映射成 product_catalog 的格式
+ */
+export function mapShoplineProductToCatalog(raw: any): {
+  product_id: string;
+  title: string;
+  keywords: string;
+  url: string;
+  image_url: string;
+  description_short: string;
+  category: string;
+  tags: string;
+  price: number;
+  is_available: number;
+} | null {
+  if (!raw) return null;
+
+  const title =
+    raw.title_translations?.["zh-hant"] ||
+    raw.title_translations?.["zh-Hant"] ||
+    raw.title_translations?.zh ||
+    raw.title ||
+    raw.name ||
+    "";
+
+  if (!String(title).trim()) return null;
+
+  let price: number = 0;
+  if (Array.isArray(raw.variants) && raw.variants.length > 0) {
+    const v = raw.variants[0];
+    let p: unknown = v.price?.dollars ?? v.price?.amount ?? v.price ?? v.sale_price ?? 0;
+    if (p != null && typeof p === "object" && (p as { dollars?: number }).dollars != null) {
+      p = (p as { dollars: number }).dollars;
+    }
+    price = Number(p) || 0;
+  }
+  if (!price && raw.price) {
+    let p: unknown = raw.price?.dollars ?? raw.price?.amount ?? raw.price ?? 0;
+    if (p != null && typeof p === "object" && (p as { dollars?: number }).dollars != null) {
+      p = (p as { dollars: number }).dollars;
+    }
+    price = Number(p) || 0;
+  }
+
+  const imageUrl =
+    (Array.isArray(raw.images) && raw.images.length > 0
+      ? raw.images[0]?.src || raw.images[0]?.url || raw.images[0]?.original_url || ""
+      : "") ||
+    raw.image?.src ||
+    raw.image_url ||
+    "";
+
+  const rawDesc =
+    raw.description_translations?.["zh-hant"] ||
+    raw.description_translations?.["zh-Hant"] ||
+    raw.description_translations?.zh ||
+    raw.description ||
+    raw.body_html ||
+    "";
+  const descShort = String(rawDesc)
+    .replace(/<[^>]*>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .substring(0, 500);
+
+  const category =
+    (Array.isArray(raw.collections) && raw.collections.length > 0
+      ? raw.collections[0]?.title || raw.collections[0]?.name || ""
+      : "") ||
+    raw.product_type ||
+    "";
+
+  const tags = Array.isArray(raw.tags) ? raw.tags.join(",") : String(raw.tags || "");
+
+  const handle = raw.handle || raw.slug || "";
+  const url = raw.url || (handle ? `https://shopline.tw/products/${handle}` : "");
+
+  const isAvailable =
+    raw.status === "active" || raw.published === true || raw.published_at != null ? 1 : 0;
+
+  const productId = String(raw._id || raw.id || raw.product_id || "").trim();
+  if (!productId) return null;
+
+  return {
+    product_id: `shopline-${productId}`,
+    title: String(title).trim(),
+    keywords: tags,
+    url,
+    image_url: imageUrl,
+    description_short: descShort,
+    category,
+    tags,
+    price,
+    is_available: isAvailable,
+  };
+}
+
+/**
+ * 同步 Shopline 商品到 product_catalog 表。
+ * 會保留 Excel 手動匯入的 faq、description_short（如果 Shopline 沒有更好的描述）。
+ */
+export async function syncShoplineProductsToCatalog(
+  brandId: number,
+  config: { storeDomain: string; apiToken: string }
+): Promise<{ synced: number; skipped: number; errors: number }> {
+  console.log(`[shopline-products] 開始同步品牌 ${brandId} 的商品...`);
+
+  const rawProducts = await fetchShoplineProducts(config);
+  console.log(`[shopline-products] 取得 ${rawProducts.length} 個原始商品`);
+
+  let synced = 0;
+  let skipped = 0;
+  let errors = 0;
+
+  for (const raw of rawProducts) {
+    try {
+      const mapped = mapShoplineProductToCatalog(raw);
+      if (!mapped) {
+        skipped++;
+        continue;
+      }
+
+      const existing = storage.searchProducts(brandId, mapped.title, 1) as any[];
+      const existingOne = existing.length > 0 ? existing[0] : null;
+
+      const productToUpsert: Record<string, unknown> = {
+        product_id: mapped.product_id,
+        title: mapped.title,
+        keywords: mapped.keywords || existingOne?.keywords || "",
+        url: mapped.url || existingOne?.url || "",
+        image_url: mapped.image_url || existingOne?.image_url || "",
+        description_short: mapped.description_short || existingOne?.description_short || "",
+        category: mapped.category || existingOne?.category || "",
+        tags: mapped.tags || existingOne?.tags || "",
+        price: mapped.price || existingOne?.price || 0,
+        is_available: mapped.is_available,
+        faq: existingOne?.faq || "",
+        order_prefix: existingOne?.order_prefix || "",
+        page_id: existingOne?.page_id || "",
+        is_popular: existingOne?.is_popular || 0,
+      };
+
+      storage.upsertProduct(brandId, productToUpsert);
+      synced++;
+    } catch (err) {
+      console.error(`[shopline-products] 同步商品失敗:`, err);
+      errors++;
+    }
+  }
+
+  console.log(`[shopline-products] 品牌 ${brandId} 同步完成：成功 ${synced}，跳過 ${skipped}，失敗 ${errors}`);
+  return { synced, skipped, errors };
 }
