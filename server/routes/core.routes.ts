@@ -467,10 +467,10 @@ export function registerCoreRoutes(app: Express): void {
                 faq: faqLine,
               };
             } else if (faqLine && currentProduct) {
-              currentProduct.faq = (currentProduct.faq || "") + "\n" + faqLine;
-              if (faqLine.startsWith("FAQ")) {
+              if (/^FAQ/i.test(faqLine)) {
                 currentProduct.faq = (currentProduct.faq || "") + "\n" + faqLine;
               } else {
+                currentProduct.faq = (currentProduct.faq || "") + "\n" + faqLine;
                 currentProduct.description_short = (currentProduct.description_short || "") + " " + faqLine;
               }
             }

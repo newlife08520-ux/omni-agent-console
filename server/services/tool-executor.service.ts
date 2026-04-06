@@ -256,12 +256,16 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
               pitch: r.pitch,
               url: r.url || undefined,
             })),
-            sys_note: "以下是品牌的推廣活動資訊。用你自己溫暖的語氣推薦，不要照唸。有連結就自然提供給客人。",
+            sys_note: "品牌推廣資訊如下。有連結就提供。",
           });
         }
 
         const knowledgeFiles = storage.getKnowledgeFiles(brandId) as any[];
         const kMatched = knowledgeFiles.filter((f: any) => {
+          const cat = (f.category || "").toLowerCase();
+          const intent = (f.intent || "").toLowerCase();
+          if (/policy|rule|sop|規則|政策|退換貨|客訴/i.test(cat + " " + intent)) return false;
+
           const content = (f.content || "").toLowerCase();
           const name = (f.original_name || "").toLowerCase();
           const kl = keyword.toLowerCase();
@@ -280,7 +284,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             found: true,
             source: "knowledge_base",
             results: snippets,
-            sys_note: "從知識庫找到相關資訊。用溫暖自然的語氣幫客人介紹，像資深專櫃人員。有價格和連結就帶出來。",
+            sys_note: "知識庫相關資訊如下。有價格連結就提供。",
           });
         }
 
@@ -288,7 +292,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           success: true,
           found: false,
           keyword,
-          sys_note: "查無相關商品。溫柔告訴客人目前沒找到，問有沒有其他想看的。不要編造商品。",
+          sys_note: "查無商品。不要編造。",
         });
       }
 
@@ -307,7 +311,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
         source: "product_catalog",
         total: results.length,
         products: results,
-        sys_note: `找到 ${results.length} 款「${keyword}」相關商品。用溫暖自然的語氣推薦，像資深專櫃人員一樣介紹。先講最推薦的 1-2 款，提到特色。有價格就說價格，有連結就自然提供。不要條列式，用聊天方式。`,
+        sys_note: `找到 ${results.length} 款「${keyword}」相關商品。有價格就提，有連結就給。`,
       });
     }
 

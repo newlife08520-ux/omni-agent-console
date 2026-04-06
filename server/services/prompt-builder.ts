@@ -241,13 +241,21 @@ export function buildMarketingPrompt(brandId?: number, userMessage?: string): st
   return "\n\n--- 產品導購規則 ---\n" + lines.join("\n");
 }
 
+/**
+ * RAG-Lite 知識庫上限：8000 字元。
+ * 即使外層傳入更大值（如 80000），也會被限制在此上限。
+ * 因為 RAG-Lite 只取 Top 5 篇相關文件，不需要更多。
+ * 商品資料走 product_catalog + recommend_products 工具，不走知識庫。
+ */
+const KNOWLEDGE_RAG_LITE_CAP = 8000;
+
 export function buildKnowledgePrompt(
   brandId?: number,
   maxTotalChars = 8000,
   userMessage?: string,
   planMode?: string
 ): string {
-  const cap = Math.min(maxTotalChars, 8000);
+  const cap = Math.min(maxTotalChars, KNOWLEDGE_RAG_LITE_CAP);
   const files = storage.getKnowledgeFiles(brandId);
   const withContent = files.filter((f) => f.content && f.content.trim().length > 0);
   if (withContent.length === 0) return "";
@@ -272,7 +280,8 @@ export function buildKnowledgePrompt(
     return true;
   });
 
-  const pool = filtered.length > 0 ? filtered : withContent;
+  const pool = filtered;
+  if (pool.length === 0) return "";
 
   if (!userMessage || !userMessage.trim()) {
     return assembleKnowledgeBlock(pool.slice(0, 5), cap);
@@ -510,7 +519,13 @@ export async function assembleEnrichedSystemPrompt(
       : buildFlowPrinciplesPrompt(flowPrinciplesOpts)
     : "";
   const catalogBlock = orderLookupDiet || skipCatalog ? "" : await buildCatalogPrompt(brandId);
-  const marketingBlock = orderLookupDiet ? "" : buildMarketingPrompt(brandId, context?.userMessage);
+  const allowMarketing =
+    !orderLookupDiet &&
+    !skipKnowledge &&
+    (!context?.selectedScenario ||
+      context.selectedScenario === "PRODUCT_CONSULT" ||
+      context.selectedScenario === "GENERAL");
+  const marketingBlock = allowMarketing ? buildMarketingPrompt(brandId, context?.userMessage) : "";
   const knowledgeBlock =
     orderLookupDiet || skipKnowledge ? "" : buildKnowledgePrompt(brandId, knowledgeMax, context?.userMessage, context?.planMode);
   const imageBlock = buildImagePrompt(brandId);

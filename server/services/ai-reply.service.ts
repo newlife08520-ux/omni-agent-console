@@ -1230,7 +1230,7 @@ ${contextStr}
         userMessage,
         hasActiveOrderContext: !!storage.getActiveOrderContext(contact.id)?.order_id,
         recentUserHasImage,
-        selectedScenario: scenarioIso ? phase1Route!.selected_scenario : undefined,
+        selectedScenario: phase1Route != null ? phase1Route.selected_scenario : undefined,
         scenarioIsolationEnabled: scenarioIso,
         logisticsHintOverride: phase1Flags.logistics_hint_override,
         scenarioOverrides: isPhase1Active(phase1Flags) ? phase1Flags.scenario_overrides : undefined,
