@@ -5,7 +5,7 @@
  */
 import { storage } from "./storage";
 
-export type AiProvider = "openai" | "anthropic";
+export type AiProvider = "openai" | "anthropic" | "google";
 
 export interface ResolvedModel {
   provider: AiProvider;
@@ -63,7 +63,11 @@ function rawAiModelString(): string {
   if (dbAi) return dbAi;
   const legacyOpenaiModel = storage.getSetting("openai_model")?.trim();
   if (legacyOpenaiModel) {
-    if (legacyOpenaiModel.startsWith("anthropic:") || legacyOpenaiModel.startsWith("openai:")) {
+    if (
+      legacyOpenaiModel.startsWith("anthropic:") ||
+      legacyOpenaiModel.startsWith("openai:") ||
+      legacyOpenaiModel.startsWith("google:")
+    ) {
       return legacyOpenaiModel;
     }
     return `openai:${legacyOpenaiModel}`;
@@ -73,10 +77,13 @@ function rawAiModelString(): string {
 
 /**
  * 解析目前主對話供應商與模型 id。
- * 環境變數 AI_MODEL：`openai:gpt-4o` 或 `anthropic:claude-sonnet-4-5`；無前綴視為 openai。
+ * 環境變數 AI_MODEL：`openai:gpt-4o`、`anthropic:claude-sonnet-4-5`、`google:gemini-…`；無前綴視為 openai。
  */
 export function resolveModel(): ResolvedModel {
   const raw = rawAiModelString();
+  if (raw.startsWith("google:")) {
+    return { provider: "google", model: raw.slice("google:".length) };
+  }
   if (raw.startsWith("anthropic:")) {
     return { provider: "anthropic", model: raw.slice("anthropic:".length) };
   }
@@ -95,6 +102,7 @@ export function resolveModel(): ResolvedModel {
 export function resolveModelWithBrandOverride(modelOverride?: string | null): ResolvedModel {
   const t = modelOverride?.trim();
   if (t) {
+    if (t.startsWith("google:")) return { provider: "google", model: t.slice("google:".length) };
     if (t.startsWith("anthropic:")) return { provider: "anthropic", model: t.slice("anthropic:".length) };
     if (t.startsWith("openai:")) return { provider: "openai", model: t.slice("openai:".length) };
     return { provider: "openai", model: t };

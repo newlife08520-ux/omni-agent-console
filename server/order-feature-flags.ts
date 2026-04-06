@@ -16,6 +16,11 @@ export const orderFeatureFlags = {
   orderFastPath: envBool("ENABLE_ORDER_FAST_PATH", false),
   orderFinalNormalizer: envBool("ENABLE_ORDER_FINAL_NORMALIZER", false),
   genericDeterministicOrder: envBool("ENABLE_GENERIC_DETERMINISTIC_ORDER", false),
+  /**
+   * 手機查單：單筆（非 local_only）或同手機 ≤3 筆時，用已組好的完整卡片略過第二輪 LLM，避免模型刪行改寫。
+   * 關閉時設 ENABLE_PHONE_ORDER_DETERMINISTIC_REPLY=0。
+   */
+  phoneOrderDeterministicReply: envBool("ENABLE_PHONE_ORDER_DETERMINISTIC_REPLY", true),
   orderUltraLitePrompt: envBool("ENABLE_ORDER_ULTRA_LITE_PROMPT", false),
   orderLatencyV2: envBool("ENABLE_ORDER_LATENCY_V2", true),
   /** Phase 30：為 true 時，若資料為 local_only（僅本地索引），不單筆定案，改回帶說明讓 LLM 補問或補查 */

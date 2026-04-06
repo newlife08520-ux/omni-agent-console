@@ -31,6 +31,8 @@ const AI_MODEL_PRESETS = [
   { value: "openai:gpt-4o", label: "GPT-4o（品質最好）" },
   { value: "openai:gpt-4o-mini", label: "GPT-4o Mini（速度快、成本低）" },
   { value: "anthropic:claude-sonnet-4-5", label: "Claude Sonnet（回覆自然）" },
+  { value: "google:gemini-3.1-pro-preview", label: "Gemini 3.1 Pro（Google 最新主力）" },
+  { value: "google:gemini-3-flash-preview", label: "Gemini 3 Flash（較快較省）" },
 ] as const;
 
 type OpenAIModelsPayload = {
@@ -39,7 +41,7 @@ type OpenAIModelsPayload = {
   modelQuickPicks: string[];
   main: { effective: string; source: string; envVarSet: boolean; storedInDb: string };
   router: { effective: string; source: string; envVarSet: boolean; storedInDb: string };
-  provider: "openai" | "anthropic";
+  provider: "openai" | "anthropic" | "google";
   aiModelEnvSet: boolean;
 };
 
@@ -288,8 +290,16 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
       label: "Anthropic API 金鑰（Claude）",
       icon: Key,
       placeholder: "sk-ant-...",
-      description: "用於 Claude 模型（後台選擇 anthropic:claude-sonnet-4-5 或環境變數 AI_MODEL 後生效）。",
+      description: "用於 Claude。測試連線時若主模型為 Anthropic，會用您設定的模型實測；否則以較輕量模型驗證金鑰。",
       testType: "anthropic",
+    },
+    {
+      key: "gemini_api_key",
+      label: "Gemini API 金鑰（Google AI Studio）",
+      icon: Key,
+      placeholder: "AIza...",
+      description: "用於 google:gemini-… 主模型。測試連線時若主模型為 Google，會用您設定的模型實測；否則以 gemini-3.1-pro-preview 驗證金鑰。",
+      testType: "gemini",
     },
   ];
 
@@ -387,7 +397,7 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
                         <Sparkles className="w-4 h-4 text-indigo-600" />
                       </div>
                       <div>
-                        <span className="text-sm font-semibold text-stone-800">AI / LLM（OpenAI 與 Claude）</span>
+                        <span className="text-sm font-semibold text-stone-800">AI / LLM（OpenAI、Claude、Gemini）</span>
                         <p className="text-xs text-stone-500">
                           頁首橫幅會顯示生效供應商與模型；此卡片可選擇主模型、進階 OpenAI 欄位
                           {isSuperAdmin ? " 與 API 金鑰（下方）。" : "（API 金鑰與測試連線僅超級管理員）。"}
@@ -478,7 +488,8 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
                             主模型（<span className="font-mono">ai_model</span>）
                           </label>
                           <p className="text-[11px] text-stone-400 mb-2">
-                            選擇後按儲存；格式為 <span className="font-mono">openai:…</span> 或 <span className="font-mono">anthropic:…</span>。亦可由環境變數{" "}
+                            選擇後按儲存；格式為 <span className="font-mono">openai:…</span>、<span className="font-mono">anthropic:…</span> 或{" "}
+                            <span className="font-mono">google:…</span>。亦可由環境變數{" "}
                             <span className="font-mono">AI_MODEL</span> 覆寫。
                           </p>
                           {(() => {

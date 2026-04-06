@@ -30,7 +30,7 @@ export interface Phase1BrandFlags {
   logistics_hint_override?: string;
   /** 逐情境輕量覆寫（不做新表） */
   scenario_overrides?: Partial<Record<AgentScenario, ScenarioOverrideEntry>>;
-  /** 品牌級模型覆寫，格式同 AI_MODEL（如 openai:gpt-4o、anthropic:claude-sonnet-4-5）；無前綴視為 OpenAI id */
+  /** 品牌級模型覆寫，格式同 AI_MODEL（如 openai:…、anthropic:…、google:gemini-…）；無前綴視為 OpenAI id */
   ai_model_override?: string;
 }
 

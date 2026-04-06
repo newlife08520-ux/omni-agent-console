@@ -83,12 +83,30 @@ function mapShoplineOrder(o: any): OrderInfo {
   let itemsStructured: string | undefined;
   const rawItems = o.order_items ?? o.line_items ?? o.items;
   if (Array.isArray(rawItems)) {
-    const mapped = rawItems.map((item: any) => ({
-      name: item.name ?? item.product_name ?? item.title ?? "",
-      code: item.sku ?? item.product_id ?? "",
-      qty: item.quantity ?? item.qty ?? 1,
-      price: item.price ?? item.sale_price ?? 0,
-    }));
+    const mapped = rawItems.map((item: any) => {
+      const zhT =
+        item.title_translations != null && typeof item.title_translations === "object"
+          ? item.title_translations["zh-hant"] ?? item.title_translations["zh-Hant"] ?? ""
+          : "";
+      const title =
+        item.name ??
+        item.product_name ??
+        item.title ??
+        item.product_title ??
+        item.variant_title ??
+        item.variant_name ??
+        item.line_item_title ??
+        item.display_name ??
+        zhT ??
+        "";
+      return {
+        name: title,
+        product_name: item.product_name ?? title,
+        code: item.sku ?? item.variant_id ?? item.product_id ?? "",
+        qty: item.quantity ?? item.qty ?? 1,
+        price: item.price ?? item.sale_price ?? 0,
+      };
+    });
     productListStr = JSON.stringify(mapped);
     itemsStructured = productListStr;
   } else if (typeof o.product_list === "string") {
@@ -97,17 +115,34 @@ function mapShoplineOrder(o: any): OrderInfo {
 
   const subRaw = o.subtotal_items ?? o.subtotal_line_items;
   if (Array.isArray(subRaw) && subRaw.length > 0) {
-    const fromSub = subRaw.map((item: any) => ({
-      name: item.title ?? item.name ?? item.product_name ?? item.product_title ?? "",
-      code: item.sku ?? item.variant_id ?? item.product_id ?? "",
-      qty: item.quantity ?? item.qty ?? 1,
-      price:
+    const fromSub = subRaw.map((item: any) => {
+      const zhT =
+        item.title_translations != null && typeof item.title_translations === "object"
+          ? item.title_translations["zh-hant"] ?? item.title_translations["zh-Hant"] ?? ""
+          : "";
+      const title =
+        item.title ??
+        item.name ??
+        item.product_name ??
+        item.product_title ??
+        item.variant_title ??
+        item.variant_name ??
+        item.line_item_title ??
+        zhT ??
+        "";
+      return {
+        name: title,
+        product_name: item.product_name ?? title,
+        code: item.sku ?? item.variant_id ?? item.product_id ?? "",
+        qty: item.quantity ?? item.qty ?? 1,
+        price:
         item.price?.dollars ??
         (item.price?.cents != null ? item.price.cents / 100 : undefined) ??
         item.price ??
         item.subtotal?.dollars ??
         0,
-    }));
+      };
+    });
     const needSub =
       !productListStr ||
       productListStr === "[]" ||

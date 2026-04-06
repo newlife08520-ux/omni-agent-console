@@ -104,21 +104,53 @@ export function payKindForOrder(order: OrderInfo, statusLabel: string, source: s
  * Phase 2.9：對客商品明細人類可讀，禁止 raw JSON。
  * 優先 items_structured，再解析 product_list JSON，最後純字串。
  */
+function productLineNameFromRow(row: Record<string, unknown>): string {
+  const zhTitle =
+    row.title_translations != null && typeof row.title_translations === "object"
+      ? String((row.title_translations as Record<string, string>)["zh-hant"] ?? "").trim()
+      : "";
+  const name = String(
+    row.product_name ??
+      row.name ??
+      row.item_name ??
+      row.title ??
+      row.product_title ??
+      row.variant_title ??
+      row.variant_name ??
+      row.line_item_title ??
+      row.display_name ??
+      zhTitle ??
+      ""
+  ).trim();
+  const code = String(row.code ?? row.sku ?? row.variant_id ?? row.product_id ?? "").trim();
+  if (name) return name;
+  if (code) return `品項（${code}）`;
+  return "";
+}
+
 export function formatProductLinesForCustomer(o: {
   product_list?: string;
   items_structured?: unknown;
 }): string {
-  const raw = o.items_structured;
+  let raw: unknown = o.items_structured;
+  if (typeof raw === "string") {
+    const t = raw.trim();
+    if (t.startsWith("[") || t.startsWith("{")) {
+      try {
+        raw = JSON.parse(t) as unknown;
+      } catch {
+        raw = null;
+      }
+    }
+  }
   if (Array.isArray(raw) && raw.length > 0) {
     const lines = raw.map((item: unknown) => {
       if (item != null && typeof item === "object") {
         const x = item as Record<string, unknown>;
-        const name = String(
-          x.product_name ?? x.name ?? x.item_name ?? x.title ?? x.product_title ?? x.code ?? ""
-        ).trim();
+        const label = productLineNameFromRow(x);
         const qty = x.quantity ?? x.qty ?? 1;
-        if (!name) return "";
-        return `${name} × ${qty}`;
+        if (!label) return "";
+        return `${label} × ${qty}`;
       }
       return String(item ?? "").trim();
     });
@@ -135,9 +167,9 @@ export function formatProductLinesForCustomer(o: {
         const lines = arr.map((x: unknown) => {
           if (x != null && typeof x === "object") {
             const r = x as Record<string, unknown>;
-            const name = String(r.name ?? r.title ?? r.product_name ?? r.code ?? "").trim();
+            const label = productLineNameFromRow(r);
             const qty = r.quantity ?? r.qty ?? 1;
-            return name ? `${name} × ${qty}` : "";
+            return label ? `${label} × ${qty}` : "";
           }
           return String(x ?? "").trim();
         });
@@ -191,10 +223,9 @@ export function formatOrderOnePage(o: {
   const prodLine = formatProductLinesForCustomer({
     product_list: o.product_list,
     items_structured: o.items_structured,
-  });
-  if (prodLine) {
-    lines.push(`商品：${prodLine}`);
-  }
+  }).trim();
+  // 固定格式：一定有一行「商品」，避免 LLM／空明細時整段消失
+  lines.push(`商品：${prodLine || "暫無明細"}`);
 
   if (o.amount != null) lines.push(`金額：NT$ ${Number(o.amount).toLocaleString()}`);
 

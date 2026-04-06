@@ -82,11 +82,10 @@ import {
   createAiReplyService,
   detectHighRisk,
   getEnrichedSystemPrompt,
-  getOpenAIModel,
 } from "../services/ai-reply.service";
 import { getTransferUnavailableSystemMessage as transferUnavailableSystemMessage } from "../transfer-unavailable-message";
 import { orderLookupTools, humanHandoffTools, imageTools } from "../openai-tools";
-import { resolveOpenAIModel } from "../openai-model";
+import { resolveModel, resolveOpenAIModel } from "../openai-model";
 
 import OpenAI from "openai";
 import { parseFileContent, isImageFile } from "../file-parser";
@@ -595,7 +594,13 @@ export function registerCoreRoutes(app: Express): void {
       } else {
         try {
           const openai = new OpenAI({ apiKey });
-          await openai.chat.completions.create({ model: getOpenAIModel(), messages: [{ role: "user", content: "hi" }], max_completion_tokens: 5 });
+          const rmHealth = resolveModel();
+          const openaiPingModel = rmHealth.provider === "openai" ? rmHealth.model : "gpt-4o-mini";
+          await openai.chat.completions.create({
+            model: openaiPingModel,
+            messages: [{ role: "user", content: "hi" }],
+            max_completion_tokens: 5,
+          });
           results.openai = { status: "ok", message: "????" };
         } catch (err: any) {
           results.openai = { status: "error", message: `????: ${err.message}` };

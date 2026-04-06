@@ -1,6 +1,14 @@
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
 import type { ContentBlockParam, MessageParam } from "@anthropic-ai/sdk/resources/messages";
+import {
+  GoogleGenerativeAI,
+  FunctionCallingMode,
+  type Content,
+  type FunctionDeclaration,
+  type Part,
+} from "@google/generative-ai";
+import { randomUUID } from "node:crypto";
 import { resolveModelWithBrandOverride } from "../openai-model";
 import { storage } from "../storage";
 
@@ -14,7 +22,7 @@ export interface AiCallOptions {
   tools?: object[];
   maxTokens?: number;
   temperature?: number;
-  /** 品牌級覆寫（Phase 1 enabled 時由 ai-reply 傳入）；格式 openai:…／anthropic:… 或純 OpenAI id */
+  /** 品牌級覆寫（Phase 1 enabled 時由 ai-reply 傳入）；格式 openai:…／anthropic:…／google:… 或純 OpenAI id */
   modelOverride?: string;
 }
 
@@ -38,6 +46,124 @@ function openAiToolToClaudeSchema(t: Record<string, unknown>): Anthropic.Tool {
     description,
     input_schema: parameters as Anthropic.Tool["input_schema"],
   };
+}
+
+function openAiToolToGeminiFunctionDeclaration(t: Record<string, unknown>): FunctionDeclaration {
+  const fn = (t.function as Record<string, unknown> | undefined) ?? t;
+  const name = String(fn.name ?? "tool");
+  const description = typeof fn.description === "string" ? fn.description : undefined;
+  const parameters = fn.parameters;
+  const decl: FunctionDeclaration = { name, description };
+  if (parameters && typeof parameters === "object") {
+    decl.parameters = parameters as FunctionDeclaration["parameters"];
+  }
+  return decl;
+}
+
+function parseToolResultForGeminiResponse(raw: string): object {
+  try {
+    const j = JSON.parse(raw) as unknown;
+    if (typeof j === "object" && j !== null && !Array.isArray(j)) return j as object;
+    return { result: j };
+  } catch {
+    return { result: raw };
+  }
+}
+
+function claudeStyleMessagesToGeminiContents(messages: AiMessage[]): {
+  systemInstruction: string;
+  contents: Content[];
+} {
+  let systemInstruction = "";
+  const contents: Content[] = [];
+
+  for (const m of messages) {
+    if (m.role === "system") {
+      if (typeof m.content !== "string") {
+        throw new Error("Gemini：system 僅支援字串");
+      }
+      systemInstruction = systemInstruction ? `${systemInstruction}\n\n${m.content}` : m.content;
+      continue;
+    }
+
+    if (m.role === "user") {
+      const c = m.content;
+      if (typeof c === "string") {
+        contents.push({ role: "user", parts: [{ text: c }] });
+        continue;
+      }
+      if (!Array.isArray(c)) throw new Error("Gemini：無效的 user 訊息");
+
+      const textBits: string[] = [];
+      const toolResultStrings: string[] = [];
+      for (const b of c as ContentBlockParam[]) {
+        if (b.type === "text") textBits.push(b.text);
+        else if (b.type === "tool_result") {
+          toolResultStrings.push(typeof b.content === "string" ? b.content : String(b.content));
+        }
+      }
+
+      const parts: Part[] = [];
+      for (const tb of textBits) {
+        if (tb.trim()) parts.push({ text: tb });
+      }
+
+      if (toolResultStrings.length > 0) {
+        const prev = contents[contents.length - 1];
+        if (!prev || prev.role !== "model") {
+          throw new Error("Gemini：tool_result 前必須為含 functionCall 的 model 回合");
+        }
+        const callParts = prev.parts.filter((p) => Boolean((p as { functionCall?: unknown }).functionCall));
+        if (callParts.length !== toolResultStrings.length) {
+          throw new Error(
+            `Gemini：tool_result 數量 (${toolResultStrings.length}) 與上一輪 functionCall (${callParts.length}) 不一致`
+          );
+        }
+        for (let i = 0; i < toolResultStrings.length; i++) {
+          const fc = (callParts[i] as { functionCall: { name: string } }).functionCall;
+          parts.push({
+            functionResponse: {
+              name: fc.name,
+              response: parseToolResultForGeminiResponse(toolResultStrings[i]),
+            },
+          });
+        }
+      }
+
+      if (parts.length === 0) continue;
+      contents.push({ role: "user", parts });
+      continue;
+    }
+
+    if (m.role === "assistant") {
+      const c = m.content;
+      if (typeof c === "string") {
+        if (c.trim()) contents.push({ role: "model", parts: [{ text: c }] });
+        continue;
+      }
+      if (!Array.isArray(c)) throw new Error("Gemini：無效的 assistant 訊息");
+      const parts: Part[] = [];
+      for (const b of c as ContentBlockParam[]) {
+        if (b.type === "text" && b.text?.trim()) {
+          parts.push({ text: b.text });
+        } else if (b.type === "tool_use") {
+          const inputObj =
+            b.input && typeof b.input === "object" && !Array.isArray(b.input)
+              ? (b.input as object)
+              : {};
+          parts.push({
+            functionCall: {
+              name: b.name,
+              args: inputObj,
+            },
+          });
+        }
+      }
+      if (parts.length) contents.push({ role: "model", parts });
+    }
+  }
+
+  return { systemInstruction, contents };
 }
 
 export async function callAiModel(options: AiCallOptions): Promise<AiCallResult> {
@@ -91,6 +217,77 @@ export async function callAiModel(options: AiCallOptions): Promise<AiCallResult>
       model,
       inputTokens: response.usage.input_tokens,
       outputTokens: response.usage.output_tokens,
+    };
+  }
+
+  if (provider === "google") {
+    const apiKey = storage.getSetting("gemini_api_key")?.trim();
+    if (!apiKey) throw new Error("Gemini API key 未設定，請在後台設定 gemini_api_key");
+
+    const { systemInstruction, contents } = claudeStyleMessagesToGeminiContents(messages);
+    if (contents.length === 0) {
+      throw new Error("Gemini：對話內容為空");
+    }
+
+    const funcDecls = tools?.length
+      ? tools.map((t) => openAiToolToGeminiFunctionDeclaration(t as Record<string, unknown>))
+      : undefined;
+
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const genModel = genAI.getGenerativeModel({
+      model,
+      systemInstruction: systemInstruction || undefined,
+      tools: funcDecls?.length ? [{ functionDeclarations: funcDecls }] : undefined,
+      toolConfig: funcDecls?.length
+        ? { functionCallingConfig: { mode: FunctionCallingMode.AUTO } }
+        : undefined,
+    });
+
+    const result = await genModel.generateContent({
+      contents,
+      generationConfig: {
+        maxOutputTokens: maxTokens,
+        temperature,
+      },
+    });
+
+    const response = result.response;
+    if (response.promptFeedback?.blockReason) {
+      throw new Error(`Gemini 遭安全策略阻擋：${response.promptFeedback.blockReason}`);
+    }
+
+    let fcs: ReturnType<typeof response.functionCalls> | undefined;
+    try {
+      fcs = response.functionCalls();
+    } catch {
+      fcs = undefined;
+    }
+    let textContent = "";
+    try {
+      textContent = response.text();
+    } catch {
+      textContent = "";
+    }
+
+    const tool_calls =
+      fcs && fcs.length > 0
+        ? fcs.map((fc, i) => ({
+            id: `gemini_${fc.name}_${i}_${randomUUID().slice(0, 8)}`,
+            name: fc.name,
+            arguments: JSON.stringify(
+              fc.args && typeof fc.args === "object" && fc.args !== null ? fc.args : {}
+            ),
+          }))
+        : undefined;
+
+    const usage = response.usageMetadata;
+    return {
+      content: textContent,
+      tool_calls,
+      provider: "google",
+      model,
+      inputTokens: usage?.promptTokenCount ?? 0,
+      outputTokens: usage?.candidatesTokenCount ?? 0,
     };
   }
 

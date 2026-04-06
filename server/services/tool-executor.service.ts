@@ -31,6 +31,7 @@ import { lookupShoplineOrdersByPhoneExact } from "../shopline";
 import { classifyOrderNumber } from "../intent-and-order";
 import { applyHandoff, normalizeHandoffReason } from "./handoff";
 import { finalizeLlmToolJsonString } from "../tool-llm-sanitize";
+import { orderFeatureFlags } from "../order-feature-flags";
 
 /** 與 ai-reply 轉人工備援句一致，避免客人只看到轉接、沒有任何 AI 對話 */
 export const TRANSFER_TOOL_CUSTOMER_ACK = "好的，我這邊幫您轉給專人處理，請稍等一下。";
@@ -95,7 +96,16 @@ function orderItemsStructuredPayload(o: OrderInfo): unknown {
     if (it == null || typeof it !== "object") return it;
     const row = it as Record<string, unknown>;
     const resolved =
-      String(row.product_name ?? row.name ?? row.item_name ?? row.title ?? "").trim() || undefined;
+      String(
+        row.product_name ??
+          row.name ??
+          row.item_name ??
+          row.title ??
+          row.product_title ??
+          row.variant_title ??
+          row.variant_name ??
+          ""
+      ).trim() || undefined;
     if (resolved && !row.product_name) {
       return { ...row, product_name: resolved };
     }
@@ -1439,7 +1449,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             : appendFailedPaymentMultiNote(
                 (() => {
                   if (orders.length <= 3) {
-                    return `【重要】以下共 ${orders.length} 筆訂單。請直接使用 one_page_full 裡的完整卡片逐筆回覆給客人，不要用簡表、不要刪行。每筆都要完整呈現卡片上的欄位，包含：訂單編號、收件人（已隱碼）、電話（已隱碼）、下單時間、商品、金額、付款、配送、取貨門市或地址、狀態。`;
+                    return `【重要】以下共 ${orders.length} 筆訂單。請逐字使用 one_page_full 的完整卡片回覆，禁止改寫成簡表、禁止刪除任何一行。每筆必含：訂單編號、收件人（已隱碼，有則顯示）、電話（已隱碼）、下單時間、商品（若為「暫無明細」也要照寫）、金額、付款、配送、取貨門市或地址、狀態。`;
                   }
                   if (orders.length <= 5) {
                     return `以下共 ${orders.length} 筆訂單。\n簡表：\n${formattedList}\n\n請列出簡表讓客人選擇要看哪一筆。`;
@@ -1529,13 +1539,17 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
               : n <= 5
                 ? formattedList
                 : formatOrdersToolFormattedList(orderSummaries.slice(0, 5));
+          /** ≤3 筆：程式直出完整卡片，略過第二輪 LLM（需契約欄位 + deterministic_customer_reply） */
+          const usePhoneDeterministic =
+            orderFeatureFlags.phoneOrderDeterministicReply && orders.length <= 3;
           return toolJson({
             success: true,
             found: true,
             total: n,
             orders: orderSummaries,
             source: orderSource,
-            deterministic_skip_llm: false,
+            deterministic_skip_llm: usePhoneDeterministic,
+            ...(usePhoneDeterministic ? { deterministic_customer_reply: deterministicReply } : {}),
             ...orderDeterministicContractFields(),
             renderer: "deterministic",
             note: multiOrderNote,
@@ -1629,13 +1643,16 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
               orderSource +
               (noSingleClaim ? " data_coverage=local_only" : "")
           );
+          const usePhoneDeterministicSingle =
+            orderFeatureFlags.phoneOrderDeterministicReply && !isLocalOnly;
           return toolJson({
             success: true,
             found: true,
             total: 1,
             orders: orderSummaries,
             source: orderSource,
-            deterministic_skip_llm: false,
+            deterministic_skip_llm: usePhoneDeterministicSingle,
+            ...(usePhoneDeterministicSingle ? { deterministic_customer_reply: replyText } : {}),
             ...orderDeterministicContractFields(),
             renderer: "deterministic",
             one_page_summary: noSingleClaim ? singleDeterministicBody : onePageBlocks[0],

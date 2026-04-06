@@ -85,10 +85,11 @@ import {
 } from "../services/ai-reply.service";
 import { getTransferUnavailableSystemMessage as transferUnavailableSystemMessage } from "../transfer-unavailable-message";
 import { orderLookupTools, humanHandoffTools, imageTools } from "../openai-tools";
-import { describeOpenAIModelsForSettings, resolveModel, resolveOpenAIModel } from "../openai-model";
+import { describeOpenAIModelsForSettings, resolveModel } from "../openai-model";
 
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { parseFileContent, isImageFile } from "../file-parser";
 import { authMiddleware, superAdminOnly, managerOrAbove, parseIdParam } from "../middlewares/auth.middleware";
 import { broadcastSSE, registerSseRoutes } from "../services/sse.service";
@@ -139,7 +140,15 @@ export function registerSettingsBrandsRoutes(app: Express): void {
       }
       const allSettings = storage.getAllSettings();
       if (role === "super_admin") return res.json(allSettings);
-      const sensitiveKeys = ["openai_api_key", "anthropic_api_key", "line_channel_secret", "line_channel_access_token", "superlanding_merchant_no", "superlanding_access_key"];
+      const sensitiveKeys = [
+        "openai_api_key",
+        "anthropic_api_key",
+        "gemini_api_key",
+        "line_channel_secret",
+        "line_channel_access_token",
+        "superlanding_merchant_no",
+        "superlanding_access_key",
+      ];
       const filtered = allSettings.filter((s) => !sensitiveKeys.includes(s.key));
       return res.json(filtered);
     });
@@ -147,7 +156,15 @@ export function registerSettingsBrandsRoutes(app: Express): void {
     app.put("/api/settings", authMiddleware, (req: any, res) => {
       const { key, value } = req.body;
       if (!key) return res.status(400).json({ message: "key is required" });
-      const sensitiveKeys = ["openai_api_key", "anthropic_api_key", "line_channel_secret", "line_channel_access_token", "superlanding_merchant_no", "superlanding_access_key"];
+      const sensitiveKeys = [
+        "openai_api_key",
+        "anthropic_api_key",
+        "gemini_api_key",
+        "line_channel_secret",
+        "line_channel_access_token",
+        "superlanding_merchant_no",
+        "superlanding_access_key",
+      ];
       if (sensitiveKeys.includes(key)) {
         if (req.session?.userRole !== "super_admin") return res.status(403).json({ message: "????? super_admin ???API Key ??" });
       } else {
@@ -171,13 +188,13 @@ export function registerSettingsBrandsRoutes(app: Express): void {
           }
           const openai = new OpenAI({ apiKey });
           const rm = resolveModel();
-          const model = rm.provider === "openai" ? resolveOpenAIModel() : "gpt-4o-mini";
+          const model = rm.provider === "openai" ? rm.model : "gpt-4o-mini";
           await openai.chat.completions.create({
             model,
             messages: [{ role: "user", content: "hi" }],
             max_completion_tokens: 5,
           });
-          return res.json({ success: true, message: `OpenAI 連線成功，使用模型：${model}` });
+          return res.json({ success: true, message: `OpenAI 連線成功，已用模型 ${model} 實際完成一次補全` });
         }
 
         if (type === "anthropic") {
@@ -186,12 +203,46 @@ export function registerSettingsBrandsRoutes(app: Express): void {
             return res.json({ success: false, message: "請先設定 Anthropic API 金鑰" });
           }
           const client = new Anthropic({ apiKey });
+          const rm = resolveModel();
+          const model = rm.provider === "anthropic" ? rm.model : "claude-haiku-4-5-20251001";
           await client.messages.create({
-            model: "claude-haiku-4-5-20251001",
+            model,
             max_tokens: 10,
             messages: [{ role: "user", content: "hi" }],
           });
-          return res.json({ success: true, message: "Claude 連線成功，模型：claude-haiku" });
+          return res.json({ success: true, message: `Anthropic 連線成功，已用模型 ${model} 實際完成一次請求` });
+        }
+
+        if (type === "gemini") {
+          const apiKey = storage.getSetting("gemini_api_key");
+          if (!apiKey || apiKey.trim() === "") {
+            return res.json({ success: false, message: "請先設定 Gemini API 金鑰" });
+          }
+          const rm = resolveModel();
+          const model = rm.provider === "google" ? rm.model : "gemini-3.1-pro-preview";
+          const genAI = new GoogleGenerativeAI(apiKey.trim());
+          const genModel = genAI.getGenerativeModel({ model });
+          const result = await genModel.generateContent({
+            contents: [{ role: "user", parts: [{ text: "hi" }] }],
+            generationConfig: { maxOutputTokens: 8, temperature: 0 },
+          });
+          const resp = result.response;
+          if (resp.promptFeedback?.blockReason) {
+            return res.json({
+              success: false,
+              message: `Gemini 遭安全策略阻擋：${resp.promptFeedback.blockReason}`,
+            });
+          }
+          let out = "";
+          try {
+            out = resp.text().trim();
+          } catch {
+            out = "";
+          }
+          if (!out) {
+            return res.json({ success: false, message: "Gemini 回應為空（請確認模型名稱與 API 權限）" });
+          }
+          return res.json({ success: true, message: `Gemini 連線成功，已用模型 ${model} 取得回應` });
         }
 
         if (type === "line") {
@@ -219,11 +270,26 @@ export function registerSettingsBrandsRoutes(app: Express): void {
           const slUrl = `https://api.super-landing.com/orders.json?merchant_no=${encodeURIComponent(merchantNo)}&access_key=${encodeURIComponent(accessKey)}&per_page=1`;
           try {
             const slRes = await fetch(slUrl, { headers: { Accept: "application/json" } });
-            if (slRes.ok) {
-              return res.json({ success: true, message: "SuperLanding ????" });
-            }
             const errText = await slRes.text().catch(() => "");
-            return res.json({ success: false, message: `SuperLanding ???? (HTTP ${slRes.status})?${errText || "??? merchant_no ? access_key ????"}` });
+            if (!slRes.ok) {
+              return res.json({
+                success: false,
+                message: `SuperLanding 請求失敗 (HTTP ${slRes.status})：${errText || "請確認 merchant_no 與 access_key"}`,
+              });
+            }
+            let parsed: unknown;
+            try {
+              parsed = JSON.parse(errText);
+            } catch {
+              return res.json({
+                success: false,
+                message: "SuperLanding 回傳非 JSON，可能為錯誤頁或網址異常，請確認金鑰與商店編號",
+              });
+            }
+            if (parsed === null || typeof parsed !== "object") {
+              return res.json({ success: false, message: "SuperLanding JSON 格式異常，連線未視為成功" });
+            }
+            return res.json({ success: true, message: "SuperLanding API 連線成功（已驗證 JSON 回應）" });
           } catch (fetchErr: any) {
             const detail = fetchErr?.cause?.code || fetchErr?.code || fetchErr?.message || "????";
             return res.json({ success: false, message: `SuperLanding ?????${detail}` });

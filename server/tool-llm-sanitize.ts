@@ -184,7 +184,13 @@ function walkPayload(root: Record<string, unknown>, dataCoverage?: string): void
   }
 
   // 清洗已組好的字串摘要（移除可能殘留的來源；收件人／電話已改隱碼顯示，勿整行刪除）
-  const STRING_KEYS_TO_SANITIZE = ["one_page_summary", "one_page_full", "formatted_list", "deterministicReply"];
+  const STRING_KEYS_TO_SANITIZE = [
+    "one_page_summary",
+    "one_page_full",
+    "formatted_list",
+    "deterministicReply",
+    "deterministic_customer_reply",
+  ];
   for (const key of STRING_KEYS_TO_SANITIZE) {
     const val = root[key];
     if (typeof val === "string" && val.length > 0) {
