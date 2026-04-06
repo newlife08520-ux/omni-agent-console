@@ -1431,12 +1431,21 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
         const one_page_full = onePageBlocks.join("\n\n---\n\n");
         const hasFailedPhoneMulti = orderSummaries.some((x) => x.payment_status === "failed");
         const multiOrderNote =
-          orders.length > 1
-            ? appendFailedPaymentMultiNote(
-                `【重要】以下共 ${orders.length} 筆訂單。回覆時必須逐筆列出。\n簡表：\n${formattedList}`,
+          orders.length <= 1
+            ? undefined
+            : appendFailedPaymentMultiNote(
+                (() => {
+                  if (orders.length <= 3) {
+                    return `【重要】以下共 ${orders.length} 筆訂單。請直接使用 one_page_full 裡的完整卡片逐筆回覆給客人，不要用簡表。每筆都要顯示：訂單編號、商品、金額、付款、配送、狀態。`;
+                  }
+                  if (orders.length <= 5) {
+                    return `以下共 ${orders.length} 筆訂單。\n簡表：\n${formattedList}\n\n請列出簡表讓客人選擇要看哪一筆。`;
+                  }
+                  const formattedListTop5 = formatOrdersToolFormattedList(orderSummaries.slice(0, 5));
+                  return `此手機共有 ${orders.length} 筆訂單，以下列出最近 5 筆：\n簡表：\n${formattedListTop5}\n\n請問客人要看哪一筆的詳細資訊。`;
+                })(),
                 hasFailedPhoneMulti
-              )
-            : undefined;
+              );
 
         if (orders.length > 1) {
           const n = orders.length;
@@ -1511,6 +1520,12 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           console.log(
             `[order_lookup] renderer=deterministic lookup=phone_multi n=${n} source=${orderSource}`
           );
+          const formattedListForTool =
+            n <= 3
+              ? undefined
+              : n <= 5
+                ? formattedList
+                : formatOrdersToolFormattedList(orderSummaries.slice(0, 5));
           return toolJson({
             success: true,
             found: true,
@@ -1521,8 +1536,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             ...orderDeterministicContractFields(),
             renderer: "deterministic",
             note: multiOrderNote,
-            formatted_list: deterministicReply,
-            one_page_full: onePageFullForContext || deterministicReply,
+            formatted_list: formattedListForTool,
+            one_page_full: onePageFullForContext ?? one_page_full,
           });
         }
 
@@ -1635,7 +1650,12 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           orders: orderSummaries,
           source: orderSource,
           note: multiOrderNote,
-          formatted_list: orders.length > 1 ? formattedList : undefined,
+          formatted_list:
+            orders.length > 3
+              ? orders.length <= 5
+                ? formattedList
+                : formatOrdersToolFormattedList(orderSummaries.slice(0, 5))
+              : undefined,
           one_page_summary:
             orders.length === 1
               ? isSingleLocalOnly
