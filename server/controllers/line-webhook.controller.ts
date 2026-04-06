@@ -250,7 +250,16 @@ export async function handleLineWebhook(req: Request, res: Response, deps: LineW
               const inHandoffState = !!(contactAfterProfile.needs_human || contactAfterProfile.status === "awaiting_human" || contactAfterProfile.status === "high_risk");
               const allowOnlyLinkRestore = inHandoffState && (isLinkRequestMessage(trimmedText) || isLinkRequestCorrectionMessage(trimmedText));
               const shouldInvokeAi = !inHandoffState || allowOnlyLinkRestore;
-              if (shouldInvokeAi) {
+              if (!shouldInvokeAi) {
+                console.log(
+                  "[WEBHOOK] 略過文字自動回覆：聯絡人已在人工／高風險流程，contact_id=",
+                  contactAfterProfile.id,
+                  "needs_human=",
+                  contactAfterProfile.needs_human,
+                  "status=",
+                  contactAfterProfile.status
+                );
+              } else {
                 const aiEnabled = matchedChannel ? matchedChannel.is_ai_enabled : 0;
                 if (!matchedChannel) {
                   recordAutoReplyBlocked(storage, {
