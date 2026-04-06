@@ -64,6 +64,7 @@ import { ensureShippingSopCompliance } from "../sop-compliance-guard";
 import { deriveOrderLookupIntent } from "../order-lookup-policy";
 import { TRANSFER_TOOL_CUSTOMER_ACK, type ToolCallContext } from "./tool-executor.service";
 import { resolveModelWithBrandOverride, resolveOpenAIModel } from "../openai-model";
+import { createChatCompletionsOpenAIClient } from "../openai-routing-client";
 import type { ContentBlockParam } from "@anthropic-ai/sdk/resources/messages";
 import { callAiModel, type AiCallResult, type AiMessage } from "./ai-client.service";
 import { getDataDir } from "../data-dir";
@@ -1745,7 +1746,14 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
 
       let openaiClient: OpenAI | null = null;
       const getOpenAI = (): OpenAI => {
-        if (!openaiClient) openaiClient = new OpenAI({ apiKey });
+        if (!openaiClient) {
+          const rm = resolveModelWithBrandOverride(phase1ModelOverride);
+          const routed = createChatCompletionsOpenAIClient(rm, {
+            openaiApiKey: apiKey,
+            geminiApiKey: storage.getSetting("gemini_api_key"),
+          });
+          openaiClient = routed ?? new OpenAI({ apiKey });
+        }
         return openaiClient;
       };
       let usedFirstLlmTelemetry = 0;
@@ -1833,9 +1841,9 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
       }
 
       const mainResolvedForTools = resolveModelWithBrandOverride(phase1ModelOverride);
+      /** 查單／跟進也必須走 callAiModel，否則 Gemini 會被當成 OpenAI model 打到 api.openai.com */
       const claudeSeed =
-        (mainResolvedForTools.provider === "anthropic" || mainResolvedForTools.provider === "google") &&
-        !isOrderLookupFamily(plan.mode)
+        mainResolvedForTools.provider === "anthropic" || mainResolvedForTools.provider === "google"
           ? openaiChatMessagesToClaudeSeed(chatMessages)
           : null;
 
@@ -1889,7 +1897,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             messages: claudeConversation,
             tools: allTools,
             maxTokens: 1500,
-            temperature: 0.85,
+            temperature: isOrderLookupFamily(plan.mode) ? 0.28 : 0.85,
             modelOverride: phase1ModelOverride,
           });
           totalTokens += rFirst.inputTokens + rFirst.outputTokens;
