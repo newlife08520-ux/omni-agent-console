@@ -14,6 +14,7 @@ import {
 import { format } from "date-fns";
 import { zhTW } from "date-fns/locale/zh-TW";
 import type { AnalyticsData } from "@shared/schema";
+import { useBrand } from "@/lib/brand-context";
 
 const PIE_COLORS = ["#059669", "#d97706", "#7c3aed", "#0284c7", "#e11d48", "#ea580c", "#0d9488", "#64748b"];
 const AREA_COLORS = { user: "#0284c7", ai: "#059669", admin: "#d97706" };
@@ -31,18 +32,21 @@ const renderPieLabel = ({ name, value, percent }: any) => {
 };
 
 export default function AnalyticsPage() {
+  const { selectedBrandId, selectedBrand } = useBrand();
   const [range, setRange] = useState("30d");
   const [customStart, setCustomStart] = useState<Date | undefined>(undefined);
   const [customEnd, setCustomEnd] = useState<Date | undefined>(undefined);
   const [showStartCal, setShowStartCal] = useState(false);
   const [showEndCal, setShowEndCal] = useState(false);
 
-  const queryParams = range === "custom" && customStart && customEnd
-    ? `?range=custom&start=${format(customStart, "yyyy-MM-dd")}&end=${format(customEnd, "yyyy-MM-dd")}`
-    : `?range=${range}`;
+  const brandQs = selectedBrandId != null ? `&brand_id=${selectedBrandId}` : "";
+  const queryParams =
+    (range === "custom" && customStart && customEnd
+      ? `?range=custom&start=${format(customStart, "yyyy-MM-dd")}&end=${format(customEnd, "yyyy-MM-dd")}`
+      : `?range=${range}`) + brandQs;
 
   const { data, isLoading, isError, error, refetch } = useQuery<AnalyticsData>({
-    queryKey: ["/api/analytics", range, customStart?.toISOString(), customEnd?.toISOString()],
+    queryKey: ["/api/analytics", range, customStart?.toISOString(), customEnd?.toISOString(), selectedBrandId ?? "all"],
     queryFn: async () => {
       const res = await fetch(`/api/analytics${queryParams}`, { credentials: "include" });
       if (!res.ok) throw new Error(`${res.status}`);
@@ -94,7 +98,17 @@ export default function AnalyticsPage() {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-xl font-bold text-stone-800" data-testid="text-analytics-title">數據戰情室</h1>
-          <p className="text-sm text-stone-500 mt-0.5">即時監控客服績效（僅顯示真實數據）</p>
+          <p className="text-sm text-stone-500 mt-0.5">
+            即時監控客服績效（僅顯示真實數據）
+            <span className="mx-1.5 text-stone-300">|</span>
+            品牌：
+            <span className="text-stone-700 font-medium">
+              {selectedBrandId == null ? "全部" : (selectedBrand?.name ?? `ID ${selectedBrandId}`)}
+            </span>
+            <span className="mx-1.5 text-stone-300">|</span>
+            區間：<span className="text-stone-700 font-medium">{rangeLabel}</span>
+            <span className="block text-xs text-stone-400 mt-1">與留言中心相同，請用左側選單切換品牌；選「全部」時不分品牌匯總。</span>
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <CalendarDays className="w-4 h-4 text-stone-400" />

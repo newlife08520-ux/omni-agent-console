@@ -18,6 +18,8 @@ import {
 } from "lucide-react";
 import { getQueryFn } from "@/lib/queryClient";
 import { useBrand } from "@/lib/brand-context";
+import { format } from "date-fns";
+import { zhTW } from "date-fns/locale/zh-TW";
 import {
   PieChart,
   Pie,
@@ -100,7 +102,8 @@ function StatCard({ title, value, sub, icon: Icon, accent }: { title: string; va
 const CHART_COLORS = ["#10b981", "#f59e0b", "#6366f1", "#ec4899", "#8b5cf6", "#06b6d4", "#84cc16"];
 
 export default function PerformancePage() {
-  const { selectedBrandId } = useBrand();
+  const { selectedBrandId, selectedBrand } = useBrand();
+  const perfBrandQs = selectedBrandId != null ? `?brand_id=${selectedBrandId}` : "";
   const { data: auth } = useQuery<{ user?: { role: string } }>({
     queryKey: ["/api/auth/check"],
     queryFn: getQueryFn({ on401: "throw" }),
@@ -161,6 +164,9 @@ export default function PerformancePage() {
   const alerts = dashboard?.alerts ?? [];
   const issueRank = dashboard?.issue_type_rank ?? [];
   const tagRank = dashboard?.tag_rank ?? [];
+  const statsDayLabel = format(new Date(), "yyyy/MM/dd (EEE)", { locale: zhTW });
+  const brandScopeLabel =
+    selectedBrandId == null ? "全部品牌" : (selectedBrand?.name ?? `品牌 #${selectedBrandId}`);
 
   return (
     <div className="p-6 max-w-[1200px] mx-auto space-y-6" data-testid="performance-page">
@@ -168,6 +174,18 @@ export default function PerformancePage() {
         <h1 className="text-xl font-bold text-stone-800">客服績效</h1>
         <p className="text-sm text-stone-500 mt-0.5">
           {isManager ? "戰情板：今日待處理、緊急案件、客服負載一目了然" : "您的今日工作量與解決率"}
+        </p>
+        <p className="text-xs text-stone-500 mt-2 space-y-0.5">
+          <span className="block">
+            <span className="text-stone-400">統計基準日（伺服器曆日）</span>：<span className="font-medium text-stone-700">{statsDayLabel}</span>
+            <span className="text-stone-400 mx-1">·</span>
+            「今日新進／今日結案」皆依上述日期計算。
+          </span>
+          <span className="block">
+            <span className="text-stone-400">品牌範圍</span>：<span className="font-medium text-stone-700">{brandScopeLabel}</span>
+            <span className="text-stone-400 mx-1">·</span>
+            與左側品牌選單連動；選「全部」時為跨品牌加總。
+          </span>
         </p>
       </div>
 
