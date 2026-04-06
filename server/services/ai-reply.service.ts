@@ -158,6 +158,31 @@ function isOrderLookupFamily(mode: string): boolean {
   return mode === "order_lookup" || mode === "order_followup";
 }
 
+/** 供主對話 system prompt：從 contact.display_name 整理出可稱呼字串 */
+function sanitizeContactDisplayName(raw: string): string {
+  const s = (raw || "").trim();
+  if (!s) return "";
+  if (/^U[a-f0-9]{30,}$/i.test(s)) return "";
+  if (/^unknown$/i.test(s)) return "";
+  if (/^\d+$/.test(s)) return "";
+  const cleaned = s.replace(/^[.*★☆♥♡~～❤️💕🌟✨\s]+|[.*★☆♥♡~～❤️💕🌟✨\s]+$/g, "").trim();
+  if (!cleaned) return "";
+  if (/^[\u4e00-\u9fff]{3,}$/.test(cleaned)) {
+    return cleaned.charAt(0) + "先生/小姐";
+  }
+  if (/^[\u4e00-\u9fff]{2}$/.test(cleaned)) {
+    return cleaned;
+  }
+  if (/^[\u4e00-\u9fff]{1}$/.test(cleaned)) {
+    return cleaned + "先生/小姐";
+  }
+  if (/^[a-zA-Z]/.test(cleaned)) {
+    const firstName = cleaned.split(/[\s._]+/)[0];
+    return firstName || "";
+  }
+  return cleaned.length > 10 ? cleaned.slice(0, 10) : cleaned;
+}
+
 function openaiChatMessagesToClaudeSeed(
   msgs: OpenAI.Chat.Completions.ChatCompletionMessageParam[]
 ): AiMessage[] | null {
@@ -1213,6 +1238,10 @@ ${contextStr}
         `[prompt_profile=${enrichedPack.prompt_profile}] prompt_chars=${enrichedPack.prompt_chars} catalog_included=${enrichedPack.includes.catalog} knowledge_included=${enrichedPack.includes.knowledge} image_included=${enrichedPack.includes.image} prompt_sections=${enrichedPack.sections.map((s) => s.key).join("|")} prompt_assembly_ms=${Date.now() - startTime}`
       );
       let systemPrompt = enrichedPack.full_prompt;
+      const contactDisplayName = sanitizeContactDisplayName(contact?.display_name || "");
+      if (contactDisplayName) {
+        systemPrompt += `\n\n【這位客人的稱呼】${contactDisplayName}\n（開場時自然帶一次就好，用你自己的語氣和風格稱呼，不要制式。之後不用重複叫名字。如果稱呼看起來不太對勁就直接說「你好」。）`;
+      }
       if (goalLocked) {
         systemPrompt += appendGoalLockedBlock(goalLocked);
       }
