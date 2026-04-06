@@ -14,7 +14,7 @@ import {
 import { classifyMessageForSafeAfterSale } from "../safe-after-sale-classifier";
 import { resolveConversationState } from "../conversation-state-resolver";
 import { buildReplyPlan } from "../reply-plan-builder";
-import { orderLookupTools, humanHandoffTools, imageTools } from "../openai-tools";
+import { orderLookupTools, humanHandoffTools, imageTools, productRecommendTools } from "../openai-tools";
 import { createToolExecutor } from "../services/tool-executor.service";
 
 export function registerSandboxRoutes(
@@ -137,7 +137,7 @@ export function registerSandboxRoutes(
       }
 
       const hasImageAssets = storage.getImageAssets(brand_id ? parseInt(brand_id) : undefined).length > 0;
-      const allTools = [...orderLookupTools, ...humanHandoffTools, ...(hasImageAssets ? imageTools : [])];
+      const allTools = [...orderLookupTools, ...humanHandoffTools, ...productRecommendTools, ...(hasImageAssets ? imageTools : [])];
 
       let completion = await openai.chat.completions.create({
         model: getOpenAIModel(),

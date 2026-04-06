@@ -71,6 +71,9 @@ export interface IStorage {
   createMarketingRule(keyword: string, pitch: string, url: string, brandId?: number): MarketingRule;
   updateMarketingRule(id: number, keyword: string, pitch: string, url: string): boolean;
   deleteMarketingRule(id: number): boolean;
+  getProductCatalog(brandId: number): unknown[];
+  searchProducts(brandId: number, keyword: string, limit?: number): unknown[];
+  upsertProduct(brandId: number, p: Record<string, unknown>): void;
   createAiLog(data: {
     contact_id?: number;
     message_id?: number;
@@ -147,7 +150,7 @@ export interface IStorage {
   createAssignmentRecord(contactId: number, assignedToAgentId: number, assignedByAgentId: number | null, reassignedFromAgentId: number | null, note: string | null): AssignmentRecord;
   updateContactAssignment(contactId: number, assignedAgentId: number | null, firstAssignedAt?: string): void;
   updateContactNeedsAssignment(contactId: number, value: number): void;
-  getOpenCasesCountForAgent(agentId: number): number;
+  getOpenCasesCountForAgent(agentId: number, brandId?: number): number;
   /** 主管戰情：僅用 COUNT 查詢，不載入全表。用於 /api/manager-stats。 */
   getManagerStatsCounts(brandId?: number): { today_new: number; unassigned: number; closed_today: number; overdue: number; urgent_simple: number; vip_unhandled: number };
   /** 客服個人戰情：僅用 COUNT，不載入全表。用於 /api/agent-stats/me。 */
@@ -195,7 +198,7 @@ export interface IStorage {
   incrementContactReassignCount(contactId: number): void;
   updateContactAssignmentStatus(contactId: number, status: string): void;
   getGlobalSchedule(): { work_start_time: string; work_end_time: string; lunch_start_time: string; lunch_end_time: string };
-  getAgentPerformanceStats(agentId: number): {
+  getAgentPerformanceStats(agentId: number, brandId?: number): {
     today_new: number;
     open_cases: number;
     processing: number;
@@ -206,7 +209,7 @@ export interface IStorage {
     close_rate: number | null;
     resolve_rate: number | null;
   };
-  getSupervisorReport(): {
+  getSupervisorReport(brandId?: number): {
     today_total: number;
     pending_count: number;
     transfer_count: number;
@@ -797,6 +800,59 @@ export class SQLiteStorage implements IStorage {
     return result.changes > 0;
   }
 
+  getProductCatalog(brandId: number): unknown[] {
+    return db
+      .prepare(
+        "SELECT * FROM product_catalog WHERE brand_id = ? AND is_available = 1 ORDER BY is_popular DESC, title ASC"
+      )
+      .all(brandId);
+  }
+
+  searchProducts(brandId: number, keyword: string, limit = 5): unknown[] {
+    const kw = `%${keyword}%`;
+    return db
+      .prepare(
+        `SELECT * FROM product_catalog
+     WHERE brand_id = ? AND is_available = 1
+     AND (title LIKE ? OR keywords LIKE ? OR tags LIKE ? OR faq LIKE ?
+          OR description_short LIKE ? OR order_prefix LIKE ?)
+     ORDER BY CASE WHEN title LIKE ? THEN 0 ELSE 1 END, is_popular DESC
+     LIMIT ?`
+      )
+      .all(brandId, kw, kw, kw, kw, kw, kw, kw, limit);
+  }
+
+  upsertProduct(brandId: number, p: Record<string, unknown>): void {
+    db.prepare(
+      `INSERT INTO product_catalog
+     (brand_id, product_id, title, keywords, order_prefix, page_id, url, image_url,
+      description_short, faq, category, tags, price, is_popular, is_available, updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+     ON CONFLICT(brand_id, product_id) DO UPDATE SET
+       title=excluded.title, keywords=excluded.keywords, order_prefix=excluded.order_prefix,
+       page_id=excluded.page_id, url=excluded.url, image_url=excluded.image_url,
+       description_short=excluded.description_short, faq=excluded.faq, category=excluded.category,
+       tags=excluded.tags, price=excluded.price, is_popular=excluded.is_popular,
+       is_available=excluded.is_available, updated_at=CURRENT_TIMESTAMP`
+    ).run(
+      brandId,
+      String(p.product_id ?? ""),
+      String(p.title ?? ""),
+      String(p.keywords ?? ""),
+      String(p.order_prefix ?? ""),
+      String(p.page_id ?? ""),
+      String(p.url ?? ""),
+      String(p.image_url ?? ""),
+      String(p.description_short ?? ""),
+      String(p.faq ?? ""),
+      String(p.category ?? ""),
+      String(p.tags ?? ""),
+      Number(p.price ?? 0),
+      Number(p.is_popular ?? 0),
+      p.is_available === undefined || p.is_available === null ? 1 : Number(p.is_available)
+    );
+  }
+
   getAnalytics(startDate: string, endDate: string, brandId?: number): {
     totalMessages: number;
     userMessages: number;
@@ -1149,10 +1205,11 @@ export class SQLiteStorage implements IStorage {
     }
   }
 
-  getOpenCasesCountForAgent(agentId: number): number {
+  getOpenCasesCountForAgent(agentId: number, brandId?: number): number {
+    const bf = brandId != null ? " AND brand_id = ?" : "";
     const row = db.prepare(
-      "SELECT COUNT(*) as count FROM contacts WHERE assigned_agent_id = ? AND status NOT IN ('closed', 'resolved')"
-    ).get(agentId) as { count: number } | undefined;
+      `SELECT COUNT(*) as count FROM contacts WHERE assigned_agent_id = ? AND status NOT IN ('closed', 'resolved')${bf}`
+    ).get(agentId, ...(brandId != null ? [brandId] : [])) as { count: number } | undefined;
     return row?.count ?? 0;
   }
 
@@ -1514,7 +1571,7 @@ export class SQLiteStorage implements IStorage {
     return this.getSetting("assignment_timeout_reassign_enabled") !== "0";
   }
 
-  getAgentPerformanceStats(agentId: number): {
+  getAgentPerformanceStats(agentId: number, brandId?: number): {
     today_new: number;
     open_cases: number;
     processing: number;
@@ -1526,19 +1583,22 @@ export class SQLiteStorage implements IStorage {
     resolve_rate: number | null;
   } {
     const today = new Date().toISOString().slice(0, 10);
+    const bf = brandId != null ? " AND brand_id = ?" : "";
+    const bfc = brandId != null ? " AND c.brand_id = ?" : "";
+    const bParams = brandId != null ? [brandId] : [];
     const todayNewRow = db.prepare(
-      "SELECT COUNT(*) as c FROM contacts WHERE assigned_agent_id = ? AND date(first_assigned_at) = date(?)"
-    ).get(agentId, today) as { c: number };
-    const openCases = this.getOpenCasesCountForAgent(agentId);
+      `SELECT COUNT(*) as c FROM contacts WHERE assigned_agent_id = ? AND date(first_assigned_at) = date(?)${bf}`
+    ).get(agentId, today, ...bParams) as { c: number };
+    const openCases = this.getOpenCasesCountForAgent(agentId, brandId);
     const processingRow = db.prepare(
-      "SELECT COUNT(*) as c FROM contacts WHERE assigned_agent_id = ? AND status IN ('assigned','processing','waiting_customer')"
-    ).get(agentId) as { c: number };
+      `SELECT COUNT(*) as c FROM contacts WHERE assigned_agent_id = ? AND status IN ('assigned','processing','waiting_customer')${bf}`
+    ).get(agentId, ...bParams) as { c: number };
     const closedTodayRow = db.prepare(
-      "SELECT COUNT(*) as c FROM contacts WHERE closed_by_agent_id = ? AND date(closed_at) = date(?)"
-    ).get(agentId, today) as { c: number };
+      `SELECT COUNT(*) as c FROM contacts WHERE closed_by_agent_id = ? AND date(closed_at) = date(?)${bf}`
+    ).get(agentId, today, ...bParams) as { c: number };
     const closedTotalRow = db.prepare(
-      "SELECT COUNT(*) as c FROM contacts WHERE closed_by_agent_id = ?"
-    ).get(agentId) as { c: number };
+      `SELECT COUNT(*) as c FROM contacts WHERE closed_by_agent_id = ?${bf}`
+    ).get(agentId, ...bParams) as { c: number };
     const closedTotal = closedTotalRow?.c ?? 0;
     const totalHandled = closedTotal + openCases;
     const closeRate = totalHandled > 0 ? closedTotal / totalHandled : null;
@@ -1547,8 +1607,8 @@ export class SQLiteStorage implements IStorage {
     const firstReplyRows = db.prepare(`
       SELECT c.id, c.first_assigned_at,
              (SELECT MIN(m.created_at) FROM messages m WHERE m.contact_id = c.id AND m.sender_type = 'admin' AND m.created_at >= c.first_assigned_at) as first_admin_at
-      FROM contacts c WHERE c.assigned_agent_id = ? AND c.first_assigned_at IS NOT NULL
-    `).all(agentId) as { id: number; first_assigned_at: string; first_admin_at: string | null }[];
+      FROM contacts c WHERE c.assigned_agent_id = ? AND c.first_assigned_at IS NOT NULL${bfc}
+    `).all(agentId, ...bParams) as { id: number; first_assigned_at: string; first_admin_at: string | null }[];
     const diffs = firstReplyRows.filter((r) => r.first_admin_at).map((r) => (new Date(r.first_admin_at!).getTime() - new Date(r.first_assigned_at).getTime()) / 60000);
     if (diffs.length > 0) avgFirstReply = diffs.reduce((a, b) => a + b, 0) / diffs.length;
     const closeTimeRows = db.prepare(
@@ -1569,7 +1629,7 @@ export class SQLiteStorage implements IStorage {
     };
   }
 
-  getSupervisorReport(): {
+  getSupervisorReport(brandId?: number): {
     today_total: number;
     pending_count: number;
     transfer_count: number;
@@ -1579,22 +1639,26 @@ export class SQLiteStorage implements IStorage {
     category_ratio: { label: string; count: number }[];
   } {
     const today = new Date().toISOString().slice(0, 10);
-    const todayTotalRow = db.prepare("SELECT COUNT(*) as c FROM contacts WHERE date(created_at) = date(?)").get(today) as { c: number };
+    const bf = brandId != null ? " AND brand_id = ?" : "";
+    const bp = brandId != null ? [brandId] : [];
+    const todayTotalRow = db.prepare(
+      `SELECT COUNT(*) as c FROM contacts WHERE date(created_at) = date(?)${bf}`
+    ).get(today, ...bp) as { c: number };
     const pendingRow = db.prepare(
-      "SELECT COUNT(*) as c FROM contacts WHERE status IN ('awaiting_human','pending','new_case','pending_info','pending_order_id') AND (status != 'closed' AND status != 'resolved')"
-    ).get() as { c: number };
+      `SELECT COUNT(*) as c FROM contacts WHERE status IN ('awaiting_human','pending','new_case','pending_info','pending_order_id') AND (status != 'closed' AND status != 'resolved')${bf}`
+    ).get(...bp) as { c: number };
     const transferRow = db.prepare(
-      "SELECT COUNT(*) as c FROM contacts WHERE needs_human = 1 AND date(created_at) <= date(?)"
-    ).get(today) as { c: number };
+      `SELECT COUNT(*) as c FROM contacts WHERE needs_human = 1 AND date(created_at) <= date(?)${bf}`
+    ).get(today, ...bp) as { c: number };
     const members = this.getTeamMembers().filter((m) => m.role === "cs_agent");
     const byAgent = members.map((m) => {
       const todayAssignedRow = db.prepare(
-        "SELECT COUNT(*) as c FROM contacts WHERE assigned_agent_id = ? AND date(first_assigned_at) = date(?)"
-      ).get(m.id, today) as { c: number };
-      const openCases = this.getOpenCasesCountForAgent(m.id);
+        `SELECT COUNT(*) as c FROM contacts WHERE assigned_agent_id = ? AND date(first_assigned_at) = date(?)${bf}`
+      ).get(m.id, today, ...bp) as { c: number };
+      const openCases = this.getOpenCasesCountForAgent(m.id, brandId);
       const closedTodayRow = db.prepare(
-        "SELECT COUNT(*) as c FROM contacts WHERE closed_by_agent_id = ? AND date(closed_at) = date(?)"
-      ).get(m.id, today) as { c: number };
+        `SELECT COUNT(*) as c FROM contacts WHERE closed_by_agent_id = ? AND date(closed_at) = date(?)${bf}`
+      ).get(m.id, today, ...bp) as { c: number };
       return {
         agent_id: m.id,
         display_name: m.display_name,
@@ -1603,7 +1667,9 @@ export class SQLiteStorage implements IStorage {
         closed_today: closedTodayRow?.c ?? 0,
       };
     });
-    const contacts = db.prepare("SELECT tags FROM contacts").all() as { tags: string }[];
+    const contacts = db.prepare(
+      brandId != null ? `SELECT tags FROM contacts WHERE brand_id = ?` : "SELECT tags FROM contacts"
+    ).all(...bp) as { tags: string }[];
     const tagCount: Record<string, number> = {};
     for (const c of contacts) {
       try {

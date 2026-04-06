@@ -69,6 +69,8 @@ import {
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
+import multer from "multer";
+import * as XLSX from "xlsx";
 import { addAiReplyJob, enqueueDebouncedAiReply, WORKER_HEARTBEAT_KEY, getWorkerHeartbeatStatus, getQueueJobCounts } from "../queue/ai-reply.queue";
 import { getRedisClient } from "../redis-client";
 import { recordAutoReplyBlocked } from "../auto-reply-blocked";
@@ -127,6 +129,8 @@ const FULFILLMENT_PROCESSING_KW = ["已確認", "待出貨", "出貨中"];
 const FULFILLMENT_NEW_KW = ["新訂單"];
 
 const FB_VERIFY_TOKEN = process.env.FB_VERIFY_TOKEN || "omnichannel_fb_verify_2024";
+
+const productCatalogUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 export function registerCoreRoutes(app: Express): void {
     app.get("/api/health", (_req, res) => {
@@ -359,6 +363,7 @@ export function registerCoreRoutes(app: Express): void {
           sections: sectionsMeta.map(s => ({ key: s.key, title: s.title, length: s.length })),
           includes: {
             catalog: includes.catalog,
+            marketing: includes.marketing,
             knowledge: includes.knowledge,
             image: includes.image,
             global_policy: includes.global_policy,
@@ -401,11 +406,118 @@ export function registerCoreRoutes(app: Express): void {
 
     /** 部署驗證用：無需登入 */
     app.get("/api/version", (_req, res) => {
+      const buildTime = new Date().toISOString();
       res.json({
-        version: "2026-04-06-final-cleanup",
-        commit: "4e47713",
-        timestamp: "這行是在最終源頭修復後加的",
+        version: "phase2-product-rag",
+        build_time: buildTime,
+        features: [
+          "gemini-3.1-pro",
+          "rag-lite-knowledge",
+          "marketing-rules-active",
+          "product-catalog",
+          "recommend-products-tool",
+          "excel-import",
+        ],
       });
+    });
+
+    app.post(
+      "/api/admin/products/:brandId/upload-excel",
+      authMiddleware,
+      superAdminOnly,
+      productCatalogUpload.single("file"),
+      (req, res) => {
+        const brandId = parseInt(String(req.params.brandId), 10);
+        if (!Number.isFinite(brandId) || brandId < 1) {
+          return res.status(400).json({ error: "無效品牌 ID" });
+        }
+        if (!(req as any).file) return res.status(400).json({ error: "請上傳檔案" });
+
+        try {
+          const fileBuf = (req as any).file.buffer as Buffer;
+          const workbook = XLSX.read(fileBuf, { type: "buffer" });
+          const sheet = workbook.Sheets[workbook.SheetNames[0]];
+          const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as unknown[][];
+
+          let imported = 0;
+          let currentProduct: Record<string, string> | null = null;
+
+          for (let i = 1; i < rows.length; i++) {
+            const row = rows[i] as unknown[];
+            const name = String(row[0] ?? "").trim();
+            const keywords = String(row[1] ?? "").trim();
+            const prefix = String(row[2] ?? "").trim();
+            const pageId = String(row[3] ?? "").trim().replace(/\.0$/, "");
+            const url = String(row[4] ?? "").trim();
+            const faqLine = String(row[5] ?? "").trim();
+
+            if (name) {
+              if (currentProduct) {
+                storage.upsertProduct(brandId, currentProduct);
+                imported++;
+              }
+              currentProduct = {
+                product_id: prefix || `p-${i}`,
+                title: name,
+                keywords,
+                order_prefix: prefix,
+                page_id: pageId,
+                url: url.startsWith("http") ? url : "",
+                description_short: faqLine.replace(/^特色[：:]?\s*/, ""),
+                faq: faqLine,
+              };
+            } else if (faqLine && currentProduct) {
+              currentProduct.faq = (currentProduct.faq || "") + "\n" + faqLine;
+              if (faqLine.startsWith("FAQ")) {
+                currentProduct.faq = (currentProduct.faq || "") + "\n" + faqLine;
+              } else {
+                currentProduct.description_short = (currentProduct.description_short || "") + " " + faqLine;
+              }
+            }
+          }
+          if (currentProduct) {
+            storage.upsertProduct(brandId, currentProduct);
+            imported++;
+          }
+
+          return res.json({ ok: true, imported, message: `成功匯入 ${imported} 個商品` });
+        } catch (e) {
+          console.error("[product-upload] error:", e);
+          return res.status(500).json({ error: (e as Error).message });
+        }
+      }
+    );
+
+    app.get("/api/admin/products/:brandId", authMiddleware, (req, res) => {
+      const brandId = parseIdParam(req.params.brandId);
+      if (brandId == null) return res.status(400).json({ error: "無效品牌 ID" });
+      const products = storage.getProductCatalog(brandId);
+      return res.json({ ok: true, total: products.length, products });
+    });
+
+    app.get("/api/admin/products/:brandId/search", authMiddleware, (req, res) => {
+      const brandId = parseIdParam(req.params.brandId);
+      if (brandId == null) return res.status(400).json({ error: "無效品牌 ID" });
+      const keyword = String(req.query.q || "");
+      const products = storage.searchProducts(brandId, keyword);
+      return res.json({ ok: true, products });
+    });
+
+    app.post("/api/admin/products/:brandId/bulk", authMiddleware, superAdminOnly, (req, res) => {
+      const brandId = parseInt(String(req.params.brandId), 10);
+      if (!Number.isFinite(brandId) || brandId < 1) {
+        return res.status(400).json({ error: "無效品牌 ID" });
+      }
+      const products = (req.body as { products?: unknown })?.products;
+      if (!Array.isArray(products)) return res.status(400).json({ error: "需要 products 陣列" });
+      let count = 0;
+      for (const p of products) {
+        if (p && typeof p === "object" && (p as any).product_id && (p as any).title) {
+          storage.upsertProduct(brandId, p as Record<string, unknown>);
+          count++;
+        }
+      }
+      return res.json({ ok: true, imported: count });
     });
 
     app.get("/api/auth/check", (req, res) => {
@@ -1068,26 +1180,32 @@ export function registerCoreRoutes(app: Express): void {
     app.get("/api/performance/me", authMiddleware, (req: any, res) => {
       const userId = req.session?.userId;
       if (!userId) return res.status(401).json({ message: "???" });
-      const stats = storage.getAgentPerformanceStats(userId);
+      const brandId = req.query.brand_id ? parseInt(String(req.query.brand_id), 10) : undefined;
+      const stats = storage.getAgentPerformanceStats(userId, Number.isNaN(brandId as number) ? undefined : brandId);
       return res.json(stats);
     });
 
-    app.get("/api/performance", authMiddleware, managerOrAbove, (_req: any, res) => {
+    app.get("/api/performance", authMiddleware, managerOrAbove, (req: any, res) => {
+      const brandId = req.query.brand_id ? parseInt(String(req.query.brand_id), 10) : undefined;
+      const bid = Number.isNaN(brandId as number) ? undefined : brandId;
       const members = storage.getTeamMembers().filter((m) => m.role === "cs_agent");
-      const list = members.map((m) => ({ agent_id: m.id, display_name: m.display_name, ...storage.getAgentPerformanceStats(m.id) }));
+      const list = members.map((m) => ({ agent_id: m.id, display_name: m.display_name, ...storage.getAgentPerformanceStats(m.id, bid) }));
       return res.json(list);
     });
 
     app.get("/api/supervisor/report", authMiddleware, managerOrAbove, (req: any, res) => {
-      const report = storage.getSupervisorReport();
+      const brandId = req.query.brand_id ? parseInt(String(req.query.brand_id), 10) : undefined;
+      const bid = Number.isNaN(brandId as number) ? undefined : brandId;
+      const report = storage.getSupervisorReport(bid);
       return res.json(report);
     });
 
     app.get("/api/manager-dashboard", authMiddleware, (req: any, res) => {
       if (!isSupervisor(req)) return res.json({ cards: {}, status_distribution: [], agent_workload: [], alerts: [], issue_type_rank: [], tag_rank: [] });
-      const brandId = req.query.brand_id ? parseInt(String(req.query.brand_id)) : undefined;
+      const brandIdRaw = req.query.brand_id ? parseInt(String(req.query.brand_id), 10) : undefined;
+      const brandId = Number.isNaN(brandIdRaw as number) ? undefined : brandIdRaw;
       const snap = storage.getManagerDashboardSnapshot(brandId);
-      const report = storage.getSupervisorReport();
+      const report = storage.getSupervisorReport(brandId);
       const todayPending = snap.today_pending;
       const urgent = snap.urgent;
       const unassigned = snap.unassigned;

@@ -62,14 +62,15 @@ describe("filterToolsForScenario", () => {
     expect(names).toContain("transfer_to_human");
   });
 
-  it("PRODUCT_CONSULT 無查單工具", () => {
+  it("PRODUCT_CONSULT 無查單工具、含商品推薦", () => {
     const names = listToolNamesForScenario("PRODUCT_CONSULT", { hasImageAssets: false });
     expect(names).not.toContain("lookup_order_by_id");
+    expect(names).toContain("recommend_products");
   });
 
-  it("GENERAL 只有轉人工", () => {
+  it("GENERAL 有轉人工與商品推薦", () => {
     const names = listToolNamesForScenario("GENERAL", { hasImageAssets: false });
-    expect(names).toEqual(["transfer_to_human"]);
+    expect(names).toEqual(["transfer_to_human", "recommend_products"]);
   });
 });
 

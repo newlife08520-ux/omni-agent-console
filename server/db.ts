@@ -164,6 +164,7 @@ export function initDatabase() {
   migratePhase2OrderIndex();
   migratePhase23OrderItemsAndAliases();
   migratePhase24OrderCreatedAt();
+  migrateProductCatalog();
 
   db.exec(`CREATE TABLE IF NOT EXISTS schema_info (key TEXT PRIMARY KEY, value TEXT)`);
   db.prepare("INSERT OR REPLACE INTO schema_info (key, value) VALUES ('schema_version', ?)").run("1");
@@ -1585,6 +1586,34 @@ function seedMockData() {
   insertRule.run("限量包包", "這款限量設計師聯名包包，採用頂級義大利小牛皮，現在下單享 85 折優惠！原價 $12,800，限時特價 $10,880", "https://shop.example.com/bag-001");
   insertRule.run("保養品", "我們的明星商品「極光煥膚精華液」30ml，含玻尿酸+維他命C，現在買一送一只要 $1,680！超過 5,000 則五星好評", "https://shop.example.com/serum-002");
   insertRule.run("會員方案", "加入 VIP 會員即享全站 9 折 + 免運費 + 生日禮金 $500！年費只要 $299，立即升級享受尊榮服務", "https://shop.example.com/vip-membership");
+}
+
+function migrateProductCatalog() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS product_catalog (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      brand_id INTEGER NOT NULL,
+      product_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      keywords TEXT DEFAULT '',
+      order_prefix TEXT DEFAULT '',
+      page_id TEXT DEFAULT '',
+      url TEXT DEFAULT '',
+      image_url TEXT DEFAULT '',
+      description_short TEXT DEFAULT '',
+      faq TEXT DEFAULT '',
+      category TEXT DEFAULT '',
+      tags TEXT DEFAULT '',
+      price REAL DEFAULT 0,
+      is_popular INTEGER DEFAULT 0,
+      is_available INTEGER DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(brand_id, product_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_pc_brand ON product_catalog(brand_id);
+    CREATE INDEX IF NOT EXISTS idx_pc_search ON product_catalog(brand_id, title);
+  `);
 }
 
 export default db;

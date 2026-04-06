@@ -73,7 +73,7 @@ import {
   FALLBACK_AFTER_SALE_LINE_LABEL,
   SHORT_IMAGE_FALLBACK,
 } from "../safe-after-sale-classifier";
-import { orderLookupTools, humanHandoffTools, imageTools } from "../openai-tools";
+import { orderLookupTools, humanHandoffTools, imageTools, productRecommendTools } from "../openai-tools";
 import { parsePhase1BrandFlags, isPhase1Active } from "./phase1-brand-config";
 import { runHybridIntentRouter, mapPlanToPhase1Scenario, computePhase15HardRoute, type HybridRouterInput } from "./intent-router.service";
 import type { HybridRouteResult, Phase1BrandFlags } from "./phase1-types";
@@ -549,7 +549,7 @@ ${contextStr}
 
       const effectiveBrandId = contact?.brand_id;
       const hasImageAssets = storage.getImageAssets(effectiveBrandId || undefined).length > 0;
-      const allTools = [...orderLookupTools, ...humanHandoffTools, ...(hasImageAssets ? imageTools : [])];
+      const allTools = [...orderLookupTools, ...humanHandoffTools, ...productRecommendTools, ...(hasImageAssets ? imageTools : [])];
 
       const openai = new OpenAI({ apiKey });
       let completion = await openai.chat.completions.create({
@@ -1227,6 +1227,7 @@ ${contextStr}
         isPhase1Active(phase1Flags) && phase1Flags.scenario_isolation && phase1Route != null;
       const enrichedPack = await assembleEnrichedSystemPrompt(contact.brand_id || brandId || undefined, {
         planMode: plan.mode,
+        userMessage,
         hasActiveOrderContext: !!storage.getActiveOrderContext(contact.id)?.order_id,
         recentUserHasImage,
         selectedScenario: scenarioIso ? phase1Route!.selected_scenario : undefined,
@@ -1815,7 +1816,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
       }
 
       const hasImageAssets = storage.getImageAssets(effectiveBrandId || undefined).length > 0;
-      let allTools = [...orderLookupTools, ...humanHandoffTools, ...(hasImageAssets ? imageTools : [])];
+      let allTools = [...orderLookupTools, ...humanHandoffTools, ...productRecommendTools, ...(hasImageAssets ? imageTools : [])];
       toolsAvailableNames = allTools
         .map((t) => (t.type === "function" ? t.function?.name : "") || "")
         .filter(Boolean);

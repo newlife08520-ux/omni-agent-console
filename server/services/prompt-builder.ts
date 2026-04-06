@@ -8,6 +8,7 @@ import { storage } from "../storage";
 import * as assignment from "../assignment";
 import { getSuperLandingConfig, ensurePagesCacheLoaded, buildProductCatalogPrompt } from "../superlanding";
 import type { AgentScenario, ScenarioOverrideEntry } from "./phase1-types";
+import type { MarketingRule } from "@shared/schema";
 const IMAGE_PRECISION_COT_BLOCK = `
 
 --- 圖片（工具契約）---
@@ -197,18 +198,123 @@ export async function buildCatalogPrompt(brandId?: number): Promise<string> {
   return "\n\n--- CATALOG ---\n" + body.trim();
 }
 
-/** 知識庫 */
-export function buildKnowledgePrompt(brandId?: number, maxTotalChars = 80000): string {
+/**
+ * 從 marketing_rules 取出品牌的導購規則，注入 prompt。
+ * 如果 userMessage 命中某條規則的 keyword，該規則會被標記為「本輪命中」優先顯示。
+ */
+export function buildMarketingPrompt(brandId?: number, userMessage?: string): string {
+  const rules = storage.getMarketingRules(brandId);
+  if (!rules || rules.length === 0) return "";
+
+  const msg = (userMessage || "").toLowerCase();
+  const hit: MarketingRule[] = [];
+  const rest: MarketingRule[] = [];
+
+  for (const r of rules) {
+    const kw = (r.keyword || "").toLowerCase();
+    if (kw && msg.includes(kw)) {
+      hit.push(r);
+    } else {
+      rest.push(r);
+    }
+  }
+
+  const lines: string[] = [];
+
+  if (hit.length > 0) {
+    lines.push("【本輪客人提到的商品/活動——請自然帶入推薦】");
+    for (const r of hit) {
+      const urlPart = r.url ? `\n  購買連結：${r.url}` : "";
+      lines.push(`- 關鍵字「${r.keyword}」：${r.pitch}${urlPart}`);
+    }
+  }
+
+  if (rest.length > 0) {
+    lines.push("");
+    lines.push("【品牌目前的活動/推薦（客人問到相關話題時可自然帶入，不要硬推）】");
+    for (const r of rest) {
+      const urlPart = r.url ? `（連結：${r.url}）` : "";
+      lines.push(`- ${r.keyword}：${r.pitch}${urlPart}`);
+    }
+  }
+
+  return "\n\n--- 產品導購規則 ---\n" + lines.join("\n");
+}
+
+export function buildKnowledgePrompt(
+  brandId?: number,
+  maxTotalChars = 8000,
+  userMessage?: string,
+  planMode?: string
+): string {
+  const cap = Math.min(maxTotalChars, 8000);
   const files = storage.getKnowledgeFiles(brandId);
   const withContent = files.filter((f) => f.content && f.content.trim().length > 0);
   if (withContent.length === 0) return "";
+
+  const filtered = withContent.filter((f) => {
+    if (planMode && f.forbidden_modes) {
+      const forbidden = String(f.forbidden_modes)
+        .toLowerCase()
+        .split(/[,\s|]+/)
+        .map((s: string) => s.trim())
+        .filter(Boolean);
+      if (forbidden.includes(planMode.toLowerCase())) return false;
+    }
+    if (planMode && f.allowed_modes && String(f.allowed_modes).trim()) {
+      const allowed = String(f.allowed_modes)
+        .toLowerCase()
+        .split(/[,\s|]+/)
+        .map((s: string) => s.trim())
+        .filter(Boolean);
+      if (!allowed.includes(planMode.toLowerCase())) return false;
+    }
+    return true;
+  });
+
+  const pool = filtered.length > 0 ? filtered : withContent;
+
+  if (!userMessage || !userMessage.trim()) {
+    return assembleKnowledgeBlock(pool.slice(0, 5), cap);
+  }
+
+  const keywords = extractSearchKeywords(userMessage);
+
+  const scored = pool.map((f) => {
+    const content = (f.content || "").toLowerCase();
+    const name = (f.original_name || "").toLowerCase();
+    const intent = (f.intent || "").toLowerCase();
+    const category = (f.category || "").toLowerCase();
+    let score = 0;
+
+    for (const kw of keywords) {
+      const kwLower = kw.toLowerCase();
+      if (name.includes(kwLower)) score += 3;
+      if (intent.includes(kwLower)) score += 3;
+      if (category.includes(kwLower)) score += 2;
+      const matches = content.split(kwLower).length - 1;
+      score += Math.min(matches, 5);
+    }
+    return { file: f, score };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+  const top = scored.filter((s) => s.score > 0).slice(0, 5);
+  const selected = top.length > 0 ? top.map((s) => s.file) : pool.slice(0, 3);
+
+  return assembleKnowledgeBlock(selected, cap);
+}
+
+/** 組裝知識庫區塊 */
+function assembleKnowledgeBlock(files: { original_name: string; content?: string | null }[], maxTotalChars: number): string {
   let totalChars = 0;
   const blocks: string[] = [];
-  for (const f of withContent) {
-    const content = f.content!;
+  for (const f of files) {
+    const content = (f.content || "").trim();
+    if (!content) continue;
     if (totalChars + content.length > maxTotalChars) {
       const remaining = maxTotalChars - totalChars;
-      if (remaining > 500) {
+      if (remaining > 200) {
         blocks.push(`[知識: ${f.original_name}]\n${content.substring(0, remaining)}\n[內容已截斷]`);
       }
       break;
@@ -216,7 +322,30 @@ export function buildKnowledgePrompt(brandId?: number, maxTotalChars = 80000): s
     blocks.push(`[知識: ${f.original_name}]\n${content}`);
     totalChars += content.length;
   }
+  if (blocks.length === 0) return "";
   return "\n\n--- KNOWLEDGE ---\n" + blocks.join("\n\n");
+}
+
+/** 從使用者訊息提取搜尋關鍵字 */
+function extractSearchKeywords(message: string): string[] {
+  const s = message.trim();
+  if (!s) return [];
+  const keywords: string[] = [];
+  const stopWords = new Set([
+    "的", "了", "嗎", "呢", "啊", "吧", "我", "你", "他", "她",
+    "這", "那", "是", "有", "在", "不", "也", "都", "就", "要",
+    "會", "可以", "請", "問", "想", "幫", "看", "一下", "什麼", "怎麼",
+  ]);
+  const zhOnly = s.replace(/[^\u4e00-\u9fff]/g, "");
+  for (let len = 4; len >= 2; len--) {
+    for (let i = 0; i <= zhOnly.length - len; i++) {
+      const gram = zhOnly.substring(i, i + len);
+      if (!stopWords.has(gram)) keywords.push(gram);
+    }
+  }
+  const enWords = s.match(/[a-zA-Z]{2,}/g) || [];
+  keywords.push(...enWords);
+  return [...new Set(keywords)];
 }
 
 /** 圖片資產清單與 CoT 說明 */
@@ -240,6 +369,7 @@ export function buildImagePrompt(brandId?: number): string {
 
 export interface EnrichedPromptContext {
   planMode?: string;
+  userMessage?: string;
   /** 已有訂單上下文（追問輪） */
   hasActiveOrderContext?: boolean;
   /** 使用者最近一則含圖 */
@@ -263,6 +393,7 @@ export interface EnrichedPromptResult {
     human_hours: boolean;
     flow_principles: boolean;
     catalog: boolean;
+    marketing: boolean;
     knowledge: boolean;
     image: boolean;
   };
@@ -327,7 +458,7 @@ export async function assembleEnrichedSystemPrompt(
   let skipKnowledge = false;
   let skipHumanHours = false;
   let skipFlow = false;
-  let knowledgeMax = 80000;
+  let knowledgeMax = 8000;
 
   const scenOverride = iso && sc ? context?.scenarioOverrides?.[sc] : undefined;
 
@@ -347,17 +478,17 @@ export async function assembleEnrichedSystemPrompt(
         break;
       case "GENERAL":
         skipCatalog = true;
-        knowledgeMax = 24000;
+        knowledgeMax = 8000;
         break;
     }
     if (scenOverride?.knowledge_mode === "none") {
       skipKnowledge = true;
     } else if (scenOverride?.knowledge_mode === "minimal") {
       skipKnowledge = false;
-      knowledgeMax = 12000;
+      knowledgeMax = 8000;
     } else if (scenOverride?.knowledge_mode === "full") {
       skipKnowledge = false;
-      knowledgeMax = 80000;
+      knowledgeMax = 8000;
     }
   }
 
@@ -379,7 +510,9 @@ export async function assembleEnrichedSystemPrompt(
       : buildFlowPrinciplesPrompt(flowPrinciplesOpts)
     : "";
   const catalogBlock = orderLookupDiet || skipCatalog ? "" : await buildCatalogPrompt(brandId);
-  const knowledgeBlock = orderLookupDiet || skipKnowledge ? "" : buildKnowledgePrompt(brandId, knowledgeMax);
+  const marketingBlock = orderLookupDiet ? "" : buildMarketingPrompt(brandId, context?.userMessage);
+  const knowledgeBlock =
+    orderLookupDiet || skipKnowledge ? "" : buildKnowledgePrompt(brandId, knowledgeMax, context?.userMessage, context?.planMode);
   const imageBlock = buildImagePrompt(brandId);
   const scenarioBlock =
     (iso && sc ? buildScenarioIsolationBlock(sc) : "") +
@@ -401,6 +534,7 @@ export async function assembleEnrichedSystemPrompt(
     brandBlock +
     scenarioFlowContext +
     catalogBlock +
+    marketingBlock +
     knowledgeBlock +
     imageBlock;
   const full_prompt = normalizeSections(raw);
@@ -410,6 +544,7 @@ export async function assembleEnrichedSystemPrompt(
     human_hours: !!humanHoursBlock.trim(),
     flow_principles: !!flowBlock.trim(),
     catalog: full_prompt.includes("--- CATALOG ---"),
+    marketing: full_prompt.includes("--- 產品導購規則 ---"),
     knowledge: full_prompt.includes("--- KNOWLEDGE ---"),
     image: full_prompt.includes("--- IMAGE ---"),
   };

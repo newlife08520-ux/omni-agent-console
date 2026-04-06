@@ -124,6 +124,27 @@ export const orderLookupTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   },
 ];
 
+export const productRecommendTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "recommend_products",
+      description:
+        "當客人問商品推薦、想看有什麼商品、問特定需求（有什麼推薦、哪個多人買、適合送禮嗎、有沒有新品、某某商品介紹）時呼叫。系統會回傳商品資訊含價格和購買連結。",
+      parameters: {
+        type: "object",
+        properties: {
+          keyword: {
+            type: "string",
+            description: "客人提到的商品關鍵字或需求，例如：包包、冒險包、送禮、熱銷、吸塵器",
+          },
+        },
+        required: ["keyword"],
+      },
+    },
+  },
+];
+
 export const humanHandoffTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   {
     type: "function",

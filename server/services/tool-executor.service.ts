@@ -230,6 +230,87 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
       console.log(`[ToolExecutor] queue_wait_ms=${queueWaitMs} pipeline_ref_ms=${pipelineStartMs}`);
     }
 
+    if (toolName === "recommend_products") {
+      const keyword = String(args.keyword || "").trim();
+      if (!keyword) return JSON.stringify({ success: false, error: "請提供商品關鍵字" });
+
+      const brandId = context?.brandId;
+      if (!brandId) return JSON.stringify({ success: false, error: "無法判斷品牌" });
+
+      let products = storage.searchProducts(brandId, keyword, 5) as any[];
+
+      if (products.length === 0) {
+        const rules = (storage.getMarketingRules(brandId) || []) as any[];
+        const matched = rules.filter((r: any) => {
+          const rk = (r.keyword || "").toLowerCase();
+          const kl = keyword.toLowerCase();
+          return rk.includes(kl) || kl.includes(rk);
+        });
+        if (matched.length > 0) {
+          return JSON.stringify({
+            success: true,
+            found: true,
+            source: "marketing_rules",
+            results: matched.map((r: any) => ({
+              keyword: r.keyword,
+              pitch: r.pitch,
+              url: r.url || undefined,
+            })),
+            sys_note: "以下是品牌的推廣活動資訊。用你自己溫暖的語氣推薦，不要照唸。有連結就自然提供給客人。",
+          });
+        }
+
+        const knowledgeFiles = storage.getKnowledgeFiles(brandId) as any[];
+        const kMatched = knowledgeFiles.filter((f: any) => {
+          const content = (f.content || "").toLowerCase();
+          const name = (f.original_name || "").toLowerCase();
+          const kl = keyword.toLowerCase();
+          return name.includes(kl) || content.includes(kl);
+        });
+        if (kMatched.length > 0) {
+          const snippets = kMatched.slice(0, 2).map((f: any) => {
+            const content = f.content || "";
+            const idx = content.toLowerCase().indexOf(keyword.toLowerCase());
+            const start = Math.max(0, idx - 100);
+            const end = Math.min(content.length, idx + 400);
+            return { name: f.original_name, snippet: content.substring(start, end).trim() };
+          });
+          return JSON.stringify({
+            success: true,
+            found: true,
+            source: "knowledge_base",
+            results: snippets,
+            sys_note: "從知識庫找到相關資訊。用溫暖自然的語氣幫客人介紹，像資深專櫃人員。有價格和連結就帶出來。",
+          });
+        }
+
+        return JSON.stringify({
+          success: true,
+          found: false,
+          keyword,
+          sys_note: "查無相關商品。溫柔告訴客人目前沒找到，問有沒有其他想看的。不要編造商品。",
+        });
+      }
+
+      const results = products.map((p: any) => ({
+        title: p.title,
+        price: p.price || undefined,
+        url: p.url || undefined,
+        description: p.description_short || undefined,
+        faq: p.faq || undefined,
+        order_prefix: p.order_prefix || undefined,
+      }));
+
+      return JSON.stringify({
+        success: true,
+        found: true,
+        source: "product_catalog",
+        total: results.length,
+        products: results,
+        sys_note: `找到 ${results.length} 款「${keyword}」相關商品。用溫暖自然的語氣推薦，像資深專櫃人員一樣介紹。先講最推薦的 1-2 款，提到特色。有價格就說價格，有連結就自然提供。不要條列式，用聊天方式。`,
+      });
+    }
+
     if (toolName === "transfer_to_human") {
       const reason = (args.reason || "AI 判斷需要轉人工").trim();
       console.log(`[AI Tool Call] transfer_to_human???: ${reason}?contactId: ${context?.contactId}`);

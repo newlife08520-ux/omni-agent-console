@@ -3,9 +3,9 @@
  */
 import type OpenAI from "openai";
 import type { AgentScenario, ScenarioOverrideEntry } from "./phase1-types";
-import { orderLookupTools, humanHandoffTools, imageTools } from "../openai-tools";
+import { orderLookupTools, humanHandoffTools, imageTools, productRecommendTools } from "../openai-tools";
 
-const ALL_REGISTRY_TOOLS = [...orderLookupTools, ...humanHandoffTools, ...imageTools];
+const ALL_REGISTRY_TOOLS = [...orderLookupTools, ...humanHandoffTools, ...imageTools, ...productRecommendTools];
 const TOOL_BY_NAME = new Map<string, OpenAI.Chat.Completions.ChatCompletionTool>(
   ALL_REGISTRY_TOOLS.map((t) => [(t.type === "function" ? t.function?.name : "") || "", t]).filter(([n]) => n) as [
     string,
@@ -39,10 +39,10 @@ export function filterToolsForScenario(
       return [...base, ...(opts.hasImageAssets ? imageTools : [])];
     }
     case "PRODUCT_CONSULT":
-      return [...handoff, ...(opts.hasImageAssets ? imageTools : [])];
+      return [...handoff, ...productRecommendTools, ...(opts.hasImageAssets ? imageTools : [])];
     case "GENERAL":
     default:
-      return [...handoff];
+      return [...handoff, ...productRecommendTools];
   }
 }
 
