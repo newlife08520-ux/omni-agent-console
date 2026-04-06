@@ -55,6 +55,19 @@ export function getMergedOpenAIModelQuickPicks(): string[] {
   return merged;
 }
 
+/**
+ * 若使用者只填模型 id（無 openai:/google:/anthropic:），但 id 明顯是 Gemini，勿送 OpenAI API（會 404 model_not_found）。
+ */
+function inferProviderFromBareModelId(raw: string): ResolvedModel | null {
+  let t = raw.trim();
+  if (!t || t.includes(":")) return null;
+  if (t.startsWith("models/")) t = t.slice("models/".length);
+  if (/^gemini/i.test(t)) {
+    return { provider: "google", model: t };
+  }
+  return null;
+}
+
 /** 未經 OPENAI_MODEL 覆寫邏輯處理的原始設定字串（env → ai_model → openai_model → 預設） */
 function rawAiModelString(): string {
   const envAi = process.env.AI_MODEL?.trim();
@@ -70,6 +83,10 @@ function rawAiModelString(): string {
     ) {
       return legacyOpenaiModel;
     }
+    const inferred = inferProviderFromBareModelId(legacyOpenaiModel);
+    if (inferred) {
+      return `google:${inferred.model}`;
+    }
     return `openai:${legacyOpenaiModel}`;
   }
   return "openai:gpt-4o";
@@ -80,19 +97,26 @@ function rawAiModelString(): string {
  * 環境變數 AI_MODEL：`openai:gpt-4o`、`anthropic:claude-sonnet-4-5`、`google:gemini-…`；無前綴視為 openai。
  */
 export function resolveModel(): ResolvedModel {
-  const raw = rawAiModelString();
+  const raw = rawAiModelString().trim();
+  const inferred = inferProviderFromBareModelId(raw);
+  if (inferred) return inferred;
   if (raw.startsWith("google:")) {
     return { provider: "google", model: raw.slice("google:".length) };
   }
   if (raw.startsWith("anthropic:")) {
     return { provider: "anthropic", model: raw.slice("anthropic:".length) };
   }
+  if (raw.startsWith("openai:")) {
+    const rest = raw.slice("openai:".length);
+    const geminiFromWrongPrefix = inferProviderFromBareModelId(rest);
+    if (geminiFromWrongPrefix) return geminiFromWrongPrefix;
+    return { provider: "openai", model: rest };
+  }
   const legacyOpenai = process.env.OPENAI_MODEL?.trim();
   if (legacyOpenai && !raw.includes(":")) {
     return { provider: "openai", model: legacyOpenai };
   }
-  const model = raw.startsWith("openai:") ? raw.slice("openai:".length) : raw;
-  return { provider: "openai", model };
+  return { provider: "openai", model: raw };
 }
 
 /**
@@ -102,9 +126,16 @@ export function resolveModel(): ResolvedModel {
 export function resolveModelWithBrandOverride(modelOverride?: string | null): ResolvedModel {
   const t = modelOverride?.trim();
   if (t) {
+    const inferred = inferProviderFromBareModelId(t);
+    if (inferred) return inferred;
     if (t.startsWith("google:")) return { provider: "google", model: t.slice("google:".length) };
     if (t.startsWith("anthropic:")) return { provider: "anthropic", model: t.slice("anthropic:".length) };
-    if (t.startsWith("openai:")) return { provider: "openai", model: t.slice("openai:".length) };
+    if (t.startsWith("openai:")) {
+      const rest = t.slice("openai:".length);
+      const geminiFromWrongPrefix = inferProviderFromBareModelId(rest);
+      if (geminiFromWrongPrefix) return geminiFromWrongPrefix;
+      return { provider: "openai", model: rest };
+    }
     return { provider: "openai", model: t };
   }
   return resolveModel();
