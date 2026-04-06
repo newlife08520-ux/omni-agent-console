@@ -218,12 +218,16 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
         const fr = await refetchOpenaiModels();
         if (key === "ai_model" && fr.data?.mainConversationLockedByEnv) {
           toast({
-            title: "已儲存至資料庫",
+            title: "儲存成功（資料庫已寫入）",
             description:
-              "目前主對話仍由伺服器環境變數（AI_MODEL／OPENAI_MODEL）決定，頂部「生效」為實際值。若要後台下拉生效，請改主機環境變數或移除覆寫。",
+              "頂部「實際生效」仍由主機環境變數 AI_MODEL／OPENAI_MODEL 決定。若要後台下拉生效，請在 Railway／Docker 移除或修改該變數後重啟。",
           });
         } else {
-          toast({ title: "儲存成功", description: "設定已更新；生效模型已重新載入" });
+          toast({
+            title: "儲存成功",
+            description:
+              "已寫入資料庫並重新讀取生效模型。若頂部未變，請看橫幅是否被 AI_MODEL 覆寫。此為「儲存」；「重新整理」按鈕不會寫入設定。",
+          });
         }
       } else {
         toast({ title: "儲存成功", description: "設定已更新" });
@@ -282,7 +286,10 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
       });
       return;
     }
-    toast({ title: "已更新", description: "生效模型狀態已從伺服器重新載入" });
+    toast({
+      title: "重新整理完成",
+      description: "已從伺服器重新載入生效模型（未變更任何設定；儲存請按各欄位的綠色儲存）。",
+    });
   }, [refetchOpenaiModels, toast]);
 
   const handleRefreshAllSettingsData = useCallback(async () => {
@@ -672,7 +679,7 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
                               className="text-xs bg-emerald-600 hover:bg-emerald-700 text-white"
                             >
                               <Save className="w-3.5 h-3.5 mr-1" />
-                              {saving === "ai_model" ? "儲存中" : "儲存主模型"}
+                              {saving === "ai_model" ? "儲存中" : "儲存主模型（ai_model）"}
                             </Button>
                           </div>
                         </div>
@@ -715,7 +722,7 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
                               className="text-xs bg-emerald-600 hover:bg-emerald-700 text-white"
                             >
                               <Save className="w-3.5 h-3.5 mr-1" />
-                              {saving === "openai_model" ? "儲存中" : "儲存主模型"}
+                              {saving === "openai_model" ? "儲存中" : "儲存 openai_model"}
                             </Button>
                           </div>
                         </div>
