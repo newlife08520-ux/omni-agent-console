@@ -164,11 +164,20 @@ export function getOpenAIRouterModelResolution(): OpenAIRouterModelResolution {
   return { effective: main.effective, source: "inherits_main", envVarSet: false, storedInDb: rawStored };
 }
 
+/** 與下拉儲存格式一致，供頂部橫幅單行顯示 */
+export function resolvedModelToPrefixedString(rm: ResolvedModel): string {
+  const prefix = rm.provider === "anthropic" ? "anthropic" : rm.provider === "google" ? "google" : "openai";
+  return `${prefix}:${rm.model}`;
+}
+
 /** 供設定頁與除錯：回傳目前實際生效模型與來源（不含金鑰）。 */
 export function describeOpenAIModelsForSettings() {
   const main = getOpenAIMainModelResolution();
   const router = getOpenAIRouterModelResolution();
   const resolved = resolveModel();
+  const envAi = process.env.AI_MODEL?.trim() || "";
+  const envOpenai = process.env.OPENAI_MODEL?.trim() || "";
+  const dbAiRow = (storage.getSetting("ai_model") || "").trim();
   return {
     defaultMainModel: DEFAULT_OPENAI_MODEL,
     builtInQuickPicks: [...BUILTIN_OPENAI_MODEL_QUICK_PICKS],
@@ -176,7 +185,15 @@ export function describeOpenAIModelsForSettings() {
     main,
     router,
     provider: resolved.provider,
-    aiModelEnvSet: Boolean(process.env.AI_MODEL?.trim()),
+    aiModelEnvSet: Boolean(envAi),
+    /** 頂部應顯示此字串（與 ai_model 下拉格式相同） */
+    effectiveMainFull: resolvedModelToPrefixedString(resolved),
+    /** 資料庫 ai_model 欄位（使用者以為的選擇）；若與 effective 不同且 source 為 env，代表被環境變數蓋掉 */
+    databaseAiModelRow: dbAiRow,
+    envAiModelPreview: envAi || null,
+    envOpenaiModelPreview: envOpenai || null,
+    /** 主對話是否由環境變數決定（儲存 ai_model 也不會改實際對話模型） */
+    mainConversationLockedByEnv: main.source === "env",
   };
 }
 

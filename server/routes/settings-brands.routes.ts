@@ -222,9 +222,10 @@ export function registerSettingsBrandsRoutes(app: Express): void {
           const model = rm.provider === "google" ? rm.model : "gemini-3.1-pro-preview";
           const genAI = new GoogleGenerativeAI(apiKey.trim());
           const genModel = genAI.getGenerativeModel({ model });
+          /** 不可過小：Gemini 3.x 等思考／preview 模型會先耗用輸出額度，8 tokens 常變成 finishReason=MAX_TOKENS 且 text() 為空 */
           const result = await genModel.generateContent({
-            contents: [{ role: "user", parts: [{ text: "hi" }] }],
-            generationConfig: { maxOutputTokens: 8, temperature: 0 },
+            contents: [{ role: "user", parts: [{ text: "Reply with exactly: OK" }] }],
+            generationConfig: { maxOutputTokens: 256, temperature: 0 },
           });
           const resp = result.response;
           if (resp.promptFeedback?.blockReason) {
@@ -242,9 +243,12 @@ export function registerSettingsBrandsRoutes(app: Express): void {
           if (!out) {
             const c0 = (resp as { candidates?: Array<{ finishReason?: string; safetyRatings?: unknown }> }).candidates?.[0];
             const fr = c0?.finishReason ? String(c0.finishReason) : "";
-            const hint = fr
-              ? `finishReason=${fr}。若為 SAFETY／RECITATION 等代表候選被擋下。`
-              : "無文字候選（可能模型 id 對此金鑰不可用、配額用盡或 API 回傳異常）。";
+            const hint =
+              fr === "MAX_TOKENS"
+                ? "finishReason=MAX_TOKENS（輸出額度用盡前未產生可讀文字，常見於思考型／preview 模型；已將測試請求調高輸出上限，請再測一次）。"
+                : fr
+                  ? `finishReason=${fr}。若為 SAFETY／RECITATION 等代表候選被擋下。`
+                  : "無文字候選（可能模型 id 對此金鑰不可用、配額用盡或 API 回傳異常）。";
             return res.json({
               success: false,
               message: `Gemini 回應為空（模型：${model}）。${hint} 請至 Google AI Studio 確認模型清單、金鑰權限與配額。`,

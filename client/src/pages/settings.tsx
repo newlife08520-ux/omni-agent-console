@@ -43,6 +43,13 @@ type OpenAIModelsPayload = {
   router: { effective: string; source: string; envVarSet: boolean; storedInDb: string };
   provider: "openai" | "anthropic" | "google";
   aiModelEnvSet: boolean;
+  /** 與下拉 ai_model 同格式，頂部應顯示此完整字串 */
+  effectiveMainFull?: string;
+  databaseAiModelRow?: string;
+  envAiModelPreview?: string | null;
+  envOpenaiModelPreview?: string | null;
+  /** true 時後台儲存 ai_model 不會改實際對話模型 */
+  mainConversationLockedByEnv?: boolean;
 };
 
 function mainModelSourceLabel(source: string): string {
@@ -205,13 +212,27 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
     setSaving(key);
     try {
       await apiRequest("PUT", "/api/settings", { key, value: formValues[key] || "" });
-      queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
-      if (key === "openai_model" || key === "openai_router_model" || key === "openai_model_quick_picks_extra") {
-        queryClient.invalidateQueries({ queryKey: ["/api/settings/openai-models"] });
+      await queryClient.refetchQueries({ queryKey: ["/api/settings"] });
+      const modelKeys = ["ai_model", "openai_model", "openai_router_model", "openai_model_quick_picks_extra"];
+      if (modelKeys.includes(key) && canConfigureOpenaiModels) {
+        const fr = await refetchOpenaiModels();
+        if (key === "ai_model" && fr.data?.mainConversationLockedByEnv) {
+          toast({
+            title: "已儲存至資料庫",
+            description:
+              "目前主對話仍由伺服器環境變數（AI_MODEL／OPENAI_MODEL）決定，頂部「生效」為實際值。若要後台下拉生效，請改主機環境變數或移除覆寫。",
+          });
+        } else {
+          toast({ title: "儲存成功", description: "設定已更新；生效模型已重新載入" });
+        }
+      } else {
+        toast({ title: "儲存成功", description: "設定已更新" });
       }
-      toast({ title: "儲存成功", description: "設定已更新" });
-    } catch (_e) { toast({ title: "儲存失敗", variant: "destructive" }); }
-    finally { setSaving(""); }
+    } catch (_e) {
+      toast({ title: "儲存失敗", variant: "destructive" });
+    } finally {
+      setSaving("");
+    }
   };
 
   const handleSaveMultiple = async (keys: string[]) => {
@@ -348,7 +369,8 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
       label: "Gemini API 金鑰（Google AI Studio）",
       icon: Key,
       placeholder: "AIza...",
-      description: "用於 google:gemini-… 主模型。測試連線時若主模型為 Google，會用您設定的模型實測；否則以 gemini-3.1-pro-preview 驗證金鑰。",
+      description:
+        "用於 google:gemini-… 主模型。測試連線時若主模型為 Google，會用您設定的模型實測；否則以 gemini-3.1-pro-preview 驗證（已給足輸出長度，避免 preview 模型因額度過小回傳空白）。",
       testType: "gemini",
     },
   ];
@@ -389,22 +411,57 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
             <div className="min-w-0 flex-1">
               <p className="text-xs font-bold uppercase tracking-wide text-indigo-900">AI · 目前生效供應商與主模型</p>
               {openaiModels ? (
-                <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-2 text-stone-900">
-                  <span className="text-sm">
-                    <span className="text-stone-500">{openaiModels.provider}</span>
-                    {" · "}
-                    <code className="rounded-md border border-indigo-200 bg-white px-2 py-1 font-mono text-base font-semibold text-indigo-950 shadow-sm">
-                      {openaiModels.main.effective}
-                    </code>
-                  </span>
-                  <span className="hidden text-stone-300 sm:inline">|</span>
-                  <span className="text-sm">
-                    Router{" "}
-                    <code className="rounded-md border border-indigo-200 bg-white px-2 py-1 font-mono text-base font-semibold text-indigo-950 shadow-sm">
-                      {openaiModels.router.effective}
-                    </code>
-                  </span>
-                </div>
+                <>
+                  <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-2 text-stone-900">
+                    <span className="text-sm">
+                      <span className="text-stone-500">主模型（實際生效）</span>{" "}
+                      <code
+                        className="rounded-md border border-indigo-200 bg-white px-2 py-1 font-mono text-base font-semibold text-indigo-950 shadow-sm break-all"
+                        data-testid="text-hero-effective-main-full"
+                      >
+                        {openaiModels.effectiveMainFull ??
+                          `${openaiModels.provider}:${openaiModels.main.effective}`}
+                      </code>
+                    </span>
+                    <span className="hidden text-stone-300 sm:inline">|</span>
+                    <span className="text-sm">
+                      Router{" "}
+                      <code className="rounded-md border border-indigo-200 bg-white px-2 py-1 font-mono text-base font-semibold text-indigo-950 shadow-sm break-all">
+                        {openaiModels.router.effective}
+                      </code>
+                    </span>
+                  </div>
+                  {openaiModels.mainConversationLockedByEnv ? (
+                    <div
+                      className="mt-3 rounded-lg border-2 border-rose-300 bg-rose-50/95 px-3 py-2.5 text-xs text-rose-950"
+                      data-testid="alert-main-model-env-override"
+                    >
+                      <p className="font-semibold">後台下拉儲存的「主模型」不會改變實際對話：目前由主機環境變數優先。</p>
+                      {openaiModels.envAiModelPreview ? (
+                        <p className="mt-1.5">
+                          <span className="text-rose-800">AI_MODEL</span>{" "}
+                          <code className="rounded bg-white/80 px-1.5 py-0.5 font-mono text-[11px] break-all">
+                            {openaiModels.envAiModelPreview}
+                          </code>
+                        </p>
+                      ) : null}
+                      {openaiModels.envOpenaiModelPreview ? (
+                        <p className="mt-1">
+                          <span className="text-rose-800">OPENAI_MODEL</span>{" "}
+                          <code className="rounded bg-white/80 px-1.5 py-0.5 font-mono text-[11px] break-all">
+                            {openaiModels.envOpenaiModelPreview}
+                          </code>
+                        </p>
+                      ) : null}
+                      {openaiModels.databaseAiModelRow ? (
+                        <p className="mt-1.5 text-rose-900">
+                          資料庫 <span className="font-mono">ai_model</span>（您選的）：{" "}
+                          <code className="rounded bg-white/80 px-1 font-mono break-all">{openaiModels.databaseAiModelRow}</code>
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </>
               ) : openaiModelsLoading ? (
                 <p className="mt-2 flex items-center gap-2 text-sm text-stone-600">
                   <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
@@ -545,7 +602,8 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
                             供應商：<span className="font-mono font-semibold">{openaiModels.provider}</span>
                           </p>
                           <p className="font-mono text-sm font-semibold text-stone-900 break-all" data-testid="text-effective-main-model">
-                            {openaiModels.main.effective}
+                            {openaiModels.effectiveMainFull ??
+                              `${openaiModels.provider}:${openaiModels.main.effective}`}
                           </p>
                           <p className="text-xs text-stone-500 mt-1">{mainModelSourceLabel(openaiModels.main.source)}</p>
                           <p className="text-[10px] text-stone-400 mt-1">
