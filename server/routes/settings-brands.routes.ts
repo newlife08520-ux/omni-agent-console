@@ -240,7 +240,15 @@ export function registerSettingsBrandsRoutes(app: Express): void {
             out = "";
           }
           if (!out) {
-            return res.json({ success: false, message: "Gemini 回應為空（請確認模型名稱與 API 權限）" });
+            const c0 = (resp as { candidates?: Array<{ finishReason?: string; safetyRatings?: unknown }> }).candidates?.[0];
+            const fr = c0?.finishReason ? String(c0.finishReason) : "";
+            const hint = fr
+              ? `finishReason=${fr}。若為 SAFETY／RECITATION 等代表候選被擋下。`
+              : "無文字候選（可能模型 id 對此金鑰不可用、配額用盡或 API 回傳異常）。";
+            return res.json({
+              success: false,
+              message: `Gemini 回應為空（模型：${model}）。${hint} 請至 Google AI Studio 確認模型清單、金鑰權限與配額。`,
+            });
           }
           return res.json({ success: true, message: `Gemini 連線成功，已用模型 ${model} 取得回應` });
         }

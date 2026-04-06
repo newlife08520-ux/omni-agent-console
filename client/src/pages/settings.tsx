@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -155,6 +155,7 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
   const [formValues, setFormValues] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState("");
   const [testing, setTesting] = useState("");
+  const [settingsPageRefreshing, setSettingsPageRefreshing] = useState(false);
   const [apiHealth, setApiHealth] = useState<Record<string, HealthEntry>>({});
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -177,8 +178,10 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
   const {
     data: openaiModels,
     isLoading: openaiModelsLoading,
+    isFetching: openaiModelsFetching,
     isError: openaiModelsIsError,
     error: openaiModelsQueryError,
+    refetch: refetchOpenaiModels,
   } = useQuery<OpenAIModelsPayload>({
     queryKey: ["/api/settings/openai-models"],
     queryFn: getQueryFn({ on401: "throw" }),
@@ -247,6 +250,39 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
     setApiHealth(prev => ({ ...prev, [key]: entry }));
   };
 
+  /** 向伺服器強制 refetch，並提示結果（避免只 invalidate 時背景更新無感） */
+  const handleRefreshOpenaiModels = useCallback(async () => {
+    const result = await refetchOpenaiModels();
+    if (result.error) {
+      toast({
+        title: "重新整理失敗",
+        description: (result.error as Error).message,
+        variant: "destructive",
+      });
+      return;
+    }
+    toast({ title: "已更新", description: "生效模型狀態已從伺服器重新載入" });
+  }, [refetchOpenaiModels, toast]);
+
+  const handleRefreshAllSettingsData = useCallback(async () => {
+    setSettingsPageRefreshing(true);
+    try {
+      await queryClient.refetchQueries({ queryKey: ["/api/settings"] });
+      if (canConfigureOpenaiModels) {
+        await queryClient.refetchQueries({ queryKey: ["/api/settings/openai-models"] });
+      }
+      toast({ title: "已重新載入", description: "本頁設定已與伺服器同步" });
+    } catch (e) {
+      toast({
+        title: "重新載入失敗",
+        description: e instanceof Error ? e.message : "請稍後再試",
+        variant: "destructive",
+      });
+    } finally {
+      setSettingsPageRefreshing(false);
+    }
+  }, [queryClient, canConfigureOpenaiModels, toast]);
+
   const handleTestConnectionWithStatus = async (type: string) => {
     setTesting(type);
     updateApiHealth(type, { status: "loading", message: "檢測中..." });
@@ -257,13 +293,27 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
         body: JSON.stringify({ type }),
         credentials: "include",
       });
-      const data = await res.json();
+      const raw = await res.text();
+      let data: { success?: boolean; message?: string } = {};
+      if (raw) {
+        try {
+          data = JSON.parse(raw) as { success?: boolean; message?: string };
+        } catch {
+          data = { message: raw.slice(0, 300) };
+        }
+      }
+      const msg = data.message || `HTTP ${res.status}`;
+      if (!res.ok) {
+        toast({ title: "連線失敗", description: msg, variant: "destructive" });
+        updateApiHealth(type, { status: "error", message: msg });
+        return;
+      }
       if (data.success) {
         toast({ title: "連線成功", description: data.message });
         updateApiHealth(type, { status: "ok", message: data.message });
       } else {
-        toast({ title: "連線失敗", description: data.message, variant: "destructive" });
-        updateApiHealth(type, { status: "error", message: data.message });
+        toast({ title: "連線失敗", description: msg, variant: "destructive" });
+        updateApiHealth(type, { status: "error", message: msg });
       }
     } catch (_e) {
       toast({ title: "連線失敗", description: "無法連線至伺服器", variant: "destructive" });
@@ -305,11 +355,29 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
 
   return (
     <div className="p-6 max-w-3xl mx-auto space-y-6" data-testid="settings-page">
-      <div>
-        <h1 className="text-xl font-bold text-stone-800" data-testid="text-settings-title">系統設定</h1>
-        <p className="text-sm text-stone-500 mt-1">
-          {isSuperAdmin ? "API 金鑰、安全與各項系統全域設定。品牌與渠道請至左側選單「品牌與渠道」；排班與派案請至「團隊管理」。" : "管理品牌外觀、LINE 迎賓與轉人工設定"}
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-bold text-stone-800" data-testid="text-settings-title">系統設定</h1>
+          <p className="text-sm text-stone-500 mt-1">
+            {isSuperAdmin ? "API 金鑰、安全與各項系統全域設定。品牌與渠道請至左側選單「品牌與渠道」；排班與派案請至「團隊管理」。" : "管理品牌外觀、LINE 迎賓與轉人工設定"}
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="shrink-0 text-xs"
+          disabled={settingsPageRefreshing || isLoading}
+          onClick={() => void handleRefreshAllSettingsData()}
+          data-testid="button-refresh-settings-page"
+        >
+          {settingsPageRefreshing ? (
+            <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <RefreshCw className="mr-1 h-3.5 w-3.5" />
+          )}
+          重新載入本頁資料
+        </Button>
       </div>
 
       {canConfigureOpenaiModels && (
@@ -342,6 +410,11 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
                   <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
                   正在向伺服器查詢生效模型…
                 </p>
+              ) : openaiModelsFetching ? (
+                <p className="mt-2 flex items-center gap-2 text-sm text-indigo-800">
+                  <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                  正在重新整理生效模型…
+                </p>
               ) : (
                 <div className="mt-2 text-sm text-amber-900">
                   <p>尚未取得生效模型。請按右側「重新整理」，或確認已登入（超級管理員／行銷主管）。</p>
@@ -361,9 +434,15 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
               variant="secondary"
               size="sm"
               className="shrink-0 border-indigo-200 bg-white hover:bg-indigo-50"
-              onClick={() => queryClient.invalidateQueries({ queryKey: ["/api/settings/openai-models"] })}
+              disabled={openaiModelsFetching}
+              onClick={() => void handleRefreshOpenaiModels()}
+              data-testid="button-refresh-openai-models-hero"
             >
-              <RefreshCw className="mr-1 h-3.5 w-3.5" />
+              {openaiModelsFetching ? (
+                <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="mr-1 h-3.5 w-3.5" />
+              )}
               重新整理模型狀態
             </Button>
           </div>
@@ -409,10 +488,15 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
                       variant="outline"
                       size="sm"
                       className="text-xs shrink-0"
-                      onClick={() => queryClient.invalidateQueries({ queryKey: ["/api/settings/openai-models"] })}
+                      disabled={openaiModelsFetching}
+                      onClick={() => void handleRefreshOpenaiModels()}
                       data-testid="button-refresh-openai-models"
                     >
-                      <RefreshCw className="w-3.5 h-3.5 mr-1" />
+                      {openaiModelsFetching ? (
+                        <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />
+                      ) : (
+                        <RefreshCw className="w-3.5 h-3.5 mr-1" />
+                      )}
                       重新整理狀態
                     </Button>
                   </div>
@@ -423,10 +507,10 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
                       <span className="ml-1 break-all font-mono">{(openaiModelsQueryError as Error)?.message}</span>
                     </div>
                   )}
-                  {openaiModelsLoading && (
+                  {(openaiModelsLoading || openaiModelsFetching) && (
                     <p className="mb-3 flex items-center gap-2 text-xs text-stone-500">
                       <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
-                      載入模型狀態中…
+                      {openaiModelsLoading ? "載入模型狀態中…" : "正在向伺服器重新整理模型狀態…"}
                     </p>
                   )}
                   {openaiModels && (
