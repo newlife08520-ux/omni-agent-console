@@ -641,9 +641,8 @@ export async function fetchShoplineOrdersListPaginated(
     const rawList = parseOrdersResponse(data);
     pagesFetched++;
     if (!rawList.length) break;
-    /** 暫時診斷：GET /orders 分頁同步時第一頁第一筆原始結構 */
-    if (page === 1 && rawList.length > 0) {
-      console.log("[SHOPLINE_RAW_ITEM_DEBUG]", JSON.stringify(rawList[0]).slice(0, 2000));
+    if (page === 1 && rawList && rawList.length > 0) {
+      console.log("[SHOPLINE_RAW_ITEM_DEBUG]", JSON.stringify(rawList[0]).slice(0, 3000));
     }
     for (const raw of rawList) out.push(mapShoplineOrder(raw));
     if (rawList.length < perPage) break;

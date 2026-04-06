@@ -28,7 +28,7 @@ export function packDeterministicMultiOrderToolResult(params: {
     const { kind, label } = payKindForOrder(o, st, src);
     return {
       order_id: o.global_order_id,
-      status: st,
+      status: customerFacingStatusLabel(st),
       amount: o.final_total_order_amount,
       product_list: o.product_list,
       buyer_name: o.buyer_name,

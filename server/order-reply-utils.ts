@@ -4,6 +4,7 @@
  */
 import type { OrderInfo, ActiveOrderContext } from "@shared/schema";
 import { derivePaymentStatus, type PaymentKind } from "./order-payment-utils";
+import { maskName, maskPhone } from "./tool-llm-sanitize";
 
 /** 訂單狀態轉成客人聽得懂的人話 */
 export function customerFacingStatusLabel(raw: string): string {
@@ -17,6 +18,26 @@ export function customerFacingStatusLabel(raw: string): string {
   if (/新訂單/i.test(s)) return "新訂單，準備中";
   if (/\[本地快取/i.test(s)) return "確認中";
   return s;
+}
+
+/** 付款標籤對客清洗——去掉工程感文字 */
+export function customerFacingPaymentLabel(raw: string): string {
+  const s = (raw || "").trim();
+  if (/貨到付款/i.test(s)) return "貨到付款（取貨時付款）";
+  if (/付款成功|已付款|已收款/i.test(s)) return "已付款";
+  if (/付款失敗|未成立|授權失敗|刷卡不成功/i.test(s)) return "付款未成功";
+  if (/同步中|確認中|processing|syncing/i.test(s)) return "付款確認中";
+  if (/未付款|待付款/i.test(s)) return "尚未付款";
+  return s;
+}
+
+/** 宅配地址隱碼：只顯示縣市區 + *** */
+export function maskAddress(addr: string): string {
+  const s = (addr || "").trim();
+  if (!s) return "";
+  const match = s.match(/^(.{2,8}(?:市|區|鎮|鄉|里|村))/);
+  if (match) return match[1] + "***";
+  return s.length > 6 ? s.slice(0, 6) + "***" : s;
 }
 
 const CVS_SHIPPING_KEYWORDS = ["超商", "門市", "7-11", "7-ELEVEN", "全家", "OK", "萊爾富"];
@@ -76,7 +97,9 @@ export function formatProductLinesForCustomer(o: {
     const lines = raw.map((item: unknown) => {
       if (item != null && typeof item === "object") {
         const x = item as Record<string, unknown>;
-        const name = String(x.name ?? x.title ?? x.product_name ?? x.product_title ?? x.code ?? "").trim();
+        const name = String(
+          x.product_name ?? x.name ?? x.item_name ?? x.title ?? x.product_title ?? x.code ?? ""
+        ).trim();
         const qty = x.quantity ?? x.qty ?? 1;
         if (!name) return "";
         return `${name} × ${qty}`;
@@ -119,11 +142,15 @@ export function formatOrderOnePage(o: {
   created_at?: string;
   payment_method?: string;
   payment_status_label?: string;
+  payment_status?: string;
+  payment_warning?: string;
   amount?: number;
   shipping_method?: string;
+  shipping_display?: string;
   tracking_number?: string;
   address?: string;
   product_list?: string;
+  items_structured?: unknown;
   status?: string;
   shipped_at?: string;
   delivery_target_type?: string;
@@ -133,28 +160,67 @@ export function formatOrderOnePage(o: {
   source_channel?: string;
 }): string {
   const lines: string[] = [];
+
   if (o.order_id) lines.push(`訂單編號：${o.order_id}`);
+
+  if (o.buyer_name) lines.push(`收件人：${maskName(o.buyer_name)}`);
+
+  if (o.buyer_phone) lines.push(`電話：${maskPhone(o.buyer_phone)}`);
+
   if (o.created_at) lines.push(`下單時間：${o.created_at}`);
-  lines.push(`付款方式：${displayPaymentMethod(o.payment_method)}`);
-  if (o.payment_status_label) lines.push(`付款狀態：${o.payment_status_label}`);
-  if (o.amount != null) lines.push(`金額：$${Number(o.amount).toLocaleString()}`);
-  lines.push(`配送方式：${displayShippingMethod(o.shipping_method)}`);
-  if (o.tracking_number) lines.push(`物流單號：${o.tracking_number}`);
-  const isCvs =
-    o.delivery_target_type === "cvs" ||
-    (o.delivery_target_type !== "home" &&
-      CVS_SHIPPING_KEYWORDS.some((k) => (o.shipping_method || "").toLowerCase().includes(k.toLowerCase())));
-  const addressDisplay = isCvs
-    ? [o.cvs_brand, o.cvs_store_name, o.full_address].filter(Boolean).join(" ") || o.address
-    : o.full_address || o.address;
-  if (addressDisplay) lines.push(isCvs ? `門市／地址：${addressDisplay}` : `地址：${addressDisplay}`);
+
   const prodLine = formatProductLinesForCustomer({
     product_list: o.product_list,
-    items_structured: (o as { items_structured?: unknown }).items_structured,
+    items_structured: o.items_structured,
   });
-  if (prodLine) lines.push(`商品：${prodLine}`);
+  if (prodLine) {
+    lines.push(`商品：${prodLine}`);
+  }
+
+  if (o.amount != null) lines.push(`金額：NT$ ${Number(o.amount).toLocaleString()}`);
+
+  const label0 = (o.payment_status_label || "").trim();
+  const ps = (o.payment_status || "").trim();
+  const paySource =
+    label0 || (/^(success|failed|pending|cod|unknown)$/i.test(ps) ? "" : ps);
+  const payLabel = customerFacingPaymentLabel(paySource);
+  const payMethod = displayPaymentMethod(o.payment_method);
+  if (payLabel) {
+    const methodSuffix = (o.payment_method || "").trim() ? `（${payMethod}）` : "";
+    lines.push(`付款：${payLabel}${methodSuffix}`);
+  }
+
+  if (o.payment_warning && o.payment_warning.trim()) {
+    lines.push(`⚠️ ${o.payment_warning}`);
+  }
+
+  const shipping = o.shipping_display || displayShippingMethod(o.shipping_method);
+  const hasShipRaw = !!(o.shipping_method || "").trim() || !!(o.shipping_display || "").trim();
+  if (hasShipRaw && shipping && shipping !== "（此筆訂單系統未回傳）") {
+    lines.push(`配送：${shipping}`);
+  }
+
+  const isCvs =
+    o.delivery_target_type === "cvs" ||
+    o.delivery_target_type === "超商" ||
+    (o.delivery_target_type !== "home" &&
+      o.delivery_target_type !== "宅配" &&
+      CVS_SHIPPING_KEYWORDS.some((k) => (o.shipping_method || "").toLowerCase().includes(k.toLowerCase())));
+
+  if (isCvs) {
+    const storeName = [o.cvs_brand, o.cvs_store_name].filter(Boolean).join(" ");
+    if (storeName) lines.push(`取貨門市：${storeName}`);
+  } else {
+    const addr = o.full_address || o.address || "";
+    if (addr) lines.push(`寄送地址：${maskAddress(addr)}`);
+  }
+
+  if (o.tracking_number) lines.push(`物流單號：${o.tracking_number}`);
+
   if (o.status) lines.push(`狀態：${customerFacingStatusLabel(o.status)}`);
+
   if (o.shipped_at) lines.push(`出貨時間：${o.shipped_at}`);
+
   return lines.join("\n");
 }
 

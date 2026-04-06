@@ -22,6 +22,7 @@ import {
   formatLocalOnlyCandidateSummary,
   payKindForOrder,
   customerFacingStatusLabel,
+  customerFacingPaymentLabel,
 } from "../order-reply-utils";
 import { packDeterministicSingleOrderToolResult } from "../order-single-renderer";
 import { orderDeterministicContractFields } from "../deterministic-order-contract";
@@ -47,21 +48,30 @@ function formatOrdersToolFormattedList(
   return rows
     .map((o) => {
       let products = String(o.product_list ?? "").trim();
-      let structured = o.items_structured;
-      if (typeof structured === "string") {
-        try {
-          structured = JSON.parse(structured);
-        } catch {
-          structured = null;
-        }
-      }
-      if (!products && Array.isArray(structured) && structured.length > 0) {
-        products = structured
-          .map((item: any) => item.product_name || item.name || "未知商品")
+      if (!products && Array.isArray(o.items_structured) && o.items_structured.length > 0) {
+        products = o.items_structured
+          .map((item: any) => item.product_name || item.name || item.item_name || item.title || "未知商品")
           .join("、");
       }
+      if (!products && typeof o.items_structured === "string") {
+        try {
+          const parsed = JSON.parse(o.items_structured);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            products = parsed
+              .map((item: any) => item.product_name || item.name || item.item_name || item.title || "未知商品")
+              .join("、");
+          }
+        } catch {
+          /* ignore */
+        }
+      }
       products = products ? products.slice(0, 40) : "未提供商品名稱";
-      return `- ${o.order_id} | ${products} | $${o.amount ?? ""} | ${customerFacingStatusLabel(o.status || "")} | ${o.payment_status_label ?? ""}`;
+
+      const status = customerFacingStatusLabel(o.status || "");
+
+      const payment = customerFacingPaymentLabel(o.payment_status_label || "");
+
+      return `- ${o.order_id} | ${products} | NT$${o.amount ?? ""} | ${status} | ${payment}`;
     })
     .join("\n");
 }
@@ -1138,10 +1148,12 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             status: customerFacingStatusLabel(st0),
             amount: o0.final_total_order_amount,
             product_list: o0.product_list,
+            items_structured: orderItemsStructuredPayload(o0),
             buyer_name: o0.buyer_name,
             buyer_phone: o0.buyer_phone,
             created_at: o0.created_at,
             payment_status_label: pkMo.label,
+            payment_warning: paymentWarningFromKind(pkMo.kind),
             shipping_method: o0.shipping_method,
             tracking_number: o0.tracking_number,
             full_address: o0.full_address,
@@ -1191,7 +1203,11 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           localHit = false;
           const b = storage.getBrand(bid);
           if (!b?.shopline_api_token?.trim()) {
-            return toolJson({ success: true, found: false, message: "本地無符合訂單且品牌未設定商店串接" });
+            return toolJson({
+              success: true,
+              found: false,
+              message: "目前暫時無法查詢訂單，我先幫您記下來，由專人確認後回覆您。",
+            });
           }
           const r = await lookupShoplineOrdersByPhoneExact(
             { storeDomain: (b.shopline_store_domain || "").trim(), apiToken: b.shopline_api_token.trim() },
@@ -1265,10 +1281,12 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             status: customerFacingStatusLabel(st0),
             amount: o0.final_total_order_amount,
             product_list: o0.product_list,
+            items_structured: orderItemsStructuredPayload(o0),
             buyer_name: o0.buyer_name,
             buyer_phone: o0.buyer_phone,
             created_at: o0.created_at,
             payment_status_label: pkS.label,
+            payment_warning: paymentWarningFromKind(pkS.kind),
             shipping_method: o0.shipping_method,
             tracking_number: o0.tracking_number,
             full_address: o0.full_address,
@@ -1350,7 +1368,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           if (preferSource === "shopline") {
             const hintNoCfg = shoplineOk
               ? "此條件下查無訂單。可請客戶提供訂單編號或當初留的 Email 再查；若訂單在其他管道建立請說明，避免混淆查詢結果。"
-              : "商店串接尚未完成，無法查詢部分訂單。請客戶提供訂單編號，或請管理員確認後台 API 與網域設定。";
+              : "目前暫時無法查詢訂單，我先幫您記下來，由專人確認後回覆您。";
             return toolJson({
               success: true,
               found: false,
@@ -1433,21 +1451,27 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           if (codn) partsAgg.push(`${codn} 筆貨到付款`);
           const aggStr = partsAgg.length ? partsAgg.join("、") : "付款狀態請見下列明細";
           const sorted = [...orders].sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
-          const top3 = sorted.slice(0, 3);
-          const lines = top3.map((o, i) => {
-            const src = o.source || orderSource;
-            const st = getUnifiedStatusLabel(o.status, src);
-            const { label } = payKindForOrder(o, st, src);
-            const srcTag = "";
-            return `${i + 1}. ${srcTag}${o.global_order_id}｜${o.created_at || ""}｜${label}｜${customerFacingStatusLabel(st)}`;
-          });
-          const deterministicReply =
-            `${n} 筆｜${aggStr}\n` +
-            lines.join("\n") +
-            (n > 3 ? `\n另有 ${n - 3} 筆未列出` : "") +
-            `\n回覆訂單編號以選定訂單`;
           const o0 = sorted[0];
           const status0 = getUnifiedStatusLabel(o0.status, o0.source || orderSource);
+
+          let deterministicReply: string;
+          let onePageFullForContext: string | undefined;
+
+          if (orders.length <= 3) {
+            const onePageBlocksMulti = orderSummaries.map((o) => formatOrderOnePage(o));
+            onePageFullForContext = onePageBlocksMulti.join("\n\n---\n\n");
+            deterministicReply = `這個手機號碼下有 ${orders.length} 筆訂單：\n\n` + onePageFullForContext;
+          } else if (orders.length <= 5) {
+            deterministicReply =
+              `這個手機號碼下有 ${orders.length} 筆訂單：\n\n` +
+              formatOrdersToolFormattedList(orderSummaries) +
+              `\n\n要看哪一筆的完整資訊呢？`;
+          } else {
+            deterministicReply =
+              `這個手機號碼下共有 ${orders.length} 筆訂單，最近幾筆是：\n\n` +
+              formatOrdersToolFormattedList(orderSummaries.slice(0, 5)) +
+              `\n\n要看哪一筆的詳細資訊嗎？`;
+          }
           const candidates = sorted.map((o) => {
             const src = o.source || orderSource;
             const st = getUnifiedStatusLabel(o.status, src);
@@ -1497,7 +1521,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             ...orderDeterministicContractFields(),
             renderer: "deterministic",
             note: multiOrderNote,
-            formatted_list: formattedList,
+            formatted_list: deterministicReply,
+            one_page_full: onePageFullForContext || deterministicReply,
           });
         }
 
@@ -1512,6 +1537,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             status: customerFacingStatusLabel(statusLabel0),
             amount: o0.final_total_order_amount,
             product_list: o0.product_list,
+            items_structured: orderItemsStructuredPayload(o0),
             buyer_name: o0.buyer_name,
             buyer_phone: o0.buyer_phone,
             address: o0.address,
@@ -1525,6 +1551,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             shipping_method: o0.shipping_method,
             payment_method: o0.payment_method,
             payment_status_label: pk.label,
+            payment_warning: paymentWarningFromKind(pk.kind),
           };
           const summaryForCtx = formatOrderOnePage(onePagePayload);
           storage.linkOrderForContact(context.contactId, o0.global_order_id, "ai_lookup");
@@ -1542,6 +1569,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
                   status: customerFacingStatusLabel(st),
                   amount: o0.final_total_order_amount,
                   product_list: o0.product_list,
+                  items_structured: orderItemsStructuredPayload(o0),
                   buyer_name: o0.buyer_name,
                   buyer_phone: o0.buyer_phone,
                   address: o0.address,
@@ -1555,6 +1583,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
                   shipping_method: o0.shipping_method,
                   payment_method: o0.payment_method,
                   payment_status_label: pk.label,
+                  payment_warning: paymentWarningFromKind(pk.kind),
                 };
                 if (isSingleLocalOnly) {
                   return formatLocalOnlyCandidateSummary({
