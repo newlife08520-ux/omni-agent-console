@@ -1,6 +1,6 @@
 /**
  * 統一 AI 模型／供應商決策（主對話）。
- * Hybrid Router 仍僅使用 OpenAI，見 resolveOpenAIRouterModel。
+ * Hybrid Router 模型見 resolveHybridRouterModel（OpenAI 或 Gemini 相容端點）。
  * 舊程式碼可繼續使用 resolveOpenAIModel()（回傳目前供應商下的 model id 字串）。
  */
 import { storage } from "./storage";
@@ -233,7 +233,23 @@ export function resolveOpenAIModel(): string {
   return resolveModel().model;
 }
 
-/** Phase 1 Hybrid Router 專用：可獨立設定較小／較快模型；未設定則沿用主模型（仍為 OpenAI 用 id）。 */
+/**
+ * Phase 1 Hybrid Router：供應商與模型 id（前綴規則同主模型）。
+ * 未設定 openai_router_model／OPENAI_ROUTER_MODEL 時沿用主模型。
+ */
+export function resolveHybridRouterModel(): ResolvedModel {
+  const env = process.env.OPENAI_ROUTER_MODEL?.trim();
+  if (env) {
+    return resolveModelWithBrandOverride(env);
+  }
+  const stored = storage.getSetting("openai_router_model")?.trim();
+  if (stored) {
+    return resolveModelWithBrandOverride(stored);
+  }
+  return resolveModel();
+}
+
+/** Phase 1 Hybrid Router 專用：可獨立設定較小／較快模型；未設定則沿用主模型。 */
 export function resolveOpenAIRouterModel(): string {
-  return getOpenAIRouterModelResolution().effective;
+  return resolveHybridRouterModel().model;
 }

@@ -1,10 +1,11 @@
 /**
  * Hybrid Router：硬規則優先（Phase 1.5 收斂），必要時 LLM fallback，失敗則 legacy 對照 plan/state。
  */
-import OpenAI from "openai";
 import type { ReplyPlanMode } from "../reply-plan-builder";
 import type { HybridRouteResult, AgentScenario } from "./phase1-types";
-import { resolveOpenAIRouterModel } from "../openai-model";
+import { resolveHybridRouterModel } from "../openai-model";
+import { createChatCompletionsOpenAIClient } from "../openai-routing-client";
+import { storage } from "../storage";
 import { classifyOrderNumber } from "../intent-and-order";
 import { extractOrderIdFromMixedSentence, extractLongNumericOrderIdFromMixedSentence } from "../order-fast-path";
 
@@ -231,11 +232,15 @@ async function tryLlmRouter(input: HybridRouterInput): Promise<HybridRouteResult
       used_llm_router: true,
     };
   }
-  if (!input.apiKey?.trim()) return null;
   const snippet = input.recentUserTexts.slice(-2).join("\n---\n").slice(0, 800);
   const userBlock = `最新訊息：\n${input.userMessage.slice(0, 500)}\n\n最近上下文：\n${snippet}`;
-  const client = new OpenAI({ apiKey: input.apiKey });
-  const model = resolveOpenAIRouterModel();
+  const rm = resolveHybridRouterModel();
+  const client = createChatCompletionsOpenAIClient(rm, {
+    openaiApiKey: input.apiKey,
+    geminiApiKey: storage.getSetting("gemini_api_key"),
+  });
+  if (!client) return null;
+  const model = rm.model;
   try {
     const res = await client.chat.completions.create({
       model,
