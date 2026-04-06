@@ -6,6 +6,7 @@ import session from "express-session";
 import { createClient } from "redis";
 import RedisStore from "connect-redis";
 import path from "path";
+import fs from "fs";
 import * as assignment from "./assignment";
 import { getUploadsDir, getDataDir } from "./data-dir";
 import db from "./db";
@@ -262,6 +263,39 @@ app.use((req, res, next) => {
       console.log("=".repeat(70));
       console.log(`  SSE  Events URL   : ${domain}/api/events`);
       console.log("=".repeat(70) + "\n");
+
+      // 啟動後自動同步 prompt 到 DB
+      setTimeout(() => {
+        try {
+          const root = process.cwd();
+
+          const globalPrompt = fs
+            .readFileSync(path.join(root, "docs/persona/PHASE97_MASTER_SLIM.txt"), "utf-8")
+            .trim();
+          db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('system_prompt', ?)").run(globalPrompt);
+
+          const b1 = fs
+            .readFileSync(path.join(root, "docs/persona/brands/brand_1_phase97_slim.txt"), "utf-8")
+            .trim();
+          db.prepare("UPDATE brands SET system_prompt = ? WHERE id = 1").run(b1);
+
+          const b2 = fs
+            .readFileSync(path.join(root, "docs/persona/brands/brand_2_phase97_slim.txt"), "utf-8")
+            .trim();
+          db.prepare("UPDATE brands SET system_prompt = ? WHERE id = 2").run(b2);
+
+          const b1row = db
+            .prepare("SELECT shopline_store_domain FROM brands WHERE id = 1")
+            .get() as { shopline_store_domain?: string } | undefined;
+          if (!String(b1row?.shopline_store_domain ?? "").trim()) {
+            db.prepare("UPDATE brands SET shopline_store_domain = ? WHERE id = 1").run("enjoythelife.shoplineapp.com");
+          }
+
+          console.log("[startup] Prompt 已自動同步到 DB（Global + Brand 1 + Brand 2）");
+        } catch (e) {
+          console.error("[startup] Prompt 同步失敗:", e);
+        }
+      }, 5000);
     });
   } catch (err) {
     console.error("[server] Startup failed:", err);
