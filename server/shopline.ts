@@ -192,7 +192,7 @@ function mapShoplineOrder(o: any): OrderInfo {
     orderPayment?.payment_at ??
     (payStatus === "completed" || payStatus === "paid" ? o.updated_at : null);
 
-  return {
+  const mapped: OrderInfo = {
     global_order_id: String(orderNumber),
     status: typeof o.status === "string" ? o.status : (o.order_status ?? "unknown"),
     final_total_order_amount: finalTotal,
@@ -223,6 +223,19 @@ function mapShoplineOrder(o: any): OrderInfo {
     payment_transaction_id: orderPayment?.payment_data?.info?.transactionId ?? undefined,
     items_structured: itemsStructured,
   };
+
+  const rawPm = String(mapped.payment_method ?? "").trim();
+  if (/tw_.*b2c_pay|cash_on_delivery|home_delivery_cod/i.test(rawPm)) {
+    mapped.payment_method = "貨到付款";
+  } else if (/credit|信用卡/i.test(rawPm)) {
+    mapped.payment_method = "信用卡";
+  } else if (/line.?pay/i.test(rawPm)) {
+    mapped.payment_method = "LINE Pay";
+  } else if (/atm|轉帳/i.test(rawPm)) {
+    mapped.payment_method = "ATM 轉帳";
+  }
+
+  return mapped;
 }
 
 export function getShoplineStatusLabel(status: string): string {

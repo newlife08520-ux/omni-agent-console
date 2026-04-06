@@ -1,6 +1,6 @@
 /**
  * 訂單回覆格式與付款狀態（供 fast path / tool 共用）
- * 付款狀態一律走 derivePaymentStatus，COD 顯示「貨到付款（到收／取件時付款）」。
+ * 付款狀態一律走 derivePaymentStatus；對客卡片見 formatOrderOnePage。
  */
 import type { OrderInfo, ActiveOrderContext } from "@shared/schema";
 import { derivePaymentStatus, type PaymentKind } from "./order-payment-utils";
@@ -23,11 +23,17 @@ export function customerFacingStatusLabel(raw: string): string {
 /** 付款標籤對客清洗——去掉工程感文字 */
 export function customerFacingPaymentLabel(raw: string): string {
   const s = (raw || "").trim();
-  if (/貨到付款/i.test(s)) return "貨到付款（取貨時付款）";
-  if (/付款成功|已付款|已收款/i.test(s)) return "已付款";
-  if (/付款失敗|未成立|授權失敗|刷卡不成功/i.test(s)) return "付款未成功";
-  if (/同步中|確認中|processing|syncing/i.test(s)) return "付款確認中";
-  if (/未付款|待付款/i.test(s)) return "尚未付款";
+  if (!s) return "";
+  if (/^(success|paid)$/i.test(s)) return "已付款";
+  if (/^failed$/i.test(s)) return "付款失敗";
+  if (/^pending$/i.test(s)) return "未付款";
+  if (/^cod$/i.test(s)) return "貨到付款";
+  if (/^unknown$/i.test(s)) return "未付款";
+  if (/貨到付款/i.test(s)) return "貨到付款";
+  if (/已付款|付款成功|已收款|已收/i.test(s)) return "已付款";
+  if (/失敗|取消|未成立|授權失敗|刷卡不成功/i.test(s)) return "付款失敗";
+  if (/未付款|待付款/i.test(s)) return "未付款";
+  if (/同步中|確認中|processing|syncing|pending/i.test(s)) return "未付款";
   return s;
 }
 
@@ -42,39 +48,49 @@ export function maskAddress(addr: string): string {
 
 const CVS_SHIPPING_KEYWORDS = ["超商", "門市", "7-11", "7-ELEVEN", "全家", "OK", "萊爾富"];
 
-/**
- * 對客顯示用：禁止輸出 API 內部代碼（pending / to_store / credit_card 等）。
- * 若未辨識則回傳中性描述，避免把 raw 英文塞給客人。
- */
+/** 對客顯示用：辨識常見付款方式；無法辨識則回空字串（由付款狀態列處理）。 */
 export function displayPaymentMethod(raw: string | null | undefined): string {
   const t = (raw || "").trim();
-  if (!t) return "（此筆訂單系統未回傳）";
+  if (!t) return "";
+
+  if (
+    /貨到付款|到收|取件時付款|cod|cash_on_delivery|tw_711_b2c_pay|tw_fami_b2c_pay|tw_hilife_b2c_pay|tw_ok_b2c_pay|b2c_pay|home_delivery_cod/i.test(
+      t
+    )
+  )
+    return "貨到付款";
+  if (/黑貓|宅急便|t_cat/i.test(t) && /代收|貨到/.test(t)) return "貨到付款";
+
   const lower = t.toLowerCase().replace(/\s+/g, "_");
-  if (lower === "pending") return "線上付款處理中（系統未顯示具體通道）";
-  if (lower === "credit_card" || lower === "creditcard") return "信用卡";
-  if (/^line[_\s-]?pay$/i.test(t) || lower.includes("linepay") || lower.includes("line_pay")) return "LINE Pay";
+  if (lower === "credit_card" || lower === "creditcard" || /信用卡|刷卡/.test(t)) return "信用卡";
+  if (/line[_\s-]?pay/i.test(t)) return "LINE Pay";
   if (/jkopay|街口/i.test(t)) return "街口支付";
   if (/apple[_\s-]?pay/i.test(t)) return "Apple Pay";
   if (/google[_\s-]?pay/i.test(t)) return "Google Pay";
-  if (/atm|虛擬帳|轉帳|匯款|ibon|超商代碼|繳費/i.test(t)) return t.replace(/\bcredit_card\b/gi, "信用卡").replace(/\bpending\b/gi, "處理中");
-  if (/貨到|到收|取件時付款|cod|cash_on_delivery/i.test(t)) return t;
-  if (/^[a-z0-9_\-]+$/i.test(t) && t.length <= 32 && !/[\u4e00-\u9fff]/.test(t)) {
-    return "線上支付（已隱藏內部代碼）";
-  }
-  return t.replace(/\bcredit_card\b/gi, "信用卡").replace(/\bpending\b/gi, "處理中").replace(/\bto_store\b/gi, "超商取貨");
+  if (/atm|虛擬帳|轉帳|匯款/i.test(t)) return "ATM 轉帳";
+  if (/ibon|超商代碼|繳費/i.test(t)) return "超商代碼繳費";
+
+  if (lower === "pending") return "";
+
+  if (/[\u4e00-\u9fff]/.test(t)) return t;
+
+  return "";
 }
 
 export function displayShippingMethod(raw: string | null | undefined): string {
-  const t = (raw || "").trim();
-  if (!t) return "（此筆訂單系統未回傳）";
-  const lower = t.toLowerCase();
-  if (lower === "to_store" || lower.includes("to_store")) return "超商取貨";
-  if (lower.includes("home") || /宅配|到府|delivery/i.test(t)) return "宅配";
-  if (/超商|門市|7-11|全家|萊爾富|ok|取貨/i.test(t)) return t.replace(/\bto_store\b/gi, "超商取貨");
-  if (/^[a-z0-9_\-]+$/i.test(t) && t.length <= 32 && !/[\u4e00-\u9fff]/.test(t)) {
-    return "物流配送（已隱藏內部代碼）";
-  }
-  return t.replace(/\bto_store\b/gi, "超商取貨");
+  const original = String(raw ?? "").trim();
+  const s = original.toLowerCase();
+  if (!s) return "";
+
+  if (/cvs|超商|門市|取貨|711|7-11|全家|萊爾富|ok.?mart|hilife|pickup|to_store/.test(s)) return "超商取貨";
+
+  if (/黑貓|宅急便|t[_\s]?cat/.test(s)) return "黑貓宅配";
+
+  if (/宅配|home|delivery|到府|address|郵寄|寄送/.test(s)) return "宅配";
+
+  if (/[\u4e00-\u9fff]/.test(s)) return original;
+
+  return "";
 }
 
 export type PayKind = PaymentKind;
@@ -179,26 +195,20 @@ export function formatOrderOnePage(o: {
 
   if (o.amount != null) lines.push(`金額：NT$ ${Number(o.amount).toLocaleString()}`);
 
-  const label0 = (o.payment_status_label || "").trim();
-  const ps = (o.payment_status || "").trim();
-  const paySource =
-    label0 || (/^(success|failed|pending|cod|unknown)$/i.test(ps) ? "" : ps);
-  const payLabel = customerFacingPaymentLabel(paySource);
   const payMethod = displayPaymentMethod(o.payment_method);
-  if (payLabel) {
-    const methodSuffix = (o.payment_method || "").trim() ? `（${payMethod}）` : "";
-    lines.push(`付款：${payLabel}${methodSuffix}`);
-  }
+  const payLabel = customerFacingPaymentLabel(
+    String(o.payment_status_label || "").trim() || String(o.payment_status || "").trim()
+  );
 
-  if (o.payment_warning && o.payment_warning.trim()) {
-    lines.push(`⚠️ ${o.payment_warning}`);
+  if (payMethod === "貨到付款") {
+    lines.push("付款：貨到付款（取貨時付款）");
+  } else if (payLabel && payMethod) {
+    lines.push(`付款：${payLabel}（${payMethod}）`);
+  } else if (payLabel) {
+    lines.push(`付款：${payLabel}`);
   }
 
   const shipping = o.shipping_display || displayShippingMethod(o.shipping_method);
-  const hasShipRaw = !!(o.shipping_method || "").trim() || !!(o.shipping_display || "").trim();
-  if (hasShipRaw && shipping && shipping !== "（此筆訂單系統未回傳）") {
-    lines.push(`配送：${shipping}`);
-  }
 
   const isCvs =
     o.delivery_target_type === "cvs" ||
@@ -207,12 +217,17 @@ export function formatOrderOnePage(o: {
       o.delivery_target_type !== "宅配" &&
       CVS_SHIPPING_KEYWORDS.some((k) => (o.shipping_method || "").toLowerCase().includes(k.toLowerCase())));
 
+  // 1. 超商取貨 → 門市名；2. 黑貓／一般宅配 → 配送標籤 + 地址隱碼（略過「台灣」占位）
   if (isCvs) {
+    if (shipping) lines.push(`配送：${shipping}`);
     const storeName = [o.cvs_brand, o.cvs_store_name].filter(Boolean).join(" ");
     if (storeName) lines.push(`取貨門市：${storeName}`);
   } else {
+    if (shipping) lines.push(`配送：${shipping}`);
     const addr = o.full_address || o.address || "";
-    if (addr) lines.push(`寄送地址：${maskAddress(addr)}`);
+    if (addr && addr !== "台灣") {
+      lines.push(`寄送地址：${maskAddress(addr)}`);
+    }
   }
 
   if (o.tracking_number) lines.push(`物流單號：${o.tracking_number}`);

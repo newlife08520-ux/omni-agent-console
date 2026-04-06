@@ -6,7 +6,7 @@ export const orderLookupTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: "lookup_order_by_id",
       description:
-        "用訂單編號查詢訂單。支援一頁式編號（如 KBT58265、DEN12345）和官網長數字編號（如 20260404055000004）。客人提供編號就直接查。",
+        "用訂單編號查詢訂單。支援短編號（如 KBT58265、DEN12345）和長數字編號（如 20260404055000004）。客人提供編號就直接查。",
       parameters: {
         type: "object",
         properties: {
@@ -80,7 +80,7 @@ export const orderLookupTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: "lookup_more_orders",
       description:
-        "查詢同一手機號碼的更多訂單（一頁商店來源）。用於客人問「還有其他訂單嗎」。",
+        "查詢同一手機號碼在同一銷售頁的更多訂單。用於客人問「還有其他訂單嗎」。",
       parameters: {
         type: "object",
         properties: {
@@ -96,12 +96,12 @@ export const orderLookupTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: "lookup_more_orders_shopline",
       description:
-        "查詢同一手機號碼的更多官網訂單。用於客人問「官網還有其他訂單嗎」。",
+        "查詢同一手機號碼在同一商店的更多訂單。用於客人問「還有其他訂單嗎」。",
       parameters: {
         type: "object",
         properties: {
           phone: { type: "string", description: "客人手機號碼" },
-          page_id: { type: "string", description: "官網頁面 ID（可選）" },
+          page_id: { type: "string", description: "頁面 ID（可選）" },
         },
         required: ["phone"],
       },
@@ -112,7 +112,7 @@ export const orderLookupTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: "lookup_order_by_phone",
       description:
-        "用手機號碼查詢所有訂單。客人給了手機號碼就直接查，不需要先問商品名稱。會同時查一頁商店和官網的訂單。",
+        "用手機號碼查詢所有訂單。客人給了手機號碼就直接查，不需要先問商品名稱。會合併查詢各管道的訂單。",
       parameters: {
         type: "object",
         properties: {
@@ -130,7 +130,7 @@ export const humanHandoffTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: "transfer_to_human",
       description:
-        "轉接給真人客服。在以下情況使用：客人要求轉人工、客人很生氣、問題超出 AI 能力、付款糾紛、客人重複問同樣問題你答不了。呼叫這個工具後系統會自動轉接，不需要你再做什麼。",
+        "轉接給真人客服。呼叫前必須先回覆一句話給客人（例如：好的，我幫您轉給專人處理，請稍等）。呼叫後系統會自動轉接。絕對不可以只呼叫工具不回覆任何文字。在以下情況使用：客人要求轉人工、客人很生氣、問題超出 AI 能力、付款糾紛、客人重複問同樣問題你答不了。",
       parameters: {
         type: "object",
         properties: {

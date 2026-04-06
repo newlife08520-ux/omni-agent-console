@@ -261,7 +261,8 @@ function appendSoftPaymentFailureSysNote(p: Record<string, unknown>): void {
 
 function applyWarmOpsSysNotes(toolName: string, p: Record<string, unknown>): void {
   if (toolName === "lookup_order_by_phone" && p.summary_only === true) {
-    p.sys_note = WARM_GUIDE_PHONE_SUMMARY_ONLY;
+    const prevNote = String(p.sys_note ?? "").trim();
+    p.sys_note = [prevNote, WARM_GUIDE_PHONE_SUMMARY_ONLY].filter(Boolean).join(" ");
   } else if (
     toolName === "lookup_order_by_id" &&
     p.success === true &&

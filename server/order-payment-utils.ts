@@ -4,9 +4,9 @@
  */
 import type { OrderInfo } from "@shared/schema";
 
-/** Shopline 常見：payment_type cash_on_delivery、中文「貨到付款／到收」、超商取貨付款等 */
+/** Shopline 常見：payment_type cash_on_delivery、中文「貨到付款／到收」、超商取貨付款、黑貓宅配代收等 */
 const COD_METHOD_REGEX =
-  /貨到付款|到收|取件時付款|取件時付|取貨付款|取貨時付款|取貨時付|到店付款|超商取貨付(?:款)?|便利商店取貨付(?:款)?|宅配代收|宅配.*貨到付款|7[\s\-／/]*11[\s、，,]*取貨付(?:款)?|全家[\s、，,]*取貨付(?:款)?|cash_on_delivery|cash\s*on\s*delivery|payment\s*on\s*delivery|\bcod\b|現金\s*與\s*刷卡/i;
+  /貨到付款|到收|取件時付款|取件時付|取貨付款|取貨時付款|取貨時付|到店付款|超商取貨付(?:款)?|便利商店取貨付(?:款)?|宅配代收|宅配.*貨到付款|黑貓.*(?:代收|貨到付款)|宅急便.*(?:代收|貨到付款)|7[\s\-／/]*11[\s、，,]*取貨付(?:款)?|全家[\s、，,]*取貨付(?:款)?|cash_on_delivery|cash\s*on\s*delivery|payment\s*on\s*delivery|\bcod\b|tw_711_b2c_pay|tw_fami_b2c_pay|tw_hilife_b2c_pay|tw_ok_b2c_pay|b2c_pay|home_delivery_cod|t_cat.*cod|現金\s*與\s*刷卡/i;
 
 function isSuperLandingCvsCod(order: OrderInfo): boolean {
   if ((order.source || "") !== "superlanding") return false;
@@ -26,6 +26,7 @@ export function isCodPaymentMethod(order: OrderInfo): boolean {
   if (COD_METHOD_REGEX.test(order.payment_method || "")) return true;
   if (/^到收$|^取件時付款$|^取件時付$/i.test((order.payment_method || "").trim())) return true;
   if (isSuperLandingCvsCod(order)) return true;
+  if (COD_METHOD_REGEX.test(String(order.shipping_method || ""))) return true;
   return false;
 }
 
@@ -88,9 +89,8 @@ function hasExplicitPaymentFailureSignal(payRaw: string, gatewayRaw: string): bo
 
 export type PaymentKind = "success" | "failed" | "pending" | "cod" | "unknown";
 
-/** Phase 3.0：fallback pending 時對客顯示（取代冰冷「待付款或待確認」） */
-export const PENDING_FALLBACK_CUSTOMER_LABEL =
-  "確認中（付款資訊更新中，請稍等）";
+/** Phase 3.0：fallback pending 時對客顯示 */
+export const PENDING_FALLBACK_CUSTOMER_LABEL = "未付款";
 
 export function derivePaymentStatus(
   order: OrderInfo,
@@ -100,7 +100,7 @@ export function derivePaymentStatus(
   if (isCodPaymentMethod(order)) {
     return {
       kind: "cod",
-      label: "貨到付款（到收／取件時付款）",
+      label: "貨到付款",
       reason: "cod",
       confidence: "high",
     };
@@ -111,7 +111,7 @@ export function derivePaymentStatus(
   if (prepaidOk || paidAtOk) {
     return {
       kind: "success",
-      label: "付款成功",
+      label: "已付款",
       reason: prepaidOk ? "prepaid" : "paid_at",
       confidence: "high",
     };
@@ -121,7 +121,7 @@ export function derivePaymentStatus(
   if (/已取消|訂單已取消|取消訂單/.test(statusLine)) {
     return {
       kind: "failed",
-      label: "付款失敗／訂單未成立",
+      label: "付款失敗",
       reason: "order_status_cancelled_zh",
       confidence: "high",
     };
@@ -133,7 +133,7 @@ export function derivePaymentStatus(
   if (hasExplicitPaymentFailureSignal(payRaw, gatewayRaw)) {
     return {
       kind: "failed",
-      label: "付款失敗／訂單未成立",
+      label: "付款失敗",
       reason: "native_payment_or_gateway_signal",
       confidence: "high",
     };
