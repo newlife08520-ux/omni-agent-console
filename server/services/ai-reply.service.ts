@@ -41,6 +41,7 @@ import {
 import { packDeterministicMultiOrderToolResult } from "../order-multi-renderer";
 import { tryOrderFastPath, extractOrderIdFromMixedSentence } from "../order-fast-path";
 import { formatOrderOnePage, payKindForOrder } from "../order-reply-utils";
+import type { MessagingOutboundSkipped } from "./messaging.service";
 import { normalizeCustomerFacingOrderReply } from "../customer-reply-normalizer";
 import { isValidOrderDeterministicPayload } from "../deterministic-order-contract";
 import { orderFeatureFlags } from "../order-feature-flags";
@@ -284,8 +285,16 @@ export function getOpenAIModel(): string {
 export interface AiReplyDeps {
   storage: IStorage;
   broadcastSSE: (eventType: string, data: unknown) => void;
-  pushLineMessage: (userId: string, messages: object[], token?: string | null) => Promise<void>;
-  sendFBMessage: (pageAccessToken: string, recipientId: string, text: string) => Promise<void>;
+  pushLineMessage: (
+    userId: string,
+    messages: object[],
+    token?: string | null
+  ) => Promise<void | MessagingOutboundSkipped>;
+  sendFBMessage: (
+    pageAccessToken: string,
+    recipientId: string,
+    text: string
+  ) => Promise<void | MessagingOutboundSkipped>;
   toolExecutor: { executeToolCall: (toolName: string, args: Record<string, string>, context?: ToolCallContext) => Promise<string> };
   getTransferUnavailableSystemMessage: (reason: "weekend" | "lunch" | "after_hours" | "all_paused" | null) => string;
   getLineTokenForContact: (contact: { channel_id?: number | null; brand_id?: number | null }) => string | null;
@@ -2049,6 +2058,19 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             Date.now() - startTime,
             `provider=${mainResolvedForTools.provider}`
           );
+          {
+            const tc = responseMessage?.tool_calls;
+            const c0 = responseMessage?.content;
+            console.log("[reply-trace] first_llm_done", {
+              contactId: contact.id,
+              hasToolCalls: !!(tc && tc.length),
+              toolNames:
+                tc?.map((t) => ("function" in t && t.function ? (t.function as { name?: string }).name : undefined)).filter(
+                  Boolean
+                ) ?? [],
+              contentLength: typeof c0 === "string" ? c0.length : 0,
+            });
+          }
 
           /** Gemini 3.x：每輪含 functionCall 的 model 輸出須帶回原始 parts（thought_signature） */
           let lastGeminiModelParts =
@@ -2181,6 +2203,12 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
               });
               const fn = (toolCall as { function?: { name?: string; arguments?: string } }).function;
               const fnName = fn?.name ?? "";
+              console.log("[reply-trace] tool_done", {
+                contactId: contact.id,
+                toolName: fnName,
+                resultLength: toolResult?.length ?? 0,
+                resultPreview: toolResult?.slice(0, 200) ?? null,
+              });
               let fnArgs: Record<string, string> = {};
               try { fnArgs = JSON.parse(fn?.arguments ?? "{}"); } catch (_e) {}
 
@@ -2261,6 +2289,14 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             const freshContact = storage.getContact(contact.id);
             if (freshContact?.needs_human && !markFormSubmittedSuccessThisRound) break;
 
+            console.log("[reply-trace] deterministic_check", {
+              contactId: contact.id,
+              hasDeterministic: !!orderLookupDeterministicReply,
+              deterministicLength: orderLookupDeterministicReply?.length ?? 0,
+              deterministicTrimmedLength: orderLookupDeterministicReply?.trim().length ?? 0,
+              deterministicSkipLlm: !!orderLookupDeterministicReply,
+            });
+
             if (orderLookupDeterministicReply) {
               secondLlmSkipped = true;
               console.log(
@@ -2291,6 +2327,14 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             lastGeminiModelParts =
               mainResolvedForTools.provider === "google" ? rNext.geminiModelParts : undefined;
             responseMessage = aiCallResultToOpenAiAssistantMessage(rNext);
+            {
+              const c2 = responseMessage?.content;
+              console.log("[reply-trace] second_llm_done", {
+                contactId: contact.id,
+                contentLength: typeof c2 === "string" ? c2.length : 0,
+                contentPreview: typeof c2 === "string" ? c2.slice(0, 200) : null,
+              });
+            }
           }
         } catch (claudeErr) {
           if (mainResolvedForTools.provider === "google") {
@@ -2363,6 +2407,19 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
         clearTimeout(streamTimeout);
         usedFirstLlmTelemetry = 1;
         console.log("[AI Latency] contact", contact.id, "after_first_llm_ms", Date.now() - startTime);
+        {
+          const tc = responseMessage?.tool_calls;
+          const c0 = responseMessage?.content;
+          console.log("[reply-trace] first_llm_done", {
+            contactId: contact.id,
+            hasToolCalls: !!(tc && tc.length),
+            toolNames:
+              tc?.map((t) => ("function" in t && t.function ? (t.function as { name?: string }).name : undefined)).filter(
+                Boolean
+              ) ?? [],
+            contentLength: typeof c0 === "string" ? c0.length : 0,
+          });
+        }
 
         while (responseMessage?.tool_calls && responseMessage.tool_calls.length > 0 && loopCount < maxToolLoops) {
           loopCount++;
@@ -2465,6 +2522,12 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             chatMessages.push({ role: "tool", tool_call_id: toolCall.id, content: toolResult });
             const fn = (toolCall as { function?: { name?: string; arguments?: string } }).function;
             const fnName = fn?.name ?? "";
+            console.log("[reply-trace] tool_done", {
+              contactId: contact.id,
+              toolName: fnName,
+              resultLength: toolResult?.length ?? 0,
+              resultPreview: toolResult?.slice(0, 200) ?? null,
+            });
             let fnArgs: Record<string, string> = {};
             try { fnArgs = JSON.parse(fn?.arguments ?? "{}"); } catch (_e) {}
 
@@ -2543,6 +2606,14 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           const freshContactLoop = storage.getContact(contact.id);
           if (freshContactLoop?.needs_human && !markFormSubmittedSuccessOaiRound) break;
 
+          console.log("[reply-trace] deterministic_check", {
+            contactId: contact.id,
+            hasDeterministic: !!orderLookupDeterministicReplyOai,
+            deterministicLength: orderLookupDeterministicReplyOai?.length ?? 0,
+            deterministicTrimmedLength: orderLookupDeterministicReplyOai?.trim().length ?? 0,
+            deterministicSkipLlm: !!orderLookupDeterministicReplyOai,
+          });
+
           if (orderLookupDeterministicReplyOai) {
             secondLlmSkipped = true;
             console.log(
@@ -2578,6 +2649,14 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
               contact.brand_id ?? undefined,
               loopAbort.signal
             );
+            {
+              const c2 = responseMessage?.content;
+              console.log("[reply-trace] second_llm_done", {
+                contactId: contact.id,
+                contentLength: typeof c2 === "string" ? c2.length : 0,
+                contentPreview: typeof c2 === "string" ? c2.slice(0, 200) : null,
+              });
+            }
           } catch (loopTimeoutErr: any) {
             clearTimeout(loopTimer);
             if (loopTimeoutErr?.name === "AbortError" || loopTimeoutErr?.message?.includes("abort")) {
@@ -2683,6 +2762,32 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
       if (!replyTrimEarly && shouldSkipPostHandoff && inHandoffAfterPipeline && !lastAiAlreadyTransferAck) {
         reply = TRANSFER_TOOL_CUSTOMER_ACK;
       }
+      {
+        const r = typeof reply === "string" ? reply : "";
+        console.log("[reply-trace] before_trim_guard", {
+          contactId: contact.id,
+          replyLength: r.length,
+          replyTrimmedLength: r.trim().length,
+          replyPreview: r.slice(0, 200),
+          source: secondLlmSkipped ? "deterministic" : usedSecondLlmTelemetry > 0 ? "second_llm" : "first_llm",
+        });
+      }
+      console.log("[reply-trace] trim_guard_result", {
+        contactId: contact.id,
+        passed: !!(reply && typeof reply === "string" && reply.trim()),
+        willCreateMessage: !!(reply && typeof reply === "string" && reply.trim()),
+        willPushLine: !!(reply && typeof reply === "string" && reply.trim()),
+      });
+      console.log("[ai-reply] final_reply_check", {
+        contactId: contact.id,
+        hasReply: !!reply,
+        replyLength: typeof reply === "string" ? reply.length : 0,
+        replyTrimmedLength: typeof reply === "string" ? reply.trim().length : 0,
+        replyPreview: typeof reply === "string" ? reply.slice(0, 80) : null,
+        secondLlmSkipped,
+        deterministicSelected: secondLlmSkipped,
+        toolsCalled: toolsCalled ?? [],
+      });
       if (reply && reply.trim()) {
         if (firstCustomerVisibleReplyMs == null) {
           firstCustomerVisibleReplyMs = Date.now() - startTime;
@@ -2720,6 +2825,14 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           recentUserTextsForRecency,
           effectiveBrandId || undefined
         );
+        {
+          const textToPush = reply;
+          console.log("[reply-trace] before_push", {
+            contactId: contact.id,
+            textLength: typeof textToPush === "string" ? textToPush.length : 0,
+            textPreview: typeof textToPush === "string" ? textToPush.slice(0, 200) : null,
+          });
+        }
         const totalMs = Date.now() - startTime;
         const finalRenderer = secondLlmSkipped ? (deterministicToolMeta.renderer || "deterministic_tool") : "llm";
         console.log("[AI Latency] contact", contact.id, "reply_sent_total_ms", totalMs, "tools=" + (toolsCalled.length ? toolsCalled.join(",") : "none"));

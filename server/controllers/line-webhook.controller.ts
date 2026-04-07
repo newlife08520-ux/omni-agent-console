@@ -21,6 +21,7 @@ import { shouldEscalateImageSupplement } from "../safe-after-sale-classifier";
 import { applyHandoff } from "../services/handoff";
 import { resolveOpenAIModel } from "../openai-model";
 import { acquireLineWebhookEvent } from "../webhook-idempotency";
+import type { MessagingOutboundSkipped } from "../services/messaging.service";
 
 const GHOST_REPLY_TOKEN = "00000000000000000000000000000000";
 const GHOST_USER_ID = "Udeadbeefdeadbeefdeadbeefdeadbeef";
@@ -29,8 +30,16 @@ const GHOST_USER_ID = "Udeadbeefdeadbeefdeadbeefdeadbeef";
 export interface LineWebhookDeps {
   storage: IStorage;
   broadcastSSE: (eventType: string, data: any) => void;
-  pushLineMessage: (userId: string, messages: object[], token?: string | null) => Promise<void>;
-  replyToLine: (replyToken: string, messages: object[], token?: string | null) => Promise<void>;
+  pushLineMessage: (
+    userId: string,
+    messages: object[],
+    token?: string | null
+  ) => Promise<void | MessagingOutboundSkipped>;
+  replyToLine: (
+    replyToken: string,
+    messages: object[],
+    token?: string | null
+  ) => Promise<void | MessagingOutboundSkipped>;
   downloadLineContent: (
     messageId: string,
     fallbackExt: string,

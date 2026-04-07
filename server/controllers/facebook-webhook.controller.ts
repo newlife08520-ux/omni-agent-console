@@ -20,11 +20,16 @@ import {
 import { shouldEscalateImageSupplement } from "../safe-after-sale-classifier";
 import { applyHandoff } from "../services/handoff";
 import { resolveOpenAIModel } from "../openai-model";
+import type { MessagingOutboundSkipped } from "../services/messaging.service";
 
 export interface FacebookWebhookDeps {
   storage: IStorage;
   broadcastSSE: (eventType: string, data: any) => void;
-  sendFBMessage: (pageAccessToken: string, recipientId: string, text: string) => Promise<void>;
+  sendFBMessage: (
+    pageAccessToken: string,
+    recipientId: string,
+    text: string
+  ) => Promise<void | MessagingOutboundSkipped>;
   downloadExternalImage: (imageUrl: string) => Promise<string | null>;
   handleImageVisionFirst: (imageFilePath: string, contactId: number) => Promise<{ reply: string; usedFallback: boolean; intent?: string; confidence?: string }>;
   enqueueDebouncedAiReply: (platform: string, contactId: number, message: string, inboundEventId: string, channelToken: string | null, matchedBrandId?: number) => Promise<void>;

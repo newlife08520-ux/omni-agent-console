@@ -31,6 +31,7 @@ import { classifyOrderNumber } from "../intent-and-order";
 import { applyHandoff, normalizeHandoffReason } from "./handoff";
 import { finalizeLlmToolJsonString } from "../tool-llm-sanitize";
 import { orderFeatureFlags } from "../order-feature-flags";
+import type { MessagingOutboundSkipped } from "./messaging.service";
 
 /** 與 ai-reply 轉人工備援句一致，避免客人只看到轉接、沒有任何 AI 對話 */
 export const TRANSFER_TOOL_CUSTOMER_ACK = "好的，我這邊幫您轉給專人處理，請稍等一下。";
@@ -129,8 +130,16 @@ function orderItemsStructuredPayload(o: OrderInfo): unknown {
 
 export interface ToolExecutorDeps {
   storage: IStorage;
-  pushLineMessage: (userId: string, messages: object[], token?: string | null) => Promise<void>;
-  sendFBMessage: (pageAccessToken: string, recipientId: string, text: string) => Promise<void>;
+  pushLineMessage: (
+    userId: string,
+    messages: object[],
+    token?: string | null
+  ) => Promise<void | MessagingOutboundSkipped>;
+  sendFBMessage: (
+    pageAccessToken: string,
+    recipientId: string,
+    text: string
+  ) => Promise<void | MessagingOutboundSkipped>;
   broadcastSSE: (eventType: string, data: unknown) => void;
   imageFileToDataUri?: (imageFilePath: string) => Promise<string | null>;
   getTransferUnavailableSystemMessage?: (
@@ -1592,6 +1601,17 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             const hintNoCfg = shoplineOk
               ? "此條件下查無訂單。可請客戶提供訂單編號或當初留的 Email 再查；若訂單在其他管道建立請說明，避免混淆查詢結果。"
               : "目前暫時無法查詢訂單，我先幫您記下來，由專人確認後回覆您。";
+            console.log("[reply-trace] lookup_phone_result", {
+              contactId: context?.contactId,
+              found: false,
+              resultCount: 0,
+              hasOnePageSummary: false,
+              onePageSummaryLength: 0,
+              hasDeterministicReply: false,
+              deterministicReplyLength: 0,
+              dataCoverage: undefined,
+              owner_match: undefined,
+            });
             return toolJson({
               success: true,
               found: false,
@@ -1599,6 +1619,17 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
               lookup_diagnostic: lookupDiag,
             });
           }
+          console.log("[reply-trace] lookup_phone_result", {
+            contactId: context?.contactId,
+            found: false,
+            resultCount: 0,
+            hasOnePageSummary: false,
+            onePageSummaryLength: 0,
+            hasDeterministicReply: false,
+            deterministicReplyLength: 0,
+            dataCoverage: undefined,
+            owner_match: undefined,
+          });
           return toolJson({
             success: true,
             found: false,
@@ -1610,6 +1641,18 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
         const orderSource = result.source;
         // summaryOnly 意圖：僅在筆數過多時隱藏明細；5 筆以內一律回傳完整 orders 供 AI 列出
         if (context?.orderLookupSummaryOnly && orders.length > 5) {
+          console.log("[reply-trace] lookup_phone_result", {
+            contactId: context?.contactId,
+            found: true,
+            resultCount: orders.length,
+            hasOnePageSummary: false,
+            onePageSummaryLength: 0,
+            hasDeterministicReply: false,
+            deterministicReplyLength: 0,
+            dataCoverage: result.data_coverage,
+            summaryOnly: true,
+            owner_match: undefined,
+          });
           return toolJson({
             success: true,
             found: true,
@@ -1761,6 +1804,17 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           /** ≤3 筆：程式直出完整卡片，略過第二輪 LLM（需契約欄位 + deterministic_customer_reply） */
           const usePhoneDeterministic =
             orderFeatureFlags.phoneOrderDeterministicReply && orders.length <= 3;
+          console.log("[reply-trace] lookup_phone_result", {
+            contactId: context?.contactId,
+            found: true,
+            resultCount: n,
+            hasOnePageSummary: !!(onePageFullForContext ?? one_page_full),
+            onePageSummaryLength: (onePageFullForContext ?? `${one_page_full}${localOnlyDisc}`).length,
+            hasDeterministicReply: usePhoneDeterministic,
+            deterministicReplyLength: usePhoneDeterministic ? deterministicReply.length : 0,
+            dataCoverage: result.data_coverage,
+            owner_match: undefined,
+          });
           return toolJson({
             success: true,
             found: true,
@@ -1892,6 +1946,17 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             one_page_summary: onePageSummarySingle,
             source: oSingle.source || orderSource,
           });
+          console.log("[reply-trace] lookup_phone_result", {
+            contactId: context?.contactId,
+            found: true,
+            resultCount: 1,
+            hasOnePageSummary: !!onePageSummarySingle,
+            onePageSummaryLength: onePageSummarySingle.length,
+            hasDeterministicReply: allowDeterministic,
+            deterministicReplyLength: allowDeterministic ? onePageSummarySingle.trim().length : 0,
+            dataCoverage: result.data_coverage,
+            owner_match: undefined,
+          });
           return toolJson({
             success: true,
             found: true,
@@ -1906,6 +1971,20 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             ...(isLocalOnly ? { data_coverage: "local_only" } : {}),
             ...(result.coverage_confidence ? { coverage_confidence: result.coverage_confidence } : {}),
             ...(result.needs_live_confirm ? { needs_live_confirm: result.needs_live_confirm } : {}),
+          });
+        }
+        {
+          const ops = orders.length === 1 ? `${onePageBlocks[0]}${localOnlyDisc}` : undefined;
+          console.log("[reply-trace] lookup_phone_result", {
+            contactId: context?.contactId,
+            found: true,
+            resultCount: orders.length,
+            hasOnePageSummary: !!ops,
+            onePageSummaryLength: (ops ?? "").length,
+            hasDeterministicReply: false,
+            deterministicReplyLength: 0,
+            dataCoverage: result.data_coverage,
+            owner_match: undefined,
           });
         }
         return toolJson({

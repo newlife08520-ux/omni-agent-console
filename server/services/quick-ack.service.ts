@@ -3,6 +3,7 @@
  * 僅查單（ORDER_LOOKUP）與售後（AFTER_SALES）送出；一般問候（GENERAL）與商品諮詢不送。
  */
 import { brandMessage } from "../phase2-output";
+import type { MessagingOutboundSkipped } from "./messaging.service";
 
 /** 是否應送 Quick Ack（與工具回合內查單 ack 共用條件） */
 export function shouldSendQuickAck(params: {
@@ -57,8 +58,16 @@ export function pickRandomAck(scenario: string): string {
 export type QuickAckChannelDeps = {
   createMessage: (contactId: number, platform: string, senderType: "ai", text: string) => { id: number };
   broadcastSSE: (eventType: string, data: unknown) => void;
-  pushLineMessage: (userId: string, messages: object[], token?: string | null) => Promise<void>;
-  sendFBMessage: (pageAccessToken: string, recipientId: string, text: string) => Promise<void>;
+  pushLineMessage: (
+    userId: string,
+    messages: object[],
+    token?: string | null
+  ) => Promise<void | MessagingOutboundSkipped>;
+  sendFBMessage: (
+    pageAccessToken: string,
+    recipientId: string,
+    text: string
+  ) => Promise<void | MessagingOutboundSkipped>;
 };
 
 /**

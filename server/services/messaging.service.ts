@@ -6,6 +6,40 @@ import crypto from "crypto";
 import { storage } from "../storage";
 import { uploadDir } from "../middlewares/upload.middleware";
 
+/** Phase 106.2：集中擋空訊息；呼叫端可判斷 skipped（不 throw） */
+export type MessagingOutboundSkipped = { skipped: true; reason: "empty_text" | "empty_messages" };
+
+function sliceCallerStack(): string {
+  return new Error().stack?.split("\n").slice(2, 8).join("\n") || "unknown";
+}
+
+function recordEmptyOutboundAlert(alert_type: string, payload: Record<string, unknown>): void {
+  try {
+    storage.createSystemAlert({
+      alert_type,
+      details: JSON.stringify({ ...payload, timestamp: new Date().toISOString() }),
+    });
+  } catch {
+    /* alert 失敗不影響主流程 */
+  }
+}
+
+/**
+ * LINE push/reply：擋下會觸發 API 400 的狀況（messages 為空、或任一 type=text 的 text 為空／僅空白）。
+ * 非 text 類型（flex、image 等）不檢查。
+ */
+function lineMessagesBlockedReason(messages: object[] | null | undefined): "empty_messages" | "empty_text" | null {
+  if (!messages || messages.length === 0) return "empty_messages";
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i] as Record<string, unknown>;
+    if (m && m.type === "text") {
+      const t = m.text;
+      if (typeof t !== "string" || !t.trim()) return "empty_text";
+    }
+  }
+  return null;
+}
+
 export function buildRatingFlexMessage(contactId: number, ratingType: "human" | "ai" = "human"): object {
   const actionPrefix = ratingType === "ai" ? "rate_ai" : "rate";
   const starButtons = [1, 2, 3, 4, 5].map((score) => ({
@@ -93,11 +127,31 @@ export function getFbTokenForContact(contact: { channel_id?: number | null; bran
   return null;
 }
 
-export async function replyToLine(replyToken: string, messages: object[], token?: string | null): Promise<void> {
+export async function replyToLine(
+  replyToken: string,
+  messages: object[],
+  token?: string | null
+): Promise<void | MessagingOutboundSkipped> {
   const resolvedToken = token ?? null;
   if (!resolvedToken || !replyToken) {
     console.error("[LINE] replyToLine ???Token ? replyToken ??");
     return;
+  }
+  const blockReason = lineMessagesBlockedReason(messages);
+  if (blockReason) {
+    const stack = sliceCallerStack();
+    console.warn("[LINE reply] BLOCKED empty or invalid messages", {
+      replyTokenPrefix: replyToken.slice(0, 8),
+      reason: blockReason,
+      messageCount: messages?.length ?? 0,
+      callerStack: stack,
+    });
+    recordEmptyOutboundAlert("line_reply_empty_blocked", {
+      api: "reply",
+      reason: blockReason,
+      callerStack: stack,
+    });
+    return { skipped: true, reason: blockReason === "empty_messages" ? "empty_messages" : "empty_text" };
   }
   try {
     const res = await fetch("https://api.line.me/v2/bot/message/reply", {
@@ -115,11 +169,31 @@ export async function replyToLine(replyToken: string, messages: object[], token?
   }
 }
 
-export async function pushLineMessage(userId: string, messages: object[], token?: string | null): Promise<void> {
+export async function pushLineMessage(
+  userId: string,
+  messages: object[],
+  token?: string | null
+): Promise<void | MessagingOutboundSkipped> {
   const resolvedToken = token ?? null;
   if (!resolvedToken) {
     console.error("[LINE] pushLineMessage ???Token ??");
     return;
+  }
+  const blockReason = lineMessagesBlockedReason(messages);
+  if (blockReason) {
+    const stack = sliceCallerStack();
+    console.warn("[LINE push] BLOCKED empty message", {
+      to: userId,
+      reason: blockReason,
+      messageCount: messages?.length ?? 0,
+      callerStack: stack,
+    });
+    recordEmptyOutboundAlert("line_push_empty_blocked", {
+      to: userId,
+      reason: blockReason,
+      callerStack: stack,
+    });
+    return { skipped: true, reason: blockReason === "empty_messages" ? "empty_messages" : "empty_text" };
   }
   try {
     const res = await fetch("https://api.line.me/v2/bot/message/push", {
@@ -137,7 +211,25 @@ export async function pushLineMessage(userId: string, messages: object[], token?
   }
 }
 
-export async function sendFBMessage(pageAccessToken: string, recipientId: string, text: string): Promise<void> {
+export async function sendFBMessage(
+  pageAccessToken: string,
+  recipientId: string,
+  text: string
+): Promise<void | MessagingOutboundSkipped> {
+  if (text == null || typeof text !== "string" || !text.trim()) {
+    const stack = sliceCallerStack();
+    console.warn("[FB send] BLOCKED empty message", {
+      recipientId,
+      textLength: text?.length ?? 0,
+      textType: typeof text,
+      callerStack: stack,
+    });
+    recordEmptyOutboundAlert("fb_message_empty_blocked", {
+      recipientId,
+      callerStack: stack,
+    });
+    return { skipped: true, reason: "empty_text" };
+  }
   const res = await fetch(`https://graph.facebook.com/v19.0/me/messages?access_token=${encodeURIComponent(pageAccessToken)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
