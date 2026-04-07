@@ -97,6 +97,20 @@ export function derivePaymentStatus(
   _statusLabel: string,
   _source: string
 ): { kind: PaymentKind; label: string; reason?: string; confidence?: "high" | "medium" | "low" } {
+  const orderIdForDebug = String(
+    (order as { global_order_id?: string }).global_order_id ||
+      (order as { order_id?: string }).order_id ||
+      (order as { orderId?: string }).orderId ||
+      ""
+  );
+  if (orderIdForDebug.includes("ESC21137")) {
+    try {
+      console.log("[DEBUG_DERIVE_PAY_INPUT_ESC21137]", JSON.stringify(order, null, 2).slice(0, 3000));
+    } catch {
+      console.log("[DEBUG_DERIVE_PAY_INPUT_ESC21137]", "(stringify failed)");
+    }
+  }
+
   if (isCodPaymentMethod(order)) {
     return {
       kind: "cod",
@@ -140,13 +154,16 @@ export function derivePaymentStatus(
   }
 
   const orderNo = String((order as { global_order_id?: string }).global_order_id || "").trim() || "(no_id)";
+  const stackHead = new Error().stack?.split("\n").slice(0, 5).join(" | ") ?? "";
   console.warn(
     "[LIVE_PAYMENT_FALLBACK_PENDING] 缺乏明確狀態，退回 pending。訂單號: " +
       orderNo +
       " | Raw Pay: " +
       payRaw +
       " | Gateway: " +
-      gatewayRaw
+      gatewayRaw +
+      " | stack: " +
+      stackHead
   );
 
   return {

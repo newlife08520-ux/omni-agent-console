@@ -1517,6 +1517,15 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           });
         }
         const orderSummaries = orders.map((o) => {
+          const dbgOid = String(o.global_order_id || "");
+          const dbgAlt = String((o as { order_id?: string }).order_id || "");
+          if (dbgOid.includes("ESC21137") || dbgAlt.includes("ESC21137")) {
+            try {
+              console.log("[DEBUG_LOOKUP_PHONE_ORDER_ESC21137]", JSON.stringify(o, null, 2).slice(0, 5000));
+            } catch {
+              console.log("[DEBUG_LOOKUP_PHONE_ORDER_ESC21137]", "(stringify failed)");
+            }
+          }
           const src = o.source || orderSource;
           const st = getUnifiedStatusLabel(o.status, src);
           const { kind, label } = payKindForOrder(o, st, src);
