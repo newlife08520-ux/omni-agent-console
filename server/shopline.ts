@@ -776,7 +776,7 @@ export async function fetchShoplineProducts(
   const maxPages = 10;
 
   while (page <= maxPages) {
-    const url = `${SHOPLINE_OPEN_API_BASE}/${SHOPLINE_API_VERSION}/products?page=${page}&limit=${limit}`;
+    const url = `${SHOPLINE_OPEN_API_BASE}/${SHOPLINE_API_VERSION}/products?page=${page}&per_page=${limit}&status=all`;
     console.log(`[shopline-products] 抓取第 ${page} 頁: ${url}`);
 
     try {
@@ -807,12 +807,23 @@ export async function fetchShoplineProducts(
 
       if (page === 1 && items.length > 0) {
         console.log("[SHOPLINE_PRODUCT_RAW_DEBUG]", JSON.stringify(items[0]).slice(0, 3000));
+        console.log(
+          "[SHOPLINE_PRODUCT_META]",
+          JSON.stringify({
+            total: data.total || data.total_count || data.count,
+            page: data.page,
+            per_page: data.per_page,
+            has_more: data.has_more,
+            next_page: data.next_page,
+            all_keys: Object.keys(data),
+            items_length: items.length,
+          })
+        );
       }
 
       allProducts.push(...items);
       console.log(`[shopline-products] 第 ${page} 頁取得 ${items.length} 個商品，累計 ${allProducts.length}`);
 
-      if (items.length < limit) break;
       page++;
     } catch (err) {
       console.error(`[shopline-products] 抓取失敗:`, err);
@@ -850,30 +861,48 @@ export function mapShoplineProductToCatalog(raw: any): {
 
   if (!String(title).trim()) return null;
 
-  let price: number = 0;
-  if (Array.isArray(raw.variants) && raw.variants.length > 0) {
-    const v = raw.variants[0];
-    let p: unknown = v.price?.dollars ?? v.price?.amount ?? v.price ?? v.sale_price ?? 0;
-    if (p != null && typeof p === "object" && (p as { dollars?: number }).dollars != null) {
-      p = (p as { dollars: number }).dollars;
-    }
-    price = Number(p) || 0;
-  }
-  if (!price && raw.price) {
-    let p: unknown = raw.price?.dollars ?? raw.price?.amount ?? raw.price ?? 0;
-    if (p != null && typeof p === "object" && (p as { dollars?: number }).dollars != null) {
-      p = (p as { dollars: number }).dollars;
-    }
-    price = Number(p) || 0;
+  // 價格：優先特價，再來是原價
+  let price = 0;
+
+  if (raw.lowest_price_sale?.dollars && raw.lowest_price_sale.dollars > 0) {
+    price = raw.lowest_price_sale.dollars;
+  } else if (raw.lowest_price_sale?.cents && raw.lowest_price_sale.cents > 0) {
+    price = raw.lowest_price_sale.cents;
   }
 
-  const imageUrl =
-    (Array.isArray(raw.images) && raw.images.length > 0
-      ? raw.images[0]?.src || raw.images[0]?.url || raw.images[0]?.original_url || ""
-      : "") ||
-    raw.image?.src ||
-    raw.image_url ||
-    "";
+  if (!price && raw.lowest_price?.dollars && raw.lowest_price.dollars > 0) {
+    price = raw.lowest_price.dollars;
+  } else if (!price && raw.lowest_price?.cents && raw.lowest_price.cents > 0) {
+    price = raw.lowest_price.cents;
+  }
+
+  if (!price && Array.isArray(raw.variants) && raw.variants.length > 0) {
+    const v = raw.variants[0];
+    price = v.price?.dollars ?? v.price?.cents ?? v.price ?? 0;
+  }
+
+  if (!price && raw.price) {
+    price = raw.price?.dollars ?? raw.price?.cents ?? raw.price ?? 0;
+  }
+
+  price = Number(price) || 0;
+
+  // Shopline 的圖片在 medias[].images.original.url
+  let imageUrl = "";
+  if (Array.isArray(raw.medias) && raw.medias.length > 0) {
+    const firstMedia = raw.medias[0];
+    imageUrl =
+      firstMedia?.images?.original?.url ||
+      firstMedia?.images?.source?.url ||
+      firstMedia?.images?.thumb?.url ||
+      "";
+  }
+  if (!imageUrl && Array.isArray(raw.images) && raw.images.length > 0) {
+    imageUrl = raw.images[0]?.src || raw.images[0]?.url || raw.images[0]?.original_url || "";
+  }
+  if (!imageUrl) {
+    imageUrl = raw.image?.src || raw.image_url || "";
+  }
 
   const rawDesc =
     raw.description_translations?.["zh-hant"] ||
@@ -901,8 +930,14 @@ export function mapShoplineProductToCatalog(raw: any): {
   const handle = raw.handle || raw.slug || "";
   const url = raw.url || (handle ? `https://shopline.tw/products/${handle}` : "");
 
+  const status = String(raw.status || "").toLowerCase();
   const isAvailable =
-    raw.status === "active" || raw.published === true || raw.published_at != null ? 1 : 0;
+    status === "active" ||
+    status === "published" ||
+    raw.published === true ||
+    (raw.published_at != null && status !== "draft" && status !== "archived")
+      ? 1
+      : 0;
 
   const productId = String(raw._id || raw.id || raw.product_id || "").trim();
   if (!productId) return null;
