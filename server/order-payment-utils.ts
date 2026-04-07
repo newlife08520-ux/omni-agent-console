@@ -126,6 +126,12 @@ export type PaymentKind = "success" | "failed" | "pending" | "cod" | "unknown";
 /** Phase 3.0：fallback pending 時對客顯示 */
 export const PENDING_FALLBACK_CUSTOMER_LABEL = "未付款";
 
+const WAIT_PAYMENT_HINT =
+  /已寄信.*付款|已通知.*付款|等待付款|等候付款|notified.*pay|pending.*confirm/i;
+
+const recentLoggedFallback = new Map<string, number>();
+const FALLBACK_LOG_DEDUP_MS = 5000;
+
 export function derivePaymentStatus(
   order: OrderInfo,
   _statusLabel: string,
@@ -173,15 +179,51 @@ export function derivePaymentStatus(
     };
   }
 
-  const orderNo = String((order as { global_order_id?: string }).global_order_id || "").trim() || "(no_id)";
-  console.warn(
-    "[LIVE_PAYMENT_FALLBACK_PENDING] 缺乏明確狀態，退回 pending。訂單號: " +
-      orderNo +
-      " | Raw Pay: " +
-      payRaw +
-      " | Gateway: " +
-      gatewayRaw
-  );
+  const rawPayMethod = String(order.payment_method || "").trim();
+  const src = String(order.source || "");
+
+  /** SuperLanding：已寄信通知付款、或 raw 含 type:success 但尚無 paid_at／prepaid */
+  if (src === "superlanding") {
+    if (WAIT_PAYMENT_HINT.test(rawPayMethod) || WAIT_PAYMENT_HINT.test(payRaw)) {
+      return {
+        kind: "pending",
+        label: "等待付款確認",
+        reason: "superlanding_payment_notified_pending",
+        confidence: "high",
+      };
+    }
+    const paidAtOk = order.paid_at != null && String(order.paid_at).trim() !== "";
+    const prepaidOk = order.prepaid === true;
+    if (/type:\s*success/i.test(payRaw) && !paidAtOk && !prepaidOk) {
+      return {
+        kind: "pending",
+        label: "等待付款確認",
+        reason: "superlanding_type_success_no_paid_at",
+        confidence: "medium",
+      };
+    }
+  }
+
+  const orderNo = String(order.global_order_id || "").trim() || "(no_id)";
+  const now = Date.now();
+  const lastLogged = recentLoggedFallback.get(orderNo) ?? 0;
+  if (now - lastLogged > FALLBACK_LOG_DEDUP_MS) {
+    console.warn(
+      "[LIVE_PAYMENT_FALLBACK_PENDING] 缺乏明確狀態，退回 pending。訂單號: " +
+        orderNo +
+        " | Raw Pay: " +
+        payRaw +
+        " | Gateway: " +
+        gatewayRaw
+    );
+    recentLoggedFallback.set(orderNo, now);
+    if (recentLoggedFallback.size > 100) {
+      const cutoff = now - FALLBACK_LOG_DEDUP_MS * 2;
+      for (const [k, v] of recentLoggedFallback) {
+        if (v < cutoff) recentLoggedFallback.delete(k);
+      }
+    }
+  }
 
   return {
     kind: "pending",
