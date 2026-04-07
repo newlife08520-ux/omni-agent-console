@@ -1,0 +1,26 @@
+此目錄檔名為扁平化 basename，對應專案路徑如下：
+
+schema.ts                    -> shared/schema.ts
+PHASE97_MASTER_SLIM.txt      -> docs/persona/PHASE97_MASTER_SLIM.txt
+tool-executor.service.ts     -> server/services/tool-executor.service.ts
+ai-reply.service.ts          -> server/services/ai-reply.service.ts
+order-ultra-lite.ts          -> server/prompts/order-ultra-lite.ts
+order-payment-utils.ts       -> server/order-payment-utils.ts
+order-reply-utils.ts         -> server/order-reply-utils.ts
+order-feature-flags.ts       -> server/order-feature-flags.ts
+order-multi-renderer.ts      -> server/order-multi-renderer.ts
+order-index.ts               -> server/order-index.ts
+order-service.ts             -> server/order-service.ts
+order-lookup-policy.ts       -> server/order-lookup-policy.ts
+order-active-context.ts      -> server/order-active-context.ts
+order-single-renderer.ts     -> server/order-single-renderer.ts
+order-fast-path.ts           -> server/order-fast-path.ts
+order-multi-selector.ts      -> server/order-multi-selector.ts
+order-product-filter.ts      -> server/order-product-filter.ts
+shopline.ts                  -> server/shopline.ts
+superlanding.ts              -> server/superlanding.ts
+openai-tools.ts              -> server/openai-tools.ts
+deterministic-order-contract.ts -> server/deterministic-order-contract.ts
+content-guard.ts             -> server/content-guard.ts
+tool-llm-sanitize.ts         -> server/tool-llm-sanitize.ts
+intent-and-order.ts          -> server/intent-and-order.ts

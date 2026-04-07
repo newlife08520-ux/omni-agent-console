@@ -71,16 +71,9 @@ export function detectLookupSourceIntent(
   if (SUPERLANDING_HINTS.test(msg)) return "superlanding";
 
   const isOnlyPhone = /^09\d{8}$/.test(msg.replace(/\s/g, "")) || /^\+?8869\d{8}$/.test(msg.replace(/\s/g, ""));
-  if (isOnlyPhone && msg.length <= 14) {
-    // 純手機句允許繼承上一句的官網/一頁意圖（窄繼承）
-    if (Array.isArray(recentMessages) && recentMessages.length > 0) {
-      const lastUserMsg = recentMessages[recentMessages.length - 1] || "";
-      if (SHOPLINE_HINTS.test(lastUserMsg)) return "shopline";
-      if (SUPERLANDING_HINTS.test(lastUserMsg)) return "superlanding";
-    }
-    return "unknown";
-  }
+  if (isOnlyPhone && msg.length <= 14) return "unknown";
 
+  /** P0：僅看當前句，不跨輪繼承官網／一頁意圖（recentMessages 參數保留相容，不再讀取） */
   return "unknown";
 }
 
@@ -242,8 +235,8 @@ export function shouldBypassLocalPhoneIndex(
   if (intent.kind === "phone_all_orders") return true;
   if (resolveOrderSourceIntent(userMessage, recentMessages) === "shopline") return true;
 
-  /** 純手機句：`detectLookupSourceIntent` 僅在「上一則使用者訊息」含官網／一頁提示時繼承來源；本段為 bypass local 與之一致。
-   * 若僅上一則為官網語意且該句未含另一支手機，仍應強制 live，避免本地索引誤導。 */
+  /** 純手機句：`detectLookupSourceIntent` 刻意不繼承官網（phase33「純手機不繼承官網+手機句」）。
+   * 但若「僅上一則」為官網語意且該句未含另一支手機，仍應強制 live，避免本地索引誤導。 */
   const msg = (userMessage || "").trim();
   const norm = msg.replace(/\s/g, "");
   const onlyPhone =

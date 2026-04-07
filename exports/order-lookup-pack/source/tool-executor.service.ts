@@ -19,6 +19,7 @@ import { packDeterministicMultiOrderToolResult } from "../order-multi-renderer";
 import { getOrdersByPhone, lookupOrdersByProductAliasAndPhoneLocal, normalizePhone } from "../order-index";
 import {
   formatOrderOnePage,
+  formatLocalOnlyCandidateSummary,
   payKindForOrder,
   customerFacingStatusLabel,
   customerFacingPaymentLabel,
@@ -1750,17 +1751,27 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
                   prepaid: o0.prepaid,
                   paid_at: o0.paid_at,
                 };
-                /** local_only 仍組完整 one page（與 onePageBlocks 同源邏輯）；data_coverage 僅標記語氣，不縮短摘要 */
+                if (isSingleLocalOnly) {
+                  return formatLocalOnlyCandidateSummary({
+                    order_id: o0.global_order_id,
+                    created_at: o0.created_at || o0.order_created_at,
+                    product_list: o0.product_list,
+                    items_structured: o0.items_structured,
+                    status_short: st,
+                  });
+                }
                 return formatOrderOnePage(payload);
               })()
             : undefined;
         if (orders.length === 1 && singleDeterministicBody) {
           const isLocalOnly = result.data_coverage === "local_only";
           const noSingleClaim = isLocalOnly;
+          /** local_only 單筆：候選摘要，禁止定案語與完整 order card */
+          const replyText = singleDeterministicBody;
           const oSingle = orders[0];
           const stSingle = getUnifiedStatusLabel(oSingle.status, oSingle.source || orderSource);
           const pkSingle = payKindForOrder(oSingle, stSingle, oSingle.source || orderSource);
-          const onePageSummarySingle = singleDeterministicBody;
+          const onePageSummarySingle = noSingleClaim ? singleDeterministicBody : onePageBlocks[0];
           console.log("[DEBUG_PHONE_DETERMINISTIC]", {
             source: oSingle.source,
             global_order_id: oSingle.global_order_id,
@@ -1782,6 +1793,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             pkSingle.kind === "pending";
           const allowDeterministic =
             orderFeatureFlags.phoneOrderDeterministicReply &&
+            !isLocalOnly &&
             allowDeterministicByPayment &&
             onePageSummarySingle.trim().length > 50;
           const packedSingle = packDeterministicSingleOrderToolResult({
@@ -1799,8 +1811,13 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             deterministic_skip_llm: allowDeterministic,
             ...(allowDeterministic ? { deterministic_customer_reply: onePageSummarySingle.trim() } : {}),
             one_page_summary: onePageSummarySingle,
-            sys_note: SYS_NOTE_ORDER_ONE_PAGE_STRICT,
-            ...(isLocalOnly ? { data_coverage: "local_only" } : {}),
+            ...(isLocalOnly
+              ? {
+                  data_coverage: "local_only",
+                  sys_note:
+                    "【營運指導】：目前資料正在與主機連線確認中，請用有溫度的語氣請客戶稍候，委婉表達狀態還在同步，不要把話說死。",
+                }
+              : { sys_note: SYS_NOTE_ORDER_ONE_PAGE_STRICT }),
             ...(result.coverage_confidence ? { coverage_confidence: result.coverage_confidence } : {}),
             ...(result.needs_live_confirm ? { needs_live_confirm: result.needs_live_confirm } : {}),
           });
@@ -1818,7 +1835,18 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
                 ? formattedList
                 : formatOrdersToolFormattedList(orderSummaries.slice(0, 5))
               : undefined,
-          one_page_summary: orders.length === 1 ? onePageBlocks[0] : undefined,
+          one_page_summary:
+            orders.length === 1
+              ? isSingleLocalOnly
+                ? formatLocalOnlyCandidateSummary({
+                    order_id: orders[0].global_order_id,
+                    created_at: orders[0].created_at || orders[0].order_created_at,
+                    product_list: orders[0].product_list,
+                    items_structured: orders[0].items_structured,
+                    status_short: getUnifiedStatusLabel(orders[0].status, orders[0].source || orderSource),
+                  })
+                : onePageBlocks[0]
+              : undefined,
           one_page_full,
           sys_note: orders.length > 1 ? SYS_NOTE_ORDER_ONE_PAGE_FULL_STRICT : SYS_NOTE_ORDER_ONE_PAGE_STRICT,
           ...(result.data_coverage ? { data_coverage: result.data_coverage } : {}),
