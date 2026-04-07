@@ -72,7 +72,7 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
   const [brandForm, setBrandForm] = useState({
     name: "", slug: "", logo_url: "", description: "", system_prompt: "",
     superlanding_merchant_no: "", superlanding_access_key: "",
-    return_form_url: "",
+    cancel_form_url: "", return_form_url: "", exchange_form_url: "",
     shopline_store_domain: "", shopline_api_token: "",
   });
   const [brandSaving, setBrandSaving] = useState(false);
@@ -209,24 +209,40 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
     setBrandForm({
       name: "", slug: "", logo_url: "", description: "", system_prompt: "",
       superlanding_merchant_no: "", superlanding_access_key: "",
-      return_form_url: "",
+      cancel_form_url: "", return_form_url: "", exchange_form_url: "",
       shopline_store_domain: "", shopline_api_token: "",
     });
     setShowBrandDialog(true);
   };
 
-  const openEditBrand = (brand: Brand) => {
+  const openEditBrand = async (brand: Brand) => {
     setEditingBrand(brand);
     setBrandForm({
       name: brand.name, slug: brand.slug, logo_url: brand.logo_url || "",
       description: brand.description || "", system_prompt: brand.system_prompt || "",
       superlanding_merchant_no: brand.superlanding_merchant_no || "",
       superlanding_access_key: brand.superlanding_access_key || "",
+      cancel_form_url: "",
       return_form_url: brand.return_form_url || "",
+      exchange_form_url: "",
       shopline_store_domain: brand.shopline_store_domain || "",
       shopline_api_token: brand.shopline_api_token || "",
     });
     setShowBrandDialog(true);
+    try {
+      const res = await fetch(`/api/admin/brands/${brand.id}/form-urls`, { credentials: "include" });
+      const data = await res.json();
+      if (data.ok) {
+        setBrandForm((prev) => ({
+          ...prev,
+          cancel_form_url: data.cancel_form_url || "",
+          return_form_url: data.return_form_url || "",
+          exchange_form_url: data.exchange_form_url || "",
+        }));
+      }
+    } catch (e) {
+      console.error("載入表單 URL 失敗:", e);
+    }
   };
 
   const handleSaveBrand = async () => {
@@ -242,9 +258,23 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
         if (payload.superlanding_access_key === "") delete (payload as Record<string, unknown>).superlanding_access_key;
         if (payload.shopline_api_token === "") delete (payload as Record<string, unknown>).shopline_api_token;
         await apiRequest("PUT", `/api/brands/${editingBrand.id}`, payload);
+        await apiRequest("PUT", `/api/admin/brands/${editingBrand.id}/form-urls`, {
+          cancel_form_url: brandForm.cancel_form_url || "",
+          return_form_url: brandForm.return_form_url || "",
+          exchange_form_url: brandForm.exchange_form_url || "",
+        });
       } else {
         const slug = brandForm.slug || brandForm.name.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9\-\u4e00-\u9fff]/g, "");
-        await apiRequest("POST", "/api/brands", { ...brandForm, slug });
+        const createRes = await apiRequest("POST", "/api/brands", { ...brandForm, slug });
+        const createData = await createRes.json().catch(() => ({})) as { brand?: { id?: number } };
+        const newId = createData?.brand?.id;
+        if (newId != null) {
+          await apiRequest("PUT", `/api/admin/brands/${newId}/form-urls`, {
+            cancel_form_url: brandForm.cancel_form_url || "",
+            return_form_url: brandForm.return_form_url || "",
+            exchange_form_url: brandForm.exchange_form_url || "",
+          });
+        }
       }
       queryClient.invalidateQueries({ queryKey: ["/api/brands"] });
       toast({ title: editingBrand ? "品牌已更新" : "品牌已建立" });
@@ -685,9 +715,43 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
               <label className="text-xs font-medium text-stone-600 mb-1 block">品牌專屬 AI 系統指令</label>
               <Textarea data-testid="textarea-brand-prompt" value={brandForm.system_prompt} onChange={(e) => setBrandForm(f => ({ ...f, system_prompt: e.target.value }))} placeholder="此品牌的 AI 客服人設與回覆風格..." className="min-h-[80px] resize-y text-sm bg-stone-50 border-stone-200" />
             </div>
-            <div>
-              <label className="text-xs font-medium text-stone-600 mb-1 block">退換貨表單連結 (Google Form 等)</label>
-              <Input data-testid="input-brand-return-url" value={brandForm.return_form_url} onChange={(e) => setBrandForm(f => ({ ...f, return_form_url: e.target.value }))} placeholder="https://forms.gle/..." className="bg-stone-50 border-stone-200" />
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs font-medium text-stone-600 mb-1 block">取消訂單表單連結</label>
+                <Input
+                  type="url"
+                  data-testid="input-brand-cancel-form-url"
+                  value={brandForm.cancel_form_url}
+                  onChange={(e) => setBrandForm((f) => ({ ...f, cancel_form_url: e.target.value }))}
+                  placeholder="https://jsj.top/f/..."
+                  className="bg-stone-50 border-stone-200"
+                />
+                <p className="text-[10px] text-stone-400 mt-1">當客人要取消訂單時，AI 會提供這個連結</p>
+              </div>
+              <div>
+                <label className="text-xs font-medium text-stone-600 mb-1 block">退貨表單連結</label>
+                <Input
+                  type="url"
+                  data-testid="input-brand-return-url"
+                  value={brandForm.return_form_url}
+                  onChange={(e) => setBrandForm((f) => ({ ...f, return_form_url: e.target.value }))}
+                  placeholder="https://jsj.top/f/..."
+                  className="bg-stone-50 border-stone-200"
+                />
+                <p className="text-[10px] text-stone-400 mt-1">當客人要退貨時，AI 會提供這個連結</p>
+              </div>
+              <div>
+                <label className="text-xs font-medium text-stone-600 mb-1 block">換貨表單連結</label>
+                <Input
+                  type="url"
+                  data-testid="input-brand-exchange-form-url"
+                  value={brandForm.exchange_form_url}
+                  onChange={(e) => setBrandForm((f) => ({ ...f, exchange_form_url: e.target.value }))}
+                  placeholder="https://jsj.top/f/..."
+                  className="bg-stone-50 border-stone-200"
+                />
+                <p className="text-[10px] text-stone-400 mt-1">當客人要換貨時，AI 會提供這個連結</p>
+              </div>
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
