@@ -68,8 +68,8 @@ function mapShoplineOrder(o: any): OrderInfo {
   const deliveryAddr = o?.delivery_address || {};
   const orderPayment = o?.order_payment || {};
 
-  // === Shopline 付款（真實欄位在 order_payment）===
-  // payment_type 例：tw_711_b2c_pay、tw_family_b2c_pay；中文見 name_translations["zh-hant"]
+  // === Shopline 付款（真實欄位在 order_payment.payment_type / name_translations）===
+  // 例：tw_711_b2c_pay、tw_family_b2c_pay；中文見 name_translations["zh-hant"]
   const paymentNameZh =
     orderPayment.name_translations?.["zh-hant"] ||
     orderPayment.name_translations?.["zh-Hant"] ||
