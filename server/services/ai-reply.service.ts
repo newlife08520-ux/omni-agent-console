@@ -71,7 +71,12 @@ import {
 import { ensureShippingSopCompliance } from "../sop-compliance-guard";
 import { deriveOrderLookupIntent } from "../order-lookup-policy";
 import { TRANSFER_TOOL_CUSTOMER_ACK, type ToolCallContext } from "./tool-executor.service";
-import { resolveModelWithBrandOverride, resolveOpenAIModel } from "../openai-model";
+import {
+  resolveModelWithBrandOverride,
+  resolveOpenAIModel,
+  resolveMainConversationModel,
+  AI_PROVIDER_MAIN,
+} from "../openai-model";
 import { createChatCompletionsOpenAIClient } from "../openai-routing-client";
 import type { ContentBlockParam } from "@anthropic-ai/sdk/resources/messages";
 import { callAiModel, type AiCallResult, type AiMessage } from "./ai-client.service";
@@ -89,6 +94,20 @@ import { filterToolsForScenario, applyScenarioToolOverrides } from "./tool-scena
 import { buildPhase1AiLogExtras } from "./phase1-trace-extras";
 import { pickRandomAck, sendQuickAckIfNeeded, shouldSendQuickAck } from "./quick-ack.service";
 import { runPostGenerationPipeline } from "./guard-pipeline";
+
+/** Phase 106.4：contacts.waiting_for_customer 為 *_form_submit 時收緊工具（僅 Gemini/Claude 主路徑使用） */
+function isWaitingForFormSubmit(waitingForCustomer: string | null | undefined): boolean {
+  return !!(waitingForCustomer || "").trim().endsWith("_form_submit");
+}
+
+function buildWaitingFormSubmitToolsOnly(): OpenAI.Chat.Completions.ChatCompletionTool[] {
+  const mark = formWorkflowTools.find((t) => t.type === "function" && t.function?.name === "mark_form_submitted");
+  const transfer = humanHandoffTools.find((t) => t.type === "function" && t.function?.name === "transfer_to_human");
+  const out: OpenAI.Chat.Completions.ChatCompletionTool[] = [];
+  if (mark) out.push(mark);
+  if (transfer) out.push(transfer);
+  return out;
+}
 
 /** Phase 1 法律/公關風險關鍵字，命中則走 legal_risk → high_risk_short_circuit */
 const LEGAL_RISK_KEYWORDS = [
@@ -665,12 +684,27 @@ ${contextStr}
     platform?: string,
     aiOpts?: { enqueueTimestampMs?: number }
   ) {
+    const geminiApiKeyRequired = storage.getSetting("gemini_api_key")?.trim();
+    if (!geminiApiKeyRequired) return;
+
     const apiKey = storage.getSetting("openai_api_key");
-    if (!apiKey || apiKey.trim() === "") return;
 
     const startTime = Date.now();
     const queueWaitMs =
       aiOpts?.enqueueTimestampMs != null ? Math.max(0, startTime - aiOpts.enqueueTimestampMs) : 0;
+    console.log("[reply-trace] auto_reply_entry", {
+      contactId: contact.id,
+      brandId: contact.brand_id ?? brandId,
+      queueWaitMs,
+    });
+    console.log("[reply-trace] llm_provider", {
+      contactId: contact.id,
+      provider: "gemini",
+      model:
+        process.env.GEMINI_MODEL?.trim() ||
+        process.env.OPENAI_MODEL?.trim() ||
+        "gemini-3.1-pro-preview",
+    });
     if (orderFeatureFlags.orderLatencyV2 && queueWaitMs > 0) {
       console.log(`[phase26_latency] queue_wait_ms=${queueWaitMs} contact=${contact.id}`);
     }
@@ -1019,6 +1053,11 @@ ${contextStr}
         storage.clearActiveOrderContext(contact.id);
       }
       console.log("[AI Latency] contact", contact.id, "after_plan_ms", Date.now() - startTime, "mode=" + plan.mode);
+      console.log("[reply-trace] plan_decided", {
+        contactId: contact.id,
+        planMode: plan.mode,
+        primaryIntent: state.primary_intent,
+      });
 
       phase1Route = null;
       if (
@@ -1794,29 +1833,16 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
         let returnFormReply = returnFormFallback;
         let rfTokens = 0;
         try {
-          const rfResolved = resolveModelWithBrandOverride(phase1ModelOverride);
-          if (rfResolved.provider === "anthropic" || rfResolved.provider === "google") {
-            const rfRes = await callAiModel({
-              messages: rfMessages,
-              maxTokens: 300,
-              temperature: 0.85,
-              modelOverride: phase1ModelOverride,
-            });
-            rfTokens = rfRes.inputTokens + rfRes.outputTokens;
-            const t = (rfRes.content || "").trim();
-            if (t) returnFormReply = t;
-          } else {
-            const openaiRf = new OpenAI({ apiKey: apiKey.trim() });
-            const comp = await openaiRf.chat.completions.create({
-              model: rfResolved.model,
-              messages: rfMessages as OpenAI.Chat.Completions.ChatCompletionMessageParam[],
-              max_completion_tokens: 300,
-              temperature: 0.85,
-            });
-            rfTokens = (comp.usage?.prompt_tokens ?? 0) + (comp.usage?.completion_tokens ?? 0);
-            const t = (comp.choices[0]?.message?.content || "").trim();
-            if (t) returnFormReply = t;
-          }
+          /** Phase 106.4：與主對話一致，一律 resolveMainConversationModel + callAiModel（Gemini） */
+          const rfRes = await callAiModel({
+            messages: rfMessages,
+            maxTokens: 300,
+            temperature: 0.85,
+            modelOverride: phase1ModelOverride,
+          });
+          rfTokens = rfRes.inputTokens + rfRes.outputTokens;
+          const t = (rfRes.content || "").trim();
+          if (t) returnFormReply = t;
         } catch (rfErr) {
           console.error("[return_form_first] LLM failed, using fallback:", rfErr);
           returnFormReply = returnFormFallback;
@@ -1846,7 +1872,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           transfer_triggered: false,
           result_summary: returnFormReply.slice(0, 200),
           token_usage: rfTokens,
-          model: resolveModelWithBrandOverride(phase1ModelOverride).model,
+          model: resolveMainConversationModel(phase1ModelOverride).model,
           response_time_ms: Date.now() - startTime,
           reply_source: "return_form_first",
           used_llm: 1,
@@ -1873,12 +1899,12 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
       let openaiClient: OpenAI | null = null;
       const getOpenAI = (): OpenAI => {
         if (!openaiClient) {
-          const rm = resolveModelWithBrandOverride(phase1ModelOverride);
+          const rm = resolveMainConversationModel(phase1ModelOverride);
           const routed = createChatCompletionsOpenAIClient(rm, {
             openaiApiKey: apiKey,
             geminiApiKey: storage.getSetting("gemini_api_key"),
           });
-          openaiClient = routed ?? new OpenAI({ apiKey });
+          openaiClient = routed ?? new OpenAI({ apiKey: apiKey ?? "" });
         }
         return openaiClient;
       };
@@ -1912,7 +1938,14 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
       }
 
       const hasImageAssets = storage.getImageAssets(effectiveBrandId || undefined).length > 0;
-      let allTools = [...orderLookupTools, ...humanHandoffTools, ...productRecommendTools, ...(hasImageAssets ? imageTools : [])];
+      /** Phase 106.4：formWorkflowTools（mark_form_submitted）一律納入基底，不依 Phase1 開關缺漏 */
+      let allTools = [
+        ...orderLookupTools,
+        ...humanHandoffTools,
+        ...formWorkflowTools,
+        ...productRecommendTools,
+        ...(hasImageAssets ? imageTools : []),
+      ];
       toolsAvailableNames = allTools
         .map((t) => (t.type === "function" ? t.function?.name : "") || "")
         .filter(Boolean);
@@ -1958,6 +1991,16 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           .filter(Boolean);
       }
 
+      const waitingForToolsSnap =
+        storage.getContact(contact.id)?.waiting_for_customer ?? contact.waiting_for_customer ?? null;
+      let toolsForGeminiPath: OpenAI.Chat.Completions.ChatCompletionTool[] = allTools;
+      if (isWaitingForFormSubmit(waitingForToolsSnap)) {
+        toolsForGeminiPath = buildWaitingFormSubmitToolsOnly();
+        toolsAvailableNames = toolsForGeminiPath
+          .map((t) => (t.type === "function" ? t.function?.name : "") || "")
+          .filter(Boolean);
+      }
+
       const AI_TIMEOUT_MS = 45000;
       const TOOL_TIMEOUT_MS = 25000;
 
@@ -1989,7 +2032,8 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
         });
       }
 
-      const mainResolvedForTools = resolveModelWithBrandOverride(phase1ModelOverride);
+      const mainResolvedForTools = resolveMainConversationModel(phase1ModelOverride);
+      const mainConversationModelForLog = mainResolvedForTools.model;
       /** 查單／跟進也必須走 callAiModel，否則 Gemini 會被當成 OpenAI model 打到 api.openai.com */
       const claudeSeed =
         mainResolvedForTools.provider === "anthropic" || mainResolvedForTools.provider === "google"
@@ -2044,7 +2088,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
         try {
           const rFirst = await callAiModel({
             messages: claudeConversation,
-            tools: allTools,
+            tools: toolsForGeminiPath,
             maxTokens: 1500,
             temperature: isOrderLookupFamily(plan.mode) ? 0.28 : 0.85,
             modelOverride: phase1ModelOverride,
@@ -2320,7 +2364,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             usedSecondLlmTelemetry = 1;
             const rNext = await callAiModel({
               messages: claudeConversation,
-              tools: allTools,
+              tools: toolsForGeminiPath,
               maxTokens: hasOrderLookupTool ? 1000 : 1500,
               temperature: hasOrderLookupTool ? 0.2 : 0.85,
               modelOverride: phase1ModelOverride,
@@ -2360,7 +2404,8 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
         }
       }
 
-      if (!usedClaudeMainPath) {
+      // [Phase 106.4] 預設永遠走 Gemini（callAiModel）。僅當 AI_PROVIDER=openai 且未走通 Anthropic/Gemini 種子時才啟用下列 OpenAI 串流（保留以備回退）。
+      if (!usedClaudeMainPath && AI_PROVIDER_MAIN === "openai") {
         try {
           responseMessage = await runOpenAIStream(
             getOpenAI(),
@@ -2726,7 +2771,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           transfer_reason: transferReason ?? undefined,
           result_summary: "?????????????",
           token_usage: totalTokens,
-          model: getOpenAIModel(),
+          model: mainConversationModelForLog,
           response_time_ms: Date.now() - startTime,
           reply_source: "handoff",
           used_llm: 1,
@@ -2879,7 +2924,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           transfer_reason: transferReason,
           result_summary: reply.slice(0, 300),
           token_usage: totalTokens,
-          model: getOpenAIModel(),
+          model: mainConversationModelForLog,
           response_time_ms: Date.now() - startTime,
           reply_source: replySourceFinal,
           used_llm: anyLlm ? 1 : 0,

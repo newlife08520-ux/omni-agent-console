@@ -141,6 +141,37 @@ export function resolveModelWithBrandOverride(modelOverride?: string | null): Re
   return resolveModel();
 }
 
+/**
+ * Phase 106.4：主對話供應商。預設 `gemini`（強制走 Google Gemini API，見 resolveMainConversationModel）。
+ * 設為 `openai` 時才允許主對話走 OpenAI 官方 API（供緊急回退）。
+ */
+export const AI_PROVIDER_MAIN = (process.env.AI_PROVIDER ?? "gemini").trim().toLowerCase();
+
+/**
+ * Phase 106.4：主對話實際使用的供應商／模型。
+ * - 預設（AI_PROVIDER≠openai）：一律 Google；若 DB/override 已是 google 則沿用其 model，否則用 GEMINI_MODEL → OPENAI_MODEL → 預設 gemini id。
+ * - AI_PROVIDER=openai：沿用 resolveModelWithBrandOverride 行為。
+ */
+export function resolveMainConversationModel(modelOverride?: string | null): ResolvedModel {
+  if (AI_PROVIDER_MAIN === "openai") {
+    return resolveModelWithBrandOverride(modelOverride);
+  }
+  const r = resolveModelWithBrandOverride(modelOverride);
+  if (r.provider === "google") {
+    return r;
+  }
+  const modelId =
+    process.env.GEMINI_MODEL?.trim() ||
+    process.env.OPENAI_MODEL?.trim() ||
+    "gemini-3.1-pro-preview";
+  let m = modelId.startsWith("google:") ? modelId.slice("google:".length) : modelId;
+  if (m.startsWith("models/")) m = m.slice("models/".length);
+  if (/^gemini/i.test(m)) {
+    return { provider: "google", model: m };
+  }
+  return { provider: "google", model: m };
+}
+
 export type OpenAIMainModelSource = "env" | "database" | "default";
 export type OpenAIRouterModelSource = "env" | "database" | "inherits_main";
 

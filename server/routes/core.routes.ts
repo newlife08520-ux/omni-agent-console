@@ -87,9 +87,10 @@ import {
 } from "../services/ai-reply.service";
 import { getTransferUnavailableSystemMessage as transferUnavailableSystemMessage } from "../transfer-unavailable-message";
 import { orderLookupTools, humanHandoffTools, imageTools } from "../openai-tools";
-import { resolveModel, resolveOpenAIModel } from "../openai-model";
+import { resolveModel, resolveOpenAIModel, resolveMainConversationModel } from "../openai-model";
 
 import OpenAI from "openai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { parseFileContent, isImageFile } from "../file-parser";
 import { authMiddleware, superAdminOnly, managerOrAbove, parseIdParam } from "../middlewares/auth.middleware";
 import { broadcastSSE, registerSseRoutes } from "../services/sse.service";
@@ -815,22 +816,19 @@ export function registerCoreRoutes(app: Express): void {
     app.get("/api/health/status", authMiddleware, async (_req, res) => {
       const results: Record<string, { status: "ok" | "error" | "unconfigured"; message: string }> = {};
 
-      const apiKey = storage.getSetting("openai_api_key");
-      if (!apiKey || apiKey.trim() === "") {
-        results.openai = { status: "unconfigured", message: "???? API ??" };
+      /** Phase 106.4：主對話以 Gemini 為準（與 settings-brands 之 /api/health/status 一致） */
+      const geminiKeyHealth = storage.getSetting("gemini_api_key");
+      if (!geminiKeyHealth || geminiKeyHealth.trim() === "") {
+        results.gemini_main = { status: "unconfigured", message: "未設定 Gemini API 金鑰（主對話必填）" };
       } else {
         try {
-          const openai = new OpenAI({ apiKey });
-          const rmHealth = resolveModel();
-          const openaiPingModel = rmHealth.provider === "openai" ? rmHealth.model : "gpt-4o-mini";
-          await openai.chat.completions.create({
-            model: openaiPingModel,
-            messages: [{ role: "user", content: "hi" }],
-            max_completion_tokens: 5,
-          });
-          results.openai = { status: "ok", message: "????" };
+          const rm = resolveMainConversationModel();
+          const genAI = new GoogleGenerativeAI(geminiKeyHealth.trim());
+          const genModel = genAI.getGenerativeModel({ model: rm.model });
+          await genModel.generateContent("hi");
+          results.gemini_main = { status: "ok", message: `Gemini 主對話連線成功（${rm.model}）` };
         } catch (err: any) {
-          results.openai = { status: "error", message: `????: ${err.message}` };
+          results.gemini_main = { status: "error", message: `檢查失敗: ${err.message}` };
         }
       }
 

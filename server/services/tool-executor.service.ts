@@ -418,10 +418,14 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
       }
       const expectedType = expected.replace(/_form_submit$/, "");
       if (expectedType !== formType) {
+        const expectedZh =
+          expectedType === "cancel" ? "取消" : expectedType === "return" ? "退貨" : expectedType === "exchange" ? "換貨" : expectedType;
+        const triedZh =
+          formType === "cancel" ? "取消" : formType === "return" ? "退貨" : formType === "exchange" ? "換貨" : formType;
         return JSON.stringify({
           success: false,
           error: "form_type_mismatch",
-          sys_note: `目前等待的是「${expectedType}」表單回填，請使用 form_type="${expectedType}"。`,
+          sys_note: `表單類型不符：系統正在等待客人完成「${expectedZh}」表單（waiting_for_customer=${expected}），您呼叫的是「${triedZh}」（form_type="${formType}"）。請依對話脈絡改給正確表單或引導客人，不要硬呼叫錯誤的 form_type。正確呼叫應為 form_type="${expectedType}"。`,
         });
       }
 

@@ -9,7 +9,7 @@ import {
   type Part,
 } from "@google/generative-ai";
 import { randomUUID } from "node:crypto";
-import { resolveModelWithBrandOverride } from "../openai-model";
+import { resolveMainConversationModel } from "../openai-model";
 import { storage } from "../storage";
 
 /** system 僅字串；user/assistant 可為 Claude 多模態／tool_use／tool_result 區塊 */
@@ -185,7 +185,7 @@ function claudeStyleMessagesToGeminiContents(messages: AiMessage[]): {
 }
 
 export async function callAiModel(options: AiCallOptions): Promise<AiCallResult> {
-  const { provider, model } = resolveModelWithBrandOverride(options.modelOverride);
+  const { provider, model } = resolveMainConversationModel(options.modelOverride);
   const { messages, tools, maxTokens = 1500, temperature = 0.85 } = options;
 
   if (provider === "anthropic") {
