@@ -359,6 +359,13 @@ let cachedPages: ProductPageMapping[] = [];
 let cacheTimestamp = 0;
 const CACHE_TTL_MS = 60 * 60 * 1000;
 
+/** Phase 106.6：同一組 API 憑證背景刷新只跑一個，避免重疊打爆 SuperLanding */
+const pagesBackgroundRefreshLocks = new Set<string>();
+
+function pagesCacheCredentialKey(config: SuperLandingConfig): string {
+  return `${String(config.merchantNo || "").trim()}::${String(config.accessKey || "").trim()}`;
+}
+
 export function getCachedPages(): ProductPageMapping[] {
   return cachedPages;
 }
@@ -367,16 +374,20 @@ export function getCachedPagesAge(): number {
   return cacheTimestamp > 0 ? Date.now() - cacheTimestamp : Infinity;
 }
 
-export async function refreshPagesCache(config: SuperLandingConfig): Promise<ProductPageMapping[]> {
+export async function refreshPagesCache(
+  config: SuperLandingConfig,
+  opts?: { maxPages?: number }
+): Promise<ProductPageMapping[]> {
   if (!config.merchantNo || !config.accessKey) {
     console.log("[銷售頁快取] 尚未設定 API 金鑰，略過同步");
     return cachedPages;
   }
   try {
-    const pages = await fetchPages(config);
+    const fetchOpts = opts?.maxPages != null ? { maxPages: opts.maxPages } : undefined;
+    const pages = await fetchPages(config, fetchOpts);
     cachedPages = pages;
     cacheTimestamp = Date.now();
-    console.log(`[銷售頁快取] 同步完成，共 ${pages.length} 個銷售頁`);
+    console.log(`[銷售頁快取] 同步完成，共 ${pages.length} 個銷售頁${opts?.maxPages != null ? `（maxPages=${opts.maxPages}）` : ""}`);
     return pages;
   } catch (err: any) {
     console.error("[銷售頁快取] 同步失敗:", err.message);
@@ -390,10 +401,30 @@ export async function ensurePagesCacheLoaded(config: SuperLandingConfig): Promis
   if (process.env.REVIEW_PROMPT_EXPORT_SKIP_CATALOG === "1") {
     return [];
   }
-  if (cachedPages.length > 0 && (Date.now() - cacheTimestamp) < CACHE_TTL_MS) {
+  const now = Date.now();
+  const cacheAge = cacheTimestamp > 0 ? now - cacheTimestamp : Infinity;
+  const cacheFresh = cachedPages.length > 0 && cacheAge < CACHE_TTL_MS;
+  if (cacheFresh) {
     return cachedPages;
   }
-  return refreshPagesCache(config);
+  /** 完全沒資料：必須同步拉一次（完整分頁；prompt 層另有 3s 超時保護） */
+  if (cachedPages.length === 0) {
+    return refreshPagesCache(config);
+  }
+  /** stale-while-revalidate：有舊資料先回傳，過期則背景刷新（限縮頁數避免主流程以外的長尾） */
+  const lockKey = pagesCacheCredentialKey(config);
+  if (!pagesBackgroundRefreshLocks.has(lockKey)) {
+    pagesBackgroundRefreshLocks.add(lockKey);
+    refreshPagesCache(config, { maxPages: 30 })
+      .catch((err) => console.error("[catalog] background refresh failed", err?.message || err))
+      .finally(() => pagesBackgroundRefreshLocks.delete(lockKey));
+  }
+  console.log("[catalog] using stale cache while refreshing in background", {
+    merchantNo: config.merchantNo,
+    cacheAgeMs: Math.round(cacheAge),
+    staleEntries: cachedPages.length,
+  });
+  return cachedPages;
 }
 
 export function buildProductCatalogPrompt(pages: ProductPageMapping[]): string {
@@ -404,10 +435,15 @@ export function buildProductCatalogPrompt(pages: ProductPageMapping[]): string {
   return `\n\n## [內部參考·商品清單]（自動同步，共 ${pages.length} 項）\n以下為本店部分商品，僅供你內部語意比對使用。禁止將編號、清單格式或任何內部資訊展示給客戶：\n${lines.join("\n")}${extraNote}\n\n## [內部規則] 產品辨識與查詢流程\n\n### 模糊匹配\n- 客戶可能用錯字、簡稱、俗稱或用途描述來指稱商品。\n- 你必須從上方商品清單中，用語意理解推論最佳匹配。\n\n### 二次確認（防呆）\n- 若客戶描述可能對應多個商品，用溫暖口語化的方式列出選項讓客戶確認。\n- 話術範例：「了解～因為跟○○相關的商品有幾款，想跟您確認一下，您購買的是『A商品名稱』還是『B商品名稱』呢？」\n- 只列出人類可讀的產品名稱，禁止顯示編號或任何代碼。\n\n### 自動觸發查詢\n- 確認唯一商品後，連同客戶手機號碼觸發訂單查詢。\n- 若完全找不到匹配商品，友善回覆：「不好意思，目前沒有找到跟您描述相符的商品，可以再確認一下商品名稱嗎？或者直接提供訂單編號我也能幫您查詢唷！」\n\n## [內部規則] 嚴格保密限制\n- **絕對禁止**在對話中顯示任何內部編號、API 欄位、系統代碼、技術參數。\n- **絕對禁止**提及「對應表」「商品清單」「備用查詢」「Function Calling」等系統用語。\n- 所有回覆必須像一位溫暖、專業的真人客服，使用口語化、親切的語氣。\n- 禁止使用條列式的系統說明（如「步驟一」「走備用查詢」），改用自然對話語氣。\n\n## [內部規則] 上下文實體提取\n- 執行查詢前，務必回顧整段歷史對話。\n- 若客戶先前已提過產品名稱或手機號碼，直接合併使用，**絕對不可重複詢問已提供過的資訊**。\n- 從整段對話中提取所有「產品名稱」和「電話號碼」實體，而非僅看最後一則訊息。\n\n## [內部規則] 回覆語氣指南\n- 語氣溫暖親切，像朋友般自然，適度使用「唷」「呢」「～」等語助詞。\n- 用「了解」「沒問題」「好的」開場，避免「根據系統」「依照規則」等機械用語。\n- 適度使用 emoji（😊、✨）但不過度。\n- 回覆簡潔有力，不冗長囉嗦。`;
 }
 
-export async function fetchPages(config: SuperLandingConfig): Promise<ProductPageMapping[]> {
+export async function fetchPages(
+  config: SuperLandingConfig,
+  opts?: { maxPages?: number }
+): Promise<ProductPageMapping[]> {
   if (!config.merchantNo || !config.accessKey) {
     throw new Error("missing_credentials");
   }
+
+  const maxPagesLimit = opts?.maxPages;
 
   console.log("[一頁商店] 正在取得銷售頁列表...");
 
@@ -418,6 +454,7 @@ export async function fetchPages(config: SuperLandingConfig): Promise<ProductPag
     const delayBetweenPagesMs = 800;
 
     while (true) {
+      if (maxPagesLimit != null && pageNum > maxPagesLimit) break;
       const queryParams = new URLSearchParams({
         merchant_no: config.merchantNo,
         access_key: config.accessKey,

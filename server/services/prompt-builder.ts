@@ -198,6 +198,21 @@ export async function buildCatalogPrompt(brandId?: number): Promise<string> {
   return "\n\n--- CATALOG ---\n" + body.trim();
 }
 
+const CATALOG_LOAD_TIMEOUT_MS = 3000;
+
+/** Phase 106.6：catalog 為加分項；超時則本輪略過，避免阻塞 webhook／首輪 LLM */
+export async function buildCatalogPromptWithTimeout(brandId?: number): Promise<string> {
+  return Promise.race([
+    buildCatalogPrompt(brandId),
+    new Promise<string>((resolve) => {
+      setTimeout(() => {
+        console.warn("[catalog] 載入超過 3 秒，本輪 prompt 不含 catalog 區塊");
+        resolve("");
+      }, CATALOG_LOAD_TIMEOUT_MS);
+    }),
+  ]);
+}
+
 /**
  * 從 marketing_rules 取出品牌的導購規則，注入 prompt。
  * 如果 userMessage 命中某條規則的 keyword，該規則會被標記為「本輪命中」優先顯示。
@@ -391,6 +406,10 @@ export interface EnrichedPromptContext {
   scenarioOverrides?: Partial<Record<AgentScenario, ScenarioOverrideEntry>>;
   /** contacts.waiting_for_customer，例如 cancel_form_submit（給 AI 判斷是否呼叫 mark_form_submitted） */
   waitingForCustomer?: string | null;
+  /** Phase 106.6：除錯與 skipCatalog 判斷 */
+  contactId?: number;
+  /** contacts.customer_goal_locked（return / order_lookup / handoff 等） */
+  customerGoalLocked?: string | null;
 }
 
 /** 動態注入：正在等客人填表時，提示 AI 用工具記錄「填好了」 */
@@ -539,6 +558,41 @@ export async function assembleEnrichedSystemPrompt(
     }
   }
 
+  /** Phase 106.6：售後／表單／目標鎖定等情境不需塞入商品目錄（非 iso 時原先仍會拉 CATALOG） */
+  {
+    const planStr = plan;
+    const wfc = (context?.waitingForCustomer || "").trim();
+    const gl = (context?.customerGoalLocked || "").trim().toLowerCase();
+    if (context?.selectedScenario === "ORDER_LOOKUP" || context?.selectedScenario === "AFTER_SALES") {
+      skipCatalog = true;
+    }
+    if (
+      planStr === "aftersales_comfort_first" ||
+      planStr === "handoff" ||
+      planStr === "return_form_first" ||
+      planStr === "return_stage_1"
+    ) {
+      skipCatalog = true;
+    }
+    if (wfc.endsWith("_form_submit")) {
+      skipCatalog = true;
+    }
+    if (["cancel", "return", "exchange", "order_lookup", "handoff"].includes(gl)) {
+      skipCatalog = true;
+    }
+  }
+
+  const catalogBlocked = orderLookupDiet || skipCatalog;
+  console.log("[reply-trace] catalog_skip_decision", {
+    contactId: context?.contactId ?? null,
+    scenario: context?.selectedScenario ?? null,
+    planMode: plan,
+    waitingFor: context?.waitingForCustomer ?? null,
+    goalLocked: context?.customerGoalLocked ?? null,
+    skipCatalog,
+    catalogBlocked,
+  });
+
   const returnFormUrl = brandId ? storage.getBrand(brandId)?.return_form_url || undefined : undefined;
   const flowPrinciplesOpts = {
     returnFormUrl,
@@ -556,7 +610,7 @@ export async function assembleEnrichedSystemPrompt(
       ? buildScenarioFlowBlock(sc, flowPrinciplesOpts)
       : buildFlowPrinciplesPrompt(flowPrinciplesOpts)
     : "";
-  const catalogBlock = orderLookupDiet || skipCatalog ? "" : await buildCatalogPrompt(brandId);
+  const catalogBlock = orderLookupDiet || skipCatalog ? "" : await buildCatalogPromptWithTimeout(brandId);
   const allowMarketing =
     !orderLookupDiet &&
     !skipKnowledge &&

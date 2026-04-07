@@ -1358,6 +1358,8 @@ ${contextStr}
         isPhase1Active(phase1Flags) && phase1Flags.scenario_isolation && phase1Route != null;
       const waitingForCustomerSnap =
         storage.getContact(contact.id)?.waiting_for_customer ?? contact.waiting_for_customer ?? null;
+      const customerGoalLockedSnap =
+        storage.getContact(contact.id)?.customer_goal_locked ?? contact.customer_goal_locked ?? null;
       const enrichedPack = await assembleEnrichedSystemPrompt(contact.brand_id || brandId || undefined, {
         planMode: plan.mode,
         userMessage,
@@ -1368,6 +1370,8 @@ ${contextStr}
         logisticsHintOverride: phase1Flags.logistics_hint_override,
         scenarioOverrides: isPhase1Active(phase1Flags) ? phase1Flags.scenario_overrides : undefined,
         waitingForCustomer: waitingForCustomerSnap,
+        contactId: contact.id,
+        customerGoalLocked: customerGoalLockedSnap,
       });
       console.log(
         `[prompt_profile=${enrichedPack.prompt_profile}] prompt_chars=${enrichedPack.prompt_chars} catalog_included=${enrichedPack.includes.catalog} knowledge_included=${enrichedPack.includes.knowledge} image_included=${enrichedPack.includes.image} prompt_sections=${enrichedPack.sections.map((s) => s.key).join("|")} prompt_assembly_ms=${Date.now() - startTime}`
