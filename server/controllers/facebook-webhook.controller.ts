@@ -15,6 +15,7 @@ import {
   isReturnFormFollowupMessage,
   isEligibleReturnFormFollowupResumeContact,
   isAiServiceRequest,
+  shouldUnlockHandoffForCancelFlowFollowup,
 } from "../conversation-state-resolver";
 import { shouldEscalateImageSupplement } from "../safe-after-sale-classifier";
 import { applyHandoff } from "../services/handoff";
@@ -242,13 +243,18 @@ export function handleFacebookWebhook(req: Request, res: Response, deps: Faceboo
                   }
                 } else {
                 const contactFresh = storage.getContact(contact.id) ?? contact;
+                const recentBodiesUnlock = storage
+                  .getMessages(contact.id)
+                  .slice(-6)
+                  .map((m) => String(m.content || ""));
                 const allowHandoffAiResume =
                   inHandoffState &&
                   (isLinkRequestMessage(trimmedText) ||
                     isLinkRequestCorrectionMessage(trimmedText) ||
                     (isReturnFormFollowupMessage(trimmedText) &&
                       isEligibleReturnFormFollowupResumeContact(contactFresh)) ||
-                    isAiServiceRequest(trimmedText));
+                    isAiServiceRequest(trimmedText) ||
+                    shouldUnlockHandoffForCancelFlowFollowup(trimmedText, recentBodiesUnlock));
                 const shouldInvokeAi = !inHandoffState || allowHandoffAiResume;
                 if (shouldInvokeAi) {
                   if (!matchedChannel) {

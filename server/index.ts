@@ -227,15 +227,16 @@ app.use((req, res, next) => {
               );
             }, 15 * 60 * 1000);
 
-            // Shopline：每 30 分鐘、近 1 天（降低 API 量與主機負載）
+            // Shopline：每 60 分鐘、近 1 天（訂單量少時再降頻）
             setInterval(() => {
               runOrderSync({ days: 1, superlanding: false }).catch((e) =>
                 console.error("[OrderSync] Shopline 定時同步失敗:", (e as Error)?.message || e)
               );
-            }, 30 * 60 * 1000);
+            }, 60 * 60 * 1000);
 
+            console.log("[server] Shopline 訂單同步已啟用：每 60 分鐘，days: 1");
             console.log(
-              "[server] 訂單定時同步已啟用（一頁每 15 分鐘／近 3 天；Shopline 每 30 分鐘／近 1 天）"
+              "[server] 訂單定時同步已啟用（一頁每 15 分鐘／近 3 天；Shopline 每 60 分鐘／近 1 天）"
             );
           })
           .catch((e) => {

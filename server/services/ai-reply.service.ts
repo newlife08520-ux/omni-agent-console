@@ -18,6 +18,7 @@ import {
   isReturnFormFollowupMessage,
   isEligibleReturnFormFollowupResumeContact,
   isAiServiceRequest,
+  shouldUnlockHandoffForCancelFlowFollowup,
 } from "../conversation-state-resolver";
 import { buildReplyPlan, shouldNotLeadWithOrderLookup, type ReplyPlanMode } from "../reply-plan-builder";
 import {
@@ -648,6 +649,10 @@ ${contextStr}
     const effectiveBrandIdForLog = contact.brand_id || brandId;
 
     const freshCheck = storage.getContact(contact.id);
+    const recentBodiesForHandoffUnlock = storage
+      .getMessages(contact.id)
+      .slice(-6)
+      .map((m) => String(m.content || ""));
 
     async function replyHandoffQueueResetBlocked(): Promise<void> {
       const blockMsg = HANDOFF_QUEUE_RESET_BLOCK_REPLY;
@@ -687,7 +692,8 @@ ${contextStr}
       const canResumeReturnForm =
         isReturnFormFollowupMessage(userMessage) && isEligibleReturnFormFollowupResumeContact(freshCheck);
       const wantsAiService = isAiServiceRequest(userMessage);
-      if (isLinkAsk || canResumeReturnForm || wantsAiService) {
+      const cancelFlowUnlock = shouldUnlockHandoffForCancelFlowFollowup(userMessage, recentBodiesForHandoffUnlock);
+      if (isLinkAsk || canResumeReturnForm || wantsAiService || cancelFlowUnlock) {
         storage.updateContactHumanFlag(contact.id, 0);
         storage.updateContactStatus(contact.id, "ai_handling");
         broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
@@ -721,7 +727,8 @@ ${contextStr}
       const canResumeReturnForm =
         isReturnFormFollowupMessage(userMessage) && isEligibleReturnFormFollowupResumeContact(freshCheck);
       const wantsAiService = isAiServiceRequest(userMessage);
-      if (isLinkAsk || canResumeReturnForm || wantsAiService) {
+      const cancelFlowUnlock = shouldUnlockHandoffForCancelFlowFollowup(userMessage, recentBodiesForHandoffUnlock);
+      if (isLinkAsk || canResumeReturnForm || wantsAiService || cancelFlowUnlock) {
         storage.updateContactHumanFlag(contact.id, 0);
         storage.updateContactStatus(contact.id, "ai_handling");
         broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
@@ -1889,6 +1896,29 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           phase1Route.selected_scenario,
           phase1Flags.scenario_overrides?.[phase1Route.selected_scenario]
         );
+        /** AFTER_SALES 預設僅 handoff 工具 → 模型易誤轉真人；售後 plan 仍應能查單／走三輪挽留 */
+        const afterSalesModesWithOrderTools: ReplyPlanMode[] = [
+          "aftersales_comfort_first",
+          "return_stage_1",
+          "return_form_first",
+          "order_lookup",
+          "order_followup",
+        ];
+        if (
+          phase1Route.selected_scenario === "AFTER_SALES" &&
+          afterSalesModesWithOrderTools.includes(plan.mode as ReplyPlanMode)
+        ) {
+          const have = new Set(
+            allTools.map((t) => (t.type === "function" ? t.function?.name : "") || "").filter(Boolean)
+          );
+          for (const t of orderLookupTools) {
+            const n = (t.type === "function" ? t.function?.name : "") || "";
+            if (n && !have.has(n)) {
+              allTools.push(t);
+              have.add(n);
+            }
+          }
+        }
         toolsAvailableNames = allTools
           .map((t) => (t.type === "function" ? t.function?.name : "") || "")
           .filter(Boolean);

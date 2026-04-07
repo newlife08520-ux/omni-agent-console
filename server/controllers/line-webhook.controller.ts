@@ -15,6 +15,7 @@ import {
   isReturnFormFollowupMessage,
   isEligibleReturnFormFollowupResumeContact,
   isAiServiceRequest,
+  shouldUnlockHandoffForCancelFlowFollowup,
 } from "../conversation-state-resolver";
 import { shouldEscalateImageSupplement } from "../safe-after-sale-classifier";
 import { applyHandoff } from "../services/handoff";
@@ -266,13 +267,18 @@ export async function handleLineWebhook(req: Request, res: Response, deps: LineW
                 }
                 continue;
               }
+              const recentBodiesUnlock = storage
+                .getMessages(contactAfterProfile.id)
+                .slice(-6)
+                .map((m) => String(m.content || ""));
               const allowHandoffAiResume =
                 inHandoffState &&
                 (isLinkRequestMessage(trimmedText) ||
                   isLinkRequestCorrectionMessage(trimmedText) ||
                   (isReturnFormFollowupMessage(trimmedText) &&
                     isEligibleReturnFormFollowupResumeContact(contactAfterProfile)) ||
-                  isAiServiceRequest(trimmedText));
+                  isAiServiceRequest(trimmedText) ||
+                  shouldUnlockHandoffForCancelFlowFollowup(trimmedText, recentBodiesUnlock));
               const shouldInvokeAi = !inHandoffState || allowHandoffAiResume;
               if (!shouldInvokeAi) {
                 console.log(
