@@ -1949,14 +1949,33 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             `provider=${mainResolvedForTools.provider}`
           );
 
+          /** Gemini 3.x：每輪含 functionCall 的 model 輸出須帶回原始 parts（thought_signature） */
+          let lastGeminiModelParts =
+            mainResolvedForTools.provider === "google" ? rFirst.geminiModelParts : undefined;
+
           while (responseMessage?.tool_calls && responseMessage.tool_calls.length > 0 && loopCount < maxToolLoops) {
             loopCount++;
             console.log(
               `[Webhook AI] ${mainResolvedForTools.provider} tool round ${loopCount} n=${responseMessage.tool_calls.length}`
             );
+            if (
+              mainResolvedForTools.provider === "google" &&
+              responseMessage.tool_calls.length > 0 &&
+              !lastGeminiModelParts?.length
+            ) {
+              console.warn(
+                "[Gemini] tool_calls 存在但未取得 geminiModelParts，下一輪可能因 thought_signature 缺失而失敗"
+              );
+            }
             const assistBlocks = openAiAssistantToClaudeContentBlocks(responseMessage);
             if (assistBlocks.length === 0) break;
-            claudeConversation.push({ role: "assistant", content: assistBlocks });
+            claudeConversation.push({
+              role: "assistant",
+              content: assistBlocks,
+              ...(mainResolvedForTools.provider === "google" && lastGeminiModelParts?.length
+                ? { geminiModelParts: lastGeminiModelParts }
+                : {}),
+            });
 
             const hasOrderLookupTool = responseMessage.tool_calls.some((tc: any) =>
               ORDER_LOOKUP_TOOL_NAMES.includes(tc?.function?.name || "")
@@ -2153,9 +2172,16 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
               modelOverride: phase1ModelOverride,
             });
             totalTokens += rNext.inputTokens + rNext.outputTokens;
+            lastGeminiModelParts =
+              mainResolvedForTools.provider === "google" ? rNext.geminiModelParts : undefined;
             responseMessage = aiCallResultToOpenAiAssistantMessage(rNext);
           }
         } catch (claudeErr) {
+          if (mainResolvedForTools.provider === "google") {
+            console.error("[AI] Gemini 工具路徑失敗（已停用改走 OpenAI fallback）：", claudeErr);
+            clearTimeout(streamTimeout);
+            throw claudeErr;
+          }
           console.error("[AI] Anthropic/Gemini 工具路徑失敗，改走 OpenAI：", claudeErr);
           usedClaudeMainPath = false;
           responseMessage = undefined;

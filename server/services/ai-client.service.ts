@@ -15,7 +15,12 @@ import { storage } from "../storage";
 /** system 僅字串；user/assistant 可為 Claude 多模態／tool_use／tool_result 區塊 */
 export type AiMessage =
   | { role: "system"; content: string }
-  | { role: "user" | "assistant"; content: string | ContentBlockParam[] };
+  | {
+      role: "user" | "assistant";
+      content: string | ContentBlockParam[];
+      /** Google Gemini 3.x：含 functionCall 的 model 回合須保留 API 回傳的 parts（含 thoughtSignature），不可只用 tool_use 重建 */
+      geminiModelParts?: Part[];
+    };
 
 export interface AiCallOptions {
   messages: AiMessage[];
@@ -33,6 +38,8 @@ export interface AiCallResult {
   model: string;
   inputTokens: number;
   outputTokens: number;
+  /** Google：上一輪 model 的原始 parts，供下一輪 tool result 前原樣帶回（thought_signature） */
+  geminiModelParts?: Part[];
 }
 
 function openAiToolToClaudeSchema(t: Record<string, unknown>): Anthropic.Tool {
@@ -136,6 +143,17 @@ function claudeStyleMessagesToGeminiContents(messages: AiMessage[]): {
     }
 
     if (m.role === "assistant") {
+      const gp = (m as { geminiModelParts?: Part[] }).geminiModelParts;
+      if (gp && gp.length > 0) {
+        let cloned: Part[];
+        try {
+          cloned = structuredClone(gp) as Part[];
+        } catch {
+          cloned = JSON.parse(JSON.stringify(gp)) as Part[];
+        }
+        contents.push({ role: "model", parts: cloned });
+        continue;
+      }
       const c = m.content;
       if (typeof c === "string") {
         if (c.trim()) contents.push({ role: "model", parts: [{ text: c }] });
@@ -280,6 +298,16 @@ export async function callAiModel(options: AiCallOptions): Promise<AiCallResult>
           }))
         : undefined;
 
+    const rawParts = response.candidates?.[0]?.content?.parts;
+    let geminiModelParts: Part[] | undefined;
+    if (Array.isArray(rawParts) && rawParts.length > 0) {
+      try {
+        geminiModelParts = structuredClone(rawParts) as Part[];
+      } catch {
+        geminiModelParts = JSON.parse(JSON.stringify(rawParts)) as Part[];
+      }
+    }
+
     const usage = response.usageMetadata;
     return {
       content: textContent,
@@ -288,6 +316,7 @@ export async function callAiModel(options: AiCallOptions): Promise<AiCallResult>
       model,
       inputTokens: usage?.promptTokenCount ?? 0,
       outputTokens: usage?.candidatesTokenCount ?? 0,
+      geminiModelParts,
     };
   }
 
