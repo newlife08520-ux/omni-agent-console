@@ -321,25 +321,60 @@ app.use((req, res, next) => {
       console.log(`  SSE  Events URL   : ${domain}/api/events`);
       console.log("=".repeat(70) + "\n");
 
-      // 啟動後自動同步 prompt 到 DB
-      setTimeout(() => {
+      // 啟動後自動同步 prompt 到 DB（每次啟動皆以檔案為準覆寫 DB，不以 DB 既有值為保留條件）
+      setTimeout(async () => {
         try {
-          const root = process.cwd();
+          const { storage } = await import("./storage");
 
-          const globalPrompt = fs
-            .readFileSync(path.join(root, "docs/persona/PHASE97_MASTER_SLIM.txt"), "utf-8")
-            .trim();
-          db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('system_prompt', ?)").run(globalPrompt);
+          const globalPromptPath = path.join(process.cwd(), "docs/persona/PHASE97_MASTER_SLIM.txt");
+          const brand1Path = path.join(process.cwd(), "docs/persona/brands/brand_1_phase97_slim.txt");
+          const brand2Path = path.join(process.cwd(), "docs/persona/brands/brand_2_phase97_slim.txt");
 
-          const b1 = fs
-            .readFileSync(path.join(root, "docs/persona/brands/brand_1_phase97_slim.txt"), "utf-8")
-            .trim();
-          db.prepare("UPDATE brands SET system_prompt = ? WHERE id = 1").run(b1);
+          let syncedCount = 0;
 
-          const b2 = fs
-            .readFileSync(path.join(root, "docs/persona/brands/brand_2_phase97_slim.txt"), "utf-8")
-            .trim();
-          db.prepare("UPDATE brands SET system_prompt = ? WHERE id = 2").run(b2);
+          // Global prompt（無條件以檔案覆寫；檔案不存在或內容空白則跳過）
+          try {
+            if (fs.existsSync(globalPromptPath)) {
+              const content = fs.readFileSync(globalPromptPath, "utf-8");
+              if (content && content.trim().length > 0) {
+                storage.setSetting("system_prompt", content);
+                console.log(`[startup-sync] Global prompt 已更新（${content.length} chars）`);
+                syncedCount++;
+              }
+            }
+          } catch (e) {
+            console.error("[startup-sync] Global prompt 同步失敗:", e);
+          }
+
+          // Brand 1 prompt（無條件以檔案覆寫）
+          try {
+            if (fs.existsSync(brand1Path)) {
+              const content = fs.readFileSync(brand1Path, "utf-8");
+              if (content && content.trim().length > 0) {
+                db.prepare("UPDATE brands SET system_prompt = ? WHERE id = 1").run(content);
+                console.log(`[startup-sync] Brand 1 prompt 已更新（${content.length} chars）`);
+                syncedCount++;
+              }
+            }
+          } catch (e) {
+            console.error("[startup-sync] Brand 1 prompt 同步失敗:", e);
+          }
+
+          // Brand 2 prompt（無條件以檔案覆寫）
+          try {
+            if (fs.existsSync(brand2Path)) {
+              const content = fs.readFileSync(brand2Path, "utf-8");
+              if (content && content.trim().length > 0) {
+                db.prepare("UPDATE brands SET system_prompt = ? WHERE id = 2").run(content);
+                console.log(`[startup-sync] Brand 2 prompt 已更新（${content.length} chars）`);
+                syncedCount++;
+              }
+            }
+          } catch (e) {
+            console.error("[startup-sync] Brand 2 prompt 同步失敗:", e);
+          }
+
+          console.log(`[startup-sync] Prompt 啟動同步完成，共更新 ${syncedCount} 份`);
 
           const b1row = db
             .prepare("SELECT shopline_store_domain FROM brands WHERE id = 1")
@@ -381,10 +416,8 @@ app.use((req, res, next) => {
           } catch (e) {
             console.error("[startup] 表單 URL 設定失敗:", e);
           }
-
-          console.log("[startup] Prompt 已自動同步到 DB（Global + Brand 1 + Brand 2）");
         } catch (e) {
-          console.error("[startup] Prompt 同步失敗:", e);
+          console.error("[startup-sync] Prompt 同步整體失敗:", e);
         }
       }, 5000);
     });
