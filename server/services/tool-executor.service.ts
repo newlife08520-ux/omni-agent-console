@@ -470,6 +470,17 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           const activeCtx = buildActiveOrderContext(order, result.source, statusLabel, one_page_summary, "text");
           storage.setActiveOrderContext(context.contactId, activeCtx);
         }
+
+        /** 與 lookup_order_by_phone 單筆相同契約：略過第二輪 LLM，對客直出 one_page_summary（付款失敗改交 LLM 語氣安撫） */
+        const paymentKind = pkId.kind;
+        const summaryTrim = one_page_summary.trim();
+        const allowDeterministicByPayment =
+          paymentKind === "success" || paymentKind === "cod" || paymentKind === "pending";
+        const allowDeterministic =
+          orderFeatureFlags.phoneOrderDeterministicReply &&
+          allowDeterministicByPayment &&
+          summaryTrim.length > 50;
+
         return toolJson({
           success: true,
           found: true,
@@ -483,6 +494,12 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             one_page_summary,
             source: result.source,
           }),
+          ...(allowDeterministic
+            ? {
+                deterministic_skip_llm: true,
+                deterministic_customer_reply: one_page_summary.trim(),
+              }
+            : {}),
         });
       }
 
