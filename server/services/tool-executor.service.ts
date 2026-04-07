@@ -345,6 +345,35 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
       });
     }
 
+    if (toolName === "release_handoff_to_ai") {
+      const reason = String(args.reason || "").trim();
+      if (!reason) {
+        return JSON.stringify({ success: false, error: "missing_reason", sys_note: "請在 reason 簡述客人為何改由 AI 服務。" });
+      }
+      if (!context?.contactId) {
+        return JSON.stringify({ success: false, error: "missing_contact" });
+      }
+      storage.updateContactHumanFlag(context.contactId, 0);
+      storage.updateContactStatus(context.contactId, "ai_handling");
+      storage.updateContactConversationFields(context.contactId, { human_reason: null });
+      const row = storage.getContact(context.contactId);
+      storage.createSystemAlert({
+        alert_type: "handoff_released_by_ai",
+        details: JSON.stringify({
+          contactId: context.contactId,
+          reason,
+          at: new Date().toISOString(),
+        }),
+        brand_id: row?.brand_id ?? undefined,
+        contact_id: context.contactId,
+      });
+      return JSON.stringify({
+        ok: true,
+        success: true,
+        message: "已為您切換成 AI 服務，請繼續您要詢問的問題",
+      });
+    }
+
     if (toolName === "transfer_to_human") {
       const userConfirmed = !!args.user_confirmed;
       const reasonRaw = String(args.reason || "");

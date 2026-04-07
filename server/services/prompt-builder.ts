@@ -410,6 +410,8 @@ export interface EnrichedPromptContext {
   contactId?: number;
   /** contacts.customer_goal_locked（return / order_lookup / handoff 等） */
   customerGoalLocked?: string | null;
+  /** Phase 106.7：客人已在人工排隊（needs_human 或 awaiting_human／high_risk） */
+  inHumanHandoffQueue?: boolean;
 }
 
 /** 動態注入：正在等客人填表時，提示 AI 用工具記錄「填好了」 */
@@ -445,6 +447,22 @@ export function buildWaitingFormStatusPrompt(waitingForCustomer: string | null |
 模糊、含糊、或其他話題都不要呼叫。
 
 如果不確定，寧可問客人「請問您的表單填好了嗎？」也不要亂呼叫工具。
+`;
+}
+
+/** Phase 106.7：人工排隊中時注入，搭配 release_handoff_to_ai 工具 */
+export function buildHumanHandoffQueueStatusPrompt(): string {
+  return `
+
+【人工排隊狀態】
+這位客人目前已經在排隊等候真人客服。
+
+如果客人想：
+- 取消排隊改由你（AI）服務 → 直接呼叫 release_handoff_to_ai 工具
+- 繼續等待真人 → 簡短安撫，告知會盡快有專員回覆
+- 詢問其他事情但不取消排隊 → 簡短回答，但提醒他仍在排隊中
+
+請根據客人的真實意圖判斷，不要機械式擋下對話。
 `;
 }
 
@@ -619,6 +637,7 @@ export async function assembleEnrichedSystemPrompt(
       context.selectedScenario === "GENERAL");
   const marketingBlock = allowMarketing ? buildMarketingPrompt(brandId, context?.userMessage) : "";
   const waitingFormBlock = buildWaitingFormStatusPrompt(context?.waitingForCustomer ?? null);
+  const humanHandoffQueueBlock = context?.inHumanHandoffQueue ? buildHumanHandoffQueueStatusPrompt() : "";
   const knowledgeBlock =
     orderLookupDiet || skipKnowledge ? "" : buildKnowledgePrompt(brandId, knowledgeMax, context?.userMessage, context?.planMode);
   const imageBlock = buildImagePrompt(brandId);
@@ -661,6 +680,7 @@ export async function assembleEnrichedSystemPrompt(
     catalogBlock +
     marketingBlock +
     waitingFormBlock +
+    humanHandoffQueueBlock +
     knowledgeBlock +
     imageBlock;
   const full_prompt = normalizeSections(raw);

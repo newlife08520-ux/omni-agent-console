@@ -7,16 +7,6 @@ import crypto from "crypto";
 import type { Contact } from "@shared/schema";
 import type { IStorage } from "../storage";
 import { recordAutoReplyBlocked } from "../auto-reply-blocked";
-import {
-  isLinkRequestMessage,
-  isLinkRequestCorrectionMessage,
-  isConversationResetRequest,
-  HANDOFF_QUEUE_RESET_BLOCK_REPLY,
-  isReturnFormFollowupMessage,
-  isEligibleReturnFormFollowupResumeContact,
-  isAiServiceRequest,
-  shouldUnlockHandoffForCancelFlowFollowup,
-} from "../conversation-state-resolver";
 import { shouldEscalateImageSupplement } from "../safe-after-sale-classifier";
 import { applyHandoff } from "../services/handoff";
 import { resolveOpenAIModel } from "../openai-model";
@@ -264,77 +254,42 @@ export async function handleLineWebhook(req: Request, res: Response, deps: LineW
                 await pushLineMessage(contact.platform_user_id, [{ type: "text", text: handoffText }], channelToken);
               }
             } else {
-              const trimmedText = (text || "").trim();
-              const inHandoffState = !!(contactAfterProfile.needs_human || contactAfterProfile.status === "awaiting_human" || contactAfterProfile.status === "high_risk");
-              if (inHandoffState && isConversationResetRequest(trimmedText)) {
-                const canned = HANDOFF_QUEUE_RESET_BLOCK_REPLY;
-                const aiMsg = storage.createMessage(contactAfterProfile.id, "line", "ai", canned);
-                broadcastSSE("new_message", { contact_id: contactAfterProfile.id, message: aiMsg, brand_id: matchedBrandId || contact.brand_id });
-                broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
-                if (channelToken) {
-                  await pushLineMessage(contactAfterProfile.platform_user_id, [{ type: "text", text: canned }], channelToken);
-                }
-                continue;
-              }
-              const recentBodiesUnlock = storage
-                .getMessages(contactAfterProfile.id)
-                .slice(-6)
-                .map((m) => String(m.content || ""));
-              const allowHandoffAiResume =
-                inHandoffState &&
-                (isLinkRequestMessage(trimmedText) ||
-                  isLinkRequestCorrectionMessage(trimmedText) ||
-                  (isReturnFormFollowupMessage(trimmedText) &&
-                    isEligibleReturnFormFollowupResumeContact(contactAfterProfile)) ||
-                  isAiServiceRequest(trimmedText) ||
-                  shouldUnlockHandoffForCancelFlowFollowup(trimmedText, recentBodiesUnlock));
-              const shouldInvokeAi = !inHandoffState || allowHandoffAiResume;
-              if (!shouldInvokeAi) {
-                console.log(
-                  "[WEBHOOK] 略過文字自動回覆：聯絡人已在人工／高風險流程，contact_id=",
-                  contactAfterProfile.id,
-                  "needs_human=",
-                  contactAfterProfile.needs_human,
-                  "status=",
-                  contactAfterProfile.status
-                );
+              /** Phase 106.7：人工排隊中一般文字仍排入 AI，由 LLM + release_handoff_to_ai 處理 */
+              const aiEnabled = matchedChannel ? matchedChannel.is_ai_enabled : 0;
+              if (!matchedChannel) {
+                recordAutoReplyBlocked(storage, {
+                  reason: "blocked:no_channel_match",
+                  contactId: contact.id,
+                  platform: "line",
+                  brandId: matchedBrandId ?? undefined,
+                  messageSummary: text ? `用戶說：${text}` : undefined,
+                });
+                console.log("[WEBHOOK] 無匹配 channel，跳過文字自動回覆（fail-closed）");
+              } else if (!aiEnabled) {
+                recordAutoReplyBlocked(storage, {
+                  reason: "blocked:channel_ai_disabled",
+                  contactId: contact.id,
+                  platform: "line",
+                  channelId: matchedChannel.id,
+                  brandId: matchedBrandId ?? undefined,
+                  messageSummary: text ? `用戶說：${text}` : undefined,
+                });
+                console.log("[WEBHOOK] AI 已關閉 (channel:", matchedChannel.channel_name, ", is_ai_enabled=", matchedChannel.is_ai_enabled, ") - 跳過自動回覆");
               } else {
-                const aiEnabled = matchedChannel ? matchedChannel.is_ai_enabled : 0;
-                if (!matchedChannel) {
+                console.log("[WEBHOOK] AI 已啟用，準備文字自動回覆 — channel:", matchedChannel?.channel_name);
+                const testMode = storage.getSetting("test_mode");
+                if (testMode === "true") {
                   recordAutoReplyBlocked(storage, {
-                    reason: "blocked:no_channel_match",
-                    contactId: contact.id,
-                    platform: "line",
-                    brandId: matchedBrandId ?? undefined,
-                    messageSummary: text ? `用戶說：${text}` : undefined,
-                  });
-                  console.log("[WEBHOOK] 無匹配 channel，跳過文字自動回覆（fail-closed）");
-                } else if (!aiEnabled) {
-                  recordAutoReplyBlocked(storage, {
-                    reason: "blocked:channel_ai_disabled",
+                    reason: "blocked:test_mode",
                     contactId: contact.id,
                     platform: "line",
                     channelId: matchedChannel.id,
                     brandId: matchedBrandId ?? undefined,
                     messageSummary: text ? `用戶說：${text}` : undefined,
                   });
-                  console.log("[WEBHOOK] AI 已關閉 (channel:", matchedChannel.channel_name, ", is_ai_enabled=", matchedChannel.is_ai_enabled, ") - 跳過自動回覆");
+                  storage.createMessage(contact.id, "line", "system", `[模擬回覆，未實際送出] 收到您的訊息：「${text}」。`);
                 } else {
-                  console.log("[WEBHOOK] AI 已啟用，準備文字自動回覆 — channel:", matchedChannel?.channel_name);
-                  const testMode = storage.getSetting("test_mode");
-                  if (testMode === "true") {
-                    recordAutoReplyBlocked(storage, {
-                      reason: "blocked:test_mode",
-                      contactId: contact.id,
-                      platform: "line",
-                      channelId: matchedChannel.id,
-                      brandId: matchedBrandId ?? undefined,
-                      messageSummary: text ? `用戶說：${text}` : undefined,
-                    });
-                    storage.createMessage(contact.id, "line", "system", `[模擬回覆，未實際送出] 收到您的訊息：「${text}」。`);
-                  } else {
-                    await enqueueDebouncedAiReply("line", contact.id, text, dedupeKey, channelToken, matchedBrandId);
-                  }
+                  await enqueueDebouncedAiReply("line", contact.id, text, dedupeKey, channelToken, matchedBrandId);
                 }
               }
             }

@@ -172,6 +172,70 @@ export const formWorkflowTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   },
 ];
 
+/**
+ * Phase 106.7：客人已在人工排隊時，主對話僅開放「釋放給 AI」與再次轉人工（需先由 AI 讀意圖）。
+ * 完整查單等工具須在 release_handoff_to_ai 成功後下一輪才會出現。
+ */
+export const handoffQueueReleaseTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "release_handoff_to_ai",
+      description:
+        "當客人明確表示要取消排隊、改用 AI 服務、或真的想重新由你接手對話時呼叫。" +
+        "會把聯絡人從人工排隊狀態釋放，讓你（AI）繼續服務。" +
+        "注意：不要只因客人提到「重新開始」就機械式呼叫；先確認客人是真的不想等真人、想改由你處理。",
+      parameters: {
+        type: "object",
+        properties: {
+          reason: {
+            type: "string",
+            description:
+              "客人想取消排隊／改由 AI 的原因摘要（例如：想用 AI 查單即可、已不需要真人、想先自己問）",
+          },
+        },
+        required: ["reason"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "transfer_to_human",
+      description:
+        "轉接給真人客服。⚠️ 重要：除非客人明確說要找真人，否則呼叫前必須先問過客人意願！" +
+        "呼叫前必須先回覆一句話給客人（例如：好的，我幫您轉給專人處理，請稍等）。" +
+        "絕對不可以只呼叫工具不回覆任何文字。" +
+        "使用情境分三類：" +
+        "(1) 直接轉：客人明確說「轉人工」「找客服」「我要真人」、客訴/法律字眼/極度生氣" +
+        "(2) 必須先問再轉：付款糾紛、退款爭議、改訂單、改地址、客人**堅持**取消／堅持退貨、特殊個案" +
+        "(3) 不要轉：查訂單、問商品、問出貨進度、問付款狀態、一般問題（這些 AI 自己處理）；" +
+        "**客人第一句僅說想取消訂單／退貨（尚未堅持）→ 不要轉人工**，先同理、問原因、走挽留與表單流程。",
+      parameters: {
+        type: "object",
+        properties: {
+          reason: {
+            type: "string",
+            description:
+              "轉接原因，例如：explicit_human_request（客人明確要求）、" +
+              "user_confirmed_transfer（客人同意轉接）、" +
+              "high_risk_emotional（客人極度不滿）、" +
+              "complaint_escalation（客訴升級）",
+          },
+          user_confirmed: {
+            type: "boolean",
+            description:
+              "客人是否已經明確同意轉接？" +
+              "true = 客人說「好」「轉接吧」「請幫我轉」或客人主動要求轉真人。" +
+              "false = AI 還沒問過客人意願（如果這個是 false 但 reason 不是 explicit_human_request 或 high_risk，工具會拒絕）",
+          },
+        },
+        required: ["user_confirmed"],
+      },
+    },
+  },
+];
+
 export const humanHandoffTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   {
     type: "function",

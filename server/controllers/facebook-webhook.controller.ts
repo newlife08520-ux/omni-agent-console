@@ -7,16 +7,6 @@ import type { Request, Response } from "express";
 import crypto from "crypto";
 import type { IStorage } from "../storage";
 import { recordAutoReplyBlocked } from "../auto-reply-blocked";
-import {
-  isLinkRequestMessage,
-  isLinkRequestCorrectionMessage,
-  isConversationResetRequest,
-  HANDOFF_QUEUE_RESET_BLOCK_REPLY,
-  isReturnFormFollowupMessage,
-  isEligibleReturnFormFollowupResumeContact,
-  isAiServiceRequest,
-  shouldUnlockHandoffForCancelFlowFollowup,
-} from "../conversation-state-resolver";
 import { shouldEscalateImageSupplement } from "../safe-after-sale-classifier";
 import { applyHandoff } from "../services/handoff";
 import { resolveOpenAIModel } from "../openai-model";
@@ -234,47 +224,40 @@ export function handleFacebookWebhook(req: Request, res: Response, deps: Faceboo
                   sendFBMessage(matchedChannel.access_token, senderId, handoffText).catch(err => console.error("[FB Webhook] 轉人工回覆失敗:", err));
                 }
               } else {
-                const trimmedText = (text || "").trim();
-                const inHandoffState = !!(contact.needs_human || contact.status === "awaiting_human" || contact.status === "high_risk");
-                if (inHandoffState && isConversationResetRequest(trimmedText)) {
-                  const canned = HANDOFF_QUEUE_RESET_BLOCK_REPLY;
-                  const aiMsg = storage.createMessage(contact.id, "messenger", "ai", canned);
-                  broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: matchedBrandId || contact.brand_id });
-                  broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
-                  if (matchedChannel?.access_token) {
-                    sendFBMessage(matchedChannel.access_token, senderId, canned).catch((err) =>
-                      console.error("[FB Webhook] 人工排隊中重置阻擋回覆失敗:", err)
-                    );
-                  }
+                /** Phase 106.7：人工排隊中一般文字仍排入 AI */
+                if (!matchedChannel) {
+                  recordAutoReplyBlocked(storage, {
+                    reason: "blocked:no_channel_match",
+                    contactId: contact.id,
+                    platform: "messenger",
+                    brandId: matchedBrandId ?? undefined,
+                    messageSummary: text ? `用戶說：${text}` : undefined,
+                  });
                 } else {
-                const contactFresh = storage.getContact(contact.id) ?? contact;
-                const recentBodiesUnlock = storage
-                  .getMessages(contact.id)
-                  .slice(-6)
-                  .map((m) => String(m.content || ""));
-                const allowHandoffAiResume =
-                  inHandoffState &&
-                  (isLinkRequestMessage(trimmedText) ||
-                    isLinkRequestCorrectionMessage(trimmedText) ||
-                    (isReturnFormFollowupMessage(trimmedText) &&
-                      isEligibleReturnFormFollowupResumeContact(contactFresh)) ||
-                    isAiServiceRequest(trimmedText) ||
-                    shouldUnlockHandoffForCancelFlowFollowup(trimmedText, recentBodiesUnlock));
-                const shouldInvokeAi = !inHandoffState || allowHandoffAiResume;
-                if (shouldInvokeAi) {
-                  if (!matchedChannel) {
+                  const fbAiEnabled = matchedChannel.is_ai_enabled === 1;
+                  if (!fbAiEnabled) {
                     recordAutoReplyBlocked(storage, {
-                      reason: "blocked:no_channel_match",
+                      reason: "blocked:channel_ai_disabled",
                       contactId: contact.id,
                       platform: "messenger",
+                      channelId: matchedChannel.id,
                       brandId: matchedBrandId ?? undefined,
                       messageSummary: text ? `用戶說：${text}` : undefined,
                     });
                   } else {
-                    const fbAiEnabled = matchedChannel.is_ai_enabled === 1;
-                    if (!fbAiEnabled) {
+                    const testMode = storage.getSetting("test_mode");
+                    if (testMode === "true") {
                       recordAutoReplyBlocked(storage, {
-                        reason: "blocked:channel_ai_disabled",
+                        reason: "blocked:test_mode",
+                        contactId: contact.id,
+                        platform: "messenger",
+                        channelId: matchedChannel.id,
+                        brandId: matchedBrandId ?? undefined,
+                        messageSummary: text ? `用戶說：${text}` : undefined,
+                      });
+                    } else if (!matchedChannel.access_token?.trim()) {
+                      recordAutoReplyBlocked(storage, {
+                        reason: "blocked:no_channel_token",
                         contactId: contact.id,
                         platform: "messenger",
                         channelId: matchedChannel.id,
@@ -282,34 +265,12 @@ export function handleFacebookWebhook(req: Request, res: Response, deps: Faceboo
                         messageSummary: text ? `用戶說：${text}` : undefined,
                       });
                     } else {
-                      const testMode = storage.getSetting("test_mode");
-                      if (testMode === "true") {
-                        recordAutoReplyBlocked(storage, {
-                          reason: "blocked:test_mode",
-                          contactId: contact.id,
-                          platform: "messenger",
-                          channelId: matchedChannel.id,
-                          brandId: matchedBrandId ?? undefined,
-                          messageSummary: text ? `用戶說：${text}` : undefined,
-                        });
-                      } else if (!matchedChannel.access_token?.trim()) {
-                        recordAutoReplyBlocked(storage, {
-                          reason: "blocked:no_channel_token",
-                          contactId: contact.id,
-                          platform: "messenger",
-                          channelId: matchedChannel.id,
-                          brandId: matchedBrandId ?? undefined,
-                          messageSummary: text ? `用戶說：${text}` : undefined,
-                        });
-                      } else {
-                        const inboundEventId = eventId;
-                        enqueueDebouncedAiReply("messenger", contact.id, text, inboundEventId, matchedChannel.access_token ?? null, matchedBrandId).catch(err =>
-                          console.error("[FB Webhook] enqueueDebouncedAiReply failed:", err)
-                        );
-                      }
+                      const inboundEventId = eventId;
+                      enqueueDebouncedAiReply("messenger", contact.id, text, inboundEventId, matchedChannel.access_token ?? null, matchedBrandId).catch((err) =>
+                        console.error("[FB Webhook] enqueueDebouncedAiReply failed:", err)
+                      );
                     }
                   }
-                }
                 }
               }
             }

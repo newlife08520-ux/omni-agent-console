@@ -13,8 +13,6 @@ import {
   ORDER_LOOKUP_PATTERNS,
   ORDER_FOLLOWUP_PATTERNS,
   isAiHandlableIntent,
-  HANDOFF_QUEUE_RESET_BLOCK_REPLY,
-  isConversationResetRequest,
   isReturnFormFollowupMessage,
   isEligibleReturnFormFollowupResumeContact,
   isAiServiceRequest,
@@ -86,7 +84,14 @@ import {
   FALLBACK_AFTER_SALE_LINE_LABEL,
   SHORT_IMAGE_FALLBACK,
 } from "../safe-after-sale-classifier";
-import { orderLookupTools, humanHandoffTools, formWorkflowTools, imageTools, productRecommendTools } from "../openai-tools";
+import {
+  orderLookupTools,
+  humanHandoffTools,
+  handoffQueueReleaseTools,
+  formWorkflowTools,
+  imageTools,
+  productRecommendTools,
+} from "../openai-tools";
 import { parsePhase1BrandFlags, isPhase1Active } from "./phase1-brand-config";
 import { runHybridIntentRouter, mapPlanToPhase1Scenario, computePhase15HardRoute, type HybridRouterInput } from "./intent-router.service";
 import type { HybridRouteResult, Phase1BrandFlags } from "./phase1-types";
@@ -107,6 +112,13 @@ function buildWaitingFormSubmitToolsOnly(): OpenAI.Chat.Completions.ChatCompleti
   if (mark) out.push(mark);
   if (transfer) out.push(transfer);
   return out;
+}
+
+/** Phase 106.7：人工排隊中（與 prompt／工具收緊共用） */
+function isInHandoffQueue(row: Pick<Contact, "needs_human" | "status"> | null | undefined): boolean {
+  if (!row) return false;
+  if (row.needs_human) return true;
+  return row.status === "awaiting_human" || row.status === "high_risk";
 }
 
 /** Phase 1 法律/公關風險關鍵字，命中則走 legal_risk → high_risk_short_circuit */
@@ -716,40 +728,8 @@ ${contextStr}
       .slice(-6)
       .map((m) => String(m.content || ""));
 
-    async function replyHandoffQueueResetBlocked(): Promise<void> {
-      const blockMsg = HANDOFF_QUEUE_RESET_BLOCK_REPLY;
-      const contactPlatform = platform || contact.platform || "line";
-      const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", blockMsg);
-      broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: contact.brand_id });
-      broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-      if (contactPlatform === "messenger" && channelToken) {
-        await sendFBMessage(channelToken, contact.platform_user_id, blockMsg);
-      } else if (channelToken) {
-        await pushLineMessage(contact.platform_user_id, [{ type: "text", text: blockMsg }], channelToken);
-      }
-      storage.createAiLog({
-        contact_id: contact.id,
-        brand_id: effectiveBrandIdForLog || undefined,
-        prompt_summary: userMessage.slice(0, 200),
-        knowledge_hits: [],
-        tools_called: [],
-        transfer_triggered: false,
-        result_summary: "gate_handoff_queue_reset_blocked",
-        token_usage: 0,
-        model: "gate",
-        response_time_ms: Date.now() - startTime,
-        reply_source: "gate_skip",
-        used_llm: 0,
-        plan_mode: null,
-        reason_if_bypassed: "handoff_queue_reset_blocked",
-      });
-    }
-
+    /** Phase 106.7：人工排隊中仍進主 LLM；保留舊有「連結／表單／明確要 AI」等自動解鎖行為 */
     if (freshCheck && (freshCheck.status === "awaiting_human" || freshCheck.status === "high_risk")) {
-      if (isConversationResetRequest(userMessage)) {
-        await replyHandoffQueueResetBlocked();
-        return;
-      }
       const isLinkAsk = isLinkRequestMessage(userMessage) || isLinkRequestCorrectionMessage(userMessage);
       const canResumeReturnForm =
         isReturnFormFollowupMessage(userMessage) && isEligibleReturnFormFollowupResumeContact(freshCheck);
@@ -759,32 +739,9 @@ ${contextStr}
         storage.updateContactHumanFlag(contact.id, 0);
         storage.updateContactStatus(contact.id, "ai_handling");
         broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-      } else {
-        console.log(`[AI Mute] Contact ${contact.id} status=${freshCheck.status}, AI ??? - ??`);
-        storage.createAiLog({
-          contact_id: contact.id,
-          brand_id: effectiveBrandIdForLog || undefined,
-          prompt_summary: userMessage.slice(0, 200),
-          knowledge_hits: [],
-          tools_called: [],
-          transfer_triggered: false,
-          result_summary: "gate_skip:status",
-          token_usage: 0,
-          model: "gate",
-          response_time_ms: Date.now() - startTime,
-          reply_source: "gate_skip",
-          used_llm: 0,
-          plan_mode: null,
-          reason_if_bypassed: `status=${freshCheck.status}`,
-        });
-        return;
       }
     }
     if (freshCheck && freshCheck.needs_human) {
-      if (isConversationResetRequest(userMessage)) {
-        await replyHandoffQueueResetBlocked();
-        return;
-      }
       const isLinkAsk = isLinkRequestMessage(userMessage) || isLinkRequestCorrectionMessage(userMessage);
       const canResumeReturnForm =
         isReturnFormFollowupMessage(userMessage) && isEligibleReturnFormFollowupResumeContact(freshCheck);
@@ -794,26 +751,6 @@ ${contextStr}
         storage.updateContactHumanFlag(contact.id, 0);
         storage.updateContactStatus(contact.id, "ai_handling");
         broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-      } else {
-        /** 避免 Handoff Loop：needs_human=1 時不再給 link 讓 AI 回；由 LLM 決定是否結束或轉人工 */
-        console.log(`[AI Mute] Contact ${contact.id} needs_human=1, AI ??? - ????????`);
-        storage.createAiLog({
-          contact_id: contact.id,
-          brand_id: effectiveBrandIdForLog || undefined,
-          prompt_summary: userMessage.slice(0, 200),
-          knowledge_hits: [],
-          tools_called: [],
-          transfer_triggered: false,
-          result_summary: "gate_skip:needs_human",
-          token_usage: 0,
-          model: "gate",
-          response_time_ms: Date.now() - startTime,
-          reply_source: "gate_skip",
-          used_llm: 0,
-          plan_mode: null,
-          reason_if_bypassed: "needs_human",
-        });
-        return;
       }
     }
     if (storage.isAiMuted(contact.id)) {
@@ -1360,6 +1297,8 @@ ${contextStr}
         storage.getContact(contact.id)?.waiting_for_customer ?? contact.waiting_for_customer ?? null;
       const customerGoalLockedSnap =
         storage.getContact(contact.id)?.customer_goal_locked ?? contact.customer_goal_locked ?? null;
+      const contactSnapForPrompt = storage.getContact(contact.id) ?? contact;
+      const inHumanHandoffQueue = isInHandoffQueue(contactSnapForPrompt);
       const enrichedPack = await assembleEnrichedSystemPrompt(contact.brand_id || brandId || undefined, {
         planMode: plan.mode,
         userMessage,
@@ -1372,6 +1311,7 @@ ${contextStr}
         waitingForCustomer: waitingForCustomerSnap,
         contactId: contact.id,
         customerGoalLocked: customerGoalLockedSnap,
+        inHumanHandoffQueue,
       });
       console.log(
         `[prompt_profile=${enrichedPack.prompt_profile}] prompt_chars=${enrichedPack.prompt_chars} catalog_included=${enrichedPack.includes.catalog} knowledge_included=${enrichedPack.includes.knowledge} image_included=${enrichedPack.includes.image} prompt_sections=${enrichedPack.sections.map((s) => s.key).join("|")} prompt_assembly_ms=${Date.now() - startTime}`
@@ -2003,7 +1943,26 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
         toolsAvailableNames = toolsForGeminiPath
           .map((t) => (t.type === "function" ? t.function?.name : "") || "")
           .filter(Boolean);
+      } else {
+        const handoffSnap = storage.getContact(contact.id) ?? contact;
+        if (isInHandoffQueue(handoffSnap)) {
+          toolsForGeminiPath = [...handoffQueueReleaseTools];
+          toolsAvailableNames = toolsForGeminiPath
+            .map((t) => (t.type === "function" ? t.function?.name : "") || "")
+            .filter(Boolean);
+        }
       }
+
+      const traceHandoffSnap = storage.getContact(contact.id) ?? contact;
+      console.log("[reply-trace] handoff_state_check", {
+        contactId: contact.id,
+        needsHuman: traceHandoffSnap.needs_human,
+        status: traceHandoffSnap.status,
+        isInHandoff: isInHandoffQueue(traceHandoffSnap),
+        toolsForHandoffMode: toolsForGeminiPath.map((t) =>
+          t.type === "function" ? (t.function?.name ?? "") : (t as { name?: string }).name ?? ""
+        ).filter(Boolean),
+      });
 
       const AI_TIMEOUT_MS = 45000;
       const TOOL_TIMEOUT_MS = 25000;
@@ -2416,7 +2375,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             {
               model: getOpenAIModel(),
               messages: chatMessages,
-              tools: allTools,
+              tools: toolsForGeminiPath,
               max_completion_tokens: isOrderLookupFamily(plan.mode) ? 1000 : 1500,
               temperature: isOrderLookupFamily(plan.mode) ? 0.28 : 0.85,
             },
@@ -2692,7 +2651,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
               {
                 model: resolveModelWithBrandOverride(phase1ModelOverride).model,
                 messages: chatMessages,
-                tools: allTools,
+                tools: toolsForGeminiPath,
                 max_completion_tokens: hasOrderLookupTool ? 1000 : 1500,
                 temperature: hasOrderLookupTool ? 0.2 : 0.85,
               },
