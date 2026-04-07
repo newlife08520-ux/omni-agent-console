@@ -19,6 +19,7 @@ import {
   isEligibleReturnFormFollowupResumeContact,
   isAiServiceRequest,
   shouldUnlockHandoffForCancelFlowFollowup,
+  isFormSubmittedNotification,
 } from "../conversation-state-resolver";
 import { buildReplyPlan, shouldNotLeadWithOrderLookup, type ReplyPlanMode } from "../reply-plan-builder";
 import {
@@ -302,6 +303,93 @@ export function createAiReplyService(deps: AiReplyDeps) {
     getTransferUnavailableSystemMessage,
     getLineTokenForContact,
   } = deps;
+
+  const FORM_URLS = {
+    cancel: "jsj.top/f/x253ie",
+    return: "jsj.top/f/rwcIDN",
+    exchange: "jsj.top/f/PwcbA7",
+  } as const;
+
+  function detectOutboundFormTypeFromReply(replyText: string): "cancel" | "return" | "exchange" | null {
+    const t = replyText || "";
+    if (t.includes(FORM_URLS.cancel)) return "cancel";
+    if (t.includes(FORM_URLS.return)) return "return";
+    if (t.includes(FORM_URLS.exchange)) return "exchange";
+    return null;
+  }
+
+  function formTypeToZh(formType: "cancel" | "return" | "exchange"): string {
+    return formType === "cancel" ? "取消" : formType === "return" ? "退貨" : "換貨";
+  }
+
+  async function handleCustomerReportedFormSubmitted(
+    contact: Contact,
+    userMessage: string,
+    channelToken: string | null | undefined,
+    platform: string | undefined,
+    startTime: number,
+    effectiveBrandIdForLog: number | undefined
+  ): Promise<void> {
+    const c = storage.getContact(contact.id);
+    const w = c?.waiting_for_customer;
+    if (!w?.endsWith("_form_submit") || !isFormSubmittedNotification(userMessage)) return;
+    const raw = w.replace(/_form_submit$/, "");
+    if (raw !== "cancel" && raw !== "return" && raw !== "exchange") return;
+    const formType = raw as "cancel" | "return" | "exchange";
+    const formTypeZh = formTypeToZh(formType);
+
+    storage.updateContactHumanFlag(contact.id, 1);
+    storage.updateContactStatus(contact.id, "awaiting_human");
+    storage.updateContactConversationFields(contact.id, { waiting_for_customer: null });
+
+    storage.createCaseNotification(contact.id, "in_app", {
+      type: "form_submitted",
+      form_type: formType,
+      priority: "high",
+      message: `客戶回報已填寫 ${formTypeZh} 表單，請盡快處理`,
+    });
+
+    const contactPlatform = platform || contact.platform || "line";
+    const sysBody = `[表單提交] 客戶回報已填寫${formTypeZh}表單`;
+    const sysMsg = storage.createMessage(contact.id, contactPlatform, "system", sysBody);
+    broadcastSSE("new_message", { contact_id: contact.id, message: sysMsg, brand_id: contact.brand_id });
+    broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+
+    const ackText =
+      "好的～收到囉，已經幫您加急處理 🙏 專員會盡快主動聯繫您確認後續，有任何問題隨時跟我說！";
+
+    if (contactPlatform === "messenger" && channelToken) {
+      await sendFBMessage(channelToken, contact.platform_user_id, ackText);
+    } else {
+      const token = channelToken || getLineTokenForContact(contact);
+      if (token) {
+        await pushLineMessage(contact.platform_user_id, [{ type: "text", text: ackText }], token);
+      }
+    }
+
+    const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", ackText);
+    broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: contact.brand_id });
+    broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+
+    storage.createAiLog({
+      contact_id: contact.id,
+      message_id: aiMsg.id,
+      brand_id: effectiveBrandIdForLog,
+      prompt_summary: userMessage.slice(0, 200),
+      knowledge_hits: [],
+      tools_called: ["form_submitted_ack"],
+      transfer_triggered: true,
+      transfer_reason: `form_submitted:${formType}`,
+      result_summary: "客戶回報表單已填，標記待人工＋確認回覆",
+      token_usage: 0,
+      model: "form-tracking",
+      response_time_ms: Date.now() - startTime,
+      reply_source: "form_submitted_ack",
+      used_llm: 0,
+      plan_mode: null,
+      reason_if_bypassed: null,
+    });
+  }
 
   function mergeStreamDelta(
       prev: OpenAI.Chat.Completions.ChatCompletionMessage,
@@ -647,6 +735,22 @@ ${contextStr}
       console.log(`[phase26_latency] queue_wait_ms=${queueWaitMs} contact=${contact.id}`);
     }
     const effectiveBrandIdForLog = contact.brand_id || brandId;
+
+    const latestForForm = storage.getContact(contact.id);
+    if (
+      latestForForm?.waiting_for_customer?.endsWith("_form_submit") &&
+      isFormSubmittedNotification(userMessage)
+    ) {
+      await handleCustomerReportedFormSubmitted(
+        contact,
+        userMessage,
+        channelToken ?? null,
+        platform,
+        startTime,
+        effectiveBrandIdForLog ?? undefined
+      );
+      return;
+    }
 
     const freshCheck = storage.getContact(contact.id);
     const recentBodiesForHandoffUnlock = storage
@@ -2677,6 +2781,21 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           await sendFBMessage(channelToken, contact.platform_user_id, reply);
         } else {
           await pushLineMessage(contact.platform_user_id, [{ type: "text", text: reply }], channelToken);
+        }
+
+        const outboundForm = detectOutboundFormTypeFromReply(reply);
+        if (outboundForm) {
+          storage.updateContactConversationFields(contact.id, {
+            waiting_for_customer: `${outboundForm}_form_submit`,
+          });
+          const formZh = formTypeToZh(outboundForm);
+          storage.createCaseNotification(contact.id, "in_app", {
+            type: "form_pending",
+            form_type: outboundForm,
+            message: `客戶已收到 ${formZh} 表單，等待回填`,
+          });
+          console.log(`[form_tracking] contact=${contact.id} form=${outboundForm} waiting`);
+          broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
         }
 
         const anyLlm = usedFirstLlmTelemetry > 0 || usedSecondLlmTelemetry > 0;

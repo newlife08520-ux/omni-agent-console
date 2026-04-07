@@ -162,6 +162,7 @@ export function initDatabase() {
   migrateBleedHumanTransferKeywords();
   migrateTightenHumanTransferKeywords();
   migrateConversationStateFields();
+  migrateCaseNotificationsPayload();
   migratePhase2OrderIndex();
   migratePhase23OrderItemsAndAliases();
   migratePhase24OrderCreatedAt();
@@ -428,6 +429,18 @@ function migrateTightenHumanTransferKeywords() {
 }
 
 /** 新增對話狀態／結案／評價／QA 欄位（先判斷再說話、24h 結案、評價條件） */
+/** case_notifications 附加 JSON（表單追蹤 type / form_type / priority 等） */
+function migrateCaseNotificationsPayload() {
+  const cols = db.prepare("PRAGMA table_info(case_notifications)").all() as { name: string }[];
+  if (cols.some((c) => c.name === "payload")) return;
+  try {
+    db.exec("ALTER TABLE case_notifications ADD COLUMN payload TEXT");
+    console.log("[DB Migration] case_notifications.payload 已新增");
+  } catch (e) {
+    console.warn("[DB Migration] case_notifications.payload 略過:", (e as Error).message);
+  }
+}
+
 function migrateConversationStateFields() {
   const contactCols = db.prepare("PRAGMA table_info(contacts)").all() as { name: string }[];
   const contactColNames = contactCols.map((c) => c.name);

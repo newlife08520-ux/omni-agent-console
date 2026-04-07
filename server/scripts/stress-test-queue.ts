@@ -62,7 +62,7 @@ async function main() {
   const waiting1 = await q.getWaitingCount();
   const active1 = await q.getActiveCount();
   console.log(`[Test A] Queue 狀態 (0.5s): delayed=${delayed1}, waiting=${waiting1}, active=${active1}`);
-  console.log(`[Test A] 預期: delayed 接近 ${N}（debounce 1200ms 延遲中）`);
+  console.log(`[Test A] 預期: delayed 接近 ${N}（debounce 4000ms 延遲中）`);
 
   await sleep(1500);
   const delayed2 = await q.getDelayedCount();

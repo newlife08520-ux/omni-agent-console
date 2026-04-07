@@ -190,7 +190,7 @@ export interface IStorage {
   updateContactConversationFields(contactId: number, fields: { resolution_status?: string | null; waiting_for_customer?: string | null; human_reason?: string | null; return_stage?: number | null; rating_invited_at?: string | null; close_reason?: string | null; qa_score?: number | null; qa_score_reason?: string | null; product_scope_locked?: string | null; customer_goal_locked?: string | null }): void;
   getUnreadHumanCaseCount(): number;
   markCaseNotificationsRead(contactId?: number): void;
-  createCaseNotification(contactId: number, channel?: string): void;
+  createCaseNotification(contactId: number, channel?: string, payload?: Record<string, unknown>): void;
   updateUserOnline(userId: number, isOnline: number, isAvailable?: number): void;
   updateUserLastActive(userId: number): void;
   getAgentContactFlags(agentId: number, contactIds: number[]): Record<number, "later" | "tracking">;
@@ -1500,8 +1500,21 @@ export class SQLiteStorage implements IStorage {
     }
   }
 
-  createCaseNotification(contactId: number, channel: string = "in_app"): void {
-    db.prepare("INSERT INTO case_notifications (contact_id, channel) VALUES (?, ?)").run(contactId, channel);
+  createCaseNotification(contactId: number, channel: string = "in_app", payload?: Record<string, unknown>): void {
+    if (payload != null) {
+      const payloadJson = JSON.stringify(payload);
+      try {
+        db.prepare("INSERT INTO case_notifications (contact_id, channel, payload) VALUES (?, ?, ?)").run(
+          contactId,
+          channel,
+          payloadJson
+        );
+      } catch {
+        db.prepare("INSERT INTO case_notifications (contact_id, channel) VALUES (?, ?)").run(contactId, channel);
+      }
+    } else {
+      db.prepare("INSERT INTO case_notifications (contact_id, channel) VALUES (?, ?)").run(contactId, channel);
+    }
   }
 
   updateUserOnline(userId: number, isOnline: number, isAvailable?: number): void {

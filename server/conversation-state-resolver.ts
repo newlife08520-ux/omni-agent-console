@@ -225,6 +225,23 @@ export function shouldUnlockHandoffForCancelFlowFollowup(
   return recentThreadHintsAftersalesOrCancel(recentMessageBodies);
 }
 
+/** 客人回報已填寫／送出表單（搭配 contact.waiting_for_customer = *_form_submit） */
+export const FORM_SUBMITTED_PATTERNS: RegExp[] = [
+  /填(?:好|完|寫)了/,
+  /(?:已經|已)?填(?:好|完|寫)/,
+  /送出了/,
+  /(?:表單)?(?:好了|OK|可以了|完成了)/i,
+  /提交(?:好|完)?了/,
+  /我填了/,
+  /表單(?:填|送|交).{0,5}了/,
+];
+
+export function isFormSubmittedNotification(text: string): boolean {
+  const t = (text || "").trim();
+  if (!t) return false;
+  return FORM_SUBMITTED_PATTERNS.some((p) => p.test(t));
+}
+
 function detectPrimaryIntent(userMessage: string, recentUserMessages: string[], contact: Contact): PrimaryIntent {
   const text = (userMessage || "").trim();
   /** Phase 1 correction override：有糾正語時僅用本輪內容算意圖，不沿用前輪 */

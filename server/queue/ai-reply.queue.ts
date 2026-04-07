@@ -19,7 +19,8 @@ import crypto from "crypto";
 
 const QUEUE_NAME = "ai-reply";
 const REDIS_URL = process.env.REDIS_URL?.trim() || "redis://localhost:6379";
-const DEBOUNCE_MS = 1200;
+/** 同 contact 連發訊息合併：拉長防抖，給客人時間打完字再進 AI */
+const DEBOUNCE_MS = 4000;
 const LOCK_TTL_MS = 120_000;
 const LOCK_KEY_PREFIX = "lock:ai-reply:";
 const PENDING_KEY_PREFIX = "ai-reply:pending:";
@@ -215,9 +216,11 @@ export async function enqueueDebouncedAiReply(
       if (state === "delayed") {
         await existing.remove();
       } else if (state === "active") {
+        /** 併發保護：AI 思考中不重排新 job，僅累積在 pending；完成後 worker 會 rescheduleIfPending */
         console.log("[Queue] job active, new message buffered in pending:", jid);
         return;
       } else if (state === "waiting") {
+        /** 已在佇列：不重複觸發，worker 執行時會一次讀取最新 pending 合併內容 */
         console.log("[Queue] job waiting, pending updated:", jid);
         return;
       }
