@@ -7,7 +7,12 @@ import crypto from "crypto";
 import type { Contact } from "@shared/schema";
 import type { IStorage } from "../storage";
 import { recordAutoReplyBlocked } from "../auto-reply-blocked";
-import { isLinkRequestMessage, isLinkRequestCorrectionMessage } from "../conversation-state-resolver";
+import {
+  isLinkRequestMessage,
+  isLinkRequestCorrectionMessage,
+  isConversationResetRequest,
+  HANDOFF_QUEUE_RESET_BLOCK_REPLY,
+} from "../conversation-state-resolver";
 import { shouldEscalateImageSupplement } from "../safe-after-sale-classifier";
 import { applyHandoff } from "../services/handoff";
 import { resolveOpenAIModel } from "../openai-model";
@@ -248,6 +253,16 @@ export async function handleLineWebhook(req: Request, res: Response, deps: LineW
             } else {
               const trimmedText = (text || "").trim();
               const inHandoffState = !!(contactAfterProfile.needs_human || contactAfterProfile.status === "awaiting_human" || contactAfterProfile.status === "high_risk");
+              if (inHandoffState && isConversationResetRequest(trimmedText)) {
+                const canned = HANDOFF_QUEUE_RESET_BLOCK_REPLY;
+                const aiMsg = storage.createMessage(contactAfterProfile.id, "line", "ai", canned);
+                broadcastSSE("new_message", { contact_id: contactAfterProfile.id, message: aiMsg, brand_id: matchedBrandId || contact.brand_id });
+                broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
+                if (channelToken) {
+                  await pushLineMessage(contactAfterProfile.platform_user_id, [{ type: "text", text: canned }], channelToken);
+                }
+                continue;
+              }
               const allowOnlyLinkRestore = inHandoffState && (isLinkRequestMessage(trimmedText) || isLinkRequestCorrectionMessage(trimmedText));
               const shouldInvokeAi = !inHandoffState || allowOnlyLinkRestore;
               if (!shouldInvokeAi) {

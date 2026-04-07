@@ -209,20 +209,34 @@ app.use((req, res, next) => {
         import("./scripts/sync-orders-normalized")
           .then(({ runOrderSync }) => {
             setTimeout(() => {
-              console.log("[OrderSync] 首次同步開始（近 7 天）...");
-              runOrderSync({ days: 7 }).catch((e) =>
-                console.error("[OrderSync] 首次同步失敗:", (e as Error)?.message || e)
-              );
+              console.log("[OrderSync] 首次同步：一頁近 3 天 + Shopline 近 1 天...");
+              Promise.all([
+                runOrderSync({ days: 3, shopline: false }).catch((e) =>
+                  console.error("[OrderSync] 首次一頁同步失敗:", (e as Error)?.message || e)
+                ),
+                runOrderSync({ days: 1, superlanding: false }).catch((e) =>
+                  console.error("[OrderSync] 首次 Shopline 同步失敗:", (e as Error)?.message || e)
+                ),
+              ]).catch(() => {});
             }, 120_000);
 
-            // runOrderSync：非 backfill 時 SuperLanding maxPages=100（每頁 200 筆≈2 萬筆上限），定時近 3 天足夠；大量歷史請分批手動跑
+            // 一頁商店：每 15 分鐘、近 3 天（變化較快）
             setInterval(() => {
-              runOrderSync({ days: 3 }).catch((e) =>
-                console.error("[OrderSync] 定時同步失敗:", (e as Error)?.message || e)
+              runOrderSync({ days: 3, shopline: false }).catch((e) =>
+                console.error("[OrderSync] 一頁定時同步失敗:", (e as Error)?.message || e)
               );
             }, 15 * 60 * 1000);
 
-            console.log("[server] 訂單定時同步已啟用（每 15 分鐘同步近 3 天）");
+            // Shopline：每 30 分鐘、近 1 天（降低 API 量與主機負載）
+            setInterval(() => {
+              runOrderSync({ days: 1, superlanding: false }).catch((e) =>
+                console.error("[OrderSync] Shopline 定時同步失敗:", (e as Error)?.message || e)
+              );
+            }, 30 * 60 * 1000);
+
+            console.log(
+              "[server] 訂單定時同步已啟用（一頁每 15 分鐘／近 3 天；Shopline 每 30 分鐘／近 1 天）"
+            );
           })
           .catch((e) => {
             console.error(
@@ -234,7 +248,7 @@ app.use((req, res, next) => {
         console.log("[server] ENABLE_ORDER_SYNC 未啟用；若需定時同步請設 ENABLE_ORDER_SYNC=true");
       }
 
-      const PRODUCT_SYNC_INTERVAL = 6 * 60 * 60 * 1000;
+      const PRODUCT_SYNC_INTERVAL = 24 * 60 * 60 * 1000;
       const PRODUCT_SYNC_INITIAL_DELAY = 30 * 1000;
 
       setTimeout(async () => {
@@ -289,7 +303,7 @@ app.use((req, res, next) => {
         }, PRODUCT_SYNC_INTERVAL);
       }, PRODUCT_SYNC_INITIAL_DELAY);
 
-      console.log("[server] 商品定時同步已啟用（每 6 小時，啟動 30 秒後首次同步）");
+      console.log("[server] 商品定時同步已啟用（每 24 小時，啟動 30 秒後首次同步）");
 
       // 24 小時閒置結案：每 15 分鐘掃描一次，客戶最後一則為 user 且超過 idle_close_hours 未回則結案（排除 awaiting_human / high_risk）。
       setInterval(async () => {

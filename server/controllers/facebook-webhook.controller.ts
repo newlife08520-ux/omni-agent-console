@@ -7,7 +7,12 @@ import type { Request, Response } from "express";
 import crypto from "crypto";
 import type { IStorage } from "../storage";
 import { recordAutoReplyBlocked } from "../auto-reply-blocked";
-import { isLinkRequestMessage, isLinkRequestCorrectionMessage } from "../conversation-state-resolver";
+import {
+  isLinkRequestMessage,
+  isLinkRequestCorrectionMessage,
+  isConversationResetRequest,
+  HANDOFF_QUEUE_RESET_BLOCK_REPLY,
+} from "../conversation-state-resolver";
 import { shouldEscalateImageSupplement } from "../safe-after-sale-classifier";
 import { applyHandoff } from "../services/handoff";
 import { resolveOpenAIModel } from "../openai-model";
@@ -222,6 +227,17 @@ export function handleFacebookWebhook(req: Request, res: Response, deps: Faceboo
               } else {
                 const trimmedText = (text || "").trim();
                 const inHandoffState = !!(contact.needs_human || contact.status === "awaiting_human" || contact.status === "high_risk");
+                if (inHandoffState && isConversationResetRequest(trimmedText)) {
+                  const canned = HANDOFF_QUEUE_RESET_BLOCK_REPLY;
+                  const aiMsg = storage.createMessage(contact.id, "messenger", "ai", canned);
+                  broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: matchedBrandId || contact.brand_id });
+                  broadcastSSE("contacts_updated", { brand_id: matchedBrandId || contact.brand_id });
+                  if (matchedChannel?.access_token) {
+                    sendFBMessage(matchedChannel.access_token, senderId, canned).catch((err) =>
+                      console.error("[FB Webhook] 人工排隊中重置阻擋回覆失敗:", err)
+                    );
+                  }
+                } else {
                 const allowOnlyLinkRestore = inHandoffState && (isLinkRequestMessage(trimmedText) || isLinkRequestCorrectionMessage(trimmedText));
                 const shouldInvokeAi = !inHandoffState || allowOnlyLinkRestore;
                 if (shouldInvokeAi) {
@@ -272,6 +288,7 @@ export function handleFacebookWebhook(req: Request, res: Response, deps: Faceboo
                       }
                     }
                   }
+                }
                 }
               }
             }

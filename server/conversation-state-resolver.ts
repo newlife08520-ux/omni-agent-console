@@ -128,6 +128,28 @@ export function isLinkRequestCorrectionMessage(text: string): boolean {
   return LINK_REQUEST_PATTERNS.test((text || "").trim()) || LINK_REQUEST_CORRECTION_PATTERNS.test((text || "").trim());
 }
 
+/** 人工排隊中客人要求「重新開始」時的固定回覆（不可清除 needs_human） */
+export const HANDOFF_QUEUE_RESET_BLOCK_REPLY =
+  "您目前已經在人工協助流程中，專員會盡快回覆您唷～";
+
+/** 客人要求「當全新對話」：人工排隊中不可當成重置許可（見 ai-reply / webhook 硬擋） */
+export const CONVERSATION_RESET_REQUEST_PATTERNS =
+  /重新開始|當作第一次見面|當成第一次見面|忘記之前對話|忘記先前對話|重新來一次|從頭開始|清零|清除對話/i;
+
+export function isConversationResetRequest(text: string): boolean {
+  return CONVERSATION_RESET_REQUEST_PATTERNS.test((text || "").trim());
+}
+
+/**
+ * 退換貨表單已給之後的常見接續句：應讓 AI 繼續回（與「僅連結可解鎖」並列），避免 needs_human 後完全失聰。
+ */
+export const RETURN_FORM_FOLLOWUP_PATTERNS =
+  /改(成)?換貨|還是改?換貨|換貨好了|想換貨|想改換貨|算了我要換貨|還是換|換別款|不退了|先不退|我先想一下|還在考慮|先考慮|表單填好了|我填好了/i;
+
+export function isReturnFormFollowupMessage(text: string): boolean {
+  return RETURN_FORM_FOLLOWUP_PATTERNS.test((text || "").trim());
+}
+
 function detectPrimaryIntent(userMessage: string, recentUserMessages: string[], contact: Contact): PrimaryIntent {
   const text = (userMessage || "").trim();
   /** Phase 1 correction override：有糾正語時僅用本輪內容算意圖，不沿用前輪 */

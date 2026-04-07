@@ -13,6 +13,9 @@ import {
   ORDER_LOOKUP_PATTERNS,
   ORDER_FOLLOWUP_PATTERNS,
   isAiHandlableIntent,
+  HANDOFF_QUEUE_RESET_BLOCK_REPLY,
+  isConversationResetRequest,
+  isReturnFormFollowupMessage,
 } from "../conversation-state-resolver";
 import { buildReplyPlan, shouldNotLeadWithOrderLookup, type ReplyPlanMode } from "../reply-plan-builder";
 import {
@@ -189,6 +192,11 @@ function sanitizeContactDisplayName(raw: string): string {
   return cleaned.length > 10 ? cleaned.slice(0, 10) : cleaned;
 }
 
+function isEligibleReturnFormFollowupResume(c: Contact): boolean {
+  if (c.waiting_for_customer === "return_form_submit") return true;
+  const rs = c.return_stage;
+  return typeof rs === "number" && rs >= 1 && rs <= 2;
+}
 
 function openaiChatMessagesToClaudeSeed(
   msgs: OpenAI.Chat.Completions.ChatCompletionMessageParam[]
@@ -644,9 +652,45 @@ ${contextStr}
     const effectiveBrandIdForLog = contact.brand_id || brandId;
 
     const freshCheck = storage.getContact(contact.id);
+
+    async function replyHandoffQueueResetBlocked(): Promise<void> {
+      const blockMsg = HANDOFF_QUEUE_RESET_BLOCK_REPLY;
+      const contactPlatform = platform || contact.platform || "line";
+      const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", blockMsg);
+      broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: contact.brand_id });
+      broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+      if (contactPlatform === "messenger" && channelToken) {
+        await sendFBMessage(channelToken, contact.platform_user_id, blockMsg);
+      } else if (channelToken) {
+        await pushLineMessage(contact.platform_user_id, [{ type: "text", text: blockMsg }], channelToken);
+      }
+      storage.createAiLog({
+        contact_id: contact.id,
+        brand_id: effectiveBrandIdForLog || undefined,
+        prompt_summary: userMessage.slice(0, 200),
+        knowledge_hits: [],
+        tools_called: [],
+        transfer_triggered: false,
+        result_summary: "gate_handoff_queue_reset_blocked",
+        token_usage: 0,
+        model: "gate",
+        response_time_ms: Date.now() - startTime,
+        reply_source: "gate_skip",
+        used_llm: 0,
+        plan_mode: null,
+        reason_if_bypassed: "handoff_queue_reset_blocked",
+      });
+    }
+
     if (freshCheck && (freshCheck.status === "awaiting_human" || freshCheck.status === "high_risk")) {
+      if (isConversationResetRequest(userMessage)) {
+        await replyHandoffQueueResetBlocked();
+        return;
+      }
       const isLinkAsk = isLinkRequestMessage(userMessage) || isLinkRequestCorrectionMessage(userMessage);
-      if (isLinkAsk) {
+      const canResumeReturnForm =
+        isReturnFormFollowupMessage(userMessage) && isEligibleReturnFormFollowupResume(freshCheck);
+      if (isLinkAsk || canResumeReturnForm) {
         storage.updateContactHumanFlag(contact.id, 0);
         storage.updateContactStatus(contact.id, "ai_handling");
         broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
@@ -672,8 +716,14 @@ ${contextStr}
       }
     }
     if (freshCheck && freshCheck.needs_human) {
+      if (isConversationResetRequest(userMessage)) {
+        await replyHandoffQueueResetBlocked();
+        return;
+      }
       const isLinkAsk = isLinkRequestMessage(userMessage) || isLinkRequestCorrectionMessage(userMessage);
-      if (isLinkAsk) {
+      const canResumeReturnForm =
+        isReturnFormFollowupMessage(userMessage) && isEligibleReturnFormFollowupResume(freshCheck);
+      if (isLinkAsk || canResumeReturnForm) {
         storage.updateContactHumanFlag(contact.id, 0);
         storage.updateContactStatus(contact.id, "ai_handling");
         broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
