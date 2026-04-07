@@ -326,6 +326,25 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
     }
 
     if (toolName === "transfer_to_human") {
+      const userConfirmed = !!args.user_confirmed;
+      const reasonRaw = String(args.reason || "");
+      const allowDirectTransfer =
+        reasonRaw === "explicit_human_request" ||
+        reasonRaw === "high_risk_emotional" ||
+        reasonRaw === "complaint_escalation" ||
+        reasonRaw === "user_confirmed_transfer";
+
+      if (!allowDirectTransfer && !userConfirmed) {
+        return JSON.stringify({
+          success: false,
+          error: "must_ask_user_first",
+          sys_note:
+            "你不可以擅自轉接客人。請先用一句話問客人意願：" +
+            "「這部分需要請專人協助處理，要幫您轉接嗎？」" +
+            "等客人說「好」或「請幫我轉」之後，再呼叫此工具並把 user_confirmed 設為 true。",
+        });
+      }
+
       const reason = (args.reason || "AI 判斷需要轉人工").trim();
       console.log(`[AI Tool Call] transfer_to_human???: ${reason}?contactId: ${context?.contactId}`);
       if (context?.contactId) {

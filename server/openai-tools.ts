@@ -151,17 +151,34 @@ export const humanHandoffTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: "transfer_to_human",
       description:
-        "轉接給真人客服。呼叫前必須先回覆一句話給客人（例如：好的，我幫您轉給專人處理，請稍等）。呼叫後系統會自動轉接。絕對不可以只呼叫工具不回覆任何文字。在以下情況使用：客人要求轉人工、客人很生氣、問題超出 AI 能力、付款糾紛、客人重複問同樣問題你答不了。",
+        "轉接給真人客服。⚠️ 重要：除非客人明確說要找真人，否則呼叫前必須先問過客人意願！" +
+        "呼叫前必須先回覆一句話給客人（例如：好的，我幫您轉給專人處理，請稍等）。" +
+        "絕對不可以只呼叫工具不回覆任何文字。" +
+        "使用情境分三類：" +
+        "(1) 直接轉：客人明確說「轉人工」「找客服」「我要真人」、客訴/法律字眼/極度生氣" +
+        "(2) 必須先問再轉：付款糾紛、退款爭議、改訂單、改地址、客人**堅持**取消／堅持退貨、特殊個案" +
+        "(3) 不要轉：查訂單、問商品、問出貨進度、問付款狀態、一般問題（這些 AI 自己處理）；" +
+        "**客人第一句僅說想取消訂單／退貨（尚未堅持）→ 不要轉人工**，先同理、問原因、走挽留與表單流程。",
       parameters: {
         type: "object",
         properties: {
           reason: {
             type: "string",
             description:
-              "轉接原因，例如：explicit_human_request、payment_or_order_risk、repeat_unresolved、return_stage_3_insist",
+              "轉接原因，例如：explicit_human_request（客人明確要求）、" +
+              "user_confirmed_transfer（客人同意轉接）、" +
+              "high_risk_emotional（客人極度不滿）、" +
+              "complaint_escalation（客訴升級）",
+          },
+          user_confirmed: {
+            type: "boolean",
+            description:
+              "客人是否已經明確同意轉接？" +
+              "true = 客人說「好」「轉接吧」「請幫我轉」或客人主動要求轉真人。" +
+              "false = AI 還沒問過客人意願（如果這個是 false 但 reason 不是 explicit_human_request 或 high_risk，工具會拒絕）",
           },
         },
-        required: [],
+        required: ["user_confirmed"],
       },
     },
   },
