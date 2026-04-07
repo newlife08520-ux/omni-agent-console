@@ -64,4 +64,21 @@ describe("derivePaymentStatus", () => {
     );
     expect(result.kind).toBe("failed");
   });
+
+  it("SuperLanding 宅配 to_home + payment pending → cod（到收）", () => {
+    const result = derivePaymentStatus(
+      minOrder({
+        payment_method: "pending",
+        shipping_method: "to_home",
+        delivery_target_type: "home",
+        prepaid: false,
+        paid_at: null as unknown as string,
+        status: "已確認",
+      }),
+      "已確認",
+      "superlanding"
+    );
+    expect(result.kind).toBe("cod");
+    expect(result.label).toBe("貨到付款");
+  });
 });

@@ -169,32 +169,7 @@ export function deriveSuperlandingPaymentStatusRaw(o: Record<string, unknown>): 
   return joined || undefined;
 }
 
-/** 除錯用：對照單筆 API payload 與 derivePaymentStatus 輸入（勿依賴於正式邏輯） */
-function isDebugEsc21137SlOrder(o: any): boolean {
-  if (!o || typeof o !== "object") return false;
-  if (o.order_id === "ESC21137" || o.order_number === "ESC21137" || o.global_order_id === "ESC21137") {
-    return true;
-  }
-  if (typeof o.id === "string" && o.id.includes("ESC21137")) return true;
-  return false;
-}
-
 function mapOrder(o: any): OrderInfo {
-  if (isDebugEsc21137SlOrder(o)) {
-    console.log("[DEBUG_SL_ESC21137_RAW]", JSON.stringify(o, null, 2).slice(0, 5000));
-    console.log("[DEBUG_SL_PAY_INPUT]", {
-      order_id: o.order_id || o.order_number || o.global_order_id,
-      payment_method: o.payment_method,
-      payment_method_code: o.payment_method_code,
-      payment_type: o.payment_type,
-      pay_method: o.pay_method,
-      shipping_method: o.shipping_method,
-      shipping_method_code: o.shipping_method_code,
-      delivery_method: o.delivery_method,
-      ship_method: o.ship_method,
-    });
-  }
-
   let trackingNumber = "";
   if (Array.isArray(o.tracking_codes) && o.tracking_codes.length > 0) {
     trackingNumber = o.tracking_codes.map((t: any) => t.tracking_code || t).join(", ");

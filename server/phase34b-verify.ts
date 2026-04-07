@@ -148,6 +148,9 @@ function main() {
     shipping_method: rawish.shipping_method,
     product_list: rawish.product_list,
     status: "待出貨",
+    source: "superlanding",
+    prepaid: false,
+    paid_at: null,
   });
   assertNoRawLeak(onePage, "formatOrderOnePage(pending/to_store)");
 

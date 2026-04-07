@@ -3,7 +3,7 @@
  * 付款狀態一律走 derivePaymentStatus；對客卡片見 formatOrderOnePage。
  */
 import type { OrderInfo, ActiveOrderContext } from "@shared/schema";
-import { derivePaymentStatus, type PaymentKind } from "./order-payment-utils";
+import { derivePaymentStatus, isCodPaymentMethod, type PaymentKind } from "./order-payment-utils";
 import { maskName, maskPhone } from "./tool-llm-sanitize";
 
 /** 訂單狀態轉成客人聽得懂的人話 */
@@ -77,18 +77,48 @@ export function displayPaymentMethod(raw: string | null | undefined): string {
   return "";
 }
 
-export function displayShippingMethod(raw: string | null | undefined): string {
+/**
+ * SuperLanding／Shopline 物流代碼轉對客文案；isCod 時加「（貨到付款）」以利宅配到付與超商取貨付款區分。
+ */
+export function displayShippingMethod(raw: string | null | undefined, isCod?: boolean): string {
   const original = String(raw ?? "").trim();
-  const s = original.toLowerCase();
-  if (!s) return "";
+  const lower = original.toLowerCase();
+  if (!original) return "";
 
-  if (/cvs|超商|門市|取貨|711|7-11|全家|萊爾富|ok.?mart|hilife|pickup|to_store/.test(s)) return "超商取貨";
+  const c = !!isCod;
 
-  if (/黑貓|宅急便|t[_\s]?cat/.test(s)) return "黑貓宅配";
+  if (/to_home|home_delivery/i.test(lower) || /宅配|到府|郵寄|寄送/i.test(original)) {
+    return c ? "宅配到府（貨到付款）" : "宅配到府";
+  }
+  if (
+    lower.includes("home") &&
+    !/store|cvs|711|fami|hilife|okm|seven|fmt|to_store|pickup|eleven|超商|門市|全家|萊爾富/i.test(lower)
+  ) {
+    return c ? "宅配到府（貨到付款）" : "宅配到府";
+  }
 
-  if (/宅配|home|delivery|到府|address|郵寄|寄送/.test(s)) return "宅配";
+  if (/黑貓|宅急便|t[_\s]?cat/i.test(lower)) {
+    return c ? "黑貓宅配（貨到付款）" : "黑貓宅配";
+  }
 
-  if (/[\u4e00-\u9fff]/.test(s)) return original;
+  if (/seven|7[\s\-／/]*11|seven_eleven|tw_711/i.test(lower)) {
+    return c ? "7-11 取貨付款" : "7-11 取貨";
+  }
+  if (/fmt|family|fami|全家/i.test(lower)) {
+    return c ? "全家取貨付款" : "全家取貨";
+  }
+  if (/hilife|萊爾富/i.test(lower)) {
+    return c ? "萊爾富取貨付款" : "萊爾富取貨";
+  }
+  if (/okm|ok_mart|^ok_|ok\.?mart/i.test(lower)) {
+    return c ? "OK 超商取貨付款" : "OK 超商取貨";
+  }
+
+  if (/cvs|超商|門市|取貨|711|pickup|to_store|便利|商店/i.test(lower)) {
+    return c ? "超商取貨付款" : "超商取貨";
+  }
+
+  if (/[\u4e00-\u9fff]/.test(original)) return original;
 
   return "";
 }
@@ -208,6 +238,10 @@ export function formatOrderOnePage(o: {
   cvs_store_name?: string;
   full_address?: string;
   source_channel?: string;
+  /** 與 OrderInfo.source 一致時可正確套用 SuperLanding pending+to_home 等 COD 規則 */
+  source?: string;
+  prepaid?: boolean;
+  paid_at?: string | null;
 }): string {
   const lines: string[] = [];
 
@@ -229,20 +263,30 @@ export function formatOrderOnePage(o: {
 
   if (o.amount != null) lines.push(`金額：NT$ ${Number(o.amount).toLocaleString()}`);
 
-  const payMethod = displayPaymentMethod(o.payment_method);
-  const payLabel = customerFacingPaymentLabel(
+  const codProbe = {
+    source: o.source,
+    payment_method: o.payment_method,
+    shipping_method: o.shipping_method,
+    delivery_target_type: o.delivery_target_type,
+    prepaid: o.prepaid,
+    paid_at: o.paid_at ?? null,
+  } as OrderInfo;
+  const isCod =
+    isCodPaymentMethod(codProbe) ||
+    o.payment_status === "cod" ||
+    /^cod$/i.test(String(o.payment_status || "").trim()) ||
+    /貨到付款|到收/i.test(String(o.payment_status_label || ""));
+
+  const pmLower = String(o.payment_method || "").trim().toLowerCase();
+  const payMethod =
+    isCod && pmLower === "pending" ? "貨到付款" : displayPaymentMethod(o.payment_method);
+
+  let payLabel = customerFacingPaymentLabel(
     String(o.payment_status_label || "").trim() || String(o.payment_status || "").trim()
   );
-
-  if (payMethod === "貨到付款") {
-    lines.push("付款：貨到付款（取貨時付款）");
-  } else if (payLabel && payMethod) {
-    lines.push(`付款：${payLabel}（${payMethod}）`);
-  } else if (payLabel) {
-    lines.push(`付款：${payLabel}`);
+  if (isCod && (!payLabel || payLabel === "未付款")) {
+    payLabel = "貨到付款";
   }
-
-  const shipping = o.shipping_display || displayShippingMethod(o.shipping_method);
 
   const isCvs =
     o.delivery_target_type === "cvs" ||
@@ -250,6 +294,18 @@ export function formatOrderOnePage(o: {
     (o.delivery_target_type !== "home" &&
       o.delivery_target_type !== "宅配" &&
       CVS_SHIPPING_KEYWORDS.some((k) => (o.shipping_method || "").toLowerCase().includes(k.toLowerCase())));
+
+  if (payMethod === "貨到付款" && isCvs) {
+    lines.push("付款：貨到付款（取貨時付款）");
+  } else if (payMethod === "貨到付款") {
+    lines.push("付款：貨到付款");
+  } else if (payLabel && payMethod) {
+    lines.push(`付款：${payLabel}（${payMethod}）`);
+  } else if (payLabel) {
+    lines.push(`付款：${payLabel}`);
+  }
+
+  const shipping = o.shipping_display || displayShippingMethod(o.shipping_method, isCod);
 
   // 1. 超商取貨 → 門市名；2. 黑貓／一般宅配 → 配送標籤 + 地址隱碼（略過「台灣」占位）
   if (isCvs) {

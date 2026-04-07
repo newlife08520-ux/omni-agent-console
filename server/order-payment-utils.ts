@@ -22,10 +22,33 @@ function isSuperLandingCvsCod(order: OrderInfo): boolean {
   return true;
 }
 
+/** SuperLanding 宅配到府：payment_method 常為 "pending"，後台「到收」與超商 pending 同屬貨到付款 */
+function isSuperLandingHomeCod(order: OrderInfo): boolean {
+  if ((order.source || "") !== "superlanding") return false;
+  const pm = (order.payment_method || "").trim().toLowerCase();
+  if (pm !== "pending") return false;
+  if (order.prepaid === true) return false;
+  if (order.paid_at != null && order.paid_at !== "") return false;
+  const sm = (order.shipping_method || "").toLowerCase();
+  const dt = String(order.delivery_target_type || "");
+  const looksCvs =
+    sm.includes("to_store") ||
+    dt === "cvs" ||
+    /超商|門市|711|7-11|全家|萊爾富|hilife|ok|fami|fmt|seven|to_store|cvs|pickup|取貨付款|取貨付/i.test(order.shipping_method || "");
+  if (looksCvs) return false;
+  const looksHome =
+    /to_home|home_delivery/i.test(sm) ||
+    dt === "home" ||
+    /宅配|到府|郵寄|寄送|address|delivery/i.test(sm) ||
+    (sm.includes("home") && !/store|cvs|711|fami|hilife|okm|seven|fmt|to_store|pickup|eleven/i.test(sm));
+  return looksHome;
+}
+
 export function isCodPaymentMethod(order: OrderInfo): boolean {
   if (COD_METHOD_REGEX.test(order.payment_method || "")) return true;
   if (/^到收$|^取件時付款$|^取件時付$/i.test((order.payment_method || "").trim())) return true;
   if (isSuperLandingCvsCod(order)) return true;
+  if (isSuperLandingHomeCod(order)) return true;
   if (COD_METHOD_REGEX.test(String(order.shipping_method || ""))) return true;
   return false;
 }
@@ -97,20 +120,6 @@ export function derivePaymentStatus(
   _statusLabel: string,
   _source: string
 ): { kind: PaymentKind; label: string; reason?: string; confidence?: "high" | "medium" | "low" } {
-  const orderIdForDebug = String(
-    (order as { global_order_id?: string }).global_order_id ||
-      (order as { order_id?: string }).order_id ||
-      (order as { orderId?: string }).orderId ||
-      ""
-  );
-  if (orderIdForDebug.includes("ESC21137")) {
-    try {
-      console.log("[DEBUG_DERIVE_PAY_INPUT_ESC21137]", JSON.stringify(order, null, 2).slice(0, 3000));
-    } catch {
-      console.log("[DEBUG_DERIVE_PAY_INPUT_ESC21137]", "(stringify failed)");
-    }
-  }
-
   if (isCodPaymentMethod(order)) {
     return {
       kind: "cod",
@@ -154,16 +163,13 @@ export function derivePaymentStatus(
   }
 
   const orderNo = String((order as { global_order_id?: string }).global_order_id || "").trim() || "(no_id)";
-  const stackHead = new Error().stack?.split("\n").slice(0, 5).join(" | ") ?? "";
   console.warn(
     "[LIVE_PAYMENT_FALLBACK_PENDING] 缺乏明確狀態，退回 pending。訂單號: " +
       orderNo +
       " | Raw Pay: " +
       payRaw +
       " | Gateway: " +
-      gatewayRaw +
-      " | stack: " +
-      stackHead
+      gatewayRaw
   );
 
   return {
