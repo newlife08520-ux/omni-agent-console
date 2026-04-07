@@ -150,6 +150,39 @@ export function isReturnFormFollowupMessage(text: string): boolean {
   return RETURN_FORM_FOLLOWUP_PATTERNS.test((text || "").trim());
 }
 
+/** 退換貨表單流程中：符合時可自人工排隊恢復 AI（webhook / ai-reply 共用） */
+export function isEligibleReturnFormFollowupResumeContact(c: {
+  waiting_for_customer?: string | null;
+  return_stage?: number | null;
+}): boolean {
+  if (c.waiting_for_customer === "return_form_submit") return true;
+  const rs = c.return_stage;
+  return typeof rs === "number" && rs >= 1 && rs <= 2;
+}
+
+/** 人工排隊中客人明確要繼續用 AI（查單、商品諮詢等），可解鎖；不含「重新開始」類（見 isConversationResetRequest） */
+export const AI_SERVICE_REQUEST_PATTERNS: RegExp[] = [
+  /(?:我要|請|幫我).{0,5}(?:你|AI|機器人).{0,5}(?:處理|幫|回|服務)/i,
+  /我自己處理/i,
+  /不要(?:真人|人工|轉接|客服)/i,
+  /先別轉/i,
+  /我先(?:自己)?(?:問|看)/i,
+  /回來吧/i,
+  /(?:幫我|請).{0,3}查.{0,3}(?:訂單|單號|出貨|進度)/i,
+  /我的(?:訂單|出貨|進度)/i,
+  /出貨(?:狀況|進度|了沒|嗎)/i,
+  /到了沒|寄了沒/i,
+  /我想(?:看|問|找).{0,5}(?:商品|產品|包包|衣服|甜點|蛋糕)/i,
+  /有什麼(?:推薦|新品|熱銷)/i,
+  /我改(?:主意|意了)|算了/i,
+];
+
+export function isAiServiceRequest(text: string): boolean {
+  const t = (text || "").trim();
+  if (!t || isConversationResetRequest(t)) return false;
+  return AI_SERVICE_REQUEST_PATTERNS.some((p) => p.test(t));
+}
+
 function detectPrimaryIntent(userMessage: string, recentUserMessages: string[], contact: Contact): PrimaryIntent {
   const text = (userMessage || "").trim();
   /** Phase 1 correction override：有糾正語時僅用本輪內容算意圖，不沿用前輪 */

@@ -12,6 +12,9 @@ import {
   isLinkRequestCorrectionMessage,
   isConversationResetRequest,
   HANDOFF_QUEUE_RESET_BLOCK_REPLY,
+  isReturnFormFollowupMessage,
+  isEligibleReturnFormFollowupResumeContact,
+  isAiServiceRequest,
 } from "../conversation-state-resolver";
 import { shouldEscalateImageSupplement } from "../safe-after-sale-classifier";
 import { applyHandoff } from "../services/handoff";
@@ -238,8 +241,15 @@ export function handleFacebookWebhook(req: Request, res: Response, deps: Faceboo
                     );
                   }
                 } else {
-                const allowOnlyLinkRestore = inHandoffState && (isLinkRequestMessage(trimmedText) || isLinkRequestCorrectionMessage(trimmedText));
-                const shouldInvokeAi = !inHandoffState || allowOnlyLinkRestore;
+                const contactFresh = storage.getContact(contact.id) ?? contact;
+                const allowHandoffAiResume =
+                  inHandoffState &&
+                  (isLinkRequestMessage(trimmedText) ||
+                    isLinkRequestCorrectionMessage(trimmedText) ||
+                    (isReturnFormFollowupMessage(trimmedText) &&
+                      isEligibleReturnFormFollowupResumeContact(contactFresh)) ||
+                    isAiServiceRequest(trimmedText));
+                const shouldInvokeAi = !inHandoffState || allowHandoffAiResume;
                 if (shouldInvokeAi) {
                   if (!matchedChannel) {
                     recordAutoReplyBlocked(storage, {

@@ -12,6 +12,9 @@ import {
   isLinkRequestCorrectionMessage,
   isConversationResetRequest,
   HANDOFF_QUEUE_RESET_BLOCK_REPLY,
+  isReturnFormFollowupMessage,
+  isEligibleReturnFormFollowupResumeContact,
+  isAiServiceRequest,
 } from "../conversation-state-resolver";
 import { shouldEscalateImageSupplement } from "../safe-after-sale-classifier";
 import { applyHandoff } from "../services/handoff";
@@ -263,8 +266,14 @@ export async function handleLineWebhook(req: Request, res: Response, deps: LineW
                 }
                 continue;
               }
-              const allowOnlyLinkRestore = inHandoffState && (isLinkRequestMessage(trimmedText) || isLinkRequestCorrectionMessage(trimmedText));
-              const shouldInvokeAi = !inHandoffState || allowOnlyLinkRestore;
+              const allowHandoffAiResume =
+                inHandoffState &&
+                (isLinkRequestMessage(trimmedText) ||
+                  isLinkRequestCorrectionMessage(trimmedText) ||
+                  (isReturnFormFollowupMessage(trimmedText) &&
+                    isEligibleReturnFormFollowupResumeContact(contactAfterProfile)) ||
+                  isAiServiceRequest(trimmedText));
+              const shouldInvokeAi = !inHandoffState || allowHandoffAiResume;
               if (!shouldInvokeAi) {
                 console.log(
                   "[WEBHOOK] 略過文字自動回覆：聯絡人已在人工／高風險流程，contact_id=",

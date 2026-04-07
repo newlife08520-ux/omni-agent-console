@@ -16,6 +16,8 @@ import {
   HANDOFF_QUEUE_RESET_BLOCK_REPLY,
   isConversationResetRequest,
   isReturnFormFollowupMessage,
+  isEligibleReturnFormFollowupResumeContact,
+  isAiServiceRequest,
 } from "../conversation-state-resolver";
 import { buildReplyPlan, shouldNotLeadWithOrderLookup, type ReplyPlanMode } from "../reply-plan-builder";
 import {
@@ -190,12 +192,6 @@ function sanitizeContactDisplayName(raw: string): string {
     return firstName || "";
   }
   return cleaned.length > 10 ? cleaned.slice(0, 10) : cleaned;
-}
-
-function isEligibleReturnFormFollowupResume(c: Contact): boolean {
-  if (c.waiting_for_customer === "return_form_submit") return true;
-  const rs = c.return_stage;
-  return typeof rs === "number" && rs >= 1 && rs <= 2;
 }
 
 function openaiChatMessagesToClaudeSeed(
@@ -689,8 +685,9 @@ ${contextStr}
       }
       const isLinkAsk = isLinkRequestMessage(userMessage) || isLinkRequestCorrectionMessage(userMessage);
       const canResumeReturnForm =
-        isReturnFormFollowupMessage(userMessage) && isEligibleReturnFormFollowupResume(freshCheck);
-      if (isLinkAsk || canResumeReturnForm) {
+        isReturnFormFollowupMessage(userMessage) && isEligibleReturnFormFollowupResumeContact(freshCheck);
+      const wantsAiService = isAiServiceRequest(userMessage);
+      if (isLinkAsk || canResumeReturnForm || wantsAiService) {
         storage.updateContactHumanFlag(contact.id, 0);
         storage.updateContactStatus(contact.id, "ai_handling");
         broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
@@ -722,8 +719,9 @@ ${contextStr}
       }
       const isLinkAsk = isLinkRequestMessage(userMessage) || isLinkRequestCorrectionMessage(userMessage);
       const canResumeReturnForm =
-        isReturnFormFollowupMessage(userMessage) && isEligibleReturnFormFollowupResume(freshCheck);
-      if (isLinkAsk || canResumeReturnForm) {
+        isReturnFormFollowupMessage(userMessage) && isEligibleReturnFormFollowupResumeContact(freshCheck);
+      const wantsAiService = isAiServiceRequest(userMessage);
+      if (isLinkAsk || canResumeReturnForm || wantsAiService) {
         storage.updateContactHumanFlag(contact.id, 0);
         storage.updateContactStatus(contact.id, "ai_handling");
         broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
