@@ -36,6 +36,12 @@ import { orderFeatureFlags } from "../order-feature-flags";
 /** 與 ai-reply 轉人工備援句一致，避免客人只看到轉接、沒有任何 AI 對話 */
 export const TRANSFER_TOOL_CUSTOMER_ACK = "好的，我這邊幫您轉給專人處理，請稍等一下。";
 
+const SYS_NOTE_ORDER_ONE_PAGE_STRICT =
+  "請直接使用 one_page_summary 的內容回覆客人，不要改寫成散文。每一行的欄位（訂單編號、商品、金額、付款、配送、狀態）都要完整保留。如果付款欄位是『貨到付款』『到店付款』『宅配代收』等，絕對不要叫客人去線上付款。";
+
+const SYS_NOTE_ORDER_ONE_PAGE_FULL_STRICT =
+  "請直接使用 one_page_full 的完整內容回覆客人（多筆之間已用 --- 分隔），不要改寫成散文；每一筆的欄位都要完整保留。若付款為貨到付款／宅配代收／到店付款，絕對不要叫客人線上付款。";
+
 function formatOrdersToolFormattedList(
   rows: Array<{
     order_id: string;
@@ -471,6 +477,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           order: orderPayload,
           payment_interpretation,
           one_page_summary,
+          sys_note: SYS_NOTE_ORDER_ONE_PAGE_STRICT,
           ...packDeterministicSingleOrderToolResult({
             renderer: "deterministic_single_by_id",
             one_page_summary,
@@ -1640,6 +1647,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             note: multiOrderNote,
             formatted_list: formattedListForTool,
             one_page_full: onePageFullForContext ?? one_page_full,
+            sys_note: SYS_NOTE_ORDER_ONE_PAGE_FULL_STRICT,
           });
         }
 
@@ -1747,7 +1755,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
                   sys_note:
                     "【營運指導】：目前資料正在與主機連線確認中，請用有溫度的語氣請客戶稍候，委婉表達狀態還在同步，不要把話說死。",
                 }
-              : {}),
+              : { sys_note: SYS_NOTE_ORDER_ONE_PAGE_STRICT }),
             ...(result.coverage_confidence ? { coverage_confidence: result.coverage_confidence } : {}),
             ...(result.needs_live_confirm ? { needs_live_confirm: result.needs_live_confirm } : {}),
           });
@@ -1778,6 +1786,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
                 : onePageBlocks[0]
               : undefined,
           one_page_full,
+          sys_note: orders.length > 1 ? SYS_NOTE_ORDER_ONE_PAGE_FULL_STRICT : SYS_NOTE_ORDER_ONE_PAGE_STRICT,
           ...(result.data_coverage ? { data_coverage: result.data_coverage } : {}),
           ...(result.coverage_confidence ? { coverage_confidence: result.coverage_confidence } : {}),
           ...(result.needs_live_confirm ? { needs_live_confirm: result.needs_live_confirm } : {}),

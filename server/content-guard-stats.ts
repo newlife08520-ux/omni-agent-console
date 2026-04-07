@@ -11,7 +11,8 @@ export type GuardRuleId =
   | "mode_forbidden_promo"
   | "official_channel_forbidden"
   | "global_platform_forbidden"
-  | "order_action_hallucination";
+  | "order_action_hallucination"
+  | "fabricated_order_info";
 
 export type GuardOutcome = "cleaned" | "fallback";
 
@@ -82,6 +83,7 @@ export function getGuardStats(): {
     official_channel_forbidden: { total: 0, cleaned: 0, fallback: 0 },
     global_platform_forbidden: { total: 0, cleaned: 0, fallback: 0 },
     order_action_hallucination: { total: 0, cleaned: 0, fallback: 0 },
+    fabricated_order_info: { total: 0, cleaned: 0, fallback: 0 },
   };
   let cleaned = 0;
   let fallback = 0;

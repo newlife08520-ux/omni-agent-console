@@ -5,12 +5,14 @@ import type { ReplyPlanMode } from "../reply-plan-builder";
 import { enforceOutputGuard } from "../phase2-output";
 import { runPostGenerationGuard, runOfficialChannelGuard, runGlobalPlatformGuard } from "../content-guard";
 import { recordGuardHit, type GuardRuleId } from "../content-guard-stats";
+import type { PostGenerationGuardContext } from "../content-guard";
 
 export function runPostGenerationPipeline(params: {
   rawReply: string | null | undefined;
   planMode: ReplyPlanMode;
   productScope: string | null;
   channelId?: number | null;
+  toolCallsMade?: string[];
 }): string | null | undefined {
   if (params.rawReply == null) return params.rawReply;
   const trimmed = params.rawReply.trim();
@@ -19,7 +21,10 @@ export function runPostGenerationPipeline(params: {
   let reply = enforceOutputGuard(trimmed, params.planMode);
 
   if (reply.trim()) {
-    const guardResult = runPostGenerationGuard(reply, params.planMode, params.productScope);
+    const guardContext: PostGenerationGuardContext = {
+      toolCallsMade: params.toolCallsMade ?? [],
+    };
+    const guardResult = runPostGenerationGuard(reply, params.planMode, params.productScope, guardContext);
     if (!guardResult.pass) {
       const useCleaned = guardResult.cleaned && guardResult.cleaned.trim();
       reply = useCleaned ? guardResult.cleaned : "????????????????????";

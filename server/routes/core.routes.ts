@@ -658,6 +658,74 @@ export function registerCoreRoutes(app: Express): void {
       res.json({ ok: true });
     });
 
+    /** super_admin：檢視 DB 內 Global / 品牌 system_prompt 長度與預覽（部署驗收用） */
+    app.get("/api/admin/prompt-status", authMiddleware, (req: any, res) => {
+      if (!req.session?.userRole || req.session.userRole !== "super_admin") {
+        return res.status(403).json({ error: "forbidden" });
+      }
+      try {
+        const globalPrompt = storage.getSetting("system_prompt") || "";
+        const brand1Prompt = db.prepare("SELECT system_prompt FROM brands WHERE id = 1").get() as
+          | { system_prompt?: string | null }
+          | undefined;
+        const brand2Prompt = db.prepare("SELECT system_prompt FROM brands WHERE id = 2").get() as
+          | { system_prompt?: string | null }
+          | undefined;
+        const g1 = brand1Prompt?.system_prompt ?? "";
+        const g2 = brand2Prompt?.system_prompt ?? "";
+        return res.json({
+          ok: true,
+          global: {
+            length: globalPrompt.length,
+            preview_start: globalPrompt.substring(0, 300),
+            preview_end: globalPrompt.substring(Math.max(0, globalPrompt.length - 300)),
+          },
+          brand_1: {
+            length: g1.length,
+            preview_start: g1.substring(0, 300),
+          },
+          brand_2: {
+            length: g2.length,
+            preview_start: g2.substring(0, 300),
+          },
+        });
+      } catch (e) {
+        return res.status(500).json({ error: (e as Error).message });
+      }
+    });
+
+    /** super_admin：從 docs/persona 強制寫回 system_prompt（與啟動延遲同步同源檔案） */
+    app.post("/api/admin/force-sync-prompt", authMiddleware, (req: any, res) => {
+      if (!req.session?.userRole || req.session.userRole !== "super_admin") {
+        return res.status(403).json({ error: "forbidden" });
+      }
+      try {
+        const root = process.cwd();
+        const globalPrompt = fs
+          .readFileSync(path.join(root, "docs/persona/PHASE97_MASTER_SLIM.txt"), "utf-8")
+          .trim();
+        const brand1Prompt = fs
+          .readFileSync(path.join(root, "docs/persona/brands/brand_1_phase97_slim.txt"), "utf-8")
+          .trim();
+        const brand2Prompt = fs
+          .readFileSync(path.join(root, "docs/persona/brands/brand_2_phase97_slim.txt"), "utf-8")
+          .trim();
+        storage.setSetting("system_prompt", globalPrompt);
+        db.prepare("UPDATE brands SET system_prompt = ? WHERE id = 1").run(brand1Prompt);
+        db.prepare("UPDATE brands SET system_prompt = ? WHERE id = 2").run(brand2Prompt);
+        return res.json({
+          ok: true,
+          synced: {
+            global: globalPrompt.length,
+            brand_1: brand1Prompt.length,
+            brand_2: brand2Prompt.length,
+          },
+        });
+      } catch (e) {
+        return res.status(500).json({ error: (e as Error).message });
+      }
+    });
+
     /** super_admin：手動觸發訂單同步（背景執行，不等待完成） */
     app.post("/api/admin/sync-orders", authMiddleware, superAdminOnly, async (_req, res) => {
       try {

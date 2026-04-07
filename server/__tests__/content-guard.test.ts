@@ -5,7 +5,23 @@ import {
   runGlobalPlatformGuard,
   runOfficialChannelGuard,
   detectOrderActionHallucination,
+  detectFabricatedOrder,
 } from "../content-guard";
+
+describe("detectFabricatedOrder", () => {
+  it("無查單工具且出現訂單編號樣式 → 視為捏造", () => {
+    expect(detectFabricatedOrder("您的訂單編號：ESC21069 已出貨", [])).toBe(true);
+  });
+  it("本輪已呼叫 lookup_order_by_id 則不視為捏造", () => {
+    expect(detectFabricatedOrder("訂單編號：ESC21069", ["lookup_order_by_id"])).toBe(false);
+  });
+  it("本輪已呼叫 lookup_order_by_phone 則不視為捏造", () => {
+    expect(detectFabricatedOrder("金額：NT$ 1980", ["lookup_order_by_phone"])).toBe(false);
+  });
+  it("一般寒暄不命中", () => {
+    expect(detectFabricatedOrder("您好，需要幫您查什麼嗎？", [])).toBe(false);
+  });
+});
 
 describe("detectOrderActionHallucination", () => {
   it("偵測宣稱已取消", () => {
@@ -27,6 +43,25 @@ describe("runPostGenerationGuard", () => {
     expect(r.pass).toBe(false);
     expect(r.reason).toBe("order_action_hallucination");
     expect(r.cleaned).toContain("沒辦法直接幫您取消");
+  });
+
+  it("無查單工具卻輸出訂單細節 → 捏造訂單資訊", () => {
+    const r = runPostGenerationGuard(
+      "幫您查到訂單編號：ESC12345，金額 NT$ 1160，Line Pay 已付款。",
+      "order_lookup",
+      null,
+      { toolCallsMade: [] }
+    );
+    expect(r.pass).toBe(false);
+    expect(r.reason).toBe("fabricated_order_info");
+    expect(r.cleaned).toContain("訂單編號或下單的手機號碼");
+  });
+
+  it("已查單則不因訂單樣式文字攔截捏造", () => {
+    const r = runPostGenerationGuard("訂單編號：ESC21069 的進度如下⋯", "order_lookup", null, {
+      toolCallsMade: ["lookup_order_by_id"],
+    });
+    expect(r.pass).toBe(true);
   });
 
   it("售後模式下推銷被攔截", () => {

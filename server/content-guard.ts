@@ -29,6 +29,31 @@ export interface GuardResult {
   reason?: string;
 }
 
+export interface PostGenerationGuardContext {
+  /** 本輪對話 LLM 實際呼叫過的查單工具名稱；有任一則不觸發「捏造訂單」檢查 */
+  toolCallsMade?: string[];
+}
+
+/** 防止 AI 在無查單工具結果時講出具體訂單細節（捏造）。 */
+export function detectFabricatedOrder(text: string, toolCallsMade: string[] | undefined): boolean {
+  const tools = toolCallsMade ?? [];
+  const hasOrderLookup = tools.some(
+    (t) =>
+      t === "lookup_order_by_id" ||
+      t === "lookup_order_by_phone" ||
+      t === "lookup_order_by_product_and_phone"
+  );
+  if (hasOrderLookup) return false;
+
+  const patterns = [
+    /訂單(?:編號)?[:：]\s*[A-Z]{3,4}\d{4,}/,
+    /(?:訂單|編號)\s*[A-Z]{3,4}\d{4,}/,
+    /金額[:：]\s*(?:NT\$|新台幣|\$)?\s*\d{3,}/,
+    /Line\s*Pay.*已付款|已付款.*Line\s*Pay/i,
+  ];
+  return patterns.some((re) => re.test(text));
+}
+
 /** 防止 AI 幻覺宣稱已取消／已修改訂單（系統無此能力）。 */
 export function detectOrderActionHallucination(text: string): boolean {
   const patterns = [
@@ -47,10 +72,21 @@ export function detectOrderActionHallucination(text: string): boolean {
 export function runPostGenerationGuard(
   reply: string,
   planMode: ReplyPlanMode,
-  _productScope: string | null
+  _productScope: string | null,
+  context?: PostGenerationGuardContext
 ): GuardResult {
   const text = (reply || "").trim();
   if (!text) return { pass: true, cleaned: reply };
+
+  if (detectFabricatedOrder(text, context?.toolCallsMade)) {
+    console.warn("[content-guard] 偵測到捏造訂單資訊，改寫回覆:", text.substring(0, 100));
+    return {
+      pass: false,
+      cleaned:
+        "不好意思讓您久等了～方便給我訂單編號或下單的手機號碼嗎？我這邊幫您查詢最準確的進度。",
+      reason: "fabricated_order_info",
+    };
+  }
 
   if (detectOrderActionHallucination(text)) {
     console.warn("[content-guard] 偵測到訂單動作幻覺，改寫回覆:", text.substring(0, 100));
