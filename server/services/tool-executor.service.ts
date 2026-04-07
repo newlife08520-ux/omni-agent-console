@@ -1,5 +1,5 @@
 import type { IStorage } from "../storage";
-import type { OrderInfo } from "@shared/schema";
+import type { OrderInfo, OrderSource } from "@shared/schema";
 import {
   fetchOrders,
   lookupOrdersByPageAndPhone,
@@ -41,6 +41,11 @@ const SYS_NOTE_ORDER_ONE_PAGE_STRICT =
 
 const SYS_NOTE_ORDER_ONE_PAGE_FULL_STRICT =
   "請直接使用 one_page_full 的完整內容回覆客人（多筆之間已用 --- 分隔），不要改寫成散文；每一筆的欄位都要完整保留。若付款為貨到付款／宅配代收／到店付款，絕對不要叫客人線上付款。";
+
+function normalizeOrderSourceForOnePage(raw: string | undefined): OrderSource {
+  if (raw === "shopline" || raw === "superlanding" || raw === "unknown") return raw;
+  return "superlanding";
+}
 
 function formatOrdersToolFormattedList(
   rows: Array<{
@@ -463,6 +468,9 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           payment_status: pkId.kind,
           payment_status_label: pkId.label,
           payment_warning: paymentWarningFromKind(pkId.kind),
+          source: order.source || result.source,
+          prepaid: order.prepaid,
+          paid_at: order.paid_at,
         };
         const one_page_summary = formatOrderOnePage(orderPayload);
         if (context?.contactId) {
@@ -1141,7 +1149,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
         }
 
         const orderSummaries = matched.map((o) => {
-          const src = o.source || dateOrderSource;
+          const src = normalizeOrderSourceForOnePage(o.source || dateOrderSource);
           const st = getUnifiedStatusLabel(o.status, src);
           const { kind, label } = payKindForOrder(o, st, src);
           return {
@@ -1517,15 +1525,6 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           });
         }
         const orderSummaries = orders.map((o) => {
-          const dbgOid = String(o.global_order_id || "");
-          const dbgAlt = String((o as { order_id?: string }).order_id || "");
-          if (dbgOid.includes("ESC21137") || dbgAlt.includes("ESC21137")) {
-            try {
-              console.log("[DEBUG_LOOKUP_PHONE_ORDER_ESC21137]", JSON.stringify(o, null, 2).slice(0, 5000));
-            } catch {
-              console.log("[DEBUG_LOOKUP_PHONE_ORDER_ESC21137]", "(stringify failed)");
-            }
-          }
           const src = o.source || orderSource;
           const st = getUnifiedStatusLabel(o.status, src);
           const { kind, label } = payKindForOrder(o, st, src);
@@ -1703,8 +1702,12 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             shipped_at: o0.shipped_at,
             shipping_method: o0.shipping_method,
             payment_method: o0.payment_method,
+            payment_status: pk.kind,
             payment_status_label: pk.label,
             payment_warning: paymentWarningFromKind(pk.kind),
+            source: o0.source || orderSource,
+            prepaid: o0.prepaid,
+            paid_at: o0.paid_at,
           };
           const summaryForCtx = formatOrderOnePage(onePagePayload);
           storage.linkOrderForContact(context.contactId, o0.global_order_id, "ai_lookup");
@@ -1737,8 +1740,12 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
                   shipped_at: o0.shipped_at,
                   shipping_method: o0.shipping_method,
                   payment_method: o0.payment_method,
+                  payment_status: pk.kind,
                   payment_status_label: pk.label,
                   payment_warning: paymentWarningFromKind(pk.kind),
+                  source: o0.source || orderSource,
+                  prepaid: o0.prepaid,
+                  paid_at: o0.paid_at,
                 };
                 if (isSingleLocalOnly) {
                   return formatLocalOnlyCandidateSummary({
