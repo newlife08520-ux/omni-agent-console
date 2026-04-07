@@ -92,7 +92,7 @@ import { resolveModel, resolveOpenAIModel, resolveMainConversationModel } from "
 import OpenAI from "openai";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { parseFileContent, isImageFile } from "../file-parser";
-import { authMiddleware, superAdminOnly, managerOrAbove, parseIdParam } from "../middlewares/auth.middleware";
+import { authMiddleware, superAdminOnly, superAdminOrDebugToken, managerOrAbove, parseIdParam } from "../middlewares/auth.middleware";
 import { broadcastSSE, registerSseRoutes } from "../services/sse.service";
 import {
   upload,
@@ -724,6 +724,137 @@ export function registerCoreRoutes(app: Express): void {
         });
       } catch (e) {
         return res.status(500).json({ error: (e as Error).message });
+      }
+    });
+
+    /** super_admin 或 ADMIN_DEBUG_TOKEN：檢視單一聯絡人 handoff／AI 閘道相關狀態（唯讀） */
+    app.get("/api/admin/contact-state/:id", superAdminOrDebugToken, (req, res) => {
+      const id = parseIdParam(req.params.id);
+      if (id == null) return res.status(400).json({ error: "invalid id" });
+      try {
+        const contact = storage.getContact(id);
+        if (!contact) return res.status(404).json({ error: "contact not found" });
+        const aiMuted = storage.isAiMuted(contact.id);
+        const handoffRelevant = {
+          id: contact.id,
+          brand_id: contact.brand_id,
+          channel_id: contact.channel_id,
+          display_name: contact.display_name,
+          needs_human: contact.needs_human,
+          status: contact.status,
+          human_reason: contact.human_reason ?? null,
+          waiting_for_customer: contact.waiting_for_customer ?? null,
+          customer_goal_locked: contact.customer_goal_locked ?? null,
+          product_scope_locked: contact.product_scope_locked ?? null,
+          resolution_status: contact.resolution_status ?? null,
+          return_stage: contact.return_stage ?? null,
+          ai_muted_until: (contact as { ai_muted_until?: string | null }).ai_muted_until ?? null,
+          assigned_agent_id: contact.assigned_agent_id ?? null,
+          assigned_at: contact.assigned_at ?? null,
+          first_assigned_at: contact.first_assigned_at ?? null,
+          last_human_reply_at: contact.last_human_reply_at ?? null,
+          assignment_status: contact.assignment_status ?? null,
+          needs_assignment: contact.needs_assignment ?? null,
+          consecutive_timeouts: (contact as { consecutive_timeouts?: number }).consecutive_timeouts ?? null,
+          created_at: contact.created_at,
+        };
+        return res.json({
+          ok: true,
+          contact: handoffRelevant,
+          diagnosis: {
+            will_be_treated_as_in_handoff:
+              contact.needs_human === 1 ||
+              contact.status === "awaiting_human" ||
+              contact.status === "high_risk",
+            is_ai_muted: aiMuted,
+            has_form_waiting: !!(contact.waiting_for_customer && String(contact.waiting_for_customer).trim()),
+          },
+        });
+      } catch (e: any) {
+        return res.status(500).json({ error: String(e?.message ?? e) });
+      }
+    });
+
+    /**
+     * super_admin 或 ADMIN_DEBUG_TOKEN：將聯絡人從「黏住」狀態打回 AI 可回模式（僅 UPDATE contacts，不刪 messages／ai_logs）。
+     * status 解除值與 ai-reply／webhook 解鎖一致：`ai_handling`（見 grep updateContactStatus(..., "ai_handling")）。
+     */
+    app.post("/api/admin/reset-contact/:id", superAdminOrDebugToken, (req, res) => {
+      const id = parseIdParam(req.params.id);
+      if (id == null) return res.status(400).json({ error: "invalid id" });
+      try {
+        const before = storage.getContact(id);
+        if (!before) return res.status(404).json({ error: "contact not found" });
+        const beforeSnap = {
+          needs_human: before.needs_human,
+          status: before.status,
+          human_reason: before.human_reason ?? null,
+          waiting_for_customer: before.waiting_for_customer ?? null,
+          customer_goal_locked: before.customer_goal_locked ?? null,
+        };
+        db.prepare(
+          `UPDATE contacts SET
+            needs_human = 0,
+            status = 'ai_handling',
+            human_reason = NULL,
+            waiting_for_customer = NULL,
+            return_stage = NULL,
+            resolution_status = NULL,
+            product_scope_locked = NULL,
+            customer_goal_locked = NULL,
+            ai_muted_until = NULL,
+            consecutive_timeouts = 0,
+            needs_assignment = 0,
+            assigned_agent_id = NULL,
+            assigned_at = NULL,
+            first_assigned_at = NULL,
+            assignment_status = 'unassigned',
+            assignment_method = NULL,
+            assignment_reason = NULL,
+            response_sla_deadline_at = NULL,
+            last_human_reply_at = NULL,
+            reassign_count = 0,
+            case_priority = NULL,
+            effective_case_priority = 999,
+            close_reason = NULL,
+            closed_at = NULL,
+            closed_by_agent_id = NULL,
+            rating_invited_at = NULL,
+            order_number_type = NULL,
+            intent_level = NULL
+          WHERE id = ?`
+        ).run(id);
+        const after = storage.getContact(id);
+        storage.createSystemAlert({
+          alert_type: "admin_contact_reset",
+          details: JSON.stringify({
+            contactId: id,
+            before: beforeSnap,
+            after: {
+              needs_human: after?.needs_human,
+              status: after?.status,
+              human_reason: after?.human_reason ?? null,
+              waiting_for_customer: after?.waiting_for_customer ?? null,
+            },
+            timestamp: new Date().toISOString(),
+          }),
+          brand_id: before.brand_id ?? undefined,
+          contact_id: id,
+        });
+        return res.json({
+          ok: true,
+          message: "contact reset successful",
+          before: beforeSnap,
+          after: {
+            needs_human: after?.needs_human,
+            status: after?.status,
+            human_reason: after?.human_reason ?? null,
+            waiting_for_customer: after?.waiting_for_customer ?? null,
+            customer_goal_locked: after?.customer_goal_locked ?? null,
+          },
+        });
+      } catch (e: any) {
+        return res.status(500).json({ error: String(e?.message ?? e) });
       }
     });
 
