@@ -341,6 +341,8 @@ export interface OrderInfo {
   cvs_brand?: string;
   cvs_store_code?: string;
   cvs_store_name?: string;
+  /** SHOPLINE 等：超商取貨門市顯示（與 cvs_store_name 並用） */
+  store_location?: string;
   full_address?: string;
   address_raw?: string;
   payment_transaction_id?: string;

@@ -459,6 +459,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           full_address: order.full_address,
           cvs_brand: order.cvs_brand,
           cvs_store_name: order.cvs_store_name,
+          store_location: order.store_location,
           delivery_target_type: order.delivery_target_type,
           tracking_number: order.tracking_number,
           created_at: order.created_at,
@@ -1542,6 +1543,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             full_address: o.full_address,
             cvs_brand: o.cvs_brand,
             cvs_store_name: o.cvs_store_name,
+            store_location: o.store_location,
             delivery_target_type: o.delivery_target_type,
             tracking_number: o.tracking_number,
             created_at: o.created_at,
@@ -1696,6 +1698,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             full_address: o0.full_address,
             cvs_brand: o0.cvs_brand,
             cvs_store_name: o0.cvs_store_name,
+            store_location: o0.store_location,
             delivery_target_type: o0.delivery_target_type,
             tracking_number: o0.tracking_number,
             created_at: o0.created_at,
@@ -1734,6 +1737,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
                   full_address: o0.full_address,
                   cvs_brand: o0.cvs_brand,
                   cvs_store_name: o0.cvs_store_name,
+                  store_location: o0.store_location,
                   delivery_target_type: o0.delivery_target_type,
                   tracking_number: o0.tracking_number,
                   created_at: o0.created_at,
@@ -1764,24 +1768,49 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           const noSingleClaim = isLocalOnly;
           /** local_only 單筆：候選摘要，禁止定案語與完整 order card */
           const replyText = singleDeterministicBody;
+          const oSingle = orders[0];
+          const stSingle = getUnifiedStatusLabel(oSingle.status, oSingle.source || orderSource);
+          const pkSingle = payKindForOrder(oSingle, stSingle, oSingle.source || orderSource);
+          const onePageSummarySingle = noSingleClaim ? singleDeterministicBody : onePageBlocks[0];
+          console.log("[DEBUG_PHONE_DETERMINISTIC]", {
+            source: oSingle.source,
+            global_order_id: oSingle.global_order_id,
+            data_coverage: result.data_coverage,
+            payment_method: oSingle.payment_method,
+            paymentKindResult: pkSingle.kind,
+            one_page_summary_length: (onePageSummarySingle || "").trim().length,
+            flag_phoneOrderDeterministicReply: orderFeatureFlags.phoneOrderDeterministicReply,
+            flag_genericDeterministicOrder: orderFeatureFlags.genericDeterministicOrder,
+          });
           console.log(
             "[order_lookup] renderer=deterministic lookup=phone_single source=" +
               orderSource +
               (noSingleClaim ? " data_coverage=local_only" : "")
           );
-          const usePhoneDeterministicSingle =
-            orderFeatureFlags.phoneOrderDeterministicReply && !isLocalOnly;
+          const allowDeterministicByPayment =
+            pkSingle.kind === "success" ||
+            pkSingle.kind === "cod" ||
+            pkSingle.kind === "pending";
+          const allowDeterministic =
+            orderFeatureFlags.phoneOrderDeterministicReply &&
+            !isLocalOnly &&
+            allowDeterministicByPayment &&
+            onePageSummarySingle.trim().length > 50;
+          const packedSingle = packDeterministicSingleOrderToolResult({
+            renderer: "deterministic_phone_single",
+            one_page_summary: onePageSummarySingle,
+            source: oSingle.source || orderSource,
+          });
           return toolJson({
             success: true,
             found: true,
             total: 1,
             orders: orderSummaries,
             source: orderSource,
-            deterministic_skip_llm: usePhoneDeterministicSingle,
-            ...(usePhoneDeterministicSingle ? { deterministic_customer_reply: replyText } : {}),
-            ...orderDeterministicContractFields(),
-            renderer: "deterministic",
-            one_page_summary: noSingleClaim ? singleDeterministicBody : onePageBlocks[0],
+            ...packedSingle,
+            deterministic_skip_llm: allowDeterministic,
+            ...(allowDeterministic ? { deterministic_customer_reply: onePageSummarySingle.trim() } : {}),
+            one_page_summary: onePageSummarySingle,
             ...(isLocalOnly
               ? {
                   data_coverage: "local_only",

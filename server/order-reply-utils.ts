@@ -87,6 +87,26 @@ export function displayShippingMethod(raw: string | null | undefined, isCod?: bo
 
   const c = !!isCod;
 
+  // === Shopline 平台代碼（含 delivery_type / platform 片段）===
+  if (/tw_711|seven|7-?11/.test(lower)) {
+    return c ? "7-11 取貨付款" : "7-11 取貨";
+  }
+  if (/tw_family|^family$|fmt|fami|全家/.test(lower)) {
+    return c ? "全家取貨付款" : "全家取貨";
+  }
+  if (/tw_hilife|hilife|萊爾富/.test(lower)) {
+    return c ? "萊爾富取貨付款" : "萊爾富取貨";
+  }
+  if (/tw_okmart|okm|^ok_|ok\.?mart/.test(lower)) {
+    return c ? "OK 超商取貨付款" : "OK 超商取貨";
+  }
+  if (/^pickup$/i.test(lower)) {
+    return c ? "超商取貨付款" : "超商取貨";
+  }
+  if (/^home_delivery$/i.test(lower)) {
+    return c ? "宅配到府（貨到付款）" : "宅配到府";
+  }
+
   if (/to_home|home_delivery/i.test(lower) || /宅配|到府|郵寄|寄送/i.test(original)) {
     return c ? "宅配到府（貨到付款）" : "宅配到府";
   }
@@ -99,19 +119,6 @@ export function displayShippingMethod(raw: string | null | undefined, isCod?: bo
 
   if (/黑貓|宅急便|t[_\s]?cat/i.test(lower)) {
     return c ? "黑貓宅配（貨到付款）" : "黑貓宅配";
-  }
-
-  if (/seven|7[\s\-／/]*11|seven_eleven|tw_711/i.test(lower)) {
-    return c ? "7-11 取貨付款" : "7-11 取貨";
-  }
-  if (/fmt|family|fami|全家/i.test(lower)) {
-    return c ? "全家取貨付款" : "全家取貨";
-  }
-  if (/hilife|萊爾富/i.test(lower)) {
-    return c ? "萊爾富取貨付款" : "萊爾富取貨";
-  }
-  if (/okm|ok_mart|^ok_|ok\.?mart/i.test(lower)) {
-    return c ? "OK 超商取貨付款" : "OK 超商取貨";
   }
 
   if (/cvs|超商|門市|取貨|711|pickup|to_store|便利|商店/i.test(lower)) {
@@ -236,6 +243,7 @@ export function formatOrderOnePage(o: {
   delivery_target_type?: string;
   cvs_brand?: string;
   cvs_store_name?: string;
+  store_location?: string;
   full_address?: string;
   source_channel?: string;
   /** 與 OrderInfo.source 一致時可正確套用 SuperLanding pending+to_home 等 COD 規則 */
@@ -310,8 +318,10 @@ export function formatOrderOnePage(o: {
   // 1. 超商取貨 → 門市名；2. 黑貓／一般宅配 → 配送標籤 + 地址隱碼（略過「台灣」占位）
   if (isCvs) {
     if (shipping) lines.push(`配送：${shipping}`);
-    const storeName = [o.cvs_brand, o.cvs_store_name].filter(Boolean).join(" ");
-    if (storeName) lines.push(`取貨門市：${storeName}`);
+    const storeDisplay =
+      String(o.store_location || "").trim() ||
+      [o.cvs_brand, o.cvs_store_name].filter(Boolean).join(" ");
+    if (storeDisplay) lines.push(`取貨門市：${storeDisplay}`);
   } else {
     if (shipping) lines.push(`配送：${shipping}`);
     const addr = o.full_address || o.address || "";

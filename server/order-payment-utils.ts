@@ -50,6 +50,17 @@ export function isCodPaymentMethod(order: OrderInfo): boolean {
   if (isSuperLandingCvsCod(order)) return true;
   if (isSuperLandingHomeCod(order)) return true;
   if (COD_METHOD_REGEX.test(String(order.shipping_method || ""))) return true;
+
+  // === Shopline COD：order_payment.payment_type 如 tw_*_b2c_pay ===
+  const src = String(order.source || "");
+  const pm = String(order.payment_method || "");
+  const lowerMethod = pm.toLowerCase();
+  if (src === "shopline") {
+    if (/^tw_(seven|711|family|fami|fmt|hilife|okmart|okm|cvs)_.*pay$/i.test(lowerMethod)) return true;
+    if (/tw_homedelivery.*pay|tw_home.*cod|cod_home/i.test(lowerMethod)) return true;
+    if (/cash_on_delivery|^cod$|cod_/i.test(lowerMethod)) return true;
+    if (/貨到付款|到付|取貨付款/.test(pm)) return true;
+  }
   return false;
 }
 

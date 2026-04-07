@@ -297,7 +297,7 @@ app.use((req, res, next) => {
           const { storage } = await import("./storage");
           const { runIdleCloseJob, getIdleCloseHours } = await import("./idle-close-job");
           const hours = getIdleCloseHours(storage);
-          const results = runIdleCloseJob(storage, hours);
+          const results = await runIdleCloseJob(storage, hours);
           if (results.length > 0) {
             const closed = results.filter((r) => r.closed);
             if (closed.length > 0) console.log("[idle-close] 24h 閒置結案:", closed.length, "筆", closed.map((r) => r.contactId));

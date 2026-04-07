@@ -63,10 +63,61 @@ export function getShoplineDeliveryTargetType(o: any): DeliveryTargetType {
 }
 
 function mapShoplineOrder(o: any): OrderInfo {
-  const deliveryData = o?.delivery_data;
-  const orderDelivery = o?.order_delivery;
-  const deliveryAddr = o?.delivery_address;
-  const orderPayment = o?.order_payment;
+  const deliveryData = o?.delivery_data || {};
+  const orderDelivery = o?.order_delivery || {};
+  const deliveryAddr = o?.delivery_address || {};
+  const orderPayment = o?.order_payment || {};
+
+  // === Shopline 付款（真實欄位在 order_payment）===
+  // payment_type 例：tw_711_b2c_pay、tw_family_b2c_pay；中文見 name_translations["zh-hant"]
+  const paymentNameZh =
+    orderPayment.name_translations?.["zh-hant"] ||
+    orderPayment.name_translations?.["zh-Hant"] ||
+    orderPayment.name_translations?.zh ||
+    "";
+  const paymentType = String(orderPayment.payment_type || "").trim();
+  const paymentMethodForInfo =
+    paymentType || paymentNameZh || String(o.payment_method || o.payment_type || "").trim();
+
+  const payStatusRaw = String(orderPayment.status || o.payment_status || "").trim();
+  const payStatusLower = payStatusRaw.toLowerCase();
+  const paidAtRaw =
+    orderPayment.paid_at ?? orderPayment.completed_at ?? orderPayment.payment_at ?? o.paid_at ?? null;
+  const paidAtStr = paidAtRaw != null && String(paidAtRaw).trim() !== "" ? String(paidAtRaw) : null;
+  const prepaidVal: boolean | undefined =
+    paidAtStr != null
+      ? true
+      : /completed|paid|success|authorized|captured/i.test(payStatusLower)
+        ? true
+        : /pending|unpaid|awaiting/i.test(payStatusLower)
+          ? false
+          : undefined;
+
+  // === Shopline 配送 ===
+  const deliveryNameZh =
+    orderDelivery.name_translations?.["zh-hant"] ||
+    orderDelivery.name_translations?.["zh-Hant"] ||
+    orderDelivery.name_translations?.zh ||
+    "";
+  const deliveryType = String(orderDelivery.delivery_type || "").trim();
+  const deliveryPlatform = String(orderDelivery.platform || "").trim();
+  const shippingMethodStr =
+    [deliveryPlatform, deliveryType, deliveryNameZh].filter(Boolean).join(" | ") ||
+    String(o.shipping_method || o.delivery_method || "").trim();
+
+  const storeLocationName =
+    (typeof deliveryData.location_name === "string" && deliveryData.location_name) ||
+    (typeof deliveryData.store_address === "string" && deliveryData.store_address) ||
+    "";
+
+  const fullAddrFromDelivery = [
+    deliveryAddr.state,
+    deliveryAddr.city,
+    deliveryAddr.address_1 ?? deliveryAddr.address1,
+    deliveryAddr.address_2 ?? deliveryAddr.address2,
+  ]
+    .filter(Boolean)
+    .join("");
 
   let trackingNumber = "";
   if (deliveryData && typeof deliveryData.tracking_number === "string" && deliveryData.tracking_number) {
@@ -197,6 +248,10 @@ function mapShoplineOrder(o: any): OrderInfo {
     address = o.address;
     fullAddress = o.address;
   }
+  if (!address && fullAddrFromDelivery) {
+    address = fullAddrFromDelivery;
+    fullAddress = fullAddrFromDelivery;
+  }
 
   const buyerName =
     o.customer_name ??
@@ -230,12 +285,6 @@ function mapShoplineOrder(o: any): OrderInfo {
   const finalTotal = Number(totalDollars ?? totalFromPayment ?? 0);
 
   const deliveryTargetType = getShoplineDeliveryTargetType(o);
-  const payStatus = (orderPayment?.status || "").toLowerCase();
-  const paidAt =
-    orderPayment?.paid_at ??
-    orderPayment?.completed_at ??
-    orderPayment?.payment_at ??
-    (payStatus === "completed" || payStatus === "paid" ? o.updated_at : null);
 
   const mapped: OrderInfo = {
     global_order_id: String(orderNumber),
@@ -249,36 +298,26 @@ function mapShoplineOrder(o: any): OrderInfo {
     created_at: orderDelivery?.created_at ?? o.created_at ?? o.created_date ?? "",
     shipped_at: orderDelivery?.shipped_at ?? o.shipped_at ?? o.fulfilled_at ?? "",
     order_created_at: o.created_at ?? o.order_created_at ?? "",
-    shipping_method: orderDelivery?.name_translations?.["zh-hant"] ?? orderDelivery?.name_translations?.["zh-Hant"] ?? o.shipping_method ?? o.delivery_method ?? "",
-    payment_method: orderPayment?.payment_type ?? orderPayment?.name_translations?.["zh-hant"] ?? o.payment_method ?? o.payment_type ?? "",
-    prepaid: /paid|complete|success|authorized|captured/i.test(payStatus) ? true : /pending|unpaid|awaiting/i.test(payStatus) ? false : undefined,
-    paid_at: paidAt != null ? String(paidAt) : null,
+    shipping_method: shippingMethodStr,
+    payment_method: paymentMethodForInfo,
+    prepaid: prepaidVal,
+    paid_at: paidAtStr,
     address,
     note: o.note ?? o.customer_note ?? o.order_remarks ?? o.remark ?? "",
     page_id: o.page_id != null ? String(o.page_id) : undefined,
     page_title: typeof o.page_title === "string" ? o.page_title : undefined,
-    payment_status_raw: getShoplinePaymentStatusRaw(o),
+    payment_status_raw: payStatusRaw || getShoplinePaymentStatusRaw(o),
     delivery_status_raw: getShoplineDeliveryStatusRaw(o),
     delivery_target_type: deliveryTargetType,
     cvs_brand: deliveryTargetType === "cvs" && deliveryData?.location_name ? "超商" : undefined,
     cvs_store_code: deliveryTargetType === "cvs" ? deliveryData?.location_code : undefined,
     cvs_store_name: deliveryTargetType === "cvs" ? deliveryData?.location_name : undefined,
+    store_location: storeLocationName || undefined,
     full_address: fullAddress ?? (deliveryTargetType === "cvs" ? deliveryData?.store_address : undefined),
     address_raw: addressRaw,
     payment_transaction_id: orderPayment?.payment_data?.info?.transactionId ?? undefined,
     items_structured: itemsStructured,
   };
-
-  const rawPm = String(mapped.payment_method ?? "").trim();
-  if (/tw_.*b2c_pay|cash_on_delivery|home_delivery_cod/i.test(rawPm)) {
-    mapped.payment_method = "貨到付款";
-  } else if (/credit|信用卡/i.test(rawPm)) {
-    mapped.payment_method = "信用卡";
-  } else if (/line.?pay/i.test(rawPm)) {
-    mapped.payment_method = "LINE Pay";
-  } else if (/atm|轉帳/i.test(rawPm)) {
-    mapped.payment_method = "ATM 轉帳";
-  }
 
   return mapped;
 }
