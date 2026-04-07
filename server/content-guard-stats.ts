@@ -10,7 +10,8 @@ export type GuardRuleId =
   | "category_mismatch_sweet"
   | "mode_forbidden_promo"
   | "official_channel_forbidden"
-  | "global_platform_forbidden";
+  | "global_platform_forbidden"
+  | "order_action_hallucination";
 
 export type GuardOutcome = "cleaned" | "fallback";
 
@@ -80,6 +81,7 @@ export function getGuardStats(): {
     mode_forbidden_promo: { total: 0, cleaned: 0, fallback: 0 },
     official_channel_forbidden: { total: 0, cleaned: 0, fallback: 0 },
     global_platform_forbidden: { total: 0, cleaned: 0, fallback: 0 },
+    order_action_hallucination: { total: 0, cleaned: 0, fallback: 0 },
   };
   let cleaned = 0;
   let fallback = 0;

@@ -4,12 +4,29 @@ import {
   isModeNoPromo,
   runGlobalPlatformGuard,
   runOfficialChannelGuard,
+  detectOrderActionHallucination,
 } from "../content-guard";
+
+describe("detectOrderActionHallucination", () => {
+  it("偵測宣稱已取消", () => {
+    expect(detectOrderActionHallucination("已經幫您取消成功了！")).toBe(true);
+  });
+  it("一般查單不誤判", () => {
+    expect(detectOrderActionHallucination("您的訂單已出貨，預計三天內到達。")).toBe(false);
+  });
+});
 
 describe("runPostGenerationGuard", () => {
   it("一般模式通過", () => {
     const r = runPostGenerationGuard("您好，有什麼可以幫您的嗎？", "answer_directly", null);
     expect(r.pass).toBe(true);
+  });
+
+  it("訂單動作幻覺被攔截並改寫", () => {
+    const r = runPostGenerationGuard("好的，已經幫您取消成功了！", "answer_directly", null);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toBe("order_action_hallucination");
+    expect(r.cleaned).toContain("沒辦法直接幫您取消");
   });
 
   it("售後模式下推銷被攔截", () => {

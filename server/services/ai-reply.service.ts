@@ -158,23 +158,29 @@ function isOrderLookupFamily(mode: string): boolean {
   return mode === "order_lookup" || mode === "order_followup";
 }
 
-/** 供主對話 system prompt：從 contact.display_name 整理出可稱呼字串 */
+/** 供主對話 system prompt：從 contact.display_name 整理出可稱呼字串（不加先生／小姐） */
 function sanitizeContactDisplayName(raw: string): string {
   const s = (raw || "").trim();
   if (!s) return "";
+  // 過濾 LINE user ID
   if (/^U[a-f0-9]{30,}$/i.test(s)) return "";
+  // 過濾 Unknown
   if (/^unknown$/i.test(s)) return "";
+  // 過濾純數字
   if (/^\d+$/.test(s)) return "";
-  const cleaned = s.replace(/^[.*★☆♥♡~～❤️💕🌟✨\s]+|[.*★☆♥♡~～❤️💕🌟✨\s]+$/g, "").trim();
+  // 去掉前後符號和 emoji
+  const cleaned = s
+    .replace(/^[.*★☆♥♡~～❤️💕🌟✨💖🌸🌺💫⭐️\s]+|[.*★☆♥♡~～❤️💕🌟✨💖🌸🌺💫⭐️\s]+$/g, "")
+    .trim();
   if (!cleaned) return "";
   if (/^[\u4e00-\u9fff]{3,}$/.test(cleaned)) {
-    return cleaned.charAt(0) + "先生/小姐";
+    return cleaned.slice(-2);
   }
   if (/^[\u4e00-\u9fff]{2}$/.test(cleaned)) {
     return cleaned;
   }
   if (/^[\u4e00-\u9fff]{1}$/.test(cleaned)) {
-    return cleaned + "先生/小姐";
+    return cleaned;
   }
   if (/^[a-zA-Z]/.test(cleaned)) {
     const firstName = cleaned.split(/[\s._]+/)[0];
@@ -182,6 +188,7 @@ function sanitizeContactDisplayName(raw: string): string {
   }
   return cleaned.length > 10 ? cleaned.slice(0, 10) : cleaned;
 }
+
 
 function openaiChatMessagesToClaudeSeed(
   msgs: OpenAI.Chat.Completions.ChatCompletionMessageParam[]

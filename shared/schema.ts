@@ -39,6 +39,8 @@ export interface Brand {
   superlanding_merchant_no: string;
   superlanding_access_key: string;
   return_form_url: string;
+  cancel_form_url?: string;
+  exchange_form_url?: string;
   shopline_store_domain: string;
   shopline_api_token: string;
   created_at: string;

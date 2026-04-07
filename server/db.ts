@@ -138,6 +138,7 @@ export function initDatabase() {
   migrateBrandsAndChannels();
   migrateBrandsPhase1AgentOpsJson();
   migrateShoplineFields();
+  migrateBrandFormUrlColumns();
   migrateSystemPrompt();
   migrateHardMuteAndAlerts();
   migrateCaseManagement();
@@ -1466,6 +1467,26 @@ function migrateShoplineFields() {
   }
   if (!brandColNames.includes("shopline_api_token")) {
     db.exec("ALTER TABLE brands ADD COLUMN shopline_api_token TEXT NOT NULL DEFAULT ''");
+  }
+}
+
+/** 品牌表單 URL：取消／退貨／換貨（return_form_url 已於 migrateBrandsAndChannels 建立） */
+function migrateBrandFormUrlColumns() {
+  const brandCols = db.prepare("PRAGMA table_info(brands)").all() as { name: string }[];
+  const names = brandCols.map((c) => c.name);
+  if (!names.includes("cancel_form_url")) {
+    try {
+      db.exec("ALTER TABLE brands ADD COLUMN cancel_form_url TEXT NOT NULL DEFAULT ''");
+    } catch (_e) {
+      /* 已存在 */
+    }
+  }
+  if (!names.includes("exchange_form_url")) {
+    try {
+      db.exec("ALTER TABLE brands ADD COLUMN exchange_form_url TEXT NOT NULL DEFAULT ''");
+    } catch (_e) {
+      /* 已存在 */
+    }
   }
 }
 

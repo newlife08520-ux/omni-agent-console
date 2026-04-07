@@ -543,10 +543,27 @@ export async function assembleEnrichedSystemPrompt(
     prompt_profile += "_phase1_iso";
   }
 
+  let formUrlsBlock = "";
+  if (brandId) {
+    const urls = storage.getBrandFormUrls(brandId);
+    const items: string[] = [];
+    if (urls.cancel_form_url) items.push(`- 取消訂單表單：${urls.cancel_form_url}`);
+    if (urls.return_form_url) items.push(`- 退貨表單：${urls.return_form_url}`);
+    if (urls.exchange_form_url) items.push(`- 換貨表單：${urls.exchange_form_url}`);
+    if (items.length > 0) {
+      formUrlsBlock =
+        "\n\n--- 這個品牌的表單連結 ---\n" +
+        "當客人明確需要以下動作時，提供對應的表單連結給客人（客人填寫後由專人處理）：\n" +
+        items.join("\n") +
+        "\n\n提供時請先了解客人的原因和情況，再自然提供對應的表單。不要一看到關鍵字就丟連結。";
+    }
+  }
+
   const scenarioFlowContext = scenarioBlock + flowBlock + humanHoursBlock;
   const raw =
     globalBlock +
     brandBlock +
+    formUrlsBlock +
     scenarioFlowContext +
     catalogBlock +
     marketingBlock +

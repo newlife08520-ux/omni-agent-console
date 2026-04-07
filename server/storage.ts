@@ -19,6 +19,15 @@ export interface IStorage {
   setSetting(key: string, value: string): void;
   getBrands(): Brand[];
   getBrand(id: number): Brand | undefined;
+  getBrandFormUrls(brandId: number): {
+    cancel_form_url: string;
+    return_form_url: string;
+    exchange_form_url: string;
+  };
+  updateBrandFormUrls(
+    brandId: number,
+    urls: { cancel_form_url?: string; return_form_url?: string; exchange_form_url?: string }
+  ): void;
   createBrand(name: string, slug: string, logoUrl?: string, description?: string, systemPrompt?: string, superlandingMerchantNo?: string, superlandingAccessKey?: string, returnFormUrl?: string): Promise<Brand>;
   updateBrand(id: number, data: Partial<Omit<Brand, "id" | "created_at">>): Promise<boolean>;
   deleteBrand(id: number): Promise<boolean>;
@@ -299,6 +308,38 @@ export class SQLiteStorage implements IStorage {
 
   getBrand(id: number): Brand | undefined {
     return db.prepare("SELECT * FROM brands WHERE id = ?").get(id) as Brand | undefined;
+  }
+
+  getBrandFormUrls(brandId: number): {
+    cancel_form_url: string;
+    return_form_url: string;
+    exchange_form_url: string;
+  } {
+    const row = db
+      .prepare("SELECT cancel_form_url, return_form_url, exchange_form_url FROM brands WHERE id = ?")
+      .get(brandId) as
+      | { cancel_form_url?: string | null; return_form_url?: string | null; exchange_form_url?: string | null }
+      | undefined;
+    return {
+      cancel_form_url: String(row?.cancel_form_url ?? ""),
+      return_form_url: String(row?.return_form_url ?? ""),
+      exchange_form_url: String(row?.exchange_form_url ?? ""),
+    };
+  }
+
+  updateBrandFormUrls(
+    brandId: number,
+    urls: { cancel_form_url?: string; return_form_url?: string; exchange_form_url?: string }
+  ): void {
+    const cur = this.getBrandFormUrls(brandId);
+    const next = {
+      cancel_form_url: urls.cancel_form_url !== undefined ? urls.cancel_form_url : cur.cancel_form_url,
+      return_form_url: urls.return_form_url !== undefined ? urls.return_form_url : cur.return_form_url,
+      exchange_form_url: urls.exchange_form_url !== undefined ? urls.exchange_form_url : cur.exchange_form_url,
+    };
+    db.prepare(
+      "UPDATE brands SET cancel_form_url = ?, return_form_url = ?, exchange_form_url = ? WHERE id = ?"
+    ).run(next.cancel_form_url ?? "", next.return_form_url ?? "", next.exchange_form_url ?? "", brandId);
   }
 
   async createBrand(name: string, slug: string, logoUrl?: string, description?: string, systemPrompt?: string, superlandingMerchantNo?: string, superlandingAccessKey?: string, returnFormUrl?: string): Promise<Brand> {

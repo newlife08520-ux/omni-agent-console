@@ -29,6 +29,18 @@ export interface GuardResult {
   reason?: string;
 }
 
+/** 防止 AI 幻覺宣稱已取消／已修改訂單（系統無此能力）。 */
+export function detectOrderActionHallucination(text: string): boolean {
+  const patterns = [
+    /已.{0,4}(?:幫您|為您|替您).{0,4}取消(?:成功|好|完成)?/,
+    /已.{0,4}(?:幫您|為您|替您).{0,4}(?:修改|更改|變更|編輯).{0,4}(?:成功|好|完成)?/,
+    /我.{0,4}(?:幫您|為您|替您).{0,4}(?:取消|修改|改好)了/,
+    /(?:取消|修改).{0,4}(?:成功|完成)了/,
+    /訂單.{0,4}已.{0,4}(?:取消|修改|變更)/,
+  ];
+  return patterns.some((re) => re.test(text));
+}
+
 /**
  * 送出前掃描：品類不符或 mode 禁語命中則不通過，並產出清洗後文案（移除違規句或整段）。
  */
@@ -39,6 +51,16 @@ export function runPostGenerationGuard(
 ): GuardResult {
   const text = (reply || "").trim();
   if (!text) return { pass: true, cleaned: reply };
+
+  if (detectOrderActionHallucination(text)) {
+    console.warn("[content-guard] 偵測到訂單動作幻覺，改寫回覆:", text.substring(0, 100));
+    return {
+      pass: false,
+      cleaned:
+        "不好意思，我這邊沒辦法直接幫您取消或修改訂單唷。可以告訴我您想處理的是哪一筆、原因是什麼嗎？我再幫您安排適合的方式（專人協助或提供對應表單）。",
+      reason: "order_action_hallucination",
+    };
+  }
 
   if (isModeNoPromo(planMode)) {
     const promoRe =

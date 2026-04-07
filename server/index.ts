@@ -348,6 +348,40 @@ app.use((req, res, next) => {
             db.prepare("UPDATE brands SET shopline_store_domain = ? WHERE id = 1").run("enjoythelife.shoplineapp.com");
           }
 
+          try {
+            const b1form = db
+              .prepare("SELECT cancel_form_url, return_form_url, exchange_form_url FROM brands WHERE id = 1")
+              .get() as any;
+            if (
+              b1form &&
+              !String(b1form.cancel_form_url ?? "").trim() &&
+              !String(b1form.return_form_url ?? "").trim() &&
+              !String(b1form.exchange_form_url ?? "").trim()
+            ) {
+              db.prepare(
+                "UPDATE brands SET cancel_form_url = ?, return_form_url = ?, exchange_form_url = ? WHERE id = 1"
+              ).run("https://jsj.top/f/x253ie", "https://jsj.top/f/rwcIDN", "https://jsj.top/f/PwcbA7");
+              console.log("[startup] Brand 1 表單 URL 已設定");
+            }
+
+            const b2form = db
+              .prepare("SELECT cancel_form_url, return_form_url, exchange_form_url FROM brands WHERE id = 2")
+              .get() as any;
+            if (
+              b2form &&
+              !String(b2form.cancel_form_url ?? "").trim() &&
+              !String(b2form.return_form_url ?? "").trim() &&
+              !String(b2form.exchange_form_url ?? "").trim()
+            ) {
+              db.prepare(
+                "UPDATE brands SET cancel_form_url = ?, return_form_url = ?, exchange_form_url = ? WHERE id = 2"
+              ).run("https://jsj.top/f/x253ie", "https://jsj.top/f/rwcIDN", "https://jsj.top/f/PwcbA7");
+              console.log("[startup] Brand 2 表單 URL 已設定");
+            }
+          } catch (e) {
+            console.error("[startup] 表單 URL 設定失敗:", e);
+          }
+
           console.log("[startup] Prompt 已自動同步到 DB（Global + Brand 1 + Brand 2）");
         } catch (e) {
           console.error("[startup] Prompt 同步失敗:", e);

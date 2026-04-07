@@ -641,6 +641,23 @@ export function registerCoreRoutes(app: Express): void {
       }
     });
 
+    app.get("/api/admin/brands/:brandId/form-urls", authMiddleware, (req, res) => {
+      const brandId = parseIdParam(req.params.brandId);
+      if (brandId == null) return res.status(400).json({ error: "無效品牌 ID" });
+      const urls = storage.getBrandFormUrls(brandId);
+      res.json({ ok: true, ...urls });
+    });
+
+    app.put("/api/admin/brands/:brandId/form-urls", authMiddleware, (req: any, res) => {
+      if (!req.session?.userRole || req.session.userRole !== "super_admin") {
+        return res.status(403).json({ error: "forbidden" });
+      }
+      const brandId = parseIdParam(req.params.brandId);
+      if (brandId == null) return res.status(400).json({ error: "無效品牌 ID" });
+      storage.updateBrandFormUrls(brandId, req.body || {});
+      res.json({ ok: true });
+    });
+
     /** super_admin：手動觸發訂單同步（背景執行，不等待完成） */
     app.post("/api/admin/sync-orders", authMiddleware, superAdminOnly, async (_req, res) => {
       try {
