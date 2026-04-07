@@ -311,7 +311,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
         source: "product_catalog",
         total: results.length,
         products: results,
-        sys_note: `找到 ${results.length} 款「${keyword}」相關商品。有價格就提，有連結就給。`,
+        sys_note: `找到 ${results.length} 款「${keyword}」相關商品。重點放在特色不是價格。價格講大概就好，務必附銷售頁連結（活動以銷售頁為準）。`,
       });
     }
 
