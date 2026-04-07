@@ -89,7 +89,9 @@ export async function registerRoutes(
       return res.status(404).json({ message: "contact not found" });
     }
     const runStartMs = Date.now();
-    const AI_REPLY_TIMEOUT_MS = 30_000;
+    const AI_REPLY_TIMEOUT_MS = 45_000;
+    const AI_REPLY_TIMEOUT_FALLBACK_MSG =
+      "不好意思，系統正在更新訂單資料，請稍候約 1 分鐘後再傳一次訊息給我喔～";
     console.log("[AI Latency] run-ai-reply start contactId=" + contactId);
     const enq =
       enqueueTimestampMs != null && !Number.isNaN(Number(enqueueTimestampMs))
@@ -105,19 +107,27 @@ export async function registerRoutes(
         "[AI Timeout] run-ai-reply timeout contactId=" + contactId + " after " + totalMs + "ms"
       );
       try {
-        storage.updateContactHumanFlag(Number(contactId), 1);
-        storage.updateContactStatus(Number(contactId), "awaiting_human");
         storage.createSystemAlert({
-          alert_type: "timeout_escalation",
-          details: `run-ai-reply timeout after ${AI_REPLY_TIMEOUT_MS}ms`,
+          alert_type: "ai_reply_timeout_soft",
+          details: `severity:warning run-ai-reply timeout after ${AI_REPLY_TIMEOUT_MS}ms`,
           contact_id: Number(contactId),
           brand_id: contact.brand_id ?? undefined,
         });
-        broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+        const token = (req.body?.channelToken as string | null | undefined) ?? null;
+        const plat = String(contact.platform || "line");
+        if (plat === "messenger" && token) {
+          sendFBMessage(token, contact.platform_user_id, AI_REPLY_TIMEOUT_FALLBACK_MSG).catch(() => {});
+        } else if (token) {
+          pushLineMessage(contact.platform_user_id, [{ type: "text", text: AI_REPLY_TIMEOUT_FALLBACK_MSG }], token).catch(
+            () => {}
+          );
+        } else {
+          console.warn("[AI Timeout] no channelToken, skip customer fallback push contactId=" + contactId);
+        }
       } catch (alertErr) {
-        console.error("[AI Timeout] failed to set needs_human:", alertErr);
+        console.error("[AI Timeout] soft fallback failed:", alertErr);
       }
-      res.status(504).json({ message: "AI reply timeout, contact escalated to human" });
+      res.status(504).json({ message: "AI reply timeout, soft fallback sent" });
     }, AI_REPLY_TIMEOUT_MS);
 
     autoReplyWithAI(

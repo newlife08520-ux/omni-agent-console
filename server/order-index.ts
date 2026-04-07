@@ -18,11 +18,18 @@ export interface CachedOrderResult {
 }
 
 export function normalizePhone(phone: string): string {
-  return (phone || "").replace(/\D/g, "");
+  let normalized = (phone || "").replace(/\D/g, "");
+  if (normalized.startsWith("8869") && normalized.length === 12) {
+    normalized = "0" + normalized.slice(3);
+  }
+  if (normalized.startsWith("08869") && normalized.length === 13) {
+    normalized = "0" + normalized.slice(4);
+  }
+  return normalized;
 }
 
-/** 台灣門號常見誤輸：多一碼，或 090 開頭多一個 0 */
-function taiwanPhoneLookupVariants(normalizedDigits: string): string[] {
+/** 台灣門號常見誤輸：多一碼、090、886 國碼與 DB 舊格式相容 */
+export function taiwanPhoneLookupVariants(normalizedDigits: string): string[] {
   const out: string[] = [];
   if (!normalizedDigits) return out;
   out.push(normalizedDigits);
@@ -32,6 +39,10 @@ function taiwanPhoneLookupVariants(normalizedDigits: string): string[] {
   if (normalizedDigits.length === 11 && normalizedDigits.startsWith("090")) {
     const tail = normalizedDigits.slice(3);
     if (tail.length === 8) out.push(`09${tail}`);
+  }
+  if (normalizedDigits.length === 10 && normalizedDigits.startsWith("09")) {
+    out.push(normalizedDigits.slice(1));
+    out.push(`886${normalizedDigits.slice(1)}`);
   }
   return [...new Set(out)];
 }

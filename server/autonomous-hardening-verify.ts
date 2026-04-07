@@ -5,7 +5,14 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { cacheKeyOrderId, cacheKeyPhone, normalizeProductName, normalizePhone, getOrdersByPhoneMerged } from "./order-index";
+import {
+  cacheKeyOrderId,
+  cacheKeyPhone,
+  normalizeProductName,
+  normalizePhone,
+  taiwanPhoneLookupVariants,
+  getOrdersByPhoneMerged,
+} from "./order-index";
 import { tryOrderFastPath } from "./order-fast-path";
 import type { IStorage } from "./storage";
 import type { SuperLandingConfig } from "./superlanding";
@@ -169,6 +176,15 @@ async function main() {
 
   assert(normalizeProductName("A B 試") === "ab試", "normalizeProductName");
   assert(normalizePhone("09-12-345-678") === "0912345678", "normalizePhone");
+  const expect09 = "0937495007";
+  assert(normalizePhone("0937495007") === expect09, "normalizePhone 09 plain");
+  assert(normalizePhone("+886937495007") === expect09, "normalizePhone +886");
+  assert(normalizePhone("+886-937-495-007") === expect09, "normalizePhone +886 dashed");
+  assert(normalizePhone("886 937 495 007") === expect09, "normalizePhone 886 spaced");
+  assert(normalizePhone("0937-495-007") === expect09, "normalizePhone 09 dashed");
+  const v = taiwanPhoneLookupVariants(expect09);
+  assert(v.includes(expect09) && v.includes("886937495007") && v.includes("937495007"), "taiwanPhoneLookupVariants 09/886/無0");
+
 
   // --- COD hotfix 驗證：derivePaymentStatus 先判 COD，deterministic 回覆不誤導 ---
   const superLandingCvsCod: OrderInfo = {
@@ -192,8 +208,13 @@ async function main() {
   const d1 = derivePaymentStatus(superLandingCvsCod, "待出貨", "superlanding");
   assert(d1.kind === "cod" && d1.label.includes("貨到付款"), "COD case 1b derivePaymentStatus SuperLanding CVS → cod");
   const replyUtilsSrc = fs.readFileSync(path.join(__dirname, "order-reply-utils.ts"), "utf8");
+  const contactsOrdersRoutesSrc = fs.readFileSync(
+    path.join(__dirname, "routes", "contacts-orders.routes.ts"),
+    "utf8"
+  );
   assert(
-    routesSrc.includes("buildDeterministicFollowUpReply") && replyUtilsSrc.includes("payKindForOrder"),
+    contactsOrdersRoutesSrc.includes("buildDeterministicFollowUpReply") &&
+      replyUtilsSrc.includes("payKindForOrder"),
     "COD case 1c follow-up 仍經 order-reply-utils（payKindForOrder）"
   );
 

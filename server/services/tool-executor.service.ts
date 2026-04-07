@@ -41,6 +41,10 @@ const SYS_NOTE_ORDER_ONE_PAGE_STRICT =
 const SYS_NOTE_ORDER_ONE_PAGE_FULL_STRICT =
   "請直接使用 one_page_full 的完整內容回覆客人（多筆之間已用 --- 分隔），不要改寫成散文；每一筆的欄位都要完整保留。若付款為貨到付款／宅配代收／到店付款，絕對不要叫客人線上付款。";
 
+/** Phase 106：local 命中時對客仍給完整卡片，僅在摘要末附快取免責 */
+export const ORDER_LOOKUP_LOCAL_CACHE_DISCLAIMER =
+  "\n\n*(註：此為系統快取資料，最新出貨狀態以物流端為準)*";
+
 function normalizeOrderSourceForOnePage(raw: string | undefined): OrderSource {
   if (raw === "shopline" || raw === "superlanding" || raw === "unknown") return raw;
   return "superlanding";
@@ -659,7 +663,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
               };
               const pkPp = payKindForOrder(order, statusLabel, order.source || orderSource);
               const orderPayloadL = { ...orderPayload, payment_status_label: pkPp.label };
-              const one_page_summary = formatOrderOnePage(orderPayloadL);
+              const one_page_summary =
+                formatOrderOnePage(orderPayloadL) + ORDER_LOOKUP_LOCAL_CACHE_DISCLAIMER;
               if (context?.contactId) {
                 storage.linkOrderForContact(context.contactId, order.global_order_id, "ai_lookup");
                 storage.setActiveOrderContext(
@@ -1651,6 +1656,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
         const formattedList = formatOrdersToolFormattedList(orderSummaries);
         const onePageBlocks = orderSummaries.map((o) => formatOrderOnePage(o));
         const one_page_full = onePageBlocks.join("\n\n---\n\n");
+        const localOnlyDisc =
+          result.data_coverage === "local_only" ? ORDER_LOOKUP_LOCAL_CACHE_DISCLAIMER : "";
         const hasFailedPhoneMulti = orderSummaries.some((x) => x.payment_status === "failed");
         const multiOrderNote =
           orders.length <= 1
@@ -1690,18 +1697,21 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
 
           if (orders.length <= 3) {
             const onePageBlocksMulti = orderSummaries.map((o) => formatOrderOnePage(o));
-            onePageFullForContext = onePageBlocksMulti.join("\n\n---\n\n");
-            deterministicReply = `這個手機號碼下有 ${orders.length} 筆訂單：\n\n` + onePageFullForContext;
+            onePageFullForContext = onePageBlocksMulti.join("\n\n---\n\n") + localOnlyDisc;
+            deterministicReply =
+              `這個手機號碼下有 ${orders.length} 筆訂單：\n\n` + onePageFullForContext;
           } else if (orders.length <= 5) {
             deterministicReply =
               `這個手機號碼下有 ${orders.length} 筆訂單：\n\n` +
               formatOrdersToolFormattedList(orderSummaries) +
-              `\n\n要看哪一筆的完整資訊呢？`;
+              `\n\n要看哪一筆的完整資訊呢？` +
+              localOnlyDisc;
           } else {
             deterministicReply =
               `這個手機號碼下共有 ${orders.length} 筆訂單，最近幾筆是：\n\n` +
               formatOrdersToolFormattedList(orderSummaries.slice(0, 5)) +
-              `\n\n要看哪一筆的詳細資訊嗎？`;
+              `\n\n要看哪一筆的詳細資訊嗎？` +
+              localOnlyDisc;
           }
           const candidates = sorted.map((o) => {
             const src = o.source || orderSource;
@@ -1763,14 +1773,13 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             renderer: "deterministic",
             note: multiOrderNote,
             formatted_list: formattedListForTool,
-            one_page_full: onePageFullForContext ?? one_page_full,
+            one_page_full: onePageFullForContext ?? `${one_page_full}${localOnlyDisc}`,
             sys_note: SYS_NOTE_ORDER_ONE_PAGE_FULL_STRICT,
           });
         }
 
-        const isSingleLocalOnly = orders.length === 1 && result.data_coverage === "local_only";
-        /** P0：local_only 單筆不寫入 DB active context（下段僅在非 local_only 執行） */
-        if (context?.contactId && orders.length === 1 && !isSingleLocalOnly) {
+        /** Phase 106：單筆 local 亦寫入 active context，與 live 一致供後續追問 */
+        if (context?.contactId && orders.length === 1) {
           const o0 = orders[0];
           const statusLabel0 = getUnifiedStatusLabel(o0.status, o0.source || orderSource);
           const pk = payKindForOrder(o0, statusLabel0, o0.source || orderSource);
@@ -1802,7 +1811,9 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             prepaid: o0.prepaid,
             paid_at: o0.paid_at,
           };
-          const summaryForCtx = formatOrderOnePage(onePagePayload);
+          const summaryForCtx =
+            formatOrderOnePage(onePagePayload) +
+            (result.data_coverage === "local_only" ? ORDER_LOOKUP_LOCAL_CACHE_DISCLAIMER : "");
           storage.linkOrderForContact(context.contactId, o0.global_order_id, "ai_lookup");
           const activeCtx = buildActiveOrderContext(o0, o0.source || orderSource, statusLabel0, summaryForCtx, "text");
           storage.setActiveOrderContext(context.contactId, activeCtx);
@@ -1851,7 +1862,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           const oSingle = orders[0];
           const stSingle = getUnifiedStatusLabel(oSingle.status, oSingle.source || orderSource);
           const pkSingle = payKindForOrder(oSingle, stSingle, oSingle.source || orderSource);
-          const onePageSummarySingle = singleDeterministicBody;
+          const onePageSummarySingle =
+            singleDeterministicBody + (isLocalOnly ? ORDER_LOOKUP_LOCAL_CACHE_DISCLAIMER : "");
           console.log("[DEBUG_PHONE_DETERMINISTIC]", {
             source: oSingle.source,
             global_order_id: oSingle.global_order_id,
@@ -1909,8 +1921,9 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
                 ? formattedList
                 : formatOrdersToolFormattedList(orderSummaries.slice(0, 5))
               : undefined,
-          one_page_summary: orders.length === 1 ? onePageBlocks[0] : undefined,
-          one_page_full,
+          one_page_summary:
+            orders.length === 1 ? `${onePageBlocks[0]}${localOnlyDisc}` : undefined,
+          one_page_full: `${one_page_full}${localOnlyDisc}`,
           sys_note: orders.length > 1 ? SYS_NOTE_ORDER_ONE_PAGE_FULL_STRICT : SYS_NOTE_ORDER_ONE_PAGE_STRICT,
           ...(result.data_coverage ? { data_coverage: result.data_coverage } : {}),
           ...(result.coverage_confidence ? { coverage_confidence: result.coverage_confidence } : {}),

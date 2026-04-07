@@ -229,9 +229,8 @@ export function deriveOrderLookupIntent(
 }
 
 /**
- * Phase 34 review：手機全域查單是否跳過本地索引／cache 早退，強制走 live API 合併路徑。
- * - 「全部／其他／幾筆」：避免本地僅 1～N 筆就當完整真相，漏掉尚未寫入索引的訂單。
- * - 當句或上一句使用者訊息含官網語意：避免 merged local（常僅一頁索引有資料）誤當官網結果。
+ * Phase 106：手機全域查單是否跳過本地索引／cache 早退。
+ * 僅在「全部／所有訂單」等明確要看完整列表時 bypass（本地可能未覆蓋全部）；其餘一律先 local。
  */
 export function shouldBypassLocalPhoneIndex(
   userMessage: string,
@@ -240,18 +239,6 @@ export function shouldBypassLocalPhoneIndex(
 ): boolean {
   const intent = deriveOrderLookupIntent(userMessage, recentMessages, activeCtx);
   if (intent.kind === "phone_all_orders") return true;
-  if (resolveOrderSourceIntent(userMessage, recentMessages) === "shopline") return true;
-
-  /** 純手機句：`detectLookupSourceIntent` 僅在「上一則使用者訊息」含官網／一頁提示時繼承來源；本段為 bypass local 與之一致。
-   * 若僅上一則為官網語意且該句未含另一支手機，仍應強制 live，避免本地索引誤導。 */
-  const msg = (userMessage || "").trim();
-  const norm = msg.replace(/\s/g, "");
-  const onlyPhone =
-    /^09\d{8}$/.test(norm) || /^\+?8869\d{8}$/.test(norm) || /^8869\d{8}$/.test(norm);
-  if (onlyPhone && msg.length <= 14) {
-    const lastUser = (recentMessages || []).slice(-1)[0] || "";
-    if (SHOPLINE_HINTS.test(lastUser) && !extractPhone(lastUser)) return true;
-  }
   return false;
 }
 

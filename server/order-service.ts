@@ -6,7 +6,6 @@ import { lookupShoplineOrderById, lookupShoplineOrdersByPhone, lookupShoplineOrd
 import { storage } from "./storage";
 import {
   getOrderByOrderId,
-  getOrdersByPhone,
   getOrdersByPhoneMerged,
   getOrderLookupCache,
   setOrderLookupCache,
@@ -409,6 +408,31 @@ export async function unifiedLookupByDateAndContact(
   return { orders: [], source: "unknown", found: false };
 }
 
+/** Phase 106.1：本地合併命中後，依 preferSource 排序（同來源內維持新→舊） */
+function sortLocalPhoneHitsByPreferredSource(
+  orders: OrderInfo[],
+  preferSource?: OrderLookupPreferSource
+): OrderInfo[] {
+  const t = (o: OrderInfo) => String(o.order_created_at || o.created_at || "").trim();
+  if (preferSource === "shopline") {
+    return [...orders].sort((a, b) => {
+      const ra = (a.source || "") === "shopline" ? 0 : 1;
+      const rb = (b.source || "") === "shopline" ? 0 : 1;
+      if (ra !== rb) return ra - rb;
+      return t(b).localeCompare(t(a));
+    });
+  }
+  if (preferSource === "superlanding") {
+    return [...orders].sort((a, b) => {
+      const ra = (a.source || "") === "superlanding" ? 0 : 1;
+      const rb = (b.source || "") === "superlanding" ? 0 : 1;
+      if (ra !== rb) return ra - rb;
+      return t(b).localeCompare(t(a));
+    });
+  }
+  return orders;
+}
+
 /** 依手機號碼跨管道查單（一頁商店不限定 page，SHOPLINE 依 phone），合併回傳 */
 export async function unifiedLookupByPhoneGlobal(
   slConfig: SuperLandingConfig,
@@ -422,66 +446,35 @@ export async function unifiedLookupByPhoneGlobal(
 ): Promise<UnifiedOrderResult> {
   const phoneNorm = normalizePhone(phone);
   if (phoneNorm && brandId && !bypassLocalIndex) {
-    if (preferSource === "shopline") {
-      const ck = cacheKeyPhone(brandId, phoneNorm, "shopline");
-      const cached = getOrderLookupCache(ck);
-      if (cached?.found) return cached as UnifiedOrderResult;
-      const localSh = getOrdersByPhone(brandId, phone, "shopline");
-      if (localSh.length > 0) {
-        const single = localSh.length === 1;
-        const result: UnifiedOrderResult = {
-          orders: localSh,
-          source: "shopline",
-          found: true,
-          data_coverage: "local_only",
-          coverage_confidence: single ? "low" : "medium",
-          needs_live_confirm: single,
-        };
-        setOrderLookupCache(ck, result);
-        return result;
-      }
-    } else if (preferSource === "superlanding") {
-      const ck = cacheKeyPhone(brandId, phoneNorm, "superlanding");
-      const cached = getOrderLookupCache(ck);
-      if (cached?.found) return cached as UnifiedOrderResult;
-      const localSl = getOrdersByPhone(brandId, phone, "superlanding");
-      if (localSl.length > 0) {
-        const single = localSl.length === 1;
-        const result: UnifiedOrderResult = {
-          orders: localSl,
-          source: "superlanding",
-          found: true,
-          data_coverage: "local_only",
-          coverage_confidence: single ? "low" : "medium",
-          needs_live_confirm: single,
-        };
-        setOrderLookupCache(ck, result);
-        return result;
-      }
-    } else {
-      const ckAny = cacheKeyPhone(brandId, phoneNorm, "any");
-      const cached = getOrderLookupCache(ckAny);
-      if (cached?.found) return cached as UnifiedOrderResult;
-      const mergedLocal = getOrdersByPhoneMerged(brandId, phone);
-      if (mergedLocal.length > 0) {
-        const src =
-          mergedLocal.every((o) => o.source === "shopline")
-            ? "shopline"
-            : mergedLocal.every((o) => o.source === "superlanding")
-              ? "superlanding"
-              : "unknown";
-        const single = mergedLocal.length === 1;
-        const result: UnifiedOrderResult = {
-          orders: mergedLocal,
-          source: src,
-          found: true,
-          data_coverage: "local_only",
-          coverage_confidence: single ? "low" : "medium",
-          needs_live_confirm: single,
-        };
-        setOrderLookupCache(ckAny, result);
-        return result;
-      }
+    /** Phase 106.1：本地一律合併雙來源；preferSource 僅影響快取 key、排序與彙總 source，不縮窄查詢 */
+    const localCacheKey =
+      preferSource === "shopline"
+        ? cacheKeyPhone(brandId, phoneNorm, "shopline")
+        : preferSource === "superlanding"
+          ? cacheKeyPhone(brandId, phoneNorm, "superlanding")
+          : cacheKeyPhone(brandId, phoneNorm, "any");
+    const cached = getOrderLookupCache(localCacheKey);
+    if (cached?.found) return cached as UnifiedOrderResult;
+
+    const mergedLocal = getOrdersByPhoneMerged(brandId, phone);
+    if (mergedLocal.length > 0) {
+      const ordersSorted = sortLocalPhoneHitsByPreferredSource(mergedLocal, preferSource);
+      const src = ordersSorted.every((o) => o.source === "shopline")
+        ? "shopline"
+        : ordersSorted.every((o) => o.source === "superlanding")
+          ? "superlanding"
+          : "unknown";
+      const single = ordersSorted.length === 1;
+      const result: UnifiedOrderResult = {
+        orders: ordersSorted,
+        source: src,
+        found: true,
+        data_coverage: "local_only",
+        coverage_confidence: single ? "low" : "medium",
+        needs_live_confirm: single,
+      };
+      setOrderLookupCache(localCacheKey, result);
+      return result;
     }
   }
 
@@ -542,7 +535,24 @@ export async function unifiedLookupByPhoneGlobal(
     const sl = await runSuperlanding();
     result = sl ?? { orders: [], source: "unknown", found: false };
   } else {
-    const [sl, shop] = await Promise.all([runSuperlanding(), runShopline()]);
+    /** Phase 106：SL 全域掃描可能遠慢於 Shopline，8 秒後放棄 SL 以免雙邊一起卡死 */
+    const slPromise = Promise.race([
+      (async (): Promise<UnifiedOrderResult | null> => {
+        try {
+          return await runSuperlanding();
+        } catch (e) {
+          console.warn("[UnifiedOrder] SuperLanding 查詢失敗:", (e as Error)?.message || e);
+          return null;
+        }
+      })(),
+      new Promise<UnifiedOrderResult | null>((resolve) => {
+        setTimeout(() => {
+          console.warn("[UnifiedOrder] SuperLanding 查詢超過 8 秒,強制切斷以保護 Shopline 回應");
+          resolve(null);
+        }, 8000);
+      }),
+    ]);
+    const [sl, shop] = await Promise.all([slPromise, runShopline()]);
     const parts: OrderInfo[] = [];
     if (sl?.found) parts.push(...sl.orders);
     if (shop?.found) parts.push(...shop.orders);

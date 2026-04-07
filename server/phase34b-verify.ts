@@ -64,8 +64,11 @@ function main() {
     source_channel: "一頁商店",
     status_short: "新訂單",
   });
-  assert(cand.includes("候選"), "候選摘要標題");
-  assert(cand.includes("還有其他訂單嗎") || cand.includes("還有其他訂單"), "下一步引導");
+  assert(cand.includes("以下是目前查到的訂單資訊") || cand.includes("候選"), "候選摘要抬頭");
+  assert(
+    cand.includes("其他訂單") || cand.includes("更多細節") || cand.includes("還有其他訂單"),
+    "下一步引導"
+  );
   assert(!/幫您查到了|我查到這筆了/.test(cand), "無定案語");
   assert(!cand.includes("付款方式："), "不含完整明細：付款方式列");
   assert(!cand.includes("電話："), "不含完整明細：電話列");
@@ -196,15 +199,15 @@ function main() {
   assert(shouldBypassLocalPhoneIndex("還有其他訂單嗎", [], null), "bypass：其他訂單");
   assert(shouldBypassLocalPhoneIndex("我有幾筆訂單", [], null), "bypass：我有幾筆");
   assert(
-    shouldBypassLocalPhoneIndex("0912345678", ["想查官網那筆"], null),
-    "bypass：上一句官網語意"
+    !shouldBypassLocalPhoneIndex("0912345678", ["想查官網那筆"], null),
+    "Phase106：官網語意不再強制 bypass local"
   );
   assert(
-    shouldBypassLocalPhoneIndex("官網 0912345678", [], null),
-    "bypass：當句官網＋手機"
+    !shouldBypassLocalPhoneIndex("官網 0912345678", [], null),
+    "Phase106：當句官網＋手機仍先 local"
   );
   assert(!shouldBypassLocalPhoneIndex("0912345678", [], null), "no bypass：純手機無語境");
-  ok("必修4b shouldBypassLocalPhoneIndex（全部/官網 → 強制 live 路徑）");
+  ok("必修4b shouldBypassLocalPhoneIndex（僅「全部訂單」類 bypass）");
 
   // --- 必修 5：與 order-service 標籤路徑一致（phone tool 模擬）---
   const stU = getUnifiedStatusLabel(orderFlat.status, "superlanding");

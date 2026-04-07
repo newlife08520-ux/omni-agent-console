@@ -58,8 +58,9 @@ function main() {
     "tool-executor: phone summary-only lock"
   );
   assert(
-    toolExecutorSrc.includes("singleDeterministicBody") && toolExecutorSrc.includes("formatLocalOnlyCandidateSummary"),
-    "tool-executor: local_only 候選摘要與定案分離"
+    toolExecutorSrc.includes("singleDeterministicBody") &&
+      toolExecutorSrc.includes("ORDER_LOOKUP_LOCAL_CACHE_DISCLAIMER"),
+    "tool-executor: Phase106 local 完整卡片 + 快取免責"
   );
   const routesSrc = fs.readFileSync(path.join(__dirname, "routes.ts"), "utf8");
   const aiReplySrc = fs.readFileSync(path.join(__dirname, "services", "ai-reply.service.ts"), "utf8");

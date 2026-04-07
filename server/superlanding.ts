@@ -1,5 +1,6 @@
 import type { OrderInfo, DeliveryTargetType } from "@shared/schema";
 import { storage } from "./storage";
+import { normalizePhone as normalizePhoneDigits } from "./order-index";
 
 const SUPERLANDING_API_BASE = "https://api.super-landing.com";
 
@@ -609,7 +610,7 @@ export async function lookupOrdersByPhone(
   phone: string,
   productKeyword?: string
 ): Promise<DateFilterResult> {
-  const normalizedPhone = phone.replace(/[-\s]/g, "");
+  const normalizedPhone = normalizePhoneDigits(phone);
   console.log("[一頁商店] 以手機號碼全域搜尋:", normalizedPhone, productKeyword ? `關鍵字: ${productKeyword}` : "");
 
   let allMatched: OrderInfo[] = [];
@@ -618,7 +619,7 @@ export async function lookupOrdersByPhone(
   const perPage = 200;
   const parallelBatch = 5;
 
-  /** Phase 2.9：各日期視窗皆掃完並合併去重，不可「第一個視窗命中就 break」以免漏單 */
+  /** Phase 106：視窗內仍完整掃描；一旦任一視窗結束後已命中手機訂單，不再掃更大視窗（加速 live 路徑） */
   const dateWindows = [
     { days: 1, label: "今天" },
     { days: 3, label: "3天" },
@@ -683,7 +684,7 @@ export async function lookupOrdersByPhone(
       for (const orders of batchResults) {
         totalScanned += orders.length;
         for (const o of orders) {
-          const orderPhone = o.buyer_phone.replace(/[-\s]/g, "");
+          const orderPhone = normalizePhoneDigits(o.buyer_phone || "");
           if (orderPhone === normalizedPhone) {
             byOrderId.set(o.global_order_id, o);
             windowHits++;
@@ -697,6 +698,17 @@ export async function lookupOrdersByPhone(
     console.log(
       `[一頁商店] ${window.label}窗口掃描完成，本視窗手機命中 ${windowHits} 筆（累計不重複 ${byOrderId.size}）`
     );
+
+    if (byOrderId.size > 0) {
+      const remaining = dateWindows
+        .slice(dateWindows.indexOf(window) + 1)
+        .map((w) => w.label)
+        .join("、");
+      console.log(
+        `[一頁商店] ${window.label}視窗已找到 ${byOrderId.size} 筆，提前結束（不掃 ${remaining || "（無）"}）`
+      );
+      break;
+    }
   }
 
   const uniqueOrders = Array.from(byOrderId.values());

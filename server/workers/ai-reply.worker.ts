@@ -48,9 +48,9 @@ async function callInternalRunAiReply(payload: {
   });
   if (res.status === 504) {
     console.log(
-      "[Worker] run-ai-reply timeout (504) contactId=" +
+      "[ai-reply.worker] internal API soft timeout (504) contactId=" +
         payload.contactId +
-        " - already escalated to human, marking job as done"
+        " — fallback message already pushed by routes layer; job completes without retry"
     );
     return;
   }
