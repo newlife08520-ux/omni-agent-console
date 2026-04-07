@@ -374,6 +374,78 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
       return JSON.stringify({ success: true, message: "已轉接人工客服，AI 不再回覆此對話。" });
     }
 
+    if (toolName === "mark_form_submitted") {
+      const formType = String(args.form_type || "").trim();
+      if (!["cancel", "return", "exchange"].includes(formType)) {
+        return JSON.stringify({
+          success: false,
+          error: "invalid_form_type",
+        });
+      }
+
+      if (!context?.contactId) {
+        return JSON.stringify({ success: false, error: "missing_contact" });
+      }
+
+      const contactRow = storage.getContact(context.contactId);
+      const expected = contactRow?.waiting_for_customer?.trim() || "";
+      if (!expected.endsWith("_form_submit")) {
+        return JSON.stringify({
+          success: false,
+          error: "not_waiting_form",
+          sys_note: "目前並非等待表單回填狀態，不要呼叫此工具。",
+        });
+      }
+      const expectedType = expected.replace(/_form_submit$/, "");
+      if (expectedType !== formType) {
+        return JSON.stringify({
+          success: false,
+          error: "form_type_mismatch",
+          sys_note: `目前等待的是「${expectedType}」表單回填，請使用 form_type="${expectedType}"。`,
+        });
+      }
+
+      const formTypeZh =
+        formType === "cancel" ? "取消" : formType === "return" ? "退貨" : "換貨";
+
+      storage.updateContactHumanFlag(context.contactId, 1);
+      storage.updateContactStatus(context.contactId, "awaiting_human");
+      storage.updateContactConversationFields(context.contactId, { waiting_for_customer: null });
+
+      storage.createCaseNotification(context.contactId, "in_app", {
+        type: "form_submitted",
+        form_type: formType,
+        priority: "high",
+        message: `客戶回報已填寫 ${formTypeZh} 表單，請盡快處理`,
+      });
+
+      const plat = context.platform || contactRow?.platform || "line";
+      storage.createMessage(
+        context.contactId,
+        plat,
+        "system",
+        `[表單提交] 客戶回報已填寫${formTypeZh}表單`
+      );
+
+      const bid = contactRow?.brand_id ?? undefined;
+      if (bid != null) {
+        broadcastSSE("contacts_updated", { brand_id: bid });
+        broadcastSSE("new_message", { contact_id: context.contactId, brand_id: bid });
+      } else {
+        broadcastSSE("contacts_updated", {});
+        broadcastSSE("new_message", { contact_id: context.contactId });
+      }
+
+      console.log(`[mark_form_submitted] contact=${context.contactId} type=${formType}`);
+
+      return JSON.stringify({
+        success: true,
+        form_type: formType,
+        message:
+          "表單提交已記錄，已通知專員。請回覆客人「好的～收到囉，已經幫您加急處理 🙏 專員會盡快主動聯繫您確認後續」",
+      });
+    }
+
     if (toolName === "send_image_to_customer") {
       const imageName = (args.image_name || "").trim();
       const textMessage = (args.text_message || "").trim();

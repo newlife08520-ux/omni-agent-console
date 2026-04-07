@@ -3,9 +3,15 @@
  */
 import type OpenAI from "openai";
 import type { AgentScenario, ScenarioOverrideEntry } from "./phase1-types";
-import { orderLookupTools, humanHandoffTools, imageTools, productRecommendTools } from "../openai-tools";
+import { orderLookupTools, humanHandoffTools, formWorkflowTools, imageTools, productRecommendTools } from "../openai-tools";
 
-const ALL_REGISTRY_TOOLS = [...orderLookupTools, ...humanHandoffTools, ...imageTools, ...productRecommendTools];
+const ALL_REGISTRY_TOOLS = [
+  ...orderLookupTools,
+  ...humanHandoffTools,
+  ...formWorkflowTools,
+  ...imageTools,
+  ...productRecommendTools,
+];
 const TOOL_BY_NAME = new Map<string, OpenAI.Chat.Completions.ChatCompletionTool>(
   ALL_REGISTRY_TOOLS.map((t) => [(t.type === "function" ? t.function?.name : "") || "", t]).filter(([n]) => n) as [
     string,
@@ -25,7 +31,7 @@ export function filterToolsForScenario(
   scenario: AgentScenario,
   opts: { hasImageAssets: boolean; allowAfterSalesOrderVerify?: boolean }
 ): OpenAI.Chat.Completions.ChatCompletionTool[] {
-  const handoff = [...humanHandoffTools];
+  const handoff = [...humanHandoffTools, ...formWorkflowTools];
   const allowOrderInAfterSales = opts.allowAfterSalesOrderVerify === true;
 
   switch (scenario) {

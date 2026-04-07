@@ -389,6 +389,44 @@ export interface EnrichedPromptContext {
   logisticsHintOverride?: string;
   /** Phase 1.5：scenario_overrides 自 phase1_agent_ops_json */
   scenarioOverrides?: Partial<Record<AgentScenario, ScenarioOverrideEntry>>;
+  /** contacts.waiting_for_customer，例如 cancel_form_submit（給 AI 判斷是否呼叫 mark_form_submitted） */
+  waitingForCustomer?: string | null;
+}
+
+/** 動態注入：正在等客人填表時，提示 AI 用工具記錄「填好了」 */
+export function buildWaitingFormStatusPrompt(waitingForCustomer: string | null | undefined): string {
+  const waiting = waitingForCustomer?.trim() || "";
+  if (!waiting || !waiting.endsWith("_form_submit")) return "";
+
+  const formType = waiting.split("_")[0];
+  const formTypeZh =
+    formType === "cancel" ? "取消" : formType === "return" ? "退貨" : formType === "exchange" ? "換貨" : "";
+  if (!formTypeZh) return "";
+
+  return `
+
+【⚠️ 目前狀態：等待客人填${formTypeZh}表單】
+
+你之前已經給了客人${formTypeZh}表單連結。現在請特別注意客人下一句的真實意圖：
+
+✅ 如果客人「真的明確表達已經填完表單」：
+- 例如「我填好了」「填完了」「填寫送出了」「OK 填好了」「都填了」
+- → 呼叫 mark_form_submitted 工具，form_type="${formType}"
+- → 然後回覆「好的～收到囉，已經幫您加急處理 🙏 專員會盡快主動聯繫您」
+
+❌ 如果客人說的是其他意思，不要呼叫 mark_form_submitted：
+- 「算了 改成整筆取消好了」→ 客人改主意了，給取消表單
+- 「錢還是不夠」→ 客人在補充原因，繼續陪聊
+- 「填不出來」「不會填」→ 客人遇到困難，問是否要轉真人協助
+- 「填到一半卡住」→ 協助客人或問是否要轉真人
+- 「等等 我想換成換貨」→ 改主意，給換貨表單
+- 客人問其他不相關的事 → 正常回應
+
+判斷原則：要客人「明確表達填寫完成」才呼叫工具，
+模糊、含糊、或其他話題都不要呼叫。
+
+如果不確定，寧可問客人「請問您的表單填好了嗎？」也不要亂呼叫工具。
+`;
 }
 
 export interface EnrichedPromptResult {
@@ -526,6 +564,7 @@ export async function assembleEnrichedSystemPrompt(
       context.selectedScenario === "PRODUCT_CONSULT" ||
       context.selectedScenario === "GENERAL");
   const marketingBlock = allowMarketing ? buildMarketingPrompt(brandId, context?.userMessage) : "";
+  const waitingFormBlock = buildWaitingFormStatusPrompt(context?.waitingForCustomer ?? null);
   const knowledgeBlock =
     orderLookupDiet || skipKnowledge ? "" : buildKnowledgePrompt(brandId, knowledgeMax, context?.userMessage, context?.planMode);
   const imageBlock = buildImagePrompt(brandId);
@@ -567,6 +606,7 @@ export async function assembleEnrichedSystemPrompt(
     scenarioFlowContext +
     catalogBlock +
     marketingBlock +
+    waitingFormBlock +
     knowledgeBlock +
     imageBlock;
   const full_prompt = normalizeSections(raw);

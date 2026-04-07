@@ -145,6 +145,33 @@ export const productRecommendTools: OpenAI.Chat.Completions.ChatCompletionTool[]
   },
 ];
 
+/** 表單回填完成：由 AI 依對話脈絡呼叫，勿用 regex 硬判 */
+export const formWorkflowTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "mark_form_submitted",
+      description:
+        "當客人明確表達已經填完退貨/換貨/取消表單時呼叫此工具。" +
+        "系統會自動把對話標記為待專員處理，並通知後台。" +
+        "⚠️ 必須在客人真的明確說「填好了」「填完了」這類完成意圖時才呼叫。" +
+        "如果客人是改主意、問問題、補充原因等其他意圖，絕對不要呼叫此工具。" +
+        "呼叫後請回客人「好的～收到囉，已經幫您加急處理 🙏 專員會盡快主動聯繫您」。",
+      parameters: {
+        type: "object",
+        properties: {
+          form_type: {
+            type: "string",
+            enum: ["cancel", "return", "exchange"],
+            description: "表單類型：cancel=取消、return=退貨、exchange=換貨",
+          },
+        },
+        required: ["form_type"],
+      },
+    },
+  },
+];
+
 export const humanHandoffTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   {
     type: "function",

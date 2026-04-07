@@ -68,9 +68,9 @@ describe("filterToolsForScenario", () => {
     expect(names).toContain("recommend_products");
   });
 
-  it("GENERAL 有轉人工與商品推薦", () => {
+  it("GENERAL 有轉人工、表單完成標記與商品推薦", () => {
     const names = listToolNamesForScenario("GENERAL", { hasImageAssets: false });
-    expect(names).toEqual(["transfer_to_human", "recommend_products"]);
+    expect(names).toEqual(["transfer_to_human", "mark_form_submitted", "recommend_products"]);
   });
 });
 

@@ -19,7 +19,6 @@ import {
   isEligibleReturnFormFollowupResumeContact,
   isAiServiceRequest,
   shouldUnlockHandoffForCancelFlowFollowup,
-  isFormSubmittedNotification,
 } from "../conversation-state-resolver";
 import { buildReplyPlan, shouldNotLeadWithOrderLookup, type ReplyPlanMode } from "../reply-plan-builder";
 import {
@@ -80,7 +79,7 @@ import {
   FALLBACK_AFTER_SALE_LINE_LABEL,
   SHORT_IMAGE_FALLBACK,
 } from "../safe-after-sale-classifier";
-import { orderLookupTools, humanHandoffTools, imageTools, productRecommendTools } from "../openai-tools";
+import { orderLookupTools, humanHandoffTools, formWorkflowTools, imageTools, productRecommendTools } from "../openai-tools";
 import { parsePhase1BrandFlags, isPhase1Active } from "./phase1-brand-config";
 import { runHybridIntentRouter, mapPlanToPhase1Scenario, computePhase15HardRoute, type HybridRouterInput } from "./intent-router.service";
 import type { HybridRouteResult, Phase1BrandFlags } from "./phase1-types";
@@ -320,75 +319,6 @@ export function createAiReplyService(deps: AiReplyDeps) {
 
   function formTypeToZh(formType: "cancel" | "return" | "exchange"): string {
     return formType === "cancel" ? "取消" : formType === "return" ? "退貨" : "換貨";
-  }
-
-  async function handleCustomerReportedFormSubmitted(
-    contact: Contact,
-    userMessage: string,
-    channelToken: string | null | undefined,
-    platform: string | undefined,
-    startTime: number,
-    effectiveBrandIdForLog: number | undefined
-  ): Promise<void> {
-    const c = storage.getContact(contact.id);
-    const w = c?.waiting_for_customer;
-    if (!w?.endsWith("_form_submit") || !isFormSubmittedNotification(userMessage)) return;
-    const raw = w.replace(/_form_submit$/, "");
-    if (raw !== "cancel" && raw !== "return" && raw !== "exchange") return;
-    const formType = raw as "cancel" | "return" | "exchange";
-    const formTypeZh = formTypeToZh(formType);
-
-    storage.updateContactHumanFlag(contact.id, 1);
-    storage.updateContactStatus(contact.id, "awaiting_human");
-    storage.updateContactConversationFields(contact.id, { waiting_for_customer: null });
-
-    storage.createCaseNotification(contact.id, "in_app", {
-      type: "form_submitted",
-      form_type: formType,
-      priority: "high",
-      message: `客戶回報已填寫 ${formTypeZh} 表單，請盡快處理`,
-    });
-
-    const contactPlatform = platform || contact.platform || "line";
-    const sysBody = `[表單提交] 客戶回報已填寫${formTypeZh}表單`;
-    const sysMsg = storage.createMessage(contact.id, contactPlatform, "system", sysBody);
-    broadcastSSE("new_message", { contact_id: contact.id, message: sysMsg, brand_id: contact.brand_id });
-    broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-
-    const ackText =
-      "好的～收到囉，已經幫您加急處理 🙏 專員會盡快主動聯繫您確認後續，有任何問題隨時跟我說！";
-
-    if (contactPlatform === "messenger" && channelToken) {
-      await sendFBMessage(channelToken, contact.platform_user_id, ackText);
-    } else {
-      const token = channelToken || getLineTokenForContact(contact);
-      if (token) {
-        await pushLineMessage(contact.platform_user_id, [{ type: "text", text: ackText }], token);
-      }
-    }
-
-    const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", ackText);
-    broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: contact.brand_id });
-    broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-
-    storage.createAiLog({
-      contact_id: contact.id,
-      message_id: aiMsg.id,
-      brand_id: effectiveBrandIdForLog,
-      prompt_summary: userMessage.slice(0, 200),
-      knowledge_hits: [],
-      tools_called: ["form_submitted_ack"],
-      transfer_triggered: true,
-      transfer_reason: `form_submitted:${formType}`,
-      result_summary: "客戶回報表單已填，標記待人工＋確認回覆",
-      token_usage: 0,
-      model: "form-tracking",
-      response_time_ms: Date.now() - startTime,
-      reply_source: "form_submitted_ack",
-      used_llm: 0,
-      plan_mode: null,
-      reason_if_bypassed: null,
-    });
   }
 
   function mergeStreamDelta(
@@ -649,7 +579,7 @@ ${contextStr}
 
       const effectiveBrandId = contact?.brand_id;
       const hasImageAssets = storage.getImageAssets(effectiveBrandId || undefined).length > 0;
-      const allTools = [...orderLookupTools, ...humanHandoffTools, ...productRecommendTools, ...(hasImageAssets ? imageTools : [])];
+      const allTools = [...orderLookupTools, ...humanHandoffTools, ...formWorkflowTools, ...productRecommendTools, ...(hasImageAssets ? imageTools : [])];
 
       const openai = new OpenAI({ apiKey });
       let completion = await openai.chat.completions.create({
@@ -735,22 +665,6 @@ ${contextStr}
       console.log(`[phase26_latency] queue_wait_ms=${queueWaitMs} contact=${contact.id}`);
     }
     const effectiveBrandIdForLog = contact.brand_id || brandId;
-
-    const latestForForm = storage.getContact(contact.id);
-    if (
-      latestForForm?.waiting_for_customer?.endsWith("_form_submit") &&
-      isFormSubmittedNotification(userMessage)
-    ) {
-      await handleCustomerReportedFormSubmitted(
-        contact,
-        userMessage,
-        channelToken ?? null,
-        platform,
-        startTime,
-        effectiveBrandIdForLog ?? undefined
-      );
-      return;
-    }
 
     const freshCheck = storage.getContact(contact.id);
     const recentBodiesForHandoffUnlock = storage
@@ -881,6 +795,8 @@ ${contextStr}
 
     const toolsCalled: string[] = [];
     let transferTriggered = false;
+    /** mark_form_submitted 成功：改走 LLM 確認稿，不要用通用轉人工罐頭句蓋掉 */
+    let formSubmitMarkedThisTurn = false;
     let transferReason: string | undefined;
     let totalTokens = 0;
     let orderLookupFailed = 0;
@@ -1132,7 +1048,7 @@ ${contextStr}
           );
           names = atools.map((t) => (t.type === "function" ? t.function?.name : "") || "").filter(Boolean);
         } else {
-          const allT = [...orderLookupTools, ...humanHandoffTools, ...(hasImageAssets ? imageTools : [])];
+          const allT = [...orderLookupTools, ...humanHandoffTools, ...formWorkflowTools, ...(hasImageAssets ? imageTools : [])];
           names = allT.map((t) => (t.type === "function" ? t.function?.name : "") || "").filter(Boolean);
         }
         return buildPhase1AiLogExtras({
@@ -1391,6 +1307,8 @@ ${contextStr}
         );
       const scenarioIso =
         isPhase1Active(phase1Flags) && phase1Flags.scenario_isolation && phase1Route != null;
+      const waitingForCustomerSnap =
+        storage.getContact(contact.id)?.waiting_for_customer ?? contact.waiting_for_customer ?? null;
       const enrichedPack = await assembleEnrichedSystemPrompt(contact.brand_id || brandId || undefined, {
         planMode: plan.mode,
         userMessage,
@@ -1400,6 +1318,7 @@ ${contextStr}
         scenarioIsolationEnabled: scenarioIso,
         logisticsHintOverride: phase1Flags.logistics_hint_override,
         scenarioOverrides: isPhase1Active(phase1Flags) ? phase1Flags.scenario_overrides : undefined,
+        waitingForCustomer: waitingForCustomerSnap,
       });
       console.log(
         `[prompt_profile=${enrichedPack.prompt_profile}] prompt_chars=${enrichedPack.prompt_chars} catalog_included=${enrichedPack.includes.catalog} knowledge_included=${enrichedPack.includes.knowledge} image_included=${enrichedPack.includes.image} prompt_sections=${enrichedPack.sections.map((s) => s.key).join("|")} prompt_assembly_ms=${Date.now() - startTime}`
@@ -2253,6 +2172,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             const toolResultBlocks: ContentBlockParam[] = [];
             let orderLookupDeterministicReply: string | null = null;
             const deterministicCandidates: { fnName: string; pr: Record<string, unknown> }[] = [];
+            let markFormSubmittedSuccessThisRound = false;
             for (const { toolCall, toolResult } of toolResults) {
               toolResultBlocks.push({
                 type: "tool_result",
@@ -2297,6 +2217,20 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
                 }
               }
 
+              if (fnName === "mark_form_submitted") {
+                try {
+                  const parsed = JSON.parse(toolResult) as { success?: boolean };
+                  if (parsed.success === true) {
+                    markFormSubmittedSuccessThisRound = true;
+                    formSubmitMarkedThisTurn = true;
+                    transferTriggered = true;
+                    transferReason = `form_submitted:${fnArgs.form_type || ""}`;
+                  }
+                } catch (_e) {
+                  /* ignore */
+                }
+              }
+
               if (fnName.includes("lookup_order")) {
                 try {
                   const parsed = JSON.parse(toolResult);
@@ -2325,7 +2259,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             claudeConversation.push({ role: "user", content: toolResultBlocks });
 
             const freshContact = storage.getContact(contact.id);
-            if (freshContact?.needs_human) break;
+            if (freshContact?.needs_human && !markFormSubmittedSuccessThisRound) break;
 
             if (orderLookupDeterministicReply) {
               secondLlmSkipped = true;
@@ -2526,6 +2460,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
 
           let orderLookupDeterministicReplyOai: string | null = null;
           const deterministicCandidatesOai: { fnName: string; pr: Record<string, unknown> }[] = [];
+          let markFormSubmittedSuccessOaiRound = false;
           for (const { toolCall, toolResult } of toolResultsOai) {
             chatMessages.push({ role: "tool", tool_call_id: toolCall.id, content: toolResult });
             const fn = (toolCall as { function?: { name?: string; arguments?: string } }).function;
@@ -2566,6 +2501,20 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
               }
             }
 
+            if (fnName === "mark_form_submitted") {
+              try {
+                const parsed = JSON.parse(toolResult) as { success?: boolean };
+                if (parsed.success === true) {
+                  markFormSubmittedSuccessOaiRound = true;
+                  formSubmitMarkedThisTurn = true;
+                  transferTriggered = true;
+                  transferReason = `form_submitted:${fnArgs.form_type || ""}`;
+                }
+              } catch (_e) {
+                /* ignore */
+              }
+            }
+
             if (fnName.includes("lookup_order")) {
               try {
                 const parsed = JSON.parse(toolResult);
@@ -2592,7 +2541,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           }
 
           const freshContactLoop = storage.getContact(contact.id);
-          if (freshContactLoop?.needs_human) break;
+          if (freshContactLoop?.needs_human && !markFormSubmittedSuccessOaiRound) break;
 
           if (orderLookupDeterministicReplyOai) {
             secondLlmSkipped = true;
@@ -2659,7 +2608,11 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
       const finalContact = storage.getContact(contact.id);
       /** 若 AI 回覆內容或後處理判定 needs_human，則寫入並轉人工 */
       const shouldSkipPostHandoff = !transferTriggered && state && isAiHandlableIntent(state.primary_intent);
-      if (!shouldSkipPostHandoff && (finalContact?.needs_human || storage.isAiMuted(contact.id) || finalContact?.status === "awaiting_human" || finalContact?.status === "high_risk")) {
+      if (
+        !formSubmitMarkedThisTurn &&
+        !shouldSkipPostHandoff &&
+        (finalContact?.needs_human || storage.isAiMuted(contact.id) || finalContact?.status === "awaiting_human" || finalContact?.status === "high_risk")
+      ) {
         console.log(`[Webhook AI] ???????????? handoff ????? (needs_human=${finalContact?.needs_human}, status=${finalContact?.status})`);
         const recentForHandoff = storage.getMessages(contact.id).slice(-12).map((m: any) => ({ sender_type: m.sender_type, content: m.content, message_type: m.message_type, image_url: m.image_url }));
         const orderInfoForHandoff = searchOrderInfoInRecentMessages(recentForHandoff);
