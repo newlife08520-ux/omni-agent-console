@@ -19,6 +19,76 @@ import { filterOrdersByProductQuery } from "./order-product-filter";
 import { derivePaymentStatus } from "./order-payment-utils";
 import { resolveOrderSourceIntent } from "./order-lookup-policy";
 
+/** Phase 106.3：手機查單預設僅保留近日訂單（關鍵字可關閉）；「其他訂單」不觸發關閉 */
+export const PHONE_ORDER_LOOKUP_MAX_AGE_DAYS = 90;
+
+export function shouldDisablePhoneOrderAgeFilter(userMessage: string, recentUserMessages: string[]): boolean {
+  const tail = (recentUserMessages || []).slice(-5).join(" ");
+  const combined = `${userMessage || ""} ${tail}`;
+  return /(歷史|以前|去年|前年|完整歷史|舊單|全部)/.test(combined);
+}
+
+/** 依訂單建立時間過濾；無法解析時間者保守保留在 kept */
+export function filterOrdersByMaxAge(
+  orders: OrderInfo[],
+  maxAgeDays: number,
+  disableAgeFilter: boolean
+): { kept: OrderInfo[]; filtered: OrderInfo[] } {
+  if (disableAgeFilter || orders.length === 0) {
+    return { kept: orders, filtered: [] };
+  }
+  const cutoffMs = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
+  const kept: OrderInfo[] = [];
+  const filtered: OrderInfo[] = [];
+  for (const o of orders) {
+    const raw = String(o.order_created_at || o.created_at || "").trim();
+    let ms: number | null = null;
+    if (raw) {
+      const t = Date.parse(raw);
+      ms = Number.isNaN(t) ? null : t;
+    }
+    if (ms === null) {
+      kept.push(o);
+      continue;
+    }
+    if (ms >= cutoffMs) kept.push(o);
+    else filtered.push(o);
+  }
+  return { kept, filtered };
+}
+
+function applyPhoneAgeFilterToUnifiedResult(
+  input: UnifiedOrderResult,
+  disableAgeFilter: boolean,
+  phase: string
+): UnifiedOrderResult {
+  if (!input.found || input.orders.length === 0) return input;
+  const before = input.orders.length;
+  const { kept, filtered } = filterOrdersByMaxAge(input.orders, PHONE_ORDER_LOOKUP_MAX_AGE_DAYS, disableAgeFilter);
+  const sampleIds = filtered
+    .slice(0, 5)
+    .map((o) => o.global_order_id || "")
+    .filter(Boolean);
+  console.log("[order-lookup] phone_age_filter_applied", {
+    phase,
+    beforeCount: before,
+    afterCount: kept.length,
+    filteredCount: filtered.length,
+    filteredOrderIdsSample: sampleIds,
+  });
+  if (kept.length === 0 && filtered.length > 0) {
+    console.log("[order-lookup] all_orders_filtered_by_age", { phase, filteredCount: filtered.length });
+    return {
+      ...input,
+      orders: [],
+      found: false,
+      needs_live_confirm: false,
+    };
+  }
+  if (kept.length === before) return input;
+  return { ...input, orders: kept };
+}
+
 /** Phase 30：local_only 表示僅來自本地索引，可能不完整，不可單筆定案 */
 export type DataCoverage = "local_only" | "api_only" | "merged_local_api";
 
@@ -442,7 +512,9 @@ export async function unifiedLookupByPhoneGlobal(
   /** Phase 2.1：前台查單時傳 false，不搜其他品牌、不污染當前品牌 cache/index */
   allowCrossBrand = true,
   /** Phase 33：跳過本地索引與 cache 早退，強制 live API（「全部訂單」展開等） */
-  bypassLocalIndex = false
+  bypassLocalIndex = false,
+  /** Phase 106.3：為 true 時不套用 90 天過濾（客人明示要看歷史／舊單等） */
+  disableAgeFilter = false
 ): Promise<UnifiedOrderResult> {
   const phoneNorm = normalizePhone(phone);
   if (phoneNorm && brandId && !bypassLocalIndex) {
@@ -454,27 +526,49 @@ export async function unifiedLookupByPhoneGlobal(
           ? cacheKeyPhone(brandId, phoneNorm, "superlanding")
           : cacheKeyPhone(brandId, phoneNorm, "any");
     const cached = getOrderLookupCache(localCacheKey);
-    if (cached?.found) return cached as UnifiedOrderResult;
+    if (cached?.found) {
+      const afterCache = applyPhoneAgeFilterToUnifiedResult(cached as UnifiedOrderResult, disableAgeFilter, "cache_read");
+      if (afterCache.found && afterCache.orders.length > 0) return afterCache;
+    }
 
     const mergedLocal = getOrdersByPhoneMerged(brandId, phone);
     if (mergedLocal.length > 0) {
       const ordersSorted = sortLocalPhoneHitsByPreferredSource(mergedLocal, preferSource);
-      const src = ordersSorted.every((o) => o.source === "shopline")
-        ? "shopline"
-        : ordersSorted.every((o) => o.source === "superlanding")
-          ? "superlanding"
-          : "unknown";
-      const single = ordersSorted.length === 1;
-      const result: UnifiedOrderResult = {
-        orders: ordersSorted,
-        source: src,
-        found: true,
-        data_coverage: "local_only",
-        coverage_confidence: single ? "low" : "medium",
-        needs_live_confirm: single,
-      };
-      setOrderLookupCache(localCacheKey, result);
-      return result;
+      const { kept, filtered } = filterOrdersByMaxAge(ordersSorted, PHONE_ORDER_LOOKUP_MAX_AGE_DAYS, disableAgeFilter);
+      const sampleIds = filtered
+        .slice(0, 5)
+        .map((o) => o.global_order_id || "")
+        .filter(Boolean);
+      console.log("[order-lookup] phone_age_filter_applied", {
+        phase: "local_merged",
+        beforeCount: ordersSorted.length,
+        afterCount: kept.length,
+        filteredCount: filtered.length,
+        filteredOrderIdsSample: sampleIds,
+      });
+      if (kept.length === 0 && filtered.length > 0) {
+        console.log("[order-lookup] all_orders_filtered_by_age", {
+          phase: "local_merged",
+          filteredCount: filtered.length,
+        });
+      } else if (kept.length > 0) {
+        const src = kept.every((o) => o.source === "shopline")
+          ? "shopline"
+          : kept.every((o) => o.source === "superlanding")
+            ? "superlanding"
+            : "unknown";
+        const single = kept.length === 1;
+        const result: UnifiedOrderResult = {
+          orders: kept,
+          source: src,
+          found: true,
+          data_coverage: "local_only",
+          coverage_confidence: single ? "low" : "medium",
+          needs_live_confirm: single,
+        };
+        setOrderLookupCache(localCacheKey, result);
+        return result;
+      }
     }
   }
 
@@ -570,6 +664,7 @@ export async function unifiedLookupByPhoneGlobal(
       result = { orders: [], source: "unknown", found: false };
     }
   }
+  result = applyPhoneAgeFilterToUnifiedResult(result, disableAgeFilter, "live_pipeline_final");
   if (result.found && result.orders.length > 0 && phoneNorm && brandId && !result.crossBrand) {
     const cachePayload = {
       orders: result.orders,

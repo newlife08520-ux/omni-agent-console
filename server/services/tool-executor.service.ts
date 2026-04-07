@@ -13,6 +13,7 @@ import {
   unifiedLookupByPhoneGlobal,
   getUnifiedStatusLabel,
   getPaymentInterpretationForAI,
+  shouldDisablePhoneOrderAgeFilter,
 } from "../order-service";
 import { shouldBypassLocalPhoneIndex } from "../order-lookup-policy";
 import { packDeterministicMultiOrderToolResult } from "../order-multi-renderer";
@@ -22,6 +23,7 @@ import {
   payKindForOrder,
   customerFacingStatusLabel,
   customerFacingPaymentLabel,
+  formatExtendedOrderList,
 } from "../order-reply-utils";
 import { packDeterministicSingleOrderToolResult } from "../order-single-renderer";
 import { orderDeterministicContractFields } from "../deterministic-order-contract";
@@ -45,6 +47,11 @@ const SYS_NOTE_ORDER_ONE_PAGE_FULL_STRICT =
 /** Phase 106：local 命中時對客仍給完整卡片，僅在摘要末附快取免責 */
 export const ORDER_LOOKUP_LOCAL_CACHE_DISCLAIMER =
   "\n\n*(註：此為系統快取資料，最新出貨狀態以物流端為準)*";
+
+/** Phase 106.3：手機查單在此筆數內以完整卡片直出（可調整） */
+const LOOKUP_PHONE_FULL_CARD_THRESHOLD = 3;
+
+const PHONE_LOOKUP_INTRO_SINGLE = "依您留的手機查到的訂單如下：\n\n";
 
 function normalizeOrderSourceForOnePage(raw: string | undefined): OrderSource {
   if (raw === "shopline" || raw === "superlanding" || raw === "unknown") return raw;
@@ -1578,13 +1585,18 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           context?.recentUserMessages ?? [],
           actBypass ?? undefined
         );
+        const disableAgeFilter = shouldDisablePhoneOrderAgeFilter(
+          context?.userMessage ?? "",
+          context?.recentUserMessages ?? []
+        );
         const result = await unifiedLookupByPhoneGlobal(
           config,
           phone,
           context?.brandId,
           preferSource,
           false,
-          bypassLocal
+          bypassLocal,
+          disableAgeFilter
         );
         if (!result.found || result.orders.length === 0) {
           const brandForDiag = context?.brandId ? storage.getBrand(context.brandId) : undefined;
@@ -1707,14 +1719,10 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             ? undefined
             : appendFailedPaymentMultiNote(
                 (() => {
-                  if (orders.length <= 3) {
-                    return `【重要】以下共 ${orders.length} 筆訂單。請逐字使用 one_page_full 的完整卡片回覆，禁止改寫成簡表、禁止刪除任何一行。每筆必含：訂單編號、收件人（已隱碼，有則顯示）、電話（已隱碼）、下單時間、商品（若為「暫無明細」也要照寫）、金額、付款、配送、取貨門市或地址、狀態。`;
+                  if (orders.length <= LOOKUP_PHONE_FULL_CARD_THRESHOLD) {
+                    return `【重要】以下共 ${orders.length} 筆訂單。請逐字使用 one_page_full／deterministic_customer_reply 的完整卡片回覆，禁止改寫成簡表、禁止刪除任何一行。`;
                   }
-                  if (orders.length <= 5) {
-                    return `以下共 ${orders.length} 筆訂單。\n簡表：\n${formattedList}\n\n請列出簡表讓客人選擇要看哪一筆。`;
-                  }
-                  const formattedListTop5 = formatOrdersToolFormattedList(orderSummaries.slice(0, 5));
-                  return `此手機共有 ${orders.length} 筆訂單，以下列出最近 5 筆：\n簡表：\n${formattedListTop5}\n\n請問客人要看哪一筆的詳細資訊。`;
+                  return `共 ${orders.length} 筆訂單，已以擴充清單列於 one_page_full／one_page_summary；請完整引用並引導客人回覆訂單編號或「第 N 筆」以查看明細。`;
                 })(),
                 hasFailedPhoneMulti
               );
@@ -1731,30 +1739,28 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           if (pend) partsAgg.push(`${pend} 筆待付款`);
           if (codn) partsAgg.push(`${codn} 筆貨到付款`);
           const aggStr = partsAgg.length ? partsAgg.join("、") : "付款狀態請見下列明細";
-          const sorted = [...orders].sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+          const sorted = [...orders].sort((a, b) =>
+            String(b.created_at || b.order_created_at || "").localeCompare(String(a.created_at || a.order_created_at || ""))
+          );
           const o0 = sorted[0];
           const status0 = getUnifiedStatusLabel(o0.status, o0.source || orderSource);
 
+          const cardSeparator = "\n\n────────\n\n";
           let deterministicReply: string;
           let onePageFullForContext: string | undefined;
+          let lookupPhoneRenderMode: "multi_card_full" | "extended_list";
 
-          if (orders.length <= 3) {
-            const onePageBlocksMulti = orderSummaries.map((o) => formatOrderOnePage(o));
-            onePageFullForContext = onePageBlocksMulti.join("\n\n---\n\n") + localOnlyDisc;
-            deterministicReply =
-              `這個手機號碼下有 ${orders.length} 筆訂單：\n\n` + onePageFullForContext;
-          } else if (orders.length <= 5) {
-            deterministicReply =
-              `這個手機號碼下有 ${orders.length} 筆訂單：\n\n` +
-              formatOrdersToolFormattedList(orderSummaries) +
-              `\n\n要看哪一筆的完整資訊呢？` +
-              localOnlyDisc;
+          if (n <= LOOKUP_PHONE_FULL_CARD_THRESHOLD) {
+            lookupPhoneRenderMode = "multi_card_full";
+            const cardsMulti = orderSummaries.map((o) => formatOrderOnePage(o));
+            const headerMulti = `依您留的手機查到 ${n} 筆訂單：\n\n`;
+            const bodyMulti = cardsMulti.join(cardSeparator);
+            deterministicReply = headerMulti + bodyMulti + localOnlyDisc;
+            onePageFullForContext = deterministicReply;
           } else {
-            deterministicReply =
-              `這個手機號碼下共有 ${orders.length} 筆訂單，最近幾筆是：\n\n` +
-              formatOrdersToolFormattedList(orderSummaries.slice(0, 5)) +
-              `\n\n要看哪一筆的詳細資訊嗎？` +
-              localOnlyDisc;
+            lookupPhoneRenderMode = "extended_list";
+            deterministicReply = formatExtendedOrderList(orders) + localOnlyDisc;
+            onePageFullForContext = deterministicReply;
           }
           const candidates = sorted.map((o) => {
             const src = o.source || orderSource;
@@ -1795,15 +1801,14 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           console.log(
             `[order_lookup] renderer=deterministic lookup=phone_multi n=${n} source=${orderSource}`
           );
-          const formattedListForTool =
-            n <= 3
-              ? undefined
-              : n <= 5
-                ? formattedList
-                : formatOrdersToolFormattedList(orderSummaries.slice(0, 5));
-          /** ≤3 筆：程式直出完整卡片，略過第二輪 LLM（需契約欄位 + deterministic_customer_reply） */
+          /** 2–3 筆：程式直出完整卡片略過第二輪 LLM；4+ 擴充清單交 LLM */
           const usePhoneDeterministic =
-            orderFeatureFlags.phoneOrderDeterministicReply && orders.length <= 3;
+            orderFeatureFlags.phoneOrderDeterministicReply && n <= LOOKUP_PHONE_FULL_CARD_THRESHOLD;
+          console.log("[reply-trace] lookup_phone_render_mode", {
+            contactId: context?.contactId,
+            mode: lookupPhoneRenderMode,
+            orderCount: n,
+          });
           console.log("[reply-trace] lookup_phone_result", {
             contactId: context?.contactId,
             found: true,
@@ -1826,7 +1831,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             ...orderDeterministicContractFields(),
             renderer: "deterministic",
             note: multiOrderNote,
-            formatted_list: formattedListForTool,
+            formatted_list: undefined,
+            one_page_summary: deterministicReply,
             one_page_full: onePageFullForContext ?? `${one_page_full}${localOnlyDisc}`,
             sys_note: SYS_NOTE_ORDER_ONE_PAGE_FULL_STRICT,
           });
@@ -1866,6 +1872,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             paid_at: o0.paid_at,
           };
           const summaryForCtx =
+            PHONE_LOOKUP_INTRO_SINGLE +
             formatOrderOnePage(onePagePayload) +
             (result.data_coverage === "local_only" ? ORDER_LOOKUP_LOCAL_CACHE_DISCLAIMER : "");
           storage.linkOrderForContact(context.contactId, o0.global_order_id, "ai_lookup");
@@ -1917,7 +1924,14 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           const stSingle = getUnifiedStatusLabel(oSingle.status, oSingle.source || orderSource);
           const pkSingle = payKindForOrder(oSingle, stSingle, oSingle.source || orderSource);
           const onePageSummarySingle =
-            singleDeterministicBody + (isLocalOnly ? ORDER_LOOKUP_LOCAL_CACHE_DISCLAIMER : "");
+            PHONE_LOOKUP_INTRO_SINGLE +
+            singleDeterministicBody +
+            (isLocalOnly ? ORDER_LOOKUP_LOCAL_CACHE_DISCLAIMER : "");
+          console.log("[reply-trace] lookup_phone_render_mode", {
+            contactId: context?.contactId,
+            mode: "single_card",
+            orderCount: 1,
+          });
           console.log("[DEBUG_PHONE_DETERMINISTIC]", {
             source: oSingle.source,
             global_order_id: oSingle.global_order_id,
@@ -1974,7 +1988,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           });
         }
         {
-          const ops = orders.length === 1 ? `${onePageBlocks[0]}${localOnlyDisc}` : undefined;
+          const ops =
+            orders.length === 1 ? `${PHONE_LOOKUP_INTRO_SINGLE}${onePageBlocks[0]}${localOnlyDisc}` : undefined;
           console.log("[reply-trace] lookup_phone_result", {
             contactId: context?.contactId,
             found: true,
@@ -2001,8 +2016,11 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
                 : formatOrdersToolFormattedList(orderSummaries.slice(0, 5))
               : undefined,
           one_page_summary:
-            orders.length === 1 ? `${onePageBlocks[0]}${localOnlyDisc}` : undefined,
-          one_page_full: `${one_page_full}${localOnlyDisc}`,
+            orders.length === 1 ? `${PHONE_LOOKUP_INTRO_SINGLE}${onePageBlocks[0]}${localOnlyDisc}` : undefined,
+          one_page_full:
+            orders.length === 1
+              ? `${PHONE_LOOKUP_INTRO_SINGLE}${one_page_full}${localOnlyDisc}`
+              : `${one_page_full}${localOnlyDisc}`,
           sys_note: orders.length > 1 ? SYS_NOTE_ORDER_ONE_PAGE_FULL_STRICT : SYS_NOTE_ORDER_ONE_PAGE_STRICT,
           ...(result.data_coverage ? { data_coverage: result.data_coverage } : {}),
           ...(result.coverage_confidence ? { coverage_confidence: result.coverage_confidence } : {}),

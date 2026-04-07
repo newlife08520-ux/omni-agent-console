@@ -37,6 +37,7 @@ import {
   unifiedLookupByPhoneGlobal,
   getUnifiedStatusLabel,
   shouldPreferShoplineLookup,
+  shouldDisablePhoneOrderAgeFilter,
 } from "../order-service";
 import { packDeterministicMultiOrderToolResult } from "../order-multi-renderer";
 import { tryOrderFastPath, extractOrderIdFromMixedSentence } from "../order-fast-path";
@@ -1688,7 +1689,8 @@ ${contextStr}
               bid29,
               prefer29,
               false,
-              true
+              true,
+              shouldDisablePhoneOrderAgeFilter(msg29, recentUserMsgs)
             );
             if (result29.orders.length > 1) {
               const src29 =

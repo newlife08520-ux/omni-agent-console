@@ -5,6 +5,7 @@
 import type { OrderInfo, ActiveOrderContext } from "@shared/schema";
 import { derivePaymentStatus, isCodPaymentMethod, type PaymentKind } from "./order-payment-utils";
 import { maskName, maskPhone } from "./tool-llm-sanitize";
+import { getUnifiedStatusLabel } from "./order-service";
 
 /** 訂單狀態轉成客人聽得懂的人話 */
 export function customerFacingStatusLabel(raw: string): string {
@@ -337,6 +338,138 @@ export function formatOrderOnePage(o: {
   if (o.shipped_at) lines.push(`出貨時間：${o.shipped_at}`);
 
   return lines.join("\n");
+}
+
+/** 台北時區日期字串（對客用，禁止輸出 ISO raw） */
+export function formatDateTaipei(isoOrRaw: string | null | undefined, pattern: "YYYY-MM-DD"): string {
+  if (pattern !== "YYYY-MM-DD") return "";
+  const raw = String(isoOrRaw ?? "").trim();
+  if (!raw) return "";
+  const t = Date.parse(raw);
+  if (Number.isNaN(t)) return "";
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Taipei",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(t));
+}
+
+const EXT_LIST_NAME_MAX = 20;
+const EXT_LIST_ITEMS_MAX = 2;
+
+function truncateProductNameForList(name: string): string {
+  const t = name.trim();
+  if (t.length <= EXT_LIST_NAME_MAX) return t;
+  return t.slice(0, EXT_LIST_NAME_MAX) + "…";
+}
+
+/** 擴充清單：拆出品項（名稱 + 數量） */
+function parseOrderLineItemsForExtendedList(o: {
+  product_list?: string;
+  items_structured?: unknown;
+}): { name: string; qty: number }[] {
+  let raw: unknown = o.items_structured;
+  if (typeof raw === "string") {
+    const t = raw.trim();
+    if (t.startsWith("[") || t.startsWith("{")) {
+      try {
+        raw = JSON.parse(t) as unknown;
+      } catch {
+        raw = null;
+      }
+    }
+  }
+  const out: { name: string; qty: number }[] = [];
+  if (Array.isArray(raw) && raw.length > 0) {
+    for (const item of raw) {
+      if (item != null && typeof item === "object") {
+        const x = item as Record<string, unknown>;
+        const label = productLineNameFromRow(x);
+        const qty = Number(x.quantity ?? x.qty ?? 1) || 1;
+        if (label) out.push({ name: label, qty });
+      }
+    }
+    if (out.length) return out;
+  }
+  const pl = o.product_list;
+  if (pl == null || !String(pl).trim()) return [];
+  const s = String(pl).trim();
+  if (s.startsWith("[") && s.includes("{")) {
+    try {
+      const arr = JSON.parse(s) as unknown;
+      if (Array.isArray(arr)) {
+        for (const x of arr) {
+          if (x != null && typeof x === "object") {
+            const r = x as Record<string, unknown>;
+            const label = productLineNameFromRow(r);
+            const qty = Number(r.quantity ?? r.qty ?? 1) || 1;
+            if (label) out.push({ name: label, qty });
+          }
+        }
+      }
+    } catch {
+      return [];
+    }
+    return out;
+  }
+  return [];
+}
+
+function formatExtendedProductSummary(o: {
+  product_list?: string;
+  items_structured?: unknown;
+}): string {
+  const rows = parseOrderLineItemsForExtendedList(o);
+  if (rows.length === 0) return "暫無明細";
+  const head = rows.slice(0, EXT_LIST_ITEMS_MAX).map((r) => `${truncateProductNameForList(r.name)} ×${r.qty}`);
+  const joined = head.join(", ");
+  if (rows.length <= EXT_LIST_ITEMS_MAX) return joined;
+  return `${joined}，等 ${rows.length} 項`;
+}
+
+function formatExtendedAmountPaymentLine(o: OrderInfo, statusLabel: string, source: string): string {
+  const amt = o.final_total_order_amount;
+  const amtStr = amt != null && !Number.isNaN(Number(amt)) ? `NT$${Number(amt).toLocaleString()}` : "金額未明";
+  const pk = payKindForOrder(o, statusLabel, source);
+  const pm = displayPaymentMethod(o.payment_method);
+  const isCod =
+    isCodPaymentMethod(o) ||
+    pk.kind === "cod" ||
+    /^cod$/i.test(String(pk.kind || "").trim()) ||
+    /貨到付款|到收/i.test(String(pk.label || ""));
+  let payPart = pm || customerFacingPaymentLabel(pk.label) || customerFacingPaymentLabel(String(pk.kind || ""));
+  if (isCod && (!payPart || payPart === "未付款")) payPart = "貨到付款";
+  if (!payPart) payPart = "未註明";
+  return `金額：${amtStr}｜${payPart}`;
+}
+
+/**
+ * Phase 106.3：手機多筆（4+）擴充清單；每筆 5 行，筆間空一行。
+ * brandContext 保留供日後品牌語氣／幣別擴充。
+ */
+export function formatExtendedOrderList(orders: OrderInfo[], _brandContext?: unknown): string {
+  const blocks: string[] = [];
+  for (const o of orders) {
+    const src = (o.source || "superlanding") as string;
+    const st = getUnifiedStatusLabel(o.status, src);
+    const id = String(o.global_order_id || "").trim() || "—";
+    const dateStr = formatDateTaipei(o.order_created_at || o.created_at, "YYYY-MM-DD") || "—";
+    const recv = String(o.buyer_name || "").trim();
+    const recvLine = recv ? maskName(recv) : "—";
+    const lines = [
+      `${id}｜${dateStr}`,
+      `收件人：${recvLine}`,
+      `商品：${formatExtendedProductSummary(o)}`,
+      formatExtendedAmountPaymentLine(o, st, src),
+      `狀態：${customerFacingStatusLabel(st)}`,
+    ];
+    blocks.push(lines.join("\n"));
+  }
+  return (
+    blocks.join("\n\n") +
+    "\n\n要看哪一筆完整資訊請回覆訂單編號或「第 N 筆」。"
+  );
 }
 
 export function sourceChannelLabel(src: string | undefined): string {
