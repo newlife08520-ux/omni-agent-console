@@ -1389,7 +1389,7 @@ function migrateBrandsAndChannels() {
 
   const channelColNames = db.prepare("PRAGMA table_info(channels)").all() as { name: string }[];
   if (!channelColNames.map(c => c.name).includes("is_ai_enabled")) {
-    db.exec("ALTER TABLE channels ADD COLUMN is_ai_enabled INTEGER NOT NULL DEFAULT 0");
+    db.exec("ALTER TABLE channels ADD COLUMN is_ai_enabled INTEGER NOT NULL DEFAULT 1");
   }
 
   const brandColNames = db.prepare("PRAGMA table_info(brands)").all() as { name: string }[];
@@ -1450,9 +1450,9 @@ function migrateBrandsAndChannels() {
     const lineToken = db.prepare("SELECT value FROM settings WHERE key = 'line_channel_access_token'").get() as { value: string } | undefined;
     const lineSecret = db.prepare("SELECT value FROM settings WHERE key = 'line_channel_secret'").get() as { value: string } | undefined;
     if (lineToken?.value || lineSecret?.value) {
-      db.prepare("INSERT INTO channels (brand_id, platform, channel_name, access_token, channel_secret) VALUES (?, ?, ?, ?, ?)").run(
-        defaultBrandId, "line", "預設 LINE 頻道", lineToken?.value || "", lineSecret?.value || ""
-      );
+      db.prepare(
+        "INSERT INTO channels (brand_id, platform, channel_name, access_token, channel_secret, is_ai_enabled) VALUES (?, ?, ?, ?, ?, 1)"
+      ).run(defaultBrandId, "line", "預設 LINE 頻道", lineToken?.value || "", lineSecret?.value || "");
     }
 
     db.prepare("UPDATE contacts SET brand_id = ? WHERE brand_id IS NULL").run(defaultBrandId);
@@ -1648,6 +1648,38 @@ function migrateProductCatalog() {
     CREATE INDEX IF NOT EXISTS idx_pc_brand ON product_catalog(brand_id);
     CREATE INDEX IF NOT EXISTS idx_pc_search ON product_catalog(brand_id, title);
   `);
+}
+
+/** 啟動時由 index 呼叫（在 Redis→SQLite 同步之後），一次性將全渠道 is_ai_enabled 綁定為開啟；粉專留言 Messenger 除外 */
+export async function runChannelsAiReplyDefaultV1(redis: import("./redis-client").RedisClientLike | null): Promise<void> {
+  try {
+    const marker = db.prepare("SELECT value FROM settings WHERE key = 'migration_channels_ai_reply_v1_done'").get() as
+      | { value: string }
+      | undefined;
+    if (marker?.value === "1") return;
+    const cols = db.prepare("PRAGMA table_info(channels)").all() as { name: string }[];
+    if (!cols.some((c) => c.name === "is_ai_enabled")) return;
+    if (redis) {
+      const { applyChannelsAiReplyV1WithRedis } = await import("./redis-brands-channels");
+      await applyChannelsAiReplyV1WithRedis(redis, db as unknown as import("./redis-brands-channels").BrandsChannelsSqlite);
+    } else {
+      db.exec("UPDATE channels SET is_ai_enabled = 1");
+      const mps = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='meta_page_settings'").get() as
+        | { name: string }
+        | undefined;
+      if (mps) {
+        db.exec(`
+          UPDATE channels SET is_ai_enabled = 0
+          WHERE platform = 'messenger'
+          AND TRIM(COALESCE(bot_id, '')) IN (SELECT TRIM(page_id) FROM meta_page_settings)
+        `);
+      }
+    }
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('migration_channels_ai_reply_v1_done', '1')").run();
+    console.log("[DB] channels：AI 自動回覆已與所有渠道綁定（粉專留言 Messenger 除外）");
+  } catch (e) {
+    console.warn("[DB] runChannelsAiReplyDefaultV1 略過:", e);
+  }
 }
 
 export default db;

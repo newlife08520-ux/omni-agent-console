@@ -38,7 +38,15 @@ export interface IStorage {
   getAgentBrandAssignments(userId: number): AgentBrandAssignment[];
   setAgentBrandAssignments(userId: number, assignments: { brand_id: number; role: AgentBrandRole }[]): void;
   getBrandAssignedAgents(brandId: number): { user_id: number; display_name: string; role: AgentBrandRole }[];
-  createChannel(brandId: number, platform: string, channelName: string, botId?: string, accessToken?: string, channelSecret?: string): Promise<Channel>;
+  createChannel(
+    brandId: number,
+    platform: string,
+    channelName: string,
+    botId?: string,
+    accessToken?: string,
+    channelSecret?: string,
+    opts?: { is_ai_enabled?: number }
+  ): Promise<Channel>;
   updateChannel(id: number, data: Partial<Omit<Channel, "id" | "created_at">>): Promise<boolean>;
   deleteChannel(id: number): Promise<boolean>;
   getContacts(brandId?: number, assignedToUserId?: number, agentIdForFlags?: number, limit?: number, offset?: number): ContactWithPreview[];
@@ -492,22 +500,33 @@ export class SQLiteStorage implements IStorage {
     return rows;
   }
 
-  async createChannel(brandId: number, platform: string, channelName: string, botId?: string, accessToken?: string, channelSecret?: string): Promise<Channel> {
+  async createChannel(
+    brandId: number,
+    platform: string,
+    channelName: string,
+    botId?: string,
+    accessToken?: string,
+    channelSecret?: string,
+    opts?: { is_ai_enabled?: number }
+  ): Promise<Channel> {
     const client = getRedisClient();
     if (client) {
-      const channel = await redisBC.createChannel(client, brandId, platform, channelName, botId, accessToken, channelSecret);
+      const channel = await redisBC.createChannel(client, brandId, platform, channelName, botId, accessToken, channelSecret, opts);
       try {
         db.prepare(`
           INSERT OR REPLACE INTO channels (id, brand_id, platform, channel_name, bot_id, access_token, channel_secret, is_active, is_ai_enabled, created_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(channel.id, channel.brand_id, channel.platform, channel.channel_name, channel.bot_id ?? "", channel.access_token ?? "", channel.channel_secret ?? "", channel.is_active ?? 1, channel.is_ai_enabled ?? 0, channel.created_at ?? "");
+        `).run(channel.id, channel.brand_id, channel.platform, channel.channel_name, channel.bot_id ?? "", channel.access_token ?? "", channel.channel_secret ?? "", channel.is_active ?? 1, channel.is_ai_enabled ?? 1, channel.created_at ?? "");
       } catch (_e) { /* ignore */ }
       return channel;
     }
     const now = new Date().toISOString().replace("T", " ").substring(0, 19);
-    const result = db.prepare("INSERT INTO channels (brand_id, platform, channel_name, bot_id, access_token, channel_secret, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
-      brandId, platform, channelName, botId || "", accessToken || "", channelSecret || "", now
-    );
+    const aiOn = opts?.is_ai_enabled === 0 ? 0 : 1;
+    const result = db
+      .prepare(
+        "INSERT INTO channels (brand_id, platform, channel_name, bot_id, access_token, channel_secret, is_ai_enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+      )
+      .run(brandId, platform, channelName, botId || "", accessToken || "", channelSecret || "", aiOn, now);
     return db.prepare("SELECT * FROM channels WHERE id = ?").get(Number(result.lastInsertRowid)) as Channel;
   }
 

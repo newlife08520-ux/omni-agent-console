@@ -1031,8 +1031,9 @@ export function registerMetaCommentsRoutes(app: Express): void {
           continue;
         }
         try {
-          const channel = await storage.createChannel(bid, "messenger", page_name, page_id, access_token, "");
-          if (channel.is_ai_enabled !== 0) await storage.updateChannel(channel.id, { is_ai_enabled: 0 });
+          const channel = await storage.createChannel(bid, "messenger", page_name, page_id, access_token, "", {
+            is_ai_enabled: 0,
+          });
           const settings = metaCommentsStorage.createMetaPageSettings({
             page_id,
             page_name,

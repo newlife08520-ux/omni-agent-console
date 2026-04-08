@@ -79,7 +79,7 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
 
   const [showChannelDialog, setShowChannelDialog] = useState(false);
   const [editingChannel, setEditingChannel] = useState<Channel | null>(null);
-  const [channelForm, setChannelForm] = useState({ platform: "line" as ChannelPlatform, channel_name: "", bot_id: "", access_token: "", channel_secret: "", is_ai_enabled: 0 });
+  const [channelForm, setChannelForm] = useState({ platform: "line" as ChannelPlatform, channel_name: "", bot_id: "", access_token: "", channel_secret: "", is_ai_enabled: 1 });
   const [channelSaving, setChannelSaving] = useState(false);
   const [channelVerifying, setChannelVerifying] = useState(false);
   const [testingChannel, setTestingChannel] = useState<number | null>(null);
@@ -319,7 +319,7 @@ export function BrandChannelManager({ isSuperAdmin, readOnly = false }: { isSupe
 
   const openAddChannel = () => {
     setEditingChannel(null);
-    setChannelForm({ platform: "line", channel_name: "", bot_id: "", access_token: "", channel_secret: "", is_ai_enabled: 0 });
+    setChannelForm({ platform: "line", channel_name: "", bot_id: "", access_token: "", channel_secret: "", is_ai_enabled: 1 });
     setShowChannelDialog(true);
   };
 

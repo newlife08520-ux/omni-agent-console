@@ -102,6 +102,7 @@ app.use((req, res, next) => {
 
     let store: session.Store | undefined;
 
+    const dbModule = await import("./db");
     if (redisUrl) {
       const redisClient = createClient({ url: redisUrl });
       redisClient.on("error", (err) => console.error("[Redis] error", err));
@@ -113,10 +114,11 @@ app.use((req, res, next) => {
       const { setRedisClient } = await import("./redis-client");
       setRedisClient(redisClient);
       const { syncRedisToSqlite } = await import("./redis-brands-channels");
-      const dbModule = await import("./db");
-      await syncRedisToSqlite(redisClient, dbModule.default as unknown as Parameters<typeof syncRedisToSqlite>[1]);
+      await syncRedisToSqlite(redisClient, dbModule.default as unknown as import("./redis-brands-channels").BrandsChannelsSqlite);
       console.log("[server] Redis 品牌/渠道已同步至 SQLite");
     }
+    const { getRedisClient } = await import("./redis-client");
+    await dbModule.runChannelsAiReplyDefaultV1(getRedisClient());
 
     if (!store && process.env.NODE_ENV !== "production") {
       const MemoryStore = (await import("memorystore")).default;

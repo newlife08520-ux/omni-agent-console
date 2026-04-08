@@ -410,7 +410,7 @@ export function registerSettingsBrandsRoutes(app: Express): void {
     app.post("/api/brands/:id/channels", authMiddleware, managerOrAbove, async (req, res) => {
       const brandId = parseIdParam(req.params.id);
       if (brandId === null) return res.status(400).json({ message: "??? ID" });
-      const { platform, channel_name, bot_id, access_token, channel_secret } = req.body;
+      const { platform, channel_name, bot_id, access_token, channel_secret, is_ai_enabled } = req.body;
       if (!platform || !channel_name) return res.status(400).json({ message: "??????????" });
       if (!["line", "messenger"].includes(platform)) return res.status(400).json({ message: "???? line ? messenger" });
       if (platform === "line" && access_token) {
@@ -419,7 +419,11 @@ export function registerSettingsBrandsRoutes(app: Express): void {
           return res.status(400).json({ message: "LINE Token ????????????" });
         }
       }
-      const channel = await storage.createChannel(brandId, platform, channel_name, bot_id, access_token, channel_secret);
+      const createOpts =
+        is_ai_enabled === false || is_ai_enabled === 0 || is_ai_enabled === "0"
+          ? ({ is_ai_enabled: 0 } as const)
+          : undefined;
+      const channel = await storage.createChannel(brandId, platform, channel_name, bot_id, access_token, channel_secret, createOpts);
       return res.json({ success: true, channel });
     });
 

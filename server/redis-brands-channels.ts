@@ -143,10 +143,12 @@ export async function createChannel(
   channelName: string,
   botId?: string,
   accessToken?: string,
-  channelSecret?: string
+  channelSecret?: string,
+  opts?: { is_ai_enabled?: number }
 ): Promise<Channel> {
   const id = await client.incr(KEY_CHANNELS_NEXT_ID);
   const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+  const aiOn = opts?.is_ai_enabled === 0 ? 0 : 1;
   const channel: Channel = {
     id,
     brand_id: brandId,
@@ -156,7 +158,7 @@ export async function createChannel(
     access_token: accessToken ?? "",
     channel_secret: channelSecret ?? "",
     is_active: 1,
-    is_ai_enabled: 0,
+    is_ai_enabled: aiOn,
     created_at: now,
   };
   const channels = await getChannels(client);
@@ -192,11 +194,13 @@ export async function ensureNextIds(client: RedisClientLike): Promise<void> {
   if (c === null) await client.set(KEY_CHANNELS_NEXT_ID, String(maxChannelId + 1));
 }
 
+/** SQLite 介面（啟動時 sync 用；寬鬆型別以相容 better-sqlite3 Statement） */
+export type BrandsChannelsSqlite = {
+  prepare: (sql: string) => { run: (...args: unknown[]) => unknown; get: (...args: unknown[]) => unknown; all: (...args: unknown[]) => unknown[] };
+};
+
 /** 將 Redis 中的品牌與渠道同步到 SQLite，供 JOIN 與讀取使用（啟動時呼叫一次） */
-export async function syncRedisToSqlite(
-  client: RedisClientLike,
-  db: { prepare: (sql: string) => { run: (...args: unknown[]) => { lastInsertRowid: number | bigint }; get: (...args: unknown[]) => unknown; all: (...args: unknown[]) => unknown[] } }
-): Promise<void> {
+export async function syncRedisToSqlite(client: RedisClientLike, db: BrandsChannelsSqlite): Promise<void> {
   const [brands, channels] = await Promise.all([getBrands(client), getChannels(client)]);
   if (brands.length === 0 && channels.length === 0) return;
 
@@ -213,7 +217,29 @@ export async function syncRedisToSqlite(
     insBrand.run(b.id, b.name, b.slug, b.logo_url ?? "", b.description ?? "", b.system_prompt ?? "", b.superlanding_merchant_no ?? "", b.superlanding_access_key ?? "", b.return_form_url ?? "", b.shopline_store_domain ?? "", b.shopline_api_token ?? "", b.created_at ?? "");
   }
   for (const ch of channels) {
-    insChannel.run(ch.id, ch.brand_id, ch.platform, ch.channel_name, ch.bot_id ?? "", ch.access_token ?? "", ch.channel_secret ?? "", ch.is_active ?? 1, ch.is_ai_enabled ?? 0, ch.created_at ?? "");
+    insChannel.run(ch.id, ch.brand_id, ch.platform, ch.channel_name, ch.bot_id ?? "", ch.access_token ?? "", ch.channel_secret ?? "", ch.is_active ?? 1, ch.is_ai_enabled ?? 1, ch.created_at ?? "");
   }
   await ensureNextIds(client);
+}
+
+/**
+ * 一次性：Redis 內所有渠道 is_ai_enabled=1；粉專留言用 Messenger（bot_id 在 meta_page_settings）維持 0。
+ * 寫回 Redis 後再 syncRedisToSqlite，與 runChannelsAiReplyDefaultV1 搭配使用。
+ */
+export async function applyChannelsAiReplyV1WithRedis(client: RedisClientLike, sqlDb: BrandsChannelsSqlite): Promise<void> {
+  const channels = await getChannels(client);
+  let metaIds = new Set<string>();
+  try {
+    const rows = sqlDb.prepare("SELECT page_id FROM meta_page_settings").all() as { page_id: string }[];
+    metaIds = new Set(rows.map((r) => String(r.page_id || "").trim()).filter(Boolean));
+  } catch {
+    /* meta_page_settings 尚未建立時略過 */
+  }
+  const next = channels.map((ch) => {
+    const bid = String(ch.bot_id || "").trim();
+    const metaOff = ch.platform === "messenger" && metaIds.has(bid);
+    return { ...ch, is_ai_enabled: metaOff ? 0 : 1 };
+  });
+  await client.set(KEY_CHANNELS, JSON.stringify(next));
+  await syncRedisToSqlite(client, sqlDb);
 }
