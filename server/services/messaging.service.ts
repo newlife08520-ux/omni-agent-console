@@ -46,25 +46,29 @@ export function buildRatingFlexMessage(contactId: number, ratingType: "human" | 
     type: "button",
     action: {
       type: "postback",
-      label: `${score} ??`,
+      label: `${score} 分`,
       data: `action=${actionPrefix}&ticket_id=${contactId}&score=${score}`,
-      displayText: `${"?".repeat(score)}`,
+      displayText: `已送出 ${score} 分，謝謝您！`,
     },
     style: "link",
     height: "md",
     flex: 1,
   }));
 
-  const headerText = ratingType === "ai" ? "???? AI ???" : "???????";
-  const bodyText = ratingType === "ai"
-    ? "???? AI ???????"
-    : "????????????????????????";
+  const headerText = ratingType === "ai" ? "請為本次 AI 客服評分" : "請為本次真人客服評分";
+  const bodyText =
+    ratingType === "ai"
+      ? "您的回饋能幫助我們把 AI 回覆調整得更好，謝謝您撥冗。"
+      : "您的回饋能幫助我們改善真人客服品質，謝謝您撥冗。";
   const headerColor = ratingType === "ai" ? "#6366F1" : "#1DB446";
   const bgColor = ratingType === "ai" ? "#F5F3FF" : "#F7FFF7";
 
   return {
     type: "flex",
-    altText: ratingType === "ai" ? "AI ??????????? 1?5 ???" : "????????????? 1?5 ???",
+    altText:
+      ratingType === "ai"
+        ? "請為本次 AI 客服評分，點選 1～5 分"
+        : "請為本次真人客服評分，點選 1～5 分",
     contents: {
       type: "bubble",
       size: "kilo",
@@ -73,7 +77,7 @@ export function buildRatingFlexMessage(contactId: number, ratingType: "human" | 
         layout: "vertical",
         contents: [
           { type: "text", text: headerText, weight: "bold", size: "lg", color: headerColor, align: "center" },
-          { type: "text", text: "??????????", size: "xs", color: "#888888", align: "center", margin: "4px" },
+          { type: "text", text: "約十秒即可完成", size: "xs", color: "#888888", align: "center", margin: "4px" },
         ],
         paddingAll: "16px",
         backgroundColor: bgColor,
@@ -84,9 +88,9 @@ export function buildRatingFlexMessage(contactId: number, ratingType: "human" | 
         contents: [
           { type: "text", text: bodyText, size: "sm", color: "#333333", wrap: true, align: "center" },
           { type: "separator", margin: "lg" },
-          { type: "text", text: "1 ? ??????5 ? ????", size: "xs", color: "#666666", align: "center", margin: "sm" },
-          { type: "text", text: "?????1 ??????? 5 ??????", size: "xs", color: "#1DB446", align: "center", margin: "4px", weight: "bold" },
-          { type: "text", text: "???????????????????", size: "xs", color: "#AAAAAA", align: "center", margin: "4px" },
+          { type: "text", text: "1 分代表最不滿意，5 分代表最滿意", size: "xs", color: "#666666", align: "center", margin: "sm" },
+          { type: "text", text: "請點選下方 1～5 分按鈕完成評分", size: "xs", color: "#1DB446", align: "center", margin: "4px", weight: "bold" },
+          { type: "text", text: "僅作為內部服務改善，不會公開顯示", size: "xs", color: "#AAAAAA", align: "center", margin: "4px" },
         ],
         paddingAll: "16px",
       },
