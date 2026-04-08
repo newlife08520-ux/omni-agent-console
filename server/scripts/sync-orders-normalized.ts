@@ -189,6 +189,61 @@ export async function runOrderSync(options?: {
   return { synced: totalSynced, errors: totalErrors };
 }
 
+/** Phase 106.8：per-brand 深度同步互斥，避免上一輪未完成又重入 */
+const deepSyncLocks = new Map<string, boolean>();
+
+/**
+ * Phase 106.8：近 45 天深度同步；多 brand 序列化、brand 間隔 30 秒；無 SL／Shopline 設定的 brand 跳過。
+ */
+export async function runDeepOrderSync(): Promise<void> {
+  console.log("[Deep Sync] === 啟動 45 天深度同步 ===");
+  const startTime = Date.now();
+
+  const brands = storage.getBrands();
+
+  for (let i = 0; i < brands.length; i++) {
+    const brand = brands[i];
+    const lockKey = String(brand.id);
+
+    if (deepSyncLocks.get(lockKey)) {
+      console.log(`[Deep Sync] Brand ${brand.id} 上一輪未結束，跳過`);
+      continue;
+    }
+
+    deepSyncLocks.set(lockKey, true);
+    try {
+      if (brand.superlanding_merchant_no && brand.superlanding_access_key) {
+        console.log(`[Deep Sync] Brand ${brand.id} SL 開始 (45 天)`);
+        const t = Date.now();
+        await runOrderSync({ brandId: brand.id, days: 45, shopline: false });
+        console.log(`[Deep Sync] Brand ${brand.id} SL 完成 ${Date.now() - t}ms`);
+      } else {
+        console.log(`[Deep Sync] Brand ${brand.id} 無 SL 設定，跳過`);
+      }
+
+      if (brand.shopline_store_domain && brand.shopline_api_token) {
+        console.log(`[Deep Sync] Brand ${brand.id} Shopline 開始 (45 天)`);
+        const t = Date.now();
+        await runOrderSync({ brandId: brand.id, days: 45, shopline: true, superlanding: false });
+        console.log(`[Deep Sync] Brand ${brand.id} Shopline 完成 ${Date.now() - t}ms`);
+      } else {
+        console.log(`[Deep Sync] Brand ${brand.id} 無 Shopline 設定，跳過`);
+      }
+    } catch (error) {
+      console.error(`[Deep Sync] Brand ${brand.id} 失敗:`, error);
+    } finally {
+      deepSyncLocks.set(lockKey, false);
+    }
+
+    if (i < brands.length - 1) {
+      console.log("[Deep Sync] 等 30 秒處理下一個 brand");
+      await new Promise((r) => setTimeout(r, 30000));
+    }
+  }
+
+  console.log(`[Deep Sync] === 全部完成，總耗時 ${Date.now() - startTime}ms ===`);
+}
+
 function isDirectCliRun(): boolean {
   const entry = process.argv[1];
   if (!entry) return false;

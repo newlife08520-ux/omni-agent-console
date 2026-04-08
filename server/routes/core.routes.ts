@@ -871,6 +871,18 @@ export function registerCoreRoutes(app: Express): void {
       }
     });
 
+    /** super_admin 或 ADMIN_DEBUG_TOKEN：45 天深度同步（fire-and-forget，請看 server log） */
+    app.post("/api/admin/trigger-deep-sync", superAdminOrDebugToken, async (_req, res) => {
+      console.log("[Deep Sync] 手動觸發");
+      try {
+        const { runDeepOrderSync } = await import("../scripts/sync-orders-normalized");
+        runDeepOrderSync().catch((err) => console.error("[Deep Sync] 手動觸發失敗:", err));
+      } catch (e) {
+        console.error("[Deep Sync] 載入模組失敗:", e);
+      }
+      return res.json({ ok: true, message: "deep sync triggered, see server logs for progress" });
+    });
+
     /** super_admin：從 docs/persona 同步 Global + 品牌 system_prompt 至 DB（路徑用 process.cwd，避免 CJS bundle 下 import.meta 不可用） */
     app.post("/api/admin/sync-prompts", async (req: any, res) => {
       if (!req.session?.userRole || req.session.userRole !== "super_admin") {

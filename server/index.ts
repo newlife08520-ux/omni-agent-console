@@ -10,6 +10,7 @@ import fs from "fs";
 import * as assignment from "./assignment";
 import { getUploadsDir, getDataDir } from "./data-dir";
 import db from "./db";
+import cron from "node-cron";
 
 const app = express();
 const httpServer = createServer(app);
@@ -209,7 +210,7 @@ app.use((req, res, next) => {
 
       if (process.env.ENABLE_ORDER_SYNC === "true") {
         import("./scripts/sync-orders-normalized")
-          .then(({ runOrderSync }) => {
+          .then(({ runOrderSync, runDeepOrderSync }) => {
             setTimeout(() => {
               console.log("[OrderSync] 首次同步：一頁近 3 天 + Shopline 近 1 天...");
               Promise.all([
@@ -235,6 +236,20 @@ app.use((req, res, next) => {
                 console.error("[OrderSync] Shopline 定時同步失敗:", (e as Error)?.message || e)
               );
             }, 60 * 60 * 1000);
+
+            cron.schedule("0 4 * * *", () => runDeepOrderSync(), { timezone: "Asia/Taipei" });
+            cron.schedule("30 12 * * *", () => runDeepOrderSync(), { timezone: "Asia/Taipei" });
+            cron.schedule("0 18 * * *", () => runDeepOrderSync(), { timezone: "Asia/Taipei" });
+            cron.schedule("0 23 * * *", () => runDeepOrderSync(), { timezone: "Asia/Taipei" });
+
+            console.log(
+              "[Deep Sync] 排程已註冊：04:00 / 12:30 / 18:00 / 23:00 (Asia/Taipei)"
+            );
+
+            setTimeout(() => {
+              console.log("[Deep Sync] 啟動後首次同步");
+              runDeepOrderSync().catch((err) => console.error("[Deep Sync] 首次同步失敗:", err));
+            }, 60_000);
 
             console.log("[server] Shopline 訂單同步已啟用：每 60 分鐘，days: 1");
             console.log(
