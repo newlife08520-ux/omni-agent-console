@@ -27,9 +27,11 @@ export function serveStatic(app: Express) {
 
   app.use(express.static(distPath));
 
-  // fall through to index.html for SPA client routes only（絕不攔截 /api/*，避免健康檢查等被打成前端 404）
+  // fall through to index.html for SPA client routes only（絕不攔截 /api/*、/uploads/*）
+  // 否則 LINE 下載的圖片 URL（/uploads/...）會被誤送 index.html，後台聊天室圖片破圖。
   app.use((req, res, next) => {
     if (req.path.startsWith("/api/")) return next();
+    if (req.path === "/uploads" || req.path.startsWith("/uploads/")) return next();
     res.sendFile(path.resolve(distPath, "index.html"));
   });
 }

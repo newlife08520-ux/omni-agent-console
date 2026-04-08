@@ -337,8 +337,8 @@ export default function SettingsPage({ userRole }: SettingsPageProps) {
         return;
       }
       if (data.success) {
-        toast({ title: "連線成功", description: data.message });
-        updateApiHealth(type, { status: "ok", message: data.message });
+        toast({ title: "連線成功", description: data.message ?? msg });
+        updateApiHealth(type, { status: "ok", message: data.message ?? msg });
       } else {
         toast({ title: "連線失敗", description: msg, variant: "destructive" });
         updateApiHealth(type, { status: "error", message: msg });

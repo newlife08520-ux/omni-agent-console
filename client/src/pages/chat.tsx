@@ -47,6 +47,15 @@ const STATUS_SEMANTIC = {
   muted: { bg: "bg-stone-100 text-stone-600 border-stone-200", dot: "bg-stone-400" },
 } as const;
 
+/** 氣泡內文字＋表情符號：補齊 Windows／瀏覽器缺字體時的彩色 emoji 後備 */
+const CHAT_MESSAGE_FONT_FAMILY =
+  'ui-sans-serif, system-ui, sans-serif, "Segoe UI Emoji", "Segoe UI Symbol", "Apple Color Emoji", "Noto Color Emoji"';
+
+function isExternalOrDataMediaUrl(url: string): boolean {
+  const u = (url || "").trim();
+  return /^https?:\/\//i.test(u) || u.startsWith("data:") || u.startsWith("blob:");
+}
+
 const ORDER_STATUS_MAP: Record<string, { label: string; color: string }> = {
   new_order: { label: "新訂單", color: "bg-blue-50 text-blue-600 border-blue-200" },
   confirming: { label: "確認中", color: "bg-sky-50 text-sky-600 border-sky-200" },
@@ -213,6 +222,11 @@ const MessageBubble = React.memo(function MessageBubble({
   /** 當前聯絡人大頭照，用於客戶訊息左側頭像 */
   userAvatarUrl?: string | null;
 }) {
+  const [imageLoadFailed, setImageLoadFailed] = useState(false);
+  useEffect(() => {
+    setImageLoadFailed(false);
+  }, [msg.id, msg.image_url]);
+
   if (msg.sender_type === "system") {
     return (
       <div>
@@ -222,7 +236,10 @@ const MessageBubble = React.memo(function MessageBubble({
           </div>
         )}
         <div className="flex justify-center" data-testid={`message-${msg.id}`}>
-          <div className="flex items-center gap-1.5 bg-stone-100 text-stone-500 text-xs px-4 py-2 rounded-full">
+          <div
+            className="flex items-center gap-1.5 bg-stone-100 text-stone-500 text-xs px-4 py-2 rounded-full"
+            style={{ fontFamily: CHAT_MESSAGE_FONT_FAMILY }}
+          >
             <Info className="w-3 h-3" />
             {msg.content}
           </div>
@@ -256,13 +273,39 @@ const MessageBubble = React.memo(function MessageBubble({
             {msg.sender_type === "ai" && isIdleClosingMessage(msg.content) && (
               <div className="text-[10px] text-stone-400 mb-0.5 text-right">系統自動結案語</div>
             )}
-            {msg.message_type === "image" && msg.image_url ? (
+            {msg.message_type === "image" && (msg.image_url || "").trim() ? (
               <div className={`rounded-2xl overflow-hidden shadow-sm ${
                 msg.sender_type === "user" ? "rounded-bl-md border border-stone-100"
                   : msg.sender_type === "ai" ? "rounded-br-md border border-emerald-100"
                   : "rounded-br-md"
               }`}>
-                <img src={msg.image_url} alt="附件圖片" className="max-w-full max-h-[280px] object-contain cursor-pointer rounded-2xl hover:opacity-90 transition-opacity" loading="lazy" decoding="async" onClick={() => onPreviewImage(msg.image_url!)} data-testid={`image-message-${msg.id}`} />
+                {imageLoadFailed ? (
+                  <div className="flex flex-col items-center justify-center gap-2 px-4 py-8 bg-stone-50 text-stone-500 text-sm max-w-[280px]">
+                    <ImageIcon className="w-10 h-10 opacity-50" />
+                    <span className="text-center">圖片無法載入（連結失效、檔案已移除，或請重新整理頁面）</span>
+                  </div>
+                ) : (
+                  <img
+                    src={msg.image_url!}
+                    alt="聊天圖片"
+                    className="max-w-full max-h-[280px] object-contain cursor-pointer rounded-2xl hover:opacity-90 transition-opacity"
+                    loading="lazy"
+                    decoding="async"
+                    referrerPolicy={isExternalOrDataMediaUrl(msg.image_url!) ? "no-referrer" : undefined}
+                    onClick={() => onPreviewImage(msg.image_url!)}
+                    onError={() => setImageLoadFailed(true)}
+                    data-testid={`image-message-${msg.id}`}
+                  />
+                )}
+              </div>
+            ) : msg.message_type === "image" && !(msg.image_url || "").trim() ? (
+              <div className={`rounded-2xl px-4 py-3 text-sm shadow-sm flex items-center gap-2 ${
+                msg.sender_type === "user" ? "bg-white text-stone-600 rounded-bl-md border border-stone-100"
+                  : msg.sender_type === "ai" ? "bg-emerald-50 text-emerald-900 rounded-br-md border border-emerald-100"
+                  : "bg-amber-600 text-white rounded-br-md"
+              }`}>
+                <ImageIcon className="w-5 h-5 shrink-0 opacity-70" />
+                <span style={{ fontFamily: CHAT_MESSAGE_FONT_FAMILY }}>圖片（尚未下載或下載失敗）</span>
               </div>
             ) : msg.message_type === "video" && msg.image_url ? (
               <div className={`rounded-2xl overflow-hidden shadow-sm ${
@@ -271,7 +314,11 @@ const MessageBubble = React.memo(function MessageBubble({
                   : "rounded-br-md"
               }`}>
                 <video controls preload="metadata" className="max-w-full max-h-[280px] rounded-2xl bg-black" data-testid={`video-message-${msg.id}`}>
-                  <source src={msg.image_url} type="video/mp4" />
+                  <source
+                    src={msg.image_url}
+                    type="video/mp4"
+                    {...(isExternalOrDataMediaUrl(msg.image_url) ? { referrerPolicy: "no-referrer" as const } : {})}
+                  />
                   您的瀏覽器不支援影片播放
                 </video>
               </div>
@@ -281,6 +328,7 @@ const MessageBubble = React.memo(function MessageBubble({
               if (placeholderMatch) {
                 const type = placeholderMatch[1];
                 const icons: Record<string, { Icon: React.ComponentType<{ className?: string }>; label: string }> = {
+                  圖片: { Icon: ImageIcon, label: "圖片訊息" },
                   貼圖: { Icon: Smile, label: "貼圖" },
                   音訊: { Icon: Mic, label: "語音訊息" },
                   位置: { Icon: MapPin, label: "位置" },
@@ -288,22 +336,28 @@ const MessageBubble = React.memo(function MessageBubble({
                 };
                 const { Icon, label } = icons[type] || { Icon: FileText, label: `${type}訊息` };
                 return (
-                  <div className={`rounded-2xl px-4 py-2.5 text-sm shadow-sm inline-flex items-center gap-2 ${
-                    msg.sender_type === "user" ? "bg-white text-stone-700 rounded-bl-md border border-stone-100"
-                      : msg.sender_type === "ai" ? "bg-emerald-50 text-emerald-900 rounded-br-md border border-emerald-100"
-                      : "bg-amber-600 text-white rounded-br-md"
-                  }`}>
+                  <div
+                    className={`rounded-2xl px-4 py-2.5 text-sm shadow-sm inline-flex items-center gap-2 ${
+                      msg.sender_type === "user" ? "bg-white text-stone-700 rounded-bl-md border border-stone-100"
+                        : msg.sender_type === "ai" ? "bg-emerald-50 text-emerald-900 rounded-br-md border border-emerald-100"
+                        : "bg-amber-600 text-white rounded-br-md"
+                    }`}
+                    style={{ fontFamily: CHAT_MESSAGE_FONT_FAMILY }}
+                  >
                     <Icon className="w-5 h-5 shrink-0 opacity-80" />
                     <span>{label}</span>
                   </div>
                 );
               }
               return (
-                <div className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow-sm ${
-                  msg.sender_type === "user" ? "bg-white text-stone-700 rounded-bl-md border border-stone-100"
-                    : msg.sender_type === "ai" ? "bg-emerald-50 text-emerald-900 rounded-br-md border border-emerald-100"
-                    : "bg-amber-600 text-white rounded-br-md"
-                }`}>
+                <div
+                  className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words shadow-sm ${
+                    msg.sender_type === "user" ? "bg-white text-stone-700 rounded-bl-md border border-stone-100"
+                      : msg.sender_type === "ai" ? "bg-emerald-50 text-emerald-900 rounded-br-md border border-emerald-100"
+                      : "bg-amber-600 text-white rounded-br-md"
+                  }`}
+                  style={{ fontFamily: CHAT_MESSAGE_FONT_FAMILY }}
+                >
                   {isStreaming ? <ThrottledContent content={msg.content ?? ""} throttleMs={80} /> : <>{msg.content}</>}
                 </div>
               );
