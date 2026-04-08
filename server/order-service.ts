@@ -18,6 +18,7 @@ import {
 import { filterOrdersByProductQuery } from "./order-product-filter";
 import { derivePaymentStatus } from "./order-payment-utils";
 import { resolveOrderSourceIntent } from "./order-lookup-policy";
+import { classifyOrderStatus, shouldRefreshFromLive } from "./order-status";
 
 /** Phase 106.3：手機查單預設僅保留近日訂單（關鍵字可關閉）；「其他訂單」不觸發關閉 */
 export const PHONE_ORDER_LOOKUP_MAX_AGE_DAYS = 90;
@@ -89,8 +90,14 @@ function applyPhoneAgeFilterToUnifiedResult(
   return { ...input, orders: kept };
 }
 
-/** Phase 30：local_only 表示僅來自本地索引，可能不完整，不可單筆定案 */
-export type DataCoverage = "local_only" | "api_only" | "merged_local_api";
+/** Phase 30／106.9：資料覆蓋來源；106.9 by_id 智能 live-fallback 增補 live_fresh 等 */
+export type DataCoverage =
+  | "local_only"
+  | "api_only"
+  | "merged_local_api"
+  | "live_fresh"
+  | "local_trusted"
+  | "local_stale_fallback";
 
 /** Phase 31：覆蓋信心 — local_only 單筆為 low，API 或合併為 high */
 export type CoverageConfidence = "low" | "medium" | "high";
@@ -155,52 +162,33 @@ function dedupeOrdersBySourceId(orders: OrderInfo[]): OrderInfo[] {
   );
 }
 
-export async function unifiedLookupById(
+function cacheAndUpsertByIdResult(result: UnifiedOrderResult, idNorm: string, brandId: number): void {
+  if (!result.found || result.orders.length === 0 || result.crossBrand) return;
+  const o0 = result.orders[0];
+  const src = (o0.source as "superlanding" | "shopline") || "superlanding";
+  setOrderLookupCache(cacheKeyOrderId(brandId, idNorm, src), {
+    orders: result.orders.length === 1 ? result.orders : [o0],
+    source: src,
+    found: true,
+  });
+  setOrderLookupCache(cacheKeyOrderId(brandId, idNorm, "any"), {
+    orders: result.orders,
+    source: result.source,
+    found: true,
+  });
+  for (const o of result.orders) {
+    if (o?.global_order_id && o.source) upsertOrderNormalized(brandId, o.source as "superlanding" | "shopline", o);
+  }
+}
+
+/** 僅 live API（無 local 短路）；供 by_id 在需刷新時呼叫 */
+async function runLiveUnifiedLookupById(
   slConfig: SuperLandingConfig,
   orderId: string,
   brandId?: number,
   preferSource?: OrderLookupPreferSource,
-  /** Phase 1：前台查單時傳 false，不搜其他品牌 */
   allowCrossBrand = true
 ): Promise<UnifiedOrderResult> {
-  const idNorm = (orderId || "").trim().toUpperCase();
-
-  if (idNorm && brandId) {
-    const scope = preferSource === "shopline" ? "shopline" : preferSource === "superlanding" ? "superlanding" : "any";
-    if (scope !== "any") {
-      const ck = cacheKeyOrderId(brandId, idNorm, scope);
-      const cached = getOrderLookupCache(ck);
-      if (cached?.found && cached.orders[0]?.source === scope) {
-        return cached as UnifiedOrderResult;
-      }
-      const loc = getOrderByOrderId(brandId, idNorm, scope);
-      if (loc) {
-        const result: UnifiedOrderResult = { orders: [loc], source: loc.source || scope, found: true };
-        setOrderLookupCache(ck, result);
-        setOrderLookupCache(cacheKeyOrderId(brandId, idNorm, "any"), result);
-        return result;
-      }
-    } else {
-      const ckAny = cacheKeyOrderId(brandId, idNorm, "any");
-      const cachedAny = getOrderLookupCache(ckAny);
-      if (cachedAny?.found) return cachedAny as UnifiedOrderResult;
-      const locSl = getOrderByOrderId(brandId, idNorm, "superlanding");
-      const locSh = getOrderByOrderId(brandId, idNorm, "shopline");
-      if (locSl) {
-        const result: UnifiedOrderResult = { orders: [locSl], source: "superlanding", found: true };
-        setOrderLookupCache(cacheKeyOrderId(brandId, idNorm, "superlanding"), result);
-        setOrderLookupCache(ckAny, result);
-        return result;
-      }
-      if (locSh) {
-        const result: UnifiedOrderResult = { orders: [locSh], source: "shopline", found: true };
-        setOrderLookupCache(cacheKeyOrderId(brandId, idNorm, "shopline"), result);
-        setOrderLookupCache(ckAny, result);
-        return result;
-      }
-    }
-  }
-
   const tryShoplineFirst = preferSource === "shopline";
 
   async function runShopline(): Promise<UnifiedOrderResult | null> {
@@ -261,7 +249,6 @@ export async function unifiedLookupById(
     const shop = await runShopline();
     if (shop?.found) result = shop;
     else {
-      /** R1-1／R1-3：官網查無不回退一頁；source 標 shopline 以利隔離 */
       result = { orders: [], source: "shopline", found: false };
     }
   } else {
@@ -272,23 +259,133 @@ export async function unifiedLookupById(
       result = shop ?? { orders: [], source: "unknown", found: false };
     }
   }
-  if (result.found && result.orders.length > 0 && idNorm && brandId && !result.crossBrand) {
-    const o0 = result.orders[0];
-    const src = (o0.source as "superlanding" | "shopline") || "superlanding";
-    setOrderLookupCache(cacheKeyOrderId(brandId, idNorm, src), {
-      orders: result.orders.length === 1 ? result.orders : [o0],
-      source: src,
-      found: true,
-    });
-    setOrderLookupCache(cacheKeyOrderId(brandId, idNorm, "any"), {
-      orders: result.orders,
-      source: result.source,
-      found: true,
-    });
-    for (const o of result.orders) {
-      if (o?.global_order_id && o.source)
-        upsertOrderNormalized(brandId, o.source as "superlanding" | "shopline", o);
+  return result;
+}
+
+export async function unifiedLookupById(
+  slConfig: SuperLandingConfig,
+  orderId: string,
+  brandId?: number,
+  preferSource?: OrderLookupPreferSource,
+  /** Phase 1：前台查單時傳 false，不搜其他品牌 */
+  allowCrossBrand = true
+): Promise<UnifiedOrderResult> {
+  const idNorm = (orderId || "").trim().toUpperCase();
+
+  let localResult: UnifiedOrderResult | null = null;
+
+  if (idNorm && brandId) {
+    const scope = preferSource === "shopline" ? "shopline" : preferSource === "superlanding" ? "superlanding" : "any";
+    if (scope !== "any") {
+      const ck = cacheKeyOrderId(brandId, idNorm, scope);
+      const cached = getOrderLookupCache(ck);
+      if (cached?.found && cached.orders[0]?.source === scope) {
+        localResult = cached as UnifiedOrderResult;
+      } else {
+        const loc = getOrderByOrderId(brandId, idNorm, scope);
+        if (loc) {
+          localResult = { orders: [loc], source: loc.source || scope, found: true };
+          setOrderLookupCache(ck, localResult);
+          setOrderLookupCache(cacheKeyOrderId(brandId, idNorm, "any"), localResult);
+        }
+      }
+    } else {
+      const ckAny = cacheKeyOrderId(brandId, idNorm, "any");
+      const cachedAny = getOrderLookupCache(ckAny);
+      if (cachedAny?.found) {
+        localResult = cachedAny as UnifiedOrderResult;
+      } else {
+        const locSl = getOrderByOrderId(brandId, idNorm, "superlanding");
+        const locSh = getOrderByOrderId(brandId, idNorm, "shopline");
+        if (locSl) {
+          localResult = { orders: [locSl], source: "superlanding", found: true };
+          setOrderLookupCache(cacheKeyOrderId(brandId, idNorm, "superlanding"), localResult);
+          setOrderLookupCache(ckAny, localResult);
+        } else if (locSh) {
+          localResult = { orders: [locSh], source: "shopline", found: true };
+          setOrderLookupCache(cacheKeyOrderId(brandId, idNorm, "shopline"), localResult);
+          setOrderLookupCache(ckAny, localResult);
+        }
+      }
     }
+  }
+
+  if (localResult?.found && localResult.orders.length > 0) {
+    const localStatus = localResult.orders[0]?.status;
+    const cls = classifyOrderStatus(localStatus);
+    if (!shouldRefreshFromLive(localStatus)) {
+      console.log("[reply-trace] lookup_id_local_trusted", {
+        orderId: idNorm,
+        brandId,
+        status: localStatus,
+        classification: cls,
+      });
+      return {
+        ...localResult,
+        data_coverage: "local_trusted",
+        coverage_confidence: "high",
+        needs_live_confirm: false,
+      };
+    }
+
+    console.log("[reply-trace] lookup_id_check_live", {
+      orderId: idNorm,
+      brandId,
+      localStatus,
+      classification: cls,
+    });
+
+    const LIVE_TIMEOUT_MS = 3000;
+    let liveResult: UnifiedOrderResult | null = null;
+    try {
+      liveResult = await Promise.race([
+        runLiveUnifiedLookupById(slConfig, orderId, brandId, preferSource, allowCrossBrand),
+        new Promise<UnifiedOrderResult | null>((resolve) => {
+          setTimeout(() => {
+            console.warn("[unifiedLookupById] live > 3s, fallback to local stale", { orderId: idNorm });
+            resolve(null);
+          }, LIVE_TIMEOUT_MS);
+        }),
+      ]);
+    } catch (err) {
+      console.warn("[unifiedLookupById] live error, fallback to local", { orderId: idNorm, error: String(err) });
+      liveResult = null;
+    }
+
+    if (liveResult?.found && liveResult.orders.length > 0) {
+      if (idNorm && brandId && !liveResult.crossBrand) {
+        cacheAndUpsertByIdResult(liveResult, idNorm, brandId);
+      }
+      console.log("[reply-trace] lookup_id_live_fresh", {
+        orderId: idNorm,
+        oldStatus: localStatus,
+        newStatus: liveResult.orders[0]?.status,
+      });
+      return {
+        ...liveResult,
+        data_coverage: "live_fresh",
+        coverage_confidence: "high",
+        needs_live_confirm: false,
+      };
+    }
+
+    return {
+      ...localResult,
+      data_coverage: "local_stale_fallback",
+      coverage_confidence: "medium",
+    };
+  }
+
+  const result = await runLiveUnifiedLookupById(slConfig, orderId, brandId, preferSource, allowCrossBrand);
+  if (result.found && result.orders.length > 0 && idNorm && brandId && !result.crossBrand) {
+    cacheAndUpsertByIdResult(result, idNorm, brandId);
+  }
+  if (result.found) {
+    return {
+      ...result,
+      data_coverage: "live_fresh",
+      coverage_confidence: "high",
+    };
   }
   return result;
 }

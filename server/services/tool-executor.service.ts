@@ -48,6 +48,10 @@ const SYS_NOTE_ORDER_ONE_PAGE_FULL_STRICT =
 export const ORDER_LOOKUP_LOCAL_CACHE_DISCLAIMER =
   "\n\n*(註：此為系統快取資料，最新出貨狀態以物流端為準)*";
 
+/** Phase 106.9：by_id live 逾時／失敗，仍用本地快取時的免責 */
+export const ORDER_LOOKUP_LIVE_FALLBACK_DISCLAIMER =
+  "\n\n*(註：目前無法即時連線取得最新狀態，以上為系統快取資料)*";
+
 /** Phase 106.3：手機查單在此筆數內以完整卡片直出（可調整） */
 const LOOKUP_PHONE_FULL_CARD_THRESHOLD = 3;
 
@@ -616,7 +620,13 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           prepaid: order.prepaid,
           paid_at: order.paid_at,
         };
-        const one_page_summary = formatOrderOnePage(orderPayload);
+        const lookupDisclaimer =
+          result.data_coverage === "local_stale_fallback"
+            ? ORDER_LOOKUP_LIVE_FALLBACK_DISCLAIMER
+            : result.data_coverage === "local_only"
+              ? ORDER_LOOKUP_LOCAL_CACHE_DISCLAIMER
+              : "";
+        const one_page_summary = formatOrderOnePage(orderPayload) + lookupDisclaimer;
         if (context?.contactId) {
           storage.linkOrderForContact(context.contactId, order.global_order_id, "ai_lookup");
           const activeCtx = buildActiveOrderContext(order, result.source, statusLabel, one_page_summary, "text");
