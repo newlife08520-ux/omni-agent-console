@@ -597,6 +597,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
         const orderPayload = {
           order_id: order.global_order_id,
           status: customerFacingStatusLabel(statusLabel),
+          fulfillment_status_raw: order.status ?? undefined,
           amount: order.final_total_order_amount,
           product_list: order.product_list,
           items_structured: orderItemsStructuredPayload(order),

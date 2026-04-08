@@ -7,18 +7,110 @@ import { derivePaymentStatus, isCodPaymentMethod, type PaymentKind } from "./ord
 import { maskName, maskPhone } from "./tool-llm-sanitize";
 import { getUnifiedStatusLabel } from "./order-service";
 
-/** 訂單狀態轉成客人聽得懂的人話 */
-export function customerFacingStatusLabel(raw: string): string {
-  const s = (raw || "").trim();
-  if (/待處理|pending/i.test(s)) return "訂單已收到，正在安排中";
-  if (/處理中|processing/i.test(s)) return "正在安排出貨";
-  if (/確認中/i.test(s)) return "付款確認中";
-  if (/已出貨|shipped/i.test(s)) return "已出貨";
-  if (/已完成|completed|delivered/i.test(s)) return "已完成";
-  if (/已取消|cancelled/i.test(s)) return "已取消";
-  if (/新訂單/i.test(s)) return "新訂單，準備中";
-  if (/\[本地快取/i.test(s)) return "確認中";
-  return s;
+/** 訂單狀態轉成客人聽得懂的極簡業務語言（Phase 106.10） */
+export function customerFacingStatusLabel(rawStatus: string | null | undefined): string {
+  if (!rawStatus) return "處理中";
+
+  const s = rawStatus.toLowerCase().trim();
+
+  if (s === "shipped" || s === "shipping" || /已出貨|出貨中/.test(rawStatus)) {
+    return "已出貨";
+  }
+  if (s === "canceled" || s === "cancelled" || /已取消|取消/.test(rawStatus)) {
+    return "已取消";
+  }
+  if (s === "returned" || /已退貨|退貨/.test(rawStatus)) {
+    return "已退貨";
+  }
+  if (s === "refunded" || /已退款|退款完成/.test(rawStatus)) {
+    return "已退款";
+  }
+  if (s === "awaiting_for_shipment" || /待出貨/.test(rawStatus)) {
+    return "待出貨";
+  }
+  if (s === "confirmed" || /已確認/.test(rawStatus)) {
+    return "已確認";
+  }
+  if (s === "replacement" || /換貨/.test(rawStatus)) {
+    return "換貨處理中";
+  }
+  if (s === "delay_handling" || /延遲/.test(rawStatus)) {
+    return "出貨稍有延遲";
+  }
+  if (s === "new_order" || /新訂單/.test(rawStatus)) {
+    return "訂單已收到";
+  }
+  if (s === "pending" || /待處理/.test(rawStatus)) {
+    return "處理中";
+  }
+  if (s === "confirming" || /確認中/.test(rawStatus)) {
+    return "訂單確認中";
+  }
+  if (s === "refunding" || /退款中/.test(rawStatus)) {
+    return "退款處理中";
+  }
+  if (/\[本地快取/i.test(rawStatus)) {
+    return "確認中";
+  }
+  return rawStatus;
+}
+
+/**
+ * 依訂單狀態 + 配送方式組配套提醒（僅單筆完整卡片使用，Phase 106.10）
+ */
+export function buildOrderStatusFollowupHint(
+  rawStatus: string | null | undefined,
+  shippingMethod: string | null | undefined
+): string {
+  if (!rawStatus) return "";
+
+  const s = rawStatus.toLowerCase().trim();
+  const ship = shippingMethod ?? "";
+
+  const isHomeDelivery = /(宅配|宅急便|home|tcat|takkyu|hct|新竹|黑貓)/i.test(ship);
+  const isStorePickup = /(7-?11|seven|family|全家|店配|超商|cvs|store|萊爾富|hi[- ]?life|ok mart)/i.test(ship);
+
+  if (s === "shipped" || s === "shipping" || /已出貨|出貨中/.test(rawStatus)) {
+    if (isHomeDelivery) {
+      return "\n\n📦 已出貨囉～請留意司機電話通知，通常 1-2 天會送達唷！";
+    }
+    if (isStorePickup) {
+      return "\n\n📦 已出貨囉～商品到店後會收到取貨簡訊，記得 7 天內取貨唷！";
+    }
+    return "\n\n📦 已出貨囉～請留意後續通知唷！";
+  }
+
+  if (s === "awaiting_for_shipment" || s === "confirmed" || /待出貨|已確認/.test(rawStatus)) {
+    return "\n\n⏰ 已安排出貨中，預計 2-3 天內出貨唷～";
+  }
+
+  if (s === "replacement" || /換貨/.test(rawStatus)) {
+    return "\n\n🔄 換貨處理中，專員會盡快處理唷～";
+  }
+
+  if (s === "delay_handling" || /延遲/.test(rawStatus)) {
+    return "\n\n⚠️ 出貨稍有延遲，專員處理中，造成不便請多包涵～";
+  }
+
+  if (
+    s === "canceled" ||
+    s === "cancelled" ||
+    s === "returned" ||
+    s === "refunded" ||
+    /已取消|已退貨|已退款/.test(rawStatus)
+  ) {
+    return "";
+  }
+
+  if (s === "new_order" || s === "pending" || s === "confirming" || /新訂單|待處理|確認中/.test(rawStatus)) {
+    return "\n\n📝 訂單已收到，正在為您安排，請稍候唷～";
+  }
+
+  if (s === "refunding" || /退款中/.test(rawStatus)) {
+    return "\n\n💰 退款處理中，請耐心等候唷～";
+  }
+
+  return "";
 }
 
 /** 付款標籤對客清洗——去掉工程感文字 */
@@ -251,6 +343,8 @@ export function formatOrderOnePage(o: {
   source?: string;
   prepaid?: boolean;
   paid_at?: string | null;
+  /** API 原始 fulfillment status，供配套提醒（與對客 status 文案分離） */
+  fulfillment_status_raw?: string | null;
 }): string {
   const lines: string[] = [];
 
@@ -337,7 +431,9 @@ export function formatOrderOnePage(o: {
 
   if (o.shipped_at) lines.push(`出貨時間：${o.shipped_at}`);
 
-  return lines.join("\n");
+  const card = lines.join("\n");
+  const hint = buildOrderStatusFollowupHint(o.fulfillment_status_raw ?? undefined, o.shipping_method);
+  return card + hint;
 }
 
 /** 台北時區日期字串（對客用，禁止輸出 ISO raw） */
