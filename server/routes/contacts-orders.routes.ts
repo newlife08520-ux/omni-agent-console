@@ -21,7 +21,7 @@ import { enforceOutputGuard, HANDOFF_MANDATORY_OPENING, buildHandoffReply, getHa
 import { runPostGenerationGuard, isModeNoPromo, runOfficialChannelGuard, runGlobalPlatformGuard } from "../content-guard";
 import { recordGuardHit, getGuardStats } from "../content-guard-stats";
 import { shouldHandoffDueToAwkwardOrRepeat } from "../awkward-repeat-handoff";
-import { isRatingEligible } from "../rating-eligibility";
+import { isRatingEligible, isAutomatedRatingFlexAllowedForContact } from "../rating-eligibility";
 import db from "../db";
 import { fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, fetchPages, lookupOrdersByPageAndPhone, ensurePagesCacheLoaded, refreshPagesCache, getCachedPages, getCachedPagesAge, buildProductCatalogPrompt, getSuperLandingConfig } from "../superlanding";
 import type { SuperLandingConfig } from "../superlanding";
@@ -227,18 +227,18 @@ export function registerContactsOrdersRoutes(app: Express): void {
 
     app.get("/api/contacts/:id", authMiddleware, (req, res) => {
       const id = parseIdParam(req.params.id);
-      if (id === null) return res.status(400).json({ message: "??? ID" });
+      if (id === null) return res.status(400).json({ message: "無效的聯絡人 ID" });
       const contact = storage.getContact(id) as any;
-      if (!contact) return res.status(404).json({ message: "?????? mapping" });
-      // GET ????????????? DB ??? SSE??????????????????????
-      // AI ???? Webhook ???????????????????
+      if (!contact) return res.status(404).json({ message: "找不到聯絡人" });
+      // GET 單一聯絡人：資料來自 DB；即時更新另由 SSE 推送
+      // AI 建議欄位主要由 Webhook／背景流程寫入，此處不保證為最新
       if (!contact.ai_suggestions && (contact as any).ai_suggestions === undefined) contact.ai_suggestions = null;
       return res.json(contact);
     });
 
     app.put("/api/contacts/:id/human", authMiddleware, (req, res) => {
       const id = parseIdParam(req.params.id);
-      if (id === null) return res.status(400).json({ message: "??? ID" });
+      if (id === null) return res.status(400).json({ message: "無效的聯絡人 ID" });
       if (req.body.needs_human) {
         const c = storage.getContact(id);
         applyHandoff({ contactId: id, reason: "explicit_human_request", source: "api_put_human", brandId: c?.brand_id ?? undefined });
@@ -250,7 +250,7 @@ export function registerContactsOrdersRoutes(app: Express): void {
 
     app.put("/api/contacts/:id/status", authMiddleware, async (req, res) => {
       const id = parseIdParam(req.params.id);
-      if (id === null) return res.status(400).json({ message: "??? ID" });
+      if (id === null) return res.status(400).json({ message: "無效的聯絡人 ID" });
       const { status } = req.body;
       const validStatuses = ["pending", "processing", "resolved", "ai_handling", "awaiting_human", "high_risk", "closed", "new_case", "pending_info", "pending_order_id", "assigned", "waiting_customer", "resolved_observe", "reopened"];
       if (!validStatuses.includes(status)) {
@@ -267,7 +267,11 @@ export function registerContactsOrdersRoutes(app: Express): void {
       if (status === "resolved" || status === "closed") {
         storage.updateContactConversationFields(id, { customer_goal_locked: null });
         const contactForRating = storage.getContact(id);
-        if (contactForRating && isRatingEligible({ contact: contactForRating, state: null })) {
+        if (
+          contactForRating &&
+          isRatingEligible({ contact: contactForRating, state: null }) &&
+          isAutomatedRatingFlexAllowedForContact(contactForRating, storage)
+        ) {
           let ratingSent = false;
           if (contactForRating.needs_human === 1 && contactForRating.cs_rating == null) {
             if (contactForRating.platform === "line") {
@@ -275,7 +279,7 @@ export function registerContactsOrdersRoutes(app: Express): void {
               if (token) {
                 try {
                   await sendRatingFlexMessage(contactForRating, "human");
-                  storage.createMessage(id, contactForRating.platform, "system", "(????) ???????????????????");
+                  storage.createMessage(id, contactForRating.platform, "system", "(系統) 已發送真人客服滿意度評價邀請給客戶");
                   const now = new Date().toISOString().replace("T", " ").substring(0, 19);
                   storage.updateContactConversationFields(id, { rating_invited_at: now });
                   ratingSent = true;
@@ -291,7 +295,7 @@ export function registerContactsOrdersRoutes(app: Express): void {
               if (token) {
                 try {
                   await sendRatingFlexMessage(contactForRating, "ai");
-                  storage.createMessage(id, contactForRating.platform, "system", "(????) ????? AI ????????????");
+                  storage.createMessage(id, contactForRating.platform, "system", "(系統) 已發送 AI 客服滿意度評價邀請給客戶");
                   const now = new Date().toISOString().replace("T", " ").substring(0, 19);
                   storage.updateContactConversationFields(id, { rating_invited_at: now });
                 } catch (err) {
@@ -308,7 +312,7 @@ export function registerContactsOrdersRoutes(app: Express): void {
 
     app.put("/api/contacts/:id/issue-type", authMiddleware, async (req, res) => {
       const id = parseIdParam(req.params.id);
-      if (id === null) return res.status(400).json({ message: "??? ID" });
+      if (id === null) return res.status(400).json({ message: "無效的聯絡人 ID" });
       const { issue_type } = req.body;
       const validTypes = ["order_inquiry", "product_consult", "return_refund", "complaint", "order_modify", "general", "other"];
       if (issue_type && !validTypes.includes(issue_type)) {
@@ -321,11 +325,11 @@ export function registerContactsOrdersRoutes(app: Express): void {
 
     app.put("/api/contacts/:id/case-priority", authMiddleware, (req, res) => {
       const id = parseIdParam(req.params.id);
-      if (id === null) return res.status(400).json({ message: "??? ID" });
+      if (id === null) return res.status(400).json({ message: "無效的聯絡人 ID" });
       const v = req.body?.case_priority;
       const priority = v === undefined || v === null || v === "" ? null : Number(v);
       if (priority !== null && (Number.isNaN(priority) || priority < 1 || priority > 5)) {
-        return res.status(400).json({ message: "case_priority ?? 1?5 ? null" });
+        return res.status(400).json({ message: "case_priority 須為 1 至 5 的整數或 null" });
       }
       storage.updateContactCasePriority(id, priority);
       broadcastSSE("contacts_updated", { contact_id: id });
@@ -334,18 +338,18 @@ export function registerContactsOrdersRoutes(app: Express): void {
 
     app.get("/api/contacts/:id/ai-logs", authMiddleware, (req, res) => {
       const id = parseIdParam(req.params.id);
-      if (id === null) return res.status(400).json({ message: "??? ID" });
+      if (id === null) return res.status(400).json({ message: "無效的聯絡人 ID" });
       const logs = storage.getAiLogs(id);
       return res.json(logs);
     });
 
     app.post("/api/contacts/:id/transfer-human", authMiddleware, (req, res) => {
       const contactId = parseIdParam(req.params.id);
-      if (contactId === null) return res.status(400).json({ message: "??? ID" });
+      if (contactId === null) return res.status(400).json({ message: "無效的聯絡人 ID" });
       const { reason } = req.body;
       const contact = storage.getContact(contactId);
-      if (!contact) return res.status(404).json({ message: "?????? mapping" });
-      const transferReason = (reason || "???????") as string;
+      if (!contact) return res.status(404).json({ message: "找不到聯絡人" });
+      const transferReason = (reason || "客戶要求真人客服") as string;
       applyHandoff({ contactId, reason: "explicit_human_request", source: "api_transfer_human", brandId: contact.brand_id ?? undefined });
       const assignedAgentId = assignment.assignCase(contactId);
       if (assignedAgentId == null && assignment.isAllAgentsUnavailable()) {
@@ -359,15 +363,15 @@ export function registerContactsOrdersRoutes(app: Express): void {
       storage.setAiMutedUntil(contactId, muteUntil);
       broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
       broadcastSSE("new_message", { contact_id: contactId });
-      console.log(`[Transfer] contact ${contactId} ???????: ${transferReason}${assignedAgentId != null ? `?????? ${assignedAgentId}` : "??????????"}`);
+      console.log(`[Transfer] contact ${contactId} 轉真人：${transferReason}${assignedAgentId != null ? `，已指派 ${assignedAgentId}` : "，尚無可用專員"}`);
       return res.json({ success: true, status: assignedAgentId != null ? "assigned" : "awaiting_human", reason: transferReason, assigned_agent_id: assignedAgentId ?? undefined, all_busy: assignedAgentId == null && assignment.isAllAgentsUnavailable() });
     });
 
     app.post("/api/contacts/:id/restore-ai", authMiddleware, (req, res) => {
       const contactId = parseIdParam(req.params.id);
-      if (contactId === null) return res.status(400).json({ message: "??? ID" });
+      if (contactId === null) return res.status(400).json({ message: "無效的聯絡人 ID" });
       const contact = storage.getContact(contactId);
-      if (!contact) return res.status(404).json({ message: "?????? mapping" });
+      if (!contact) return res.status(404).json({ message: "找不到聯絡人" });
       storage.updateContactStatus(contactId, "ai_handling");
       storage.updateContactHumanFlag(contactId, 0);
       storage.clearAiMuted(contactId);
@@ -388,20 +392,20 @@ export function registerContactsOrdersRoutes(app: Express): void {
       storage.updateContactAssignment(contactId, null, undefined, undefined, 0);
       if (prevAgentId != null) assignment.syncAgentOpenCases(prevAgentId);
       broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-      console.log(`[Restore AI] contact ${contactId} ??? AI ??????????????????????`);
+      console.log(`[Restore AI] contact ${contactId} 已恢復為 AI 處理（已清除真人相關狀態）`);
       return res.json({ success: true, status: "ai_handling" });
     });
 
     app.post("/api/contacts/:id/send-rating", authMiddleware, async (req, res) => {
       const id = parseIdParam(req.params.id);
-      if (id === null) return res.status(400).json({ message: "??? ID" });
+      if (id === null) return res.status(400).json({ message: "無效的聯絡人 ID" });
       const ratingType = (req.body?.type === "ai" ? "ai" : "human") as "human" | "ai";
       const contact = storage.getContact(id);
-      if (!contact) return res.status(404).json({ message: "?????? mapping" });
+      if (!contact) return res.status(404).json({ message: "找不到聯絡人" });
       if (contact.platform !== "line") {
-        return res.status(400).json({ message: "??? LINE ??" });
+        return res.status(400).json({ message: "此功能僅支援 LINE 平台" });
       }
-      // ????????????????????????????????????????????
+      // 手動重新發送前：若已有評分則先清除，讓客戶可再次填寫
       if (ratingType === "ai" && contact.ai_rating != null) {
         storage.clearContactAiRating(id);
       }
@@ -410,22 +414,22 @@ export function registerContactsOrdersRoutes(app: Express): void {
       }
       const token = getLineTokenForContact(contact);
       if (!token) {
-        return res.status(400).json({ message: "???? LINE Channel Access Token" });
+        return res.status(400).json({ message: "缺少 LINE Channel Access Token" });
       }
       try {
         await sendRatingFlexMessage(contact, ratingType);
-        const typeLabel = ratingType === "ai" ? "AI ??" : "????";
-        storage.createMessage(id, contact.platform, "system", `(????) ?????${typeLabel}??????????`);
+        const typeLabel = ratingType === "ai" ? "AI 客服" : "真人客服";
+        storage.createMessage(id, contact.platform, "system", `(系統) 已發送${typeLabel}滿意度評價邀請給客戶`);
         broadcastSSE("contacts_updated", { contact_id: id });
         return res.json({ success: true });
       } catch (err) {
-        return res.status(500).json({ message: "????" });
+        return res.status(500).json({ message: "發送評價邀請失敗" });
       }
     });
 
     app.put("/api/contacts/:id/tags", authMiddleware, (req, res) => {
       const id = parseIdParam(req.params.id);
-      if (id === null) return res.status(400).json({ message: "??? ID" });
+      if (id === null) return res.status(400).json({ message: "無效的聯絡人 ID" });
       const { tags } = req.body;
       if (!Array.isArray(tags)) return res.status(400).json({ message: "tags must be an array" });
       storage.updateContactTags(id, tags);
@@ -434,19 +438,19 @@ export function registerContactsOrdersRoutes(app: Express): void {
 
     app.put("/api/contacts/:id/agent-flag", authMiddleware, (req: any, res) => {
       const id = parseIdParam(req.params.id);
-      if (id === null) return res.status(400).json({ message: "??? ID" });
+      if (id === null) return res.status(400).json({ message: "無效的聯絡人 ID" });
       const userId = req.session?.userId;
-      if (!userId) return res.status(401).json({ message: "???" });
+      if (!userId) return res.status(401).json({ message: "請先登入" });
       const { flag } = req.body || {};
       const v = flag === "later" || flag === "tracking" ? flag : null;
-      if (flag !== undefined && flag !== null && v === null) return res.status(400).json({ message: "flag ?? 'later'?'tracking' ? null" });
+      if (flag !== undefined && flag !== null && v === null) return res.status(400).json({ message: "flag 須為 'later'、'tracking' 或 null" });
       storage.setAgentContactFlag(userId, id, v);
       return res.json({ success: true, flag: v });
     });
 
     app.put("/api/contacts/:id/pinned", authMiddleware, (req, res) => {
       const id = parseIdParam(req.params.id);
-      if (id === null) return res.status(400).json({ message: "??? ID" });
+      if (id === null) return res.status(400).json({ message: "無效的聯絡人 ID" });
       const { is_pinned } = req.body;
       storage.updateContactPinned(id, is_pinned ? 1 : 0);
       return res.json({ success: true });
@@ -460,7 +464,7 @@ export function registerContactsOrdersRoutes(app: Express): void {
 
     app.get("/api/contacts/:id/messages", authMiddleware, (req, res) => {
       const contactId = parseIdParam(req.params.id);
-      if (contactId === null) return res.status(400).json({ message: "??? ID" });
+      if (contactId === null) return res.status(400).json({ message: "無效的聯絡人 ID" });
       const sinceId = parseInt(req.query.since_id as string) || 0;
       if (sinceId > 0) return res.json(storage.getMessagesSince(contactId, sinceId));
       const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 80, 1), 500);
@@ -470,11 +474,11 @@ export function registerContactsOrdersRoutes(app: Express): void {
 
     app.post("/api/contacts/:id/messages", authMiddleware, (req, res) => {
       const contactId = parseIdParam(req.params.id);
-      if (contactId === null) return res.status(400).json({ message: "??? ID" });
+      if (contactId === null) return res.status(400).json({ message: "無效的聯絡人 ID" });
       const { content, message_type, image_url } = req.body;
       if (!content && !image_url) return res.status(400).json({ message: "content or image_url is required" });
       const contact = storage.getContact(contactId);
-      if (!contact) return res.status(404).json({ message: "?????? mapping" });
+      if (!contact) return res.status(404).json({ message: "找不到聯絡人" });
       const msgType = message_type || "text";
       const message = storage.createMessage(contactId, contact.platform, "admin", content || "", msgType, image_url || null);
       storage.updateContactLastHumanReply(contactId);
@@ -484,7 +488,7 @@ export function registerContactsOrdersRoutes(app: Express): void {
 
       const muteUntil = new Date(Date.now() + 30 * 60 * 1000).toISOString();
       storage.setAiMutedUntil(contactId, muteUntil);
-      console.log(`[Hard Mute] ?????? contact ${contactId}, AI ??? ${muteUntil}`);
+      console.log(`[Hard Mute] 專員發言後暫停 AI contact ${contactId}，靜音至 ${muteUntil}`);
 
       if (contact.platform === "line") {
         const token = getLineTokenForContact(contact);
@@ -520,41 +524,41 @@ export function registerContactsOrdersRoutes(app: Express): void {
     });
 
     app.post("/api/chat-upload", authMiddleware, chatUpload.single("file"), (req, res) => {
-      if (!req.file) return res.status(400).json({ message: "??? JPG, PNG, GIF, WebP ???????????? 10MB" });
+      if (!req.file) return res.status(400).json({ message: "請上傳 JPG、PNG、GIF 或 WebP，且檔案須小於 10MB" });
       const fileUrl = `/uploads/${req.file.filename}`;
       return res.json({ url: fileUrl, filename: fixMulterFilename(req.file.originalname), size: req.file.size });
     });
 
     app.get("/api/contacts/:id/orders", authMiddleware, async (req, res) => {
       const contactId = parseIdParam(req.params.id);
-      if (contactId === null) return res.status(400).json({ message: "??? ID" });
+      if (contactId === null) return res.status(400).json({ message: "無效的聯絡人 ID" });
       const contact = storage.getContact(contactId);
-      if (!contact) return res.status(404).json({ message: "?????? mapping" });
+      if (!contact) return res.status(404).json({ message: "找不到聯絡人" });
       const config = getSuperLandingConfig(contact.brand_id || undefined);
       if (!config.merchantNo || !config.accessKey) {
-        return res.json({ orders: [], error: "not_configured", message: "???????? API ??" });
+        return res.json({ orders: [], error: "not_configured", message: "尚未設定 SuperLanding API 憑證" });
       }
       try {
         const orders = await fetchOrders(config, { per_page: "50" });
         return res.json({ orders });
       } catch (err: any) {
         const errorMap: Record<string, string> = {
-          missing_credentials: "API ?????",
-          invalid_credentials: "API ???????? merchant_no ? access_key?",
-          connection_failed: "????????? API",
+          missing_credentials: "未設定 API 憑證",
+          invalid_credentials: "API 憑證錯誤，請檢查 merchant_no 與 access_key",
+          connection_failed: "無法連線至 SuperLanding API",
         };
-        console.error("[????] ?????????:", err.message);
-        return res.json({ orders: [], error: err.message, message: errorMap[err.message] || `?????${err.message}` });
+        console.error("[訂單] 取得訂單列表失敗:", err.message);
+        return res.json({ orders: [], error: err.message, message: errorMap[err.message] || `查詢失敗：${err.message}` });
       }
     });
 
     app.post("/api/contacts/:id/link-order", authMiddleware, (req: any, res) => {
       const contactId = parseIdParam(req.params.id);
-      if (contactId === null) return res.status(400).json({ message: "??? ID" });
+      if (contactId === null) return res.status(400).json({ message: "無效的聯絡人 ID" });
       const orderId = (req.body?.order_id as string)?.trim();
-      if (!orderId) return res.status(400).json({ message: "??? order_id" });
+      if (!orderId) return res.status(400).json({ message: "請提供 order_id" });
       const contact = storage.getContact(contactId);
-      if (!contact) return res.status(404).json({ message: "?????? mapping" });
+      if (!contact) return res.status(404).json({ message: "找不到聯絡人" });
       try {
         db.prepare(
           "INSERT OR IGNORE INTO contact_order_links (contact_id, global_order_id, source) VALUES (?, ?, 'manual')"
@@ -562,15 +566,15 @@ export function registerContactsOrdersRoutes(app: Express): void {
         return res.json({ ok: true });
       } catch (e: any) {
         console.error("[link-order]", e);
-        return res.status(500).json({ message: e?.message || "????" });
+        return res.status(500).json({ message: e?.message || "連結訂單失敗" });
       }
     });
 
     app.get("/api/contacts/:id/linked-orders", authMiddleware, (req, res) => {
       const contactId = parseIdParam(req.params.id);
-      if (contactId === null) return res.status(400).json({ message: "??? ID" });
+      if (contactId === null) return res.status(400).json({ message: "無效的聯絡人 ID" });
       const contact = storage.getContact(contactId);
-      if (!contact) return res.status(404).json({ message: "?????? mapping" });
+      if (!contact) return res.status(404).json({ message: "找不到聯絡人" });
       const rows = db.prepare("SELECT global_order_id FROM contact_order_links WHERE contact_id = ? ORDER BY created_at DESC")
         .all(contactId) as { global_order_id: string }[];
       return res.json({ order_ids: rows.map((r) => r.global_order_id) });
@@ -578,9 +582,9 @@ export function registerContactsOrdersRoutes(app: Express): void {
 
     app.get("/api/contacts/:id/active-order", authMiddleware, (req, res) => {
       const contactId = parseIdParam(req.params.id);
-      if (contactId === null) return res.status(400).json({ message: "??? ID" });
+      if (contactId === null) return res.status(400).json({ message: "無效的聯絡人 ID" });
       const contact = storage.getContact(contactId);
-      if (!contact) return res.status(404).json({ message: "?????? mapping" });
+      if (!contact) return res.status(404).json({ message: "找不到聯絡人" });
       const ctx = storage.getActiveOrderContext(contactId);
       return res.json(ctx ? { active_order: ctx } : { active_order: null });
     });
@@ -605,24 +609,24 @@ export function registerContactsOrdersRoutes(app: Express): void {
     app.get("/api/orders/lookup", authMiddleware, async (req, res) => {
       const { q, brand_id } = req.query;
       const query = (q as string || "").trim().toUpperCase();
-      if (!query) return res.status(400).json({ message: "???????" });
+      if (!query) return res.status(400).json({ message: "請提供訂單編號" });
       const brandId = brand_id ? parseInt(brand_id as string) : undefined;
       const config = getSuperLandingConfig(brandId);
       try {
-        console.log("[????] ???????:", query, "(?????)");
+        console.log("[訂單查詢] unifiedLookupById:", query, brandId != null ? `(brand_id=${brandId})` : "(全品牌)");
         const result = await unifiedLookupById(config, query, brandId, undefined, false);
         if (!result.found || result.orders.length === 0) {
-          return res.json({ orders: [], message: "??????????????????????" });
+          return res.json({ orders: [], message: "查無符合的訂單" });
         }
         return res.json({ orders: result.orders });
       } catch (err: any) {
         const errorMap: Record<string, string> = {
-          missing_credentials: "API ?????",
-          invalid_credentials: "API ???????? merchant_no ? access_key?",
-          connection_failed: "????????? API",
+          missing_credentials: "未設定 API 憑證",
+          invalid_credentials: "API 憑證錯誤，請檢查 merchant_no 與 access_key",
+          connection_failed: "無法連線至 SuperLanding API",
         };
-        console.error("[????] ??????:", err.message);
-        return res.json({ orders: [], error: err.message, message: errorMap[err.message] || `?????${err.message}` });
+        console.error("[訂單查詢] 失敗:", err.message);
+        return res.json({ orders: [], error: err.message, message: errorMap[err.message] || `查詢失敗：${err.message}` });
       }
     });
 
@@ -632,43 +636,43 @@ export function registerContactsOrdersRoutes(app: Express): void {
       const beginDate = (begin_date as string || "").trim();
       const endDate = (end_date as string || "").trim();
 
-      if (!query) return res.status(400).json({ message: "????????Email???????" });
-      if (!beginDate || !endDate) return res.status(400).json({ message: "????????begin_date ? end_date?" });
+      if (!query) return res.status(400).json({ message: "請輸入 Email、電話或其他查詢條件" });
+      if (!beginDate || !endDate) return res.status(400).json({ message: "請同時提供 begin_date 與 end_date" });
 
       const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
       if (!dateRegex.test(beginDate) || !dateRegex.test(endDate)) {
-        return res.status(400).json({ message: "?????? YYYY-MM-DD" });
+        return res.status(400).json({ message: "日期格式須為 YYYY-MM-DD" });
       }
 
       const begin = new Date(beginDate + "T00:00:00");
       const end = new Date(endDate + "T00:00:00");
       if (isNaN(begin.getTime()) || isNaN(end.getTime())) {
-        return res.status(400).json({ message: "???????????????" });
+        return res.status(400).json({ message: "日期無效" });
       }
       const diffDays = Math.round((end.getTime() - begin.getTime()) / (1000 * 60 * 60 * 24));
-      if (diffDays < 0) return res.status(400).json({ message: "????????????" });
-      if (diffDays >= 31) return res.status(400).json({ message: "???????? 31 ?????????" });
+      if (diffDays < 0) return res.status(400).json({ message: "結束日期須晚於或等於開始日期" });
+      if (diffDays >= 31) return res.status(400).json({ message: "查詢區間不得超過 31 天" });
 
       const config = getSuperLandingConfig(brand_id ? parseInt(brand_id as string) : undefined);
       if (!config.merchantNo || !config.accessKey) {
-        return res.json({ orders: [], error: "not_configured", message: "???????? API ??" });
+        return res.json({ orders: [], error: "not_configured", message: "尚未設定 SuperLanding API 憑證" });
       }
 
       try {
-        console.log(`[????] ????: q="${query}" ${beginDate}~${endDate}`);
+        console.log(`[訂單搜尋] 條件: q="${query}" ${beginDate}~${endDate}`);
         const result = await lookupOrdersByDateAndFilter(config, query, beginDate, endDate);
         if (result.orders.length === 0) {
-          return res.json({ orders: [], totalFetched: result.totalFetched, message: `? ${beginDate} ~ ${endDate} ???????${query}???????? ${result.totalFetched} ??` });
+          return res.json({ orders: [], totalFetched: result.totalFetched, message: `於 ${beginDate} ~ ${endDate} 區間內以「${query}」查無訂單（已掃描 ${result.totalFetched} 筆）` });
         }
         return res.json({ orders: result.orders, totalFetched: result.totalFetched, truncated: result.truncated });
       } catch (err: any) {
         const errorMap: Record<string, string> = {
-          missing_credentials: "API ?????",
-          invalid_credentials: "API ???????? merchant_no ? access_key?",
-          connection_failed: "????????? API",
+          missing_credentials: "未設定 API 憑證",
+          invalid_credentials: "API 憑證錯誤，請檢查 merchant_no 與 access_key",
+          connection_failed: "無法連線至 SuperLanding API",
         };
-        console.error("[????] ??????:", err.message);
-        return res.json({ orders: [], error: err.message, message: errorMap[err.message] || `?????${err.message}` });
+        console.error("[訂單搜尋] 失敗:", err.message);
+        return res.json({ orders: [], error: err.message, message: errorMap[err.message] || `查詢失敗：${err.message}` });
       }
     });
 
@@ -676,7 +680,7 @@ export function registerContactsOrdersRoutes(app: Express): void {
       const brandId = req.query.brand_id ? parseInt(req.query.brand_id as string) : undefined;
       const config = getSuperLandingConfig(brandId);
       if (!config.merchantNo || !config.accessKey) {
-        return res.json({ pages: [], error: "not_configured", message: "???????? API ??" });
+        return res.json({ pages: [], error: "not_configured", message: "尚未設定 SuperLanding API 憑證" });
       }
       try {
         const forceRefresh = req.query.refresh === "1";
@@ -686,11 +690,11 @@ export function registerContactsOrdersRoutes(app: Express): void {
         return res.json({ pages, cached: !forceRefresh, cacheAge: Math.round(getCachedPagesAge() / 1000) });
       } catch (err: any) {
         const errorMap: Record<string, string> = {
-          missing_credentials: "API ?????",
-          invalid_credentials: "API ????",
-          connection_failed: "????????? API",
+          missing_credentials: "未設定 API 憑證",
+          invalid_credentials: "API 憑證錯誤",
+          connection_failed: "無法連線至 SuperLanding API",
         };
-        return res.json({ pages: [], error: err.message, message: errorMap[err.message] || `?????${err.message}` });
+        return res.json({ pages: [], error: err.message, message: errorMap[err.message] || `查詢失敗：${err.message}` });
       }
     });
 
@@ -699,29 +703,29 @@ export function registerContactsOrdersRoutes(app: Express): void {
       const pageId = (page_id as string || "").trim();
       const phoneNum = (phone as string || "").trim();
 
-      if (!pageId) return res.status(400).json({ message: "??????page_id?" });
-      if (!phoneNum) return res.status(400).json({ message: "???????" });
+      if (!pageId) return res.status(400).json({ message: "請提供 page_id" });
+      if (!phoneNum) return res.status(400).json({ message: "請提供電話號碼" });
 
       const config = getSuperLandingConfig(brand_id ? parseInt(brand_id as string) : undefined);
       if (!config.merchantNo || !config.accessKey) {
-        return res.json({ orders: [], error: "not_configured", message: "???????? API ??" });
+        return res.json({ orders: [], error: "not_configured", message: "尚未設定 SuperLanding API 憑證" });
       }
 
       try {
-        console.log(`[????] ????: page_id=${pageId} phone=${phoneNum}`);
+        console.log(`[訂單-銷售頁] 查詢: page_id=${pageId} phone=${phoneNum}`);
         const result = await lookupOrdersByPageAndPhone(config, pageId, phoneNum);
         if (result.orders.length === 0) {
-          return res.json({ orders: [], totalFetched: result.totalFetched, message: `?????????????${phoneNum}???????? ${result.totalFetched} ??` });
+          return res.json({ orders: [], totalFetched: result.totalFetched, message: `此銷售頁與電話 ${phoneNum} 無符合訂單（已掃描 ${result.totalFetched} 筆）` });
         }
         return res.json({ orders: result.orders, totalFetched: result.totalFetched, truncated: result.truncated });
       } catch (err: any) {
         const errorMap: Record<string, string> = {
-          missing_credentials: "API ?????",
-          invalid_credentials: "API ???????? merchant_no ? access_key?",
-          connection_failed: "????????? API",
+          missing_credentials: "未設定 API 憑證",
+          invalid_credentials: "API 憑證錯誤，請檢查 merchant_no 與 access_key",
+          connection_failed: "無法連線至 SuperLanding API",
         };
-        console.error("[????] ??????:", err.message);
-        return res.json({ orders: [], error: err.message, message: errorMap[err.message] || `?????${err.message}` });
+        console.error("[訂單-銷售頁] 失敗:", err.message);
+        return res.json({ orders: [], error: err.message, message: errorMap[err.message] || `查詢失敗：${err.message}` });
       }
     });
 }

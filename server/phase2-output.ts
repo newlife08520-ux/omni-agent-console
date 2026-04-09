@@ -112,9 +112,10 @@ export function enforceOutputGuard(text: string, planMode: string): string {
   const candidates = [
     trimmed.lastIndexOf("。", maxChars),
     trimmed.lastIndexOf("！", maxChars),
+    trimmed.lastIndexOf("？", maxChars),
     trimmed.lastIndexOf("～", maxChars),
     trimmed.lastIndexOf("\n", maxChars),
-  ].filter((i) => i >= Math.floor(maxChars * 0.5) && i < maxChars);
+  ].filter((i) => i >= Math.floor(maxChars * 0.35) && i < maxChars);
 
   if (candidates.length > 0) {
     const cutAt = Math.max(...candidates) + 1;

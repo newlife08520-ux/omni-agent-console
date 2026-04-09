@@ -9,7 +9,7 @@ import type { IStorage } from "./storage";
 import { getUnavailableReason } from "./assignment";
 import { pushLineMessage, sendFBMessage, getLineTokenForContact, getFbTokenForContact, sendRatingFlexMessage } from "./services/messaging.service";
 import { broadcastSSE } from "./services/sse.service";
-import { isRatingEligible } from "./rating-eligibility";
+import { isRatingEligible, isAutomatedRatingFlexAllowedForContact } from "./rating-eligibility";
 
 const IDLE_HOURS_DEFAULT = 24;
 const MS_PER_HOUR = 60 * 60 * 1000;
@@ -106,7 +106,12 @@ export async function runIdleCloseJob(storage: IStorage, idleHours: number = IDL
 
     try {
       const updatedContact = storage.getContact(c.id);
-      if (updatedContact && isRatingEligible({ contact: updatedContact, state: null }) && updatedContact.platform === "line") {
+      if (
+        updatedContact &&
+        isRatingEligible({ contact: updatedContact, state: null }) &&
+        isAutomatedRatingFlexAllowedForContact(updatedContact, storage) &&
+        updatedContact.platform === "line"
+      ) {
         const token = getLineTokenForContact(updatedContact as any);
         if (token) {
           let ratingSent = false;
