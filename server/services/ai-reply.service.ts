@@ -121,6 +121,15 @@ function isInHandoffQueue(row: Pick<Contact, "needs_human" | "status"> | null | 
   return row.status === "awaiting_human" || row.status === "high_risk";
 }
 
+/** Phase 106.11：排隊／售後需較長輸出；一般場景與查單第二輪維持 1000 */
+function computeMainMaxTokens(planMode: string, inHandoffQueue: boolean, hasOrderLookupTool: boolean): number {
+  if (inHandoffQueue) return 1500;
+  const pm = planMode || "";
+  if (pm.startsWith("aftersales") || pm === "cancel_first") return 1500;
+  if (hasOrderLookupTool) return 1000;
+  return 1000;
+}
+
 /** Phase 1 法律/公關風險關鍵字，命中則走 legal_risk → high_risk_short_circuit */
 const LEGAL_RISK_KEYWORDS = [
   "提告", "投訴", "檢舉", "消保官", "消基會", "律師", "法院", "法務", "詐騙",
@@ -1964,6 +1973,10 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
         ).filter(Boolean),
       });
 
+      /** Phase 106.11：同輪 release 後擴回完整工具組 */
+      let toolLoopIsInHandoffQueue = isInHandoffQueue(storage.getContact(contact.id) ?? contact);
+      let loopToolsForGemini: OpenAI.Chat.Completions.ChatCompletionTool[] = toolsForGeminiPath;
+
       const AI_TIMEOUT_MS = 45000;
       const TOOL_TIMEOUT_MS = 25000;
 
@@ -2049,10 +2062,18 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
       if (claudeSeed) {
         const claudeConversation: AiMessage[] = [...claudeSeed];
         try {
+          const maxTokFirst = computeMainMaxTokens(String(plan.mode), toolLoopIsInHandoffQueue, false);
+          console.log("[reply-trace] max_tokens_decision", {
+            contactId: contact.id,
+            planMode: plan.mode,
+            isInHandoffQueue: toolLoopIsInHandoffQueue,
+            hasOrderLookupTool: false,
+            maxTokens: maxTokFirst,
+          });
           const rFirst = await callAiModel({
             messages: claudeConversation,
-            tools: toolsForGeminiPath,
-            maxTokens: 1500,
+            tools: loopToolsForGemini,
+            maxTokens: maxTokFirst,
             temperature: isOrderLookupFamily(plan.mode) ? 0.28 : 0.85,
             modelOverride: phase1ModelOverride,
           });
@@ -2234,6 +2255,31 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
                 /* ignore */
               }
 
+              if (fnName === "release_handoff_to_ai") {
+                try {
+                  const parsed = JSON.parse(toolResult) as { ok?: boolean; success?: boolean };
+                  if (parsed?.ok === true || parsed?.success === true) {
+                    const wasQueue = toolLoopIsInHandoffQueue;
+                    const refreshed = storage.getContact(contact.id);
+                    const nowQueue = isInHandoffQueue(refreshed);
+                    if (wasQueue && !nowQueue) {
+                      toolLoopIsInHandoffQueue = false;
+                      loopToolsForGemini = allTools;
+                      toolsAvailableNames = allTools
+                        .map((t) => (t.type === "function" ? t.function?.name : "") || "")
+                        .filter(Boolean);
+                      console.log("[reply-trace] tool_set_expanded_after_release", {
+                        contactId: contact.id,
+                        from: "handoff_queue_release_tools",
+                        to: "all_tools",
+                      });
+                    }
+                  }
+                } catch (_e) {
+                  /* ignore */
+                }
+              }
+
               if (fnName === "transfer_to_human") {
                 transferTriggered = true;
                 transferReason = fnArgs.reason || "AI 判斷需要轉人工";
@@ -2325,10 +2371,18 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             }
 
             usedSecondLlmTelemetry = 1;
+            const maxTokNext = computeMainMaxTokens(String(plan.mode), toolLoopIsInHandoffQueue, hasOrderLookupTool);
+            console.log("[reply-trace] max_tokens_decision", {
+              contactId: contact.id,
+              planMode: plan.mode,
+              isInHandoffQueue: toolLoopIsInHandoffQueue,
+              hasOrderLookupTool,
+              maxTokens: maxTokNext,
+            });
             const rNext = await callAiModel({
               messages: claudeConversation,
-              tools: toolsForGeminiPath,
-              maxTokens: hasOrderLookupTool ? 1000 : 1500,
+              tools: loopToolsForGemini,
+              maxTokens: maxTokNext,
               temperature: hasOrderLookupTool ? 0.2 : 0.85,
               modelOverride: phase1ModelOverride,
             });
@@ -2757,6 +2811,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
         productScope: effectiveScope,
         channelId: contact.channel_id,
         toolCallsMade: toolsCalled,
+        contactId: contact.id,
       });
       const contactAfterPipeline = storage.getContact(contact.id);
       const inHandoffAfterPipeline =

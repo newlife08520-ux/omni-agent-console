@@ -173,8 +173,8 @@ export const formWorkflowTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
 ];
 
 /**
- * Phase 106.7：客人已在人工排隊時，主對話僅開放「釋放給 AI」與再次轉人工（需先由 AI 讀意圖）。
- * 完整查單等工具須在 release_handoff_to_ai 成功後下一輪才會出現。
+ * Phase 106.7／106.11：客人已在人工排隊時，首輪僅開放 release_handoff_to_ai + transfer_to_human。
+ * 106.11：同輪內 release_handoff_to_ai 成功後，ai-reply 會動態擴回完整工具組，無需客人分兩則訊息。
  */
 export const handoffQueueReleaseTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   {

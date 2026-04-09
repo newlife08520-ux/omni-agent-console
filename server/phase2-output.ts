@@ -97,30 +97,64 @@ export const OUTPUT_GUARD_MAX_CHARS = 600;
 /** 其餘 mode 回覆建議上限 */
 export const OUTPUT_GUARD_MAX_CHARS_RELAXED = 800;
 
+/** Phase 106.11：輸出前兜底，避免客人看到半句話結尾 */
+export function ensureProperEnding(reply: string): string {
+  if (!reply || reply.length === 0) return reply;
+  const t = reply.trimEnd();
+  if (!t) return reply;
+  if (/[。！？～)）」"』…]$/.test(t)) return reply;
+  if (/[，、,]$/.test(t)) {
+    return t.slice(0, -1) + "。";
+  }
+  return t + "～";
+}
+
+export type OutputGuardTrace = { contactId?: number };
+
 /**
  * 回覆長度控制：查單／出貨跟進較嚴、一般較寬；避免 LINE 上超長 wall of text。
  */
-export function enforceOutputGuard(text: string, planMode: string): string {
+export function enforceOutputGuard(text: string, planMode: string, trace?: OutputGuardTrace): string {
   const trimmed = (text || "").trim();
   if (!trimmed) return trimmed;
 
   const maxChars =
     planMode === "order_lookup" || planMode === "order_followup" ? 600 : 800;
 
-  if (trimmed.length <= maxChars) return trimmed;
+  let afterTrunc = trimmed;
+  if (trimmed.length > maxChars) {
+    const candidates = [
+      trimmed.lastIndexOf("。", maxChars),
+      trimmed.lastIndexOf("！", maxChars),
+      trimmed.lastIndexOf("？", maxChars),
+      trimmed.lastIndexOf("～", maxChars),
+      trimmed.lastIndexOf("\n", maxChars),
+    ].filter((i) => i >= Math.floor(maxChars * 0.35) && i < maxChars);
 
-  const candidates = [
-    trimmed.lastIndexOf("。", maxChars),
-    trimmed.lastIndexOf("！", maxChars),
-    trimmed.lastIndexOf("？", maxChars),
-    trimmed.lastIndexOf("～", maxChars),
-    trimmed.lastIndexOf("\n", maxChars),
-  ].filter((i) => i >= Math.floor(maxChars * 0.35) && i < maxChars);
-
-  if (candidates.length > 0) {
-    const cutAt = Math.max(...candidates) + 1;
-    return trimmed.slice(0, cutAt);
+    if (candidates.length > 0) {
+      const cutAt = Math.max(...candidates) + 1;
+      afterTrunc = trimmed.slice(0, cutAt);
+    } else {
+      afterTrunc = trimmed.slice(0, maxChars - 1) + "…";
+    }
   }
 
-  return trimmed.slice(0, maxChars - 1) + "…";
+  const processedReply = ensureProperEnding(afterTrunc);
+
+  if (trace?.contactId != null) {
+    const hadProperBeforeEnding = /[。！？～)）」"』…]$/.test(afterTrunc.trimEnd());
+    const hasProperAfter = /[。！？～)）」"』…]$/.test(processedReply.trimEnd());
+    console.log("[reply-trace] output_guard", {
+      contactId: trace.contactId,
+      planMode,
+      originalLength: trimmed.length,
+      afterTruncLength: afterTrunc.length,
+      finalLength: processedReply.length,
+      wasTruncated: trimmed.length !== afterTrunc.length,
+      hadProperEnding: hadProperBeforeEnding,
+      endingFixApplied: hasProperAfter && !hadProperBeforeEnding,
+    });
+  }
+
+  return processedReply;
 }

@@ -34,9 +34,41 @@ import { applyHandoff, normalizeHandoffReason } from "./handoff";
 import { finalizeLlmToolJsonString } from "../tool-llm-sanitize";
 import { orderFeatureFlags } from "../order-feature-flags";
 import type { MessagingOutboundSkipped } from "./messaging.service";
+import * as assignment from "../assignment";
+import { getTransferUnavailableSystemMessage } from "../transfer-unavailable-message";
+import {
+  bumpLookupNotFoundStrike,
+  clearLookupNotFoundStrikes,
+  getLookupNotFoundStrikesInWindow,
+} from "../lookup-not-found-strikes";
 
 /** 與 ai-reply 轉人工備援句一致，避免客人只看到轉接、沒有任何 AI 對話 */
 export const TRANSFER_TOOL_CUSTOMER_ACK = "好的，我這邊幫您轉給專人處理，請稍等一下。";
+
+function runLookupNotFoundSecondStrikeHandoff(st: IStorage, contactId: number, brandId?: number): void {
+  applyHandoff({
+    contactId,
+    reason: "repeat_unresolved",
+    reason_detail: "lookup_not_found_x2",
+    source: "tool_lookup_order_not_found_escalation",
+    brandId,
+  });
+  const assignedId = assignment.assignCase(contactId);
+  if (assignedId == null && assignment.isAllAgentsUnavailable()) {
+    st.updateContactNeedsAssignment(contactId, 1);
+    const c0 = st.getContact(contactId);
+    const tags = JSON.parse((c0?.tags || "[]") as string) as string[];
+    if (!tags.includes("待指派")) {
+      st.updateContactTags(contactId, [...tags, "待指派"]);
+    }
+    st.createMessage(
+      contactId,
+      c0?.platform || "line",
+      "system",
+      getTransferUnavailableSystemMessage(st, assignment.getUnavailableReason())
+    );
+  }
+}
 
 const SYS_NOTE_ORDER_ONE_PAGE_STRICT =
   "請直接使用 one_page_summary 的內容回覆客人，不要改寫成散文。每一行的欄位（訂單編號、商品、金額、付款、配送、狀態）都要完整保留。如果付款欄位是『貨到付款』『到店付款』『宅配代收』等，絕對不要叫客人去線上付款。";
@@ -581,7 +613,42 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
 
         if (!result.found || result.orders.length === 0) {
           console.log(`[AI Tool Call] lookup_order_by_id 查無: ${orderId}`);
-          return toolJson({ success: true, found: false, message: `查無單號 ${orderId}。請確認單號正確，或改用手機號碼查詢。` });
+          const cid = context?.contactId;
+          if (!cid) {
+            return toolJson({
+              success: true,
+              found: false,
+              message: `查無單號 ${orderId}。請確認單號正確，或改用手機號碼查詢。`,
+            });
+          }
+          const strikes = getLookupNotFoundStrikesInWindow(cid);
+          if (strikes === 0) {
+            bumpLookupNotFoundStrike(cid);
+            const deterministicReply = `不好意思，找不到「${orderId}」這筆訂單耶～\n是不是有打錯一個字呢？方便再幫我確認一下嗎？\n\n也可以直接給我您的下單【手機號碼】，我換個方式幫您查找看看～`;
+            return toolJson({
+              success: true,
+              found: false,
+              message: deterministicReply,
+              deterministic_skip_llm: true,
+              deterministic_customer_reply: deterministicReply,
+              ...orderDeterministicContractFields(),
+            });
+          }
+          clearLookupNotFoundStrikes(cid);
+          runLookupNotFoundSecondStrikeHandoff(storage, cid, context?.brandId);
+          const deterministicReply2 = `真的找不到耶... 😢\n為了避免繼續打擾您，這邊先幫您轉接真人專員確認，請稍候唷～`;
+          return toolJson({
+            success: true,
+            found: false,
+            message: deterministicReply2,
+            deterministic_skip_llm: true,
+            deterministic_customer_reply: deterministicReply2,
+            ...orderDeterministicContractFields(),
+          });
+        }
+
+        if (context?.contactId) {
+          clearLookupNotFoundStrikes(context.contactId);
         }
 
         const order = result.orders[0];
@@ -1653,30 +1720,11 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             lookup_miss_reason: preferSource === "shopline" ? (shoplineOk ? "shopline_search_zero_or_mismatch" : "shopline_not_configured") : "no_hit_merged",
           };
           console.log("[order_lookup] lookup_miss", JSON.stringify(lookupDiag));
-          if (preferSource === "shopline") {
-            const hintNoCfg = shoplineOk
-              ? "此條件下查無訂單。可請客戶提供訂單編號或當初留的 Email 再查；若訂單在其他管道建立請說明，避免混淆查詢結果。"
-              : "目前暫時無法查詢訂單，我先幫您記下來，由專人確認後回覆您。";
-            console.log("[reply-trace] lookup_phone_result", {
-              contactId: context?.contactId,
-              found: false,
-              resultCount: 0,
-              hasOnePageSummary: false,
-              onePageSummaryLength: 0,
-              hasDeterministicReply: false,
-              deterministicReplyLength: 0,
-              dataCoverage: undefined,
-              owner_match: undefined,
-            });
-            return toolJson({
-              success: true,
-              found: false,
-              message: hintNoCfg,
-              lookup_diagnostic: lookupDiag,
-            });
-          }
+          const cid = context?.contactId;
+          const digits = phone.replace(/\s/g, "");
+          const phoneShown = digits.length >= 4 ? `***${digits.slice(-4)}` : phone;
           console.log("[reply-trace] lookup_phone_result", {
-            contactId: context?.contactId,
+            contactId: cid,
             found: false,
             resultCount: 0,
             hasOnePageSummary: false,
@@ -1686,12 +1734,54 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             dataCoverage: undefined,
             owner_match: undefined,
           });
+          if (!cid) {
+            if (preferSource === "shopline") {
+              const hintNoCfg = shoplineOk
+                ? "此條件下查無訂單。可請客戶提供訂單編號或當初留的 Email 再查；若訂單在其他管道建立請說明，避免混淆查詢結果。"
+                : "目前暫時無法查詢訂單，我先幫您記下來，由專人確認後回覆您。";
+              return toolJson({
+                success: true,
+                found: false,
+                message: hintNoCfg,
+                lookup_diagnostic: lookupDiag,
+              });
+            }
+            return toolJson({
+              success: true,
+              found: false,
+              message: "此手機號碼查無訂單紀錄；若為官網購買可確認是否已留此電話。",
+              lookup_diagnostic: lookupDiag,
+            });
+          }
+          const strikes = getLookupNotFoundStrikesInWindow(cid);
+          if (strikes === 0) {
+            bumpLookupNotFoundStrike(cid);
+            const deterministicReply = `不好意思，找不到手機「${phoneShown}」的訂單耶～\n是不是有打錯一個字呢？方便再幫我確認一下嗎？\n\n也可以直接給我您的【訂單編號】，我換個方式幫您查找看看～`;
+            return toolJson({
+              success: true,
+              found: false,
+              message: deterministicReply,
+              lookup_diagnostic: lookupDiag,
+              deterministic_skip_llm: true,
+              deterministic_customer_reply: deterministicReply,
+              ...orderDeterministicContractFields(),
+            });
+          }
+          clearLookupNotFoundStrikes(cid);
+          runLookupNotFoundSecondStrikeHandoff(storage, cid, context?.brandId);
+          const deterministicReply2 = `真的找不到耶... 😢\n為了避免繼續打擾您，這邊先幫您轉接真人專員確認，請稍候唷～`;
           return toolJson({
             success: true,
             found: false,
-            message: "此手機號碼查無訂單紀錄；若為官網購買可確認是否已留此電話。",
+            message: deterministicReply2,
             lookup_diagnostic: lookupDiag,
+            deterministic_skip_llm: true,
+            deterministic_customer_reply: deterministicReply2,
+            ...orderDeterministicContractFields(),
           });
+        }
+        if (context?.contactId) {
+          clearLookupNotFoundStrikes(context.contactId);
         }
         const orders = result.orders;
         const orderSource = result.source;

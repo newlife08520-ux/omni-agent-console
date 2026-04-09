@@ -13,12 +13,16 @@ export function runPostGenerationPipeline(params: {
   productScope: string | null;
   channelId?: number | null;
   toolCallsMade?: string[];
+  /** Phase 106.11：供 output_guard reply-trace */
+  contactId?: number | null;
 }): string | null | undefined {
   if (params.rawReply == null) return params.rawReply;
   const trimmed = params.rawReply.trim();
   if (!trimmed) return params.rawReply;
 
-  let reply = enforceOutputGuard(trimmed, params.planMode);
+  let reply = enforceOutputGuard(trimmed, params.planMode, {
+    contactId: params.contactId ?? undefined,
+  });
 
   if (reply.trim()) {
     const guardContext: PostGenerationGuardContext = {
