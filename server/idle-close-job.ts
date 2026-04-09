@@ -16,13 +16,25 @@ const MS_PER_HOUR = 60 * 60 * 1000;
 
 export type IdleCloseScenario = "general" | "waiting_order_info" | "waiting_return_form" | "handoff_no_close";
 
+/** Phase 106.12：退換／取消表單情境的精準標籤白名單（整詞比對，不用 includes） */
+const RETURN_FORM_PRECISE_TAGS = new Set([
+  "退貨",
+  "換貨",
+  "退款",
+  "退換貨",
+  "退換",
+  "申請退貨",
+  "申請換貨",
+  "申請退款",
+]);
+
 const CLOSING_MESSAGES: Record<IdleCloseScenario, string> = {
   general:
-    "先幫您整理到這邊唷😊 若之後還想確認商品、價格或下單方式，直接再傳訊息給我就可以了～",
+    "這邊好一陣子沒收到您的後續訊息，先幫您整理結案唷～\n若之後還想確認商品、價格或下單方式，直接再傳訊息給我，隨時都能繼續協助您！",
   waiting_order_info:
-    "這邊先幫您保留到這裡唷🙏 若之後找到訂單編號，或方便補商品名稱＋下單手機，再直接傳我，我就能接著幫您查。",
+    "這邊好一陣子沒收到您的後續訊息，先幫您整理結案唷～\n若之後找到訂單編號或想到下單時的手機號碼，再傳訊息給我，我這邊就能接著幫您查～",
   waiting_return_form:
-    "目前先幫您暫時整理到這邊🙏 若您之後要申請退換貨，直接填寫表單或再傳訊息給我，我這邊都能接著協助您處理。",
+    "這邊好一陣子沒收到您的後續訊息，先幫您整理結案唷～\n若之後想繼續處理或填寫退換貨表單，再傳訊息給我，隨時都能接著協助您～",
   handoff_no_close:
     "", // 已轉人工不發結案語，僅內部告警
 };
@@ -35,12 +47,45 @@ export interface IdleCloseResult {
   closeReason: string;
 }
 
+function parseContactTags(contact: any): string[] {
+  return (typeof contact.tags === "string"
+    ? (() => {
+        try {
+          return JSON.parse(contact.tags || "[]");
+        } catch {
+          return [];
+        }
+      })()
+    : contact.tags) as string[];
+}
+
 function getScenario(contact: any, _lastUserAt: Date): IdleCloseScenario {
-  if (contact.status === "awaiting_human" || contact.status === "high_risk") return "handoff_no_close";
-  const tags = (typeof contact.tags === "string" ? (() => { try { return JSON.parse(contact.tags || "[]"); } catch { return []; } })() : contact.tags) as string[];
-  if (tags.some((t: string) => t === "待訂單編號" || t === "待補單號")) return "waiting_order_info";
-  if (contact.issue_type === "return_refund" || tags.some((t: string) => t.includes("退") || t.includes("換"))) return "waiting_return_form";
-  return "general";
+  const tags = parseContactTags(contact);
+
+  let scenario: IdleCloseScenario;
+  if (contact.status === "awaiting_human" || contact.status === "high_risk") {
+    scenario = "handoff_no_close";
+  } else if (tags.some((t: string) => t === "待訂單編號" || t === "待補單號")) {
+    scenario = "waiting_order_info";
+  } else {
+    const isInReturnFormFlow =
+      contact.waiting_for_customer === "return_form_submit" ||
+      contact.waiting_for_customer === "exchange_form_submit" ||
+      contact.waiting_for_customer === "cancel_form_submit" ||
+      tags.some((t: string) => RETURN_FORM_PRECISE_TAGS.has(t));
+    scenario = isInReturnFormFlow ? "waiting_return_form" : "general";
+  }
+
+  console.log("[idle-close] scenario_decision", {
+    contactId: contact.id,
+    scenario,
+    hasWaitingFormState: !!contact.waiting_for_customer,
+    waitingForCustomer: contact.waiting_for_customer,
+    hasReturnFormPreciseTag: tags.some((t: string) => RETURN_FORM_PRECISE_TAGS.has(t)),
+    legacyIssueType: contact.issue_type,
+  });
+
+  return scenario;
 }
 
 export async function runIdleCloseJob(storage: IStorage, idleHours: number = IDLE_HOURS_DEFAULT): Promise<IdleCloseResult[]> {
