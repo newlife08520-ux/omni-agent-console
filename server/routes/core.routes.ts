@@ -1210,6 +1210,15 @@ export function registerCoreRoutes(app: Express): void {
       const isOnline = (me as any)?.is_online ?? 0;
       const isAvailable = (me as any)?.is_available ?? 1;
       const counts = storage.getAgentStatsCounts(userId);
+      console.log("[stats] agent_stats_computed", {
+        userId,
+        pending_reply: counts.pending_reply,
+        urgent: counts.urgent_simple,
+        overdue: counts.overdue,
+        tracking: counts.tracking,
+        closed_today: counts.closed_today,
+        computedAt: new Date().toISOString(),
+      });
       return res.json({ my_cases: openCases, pending_reply: counts.pending_reply, urgent: counts.urgent_simple, overdue: counts.overdue, tracking: counts.tracking, closed_today: counts.closed_today, open_cases_count: openCases, max_active_conversations: maxActive, is_online: isOnline, is_available: isAvailable });
     });
 
@@ -1217,6 +1226,16 @@ export function registerCoreRoutes(app: Express): void {
       if (!isSupervisor(req)) return res.json({ today_new: 0, unassigned: 0, urgent: 0, overdue: 0, closed_today: 0, vip_unhandled: 0, team: [] });
       const brandId = req.query.brand_id ? parseInt(String(req.query.brand_id)) : undefined;
       const counts = storage.getManagerStatsCounts(brandId);
+      console.log("[stats] manager_stats_computed", {
+        brandId: brandId ?? null,
+        newToday: counts.today_new,
+        unassigned: counts.unassigned,
+        urgent: counts.urgent_simple,
+        overdue: counts.overdue,
+        resolved: counts.closed_today,
+        vipPending: counts.vip_unhandled,
+        computedAt: new Date().toISOString(),
+      });
       const agents = storage.getTeamMembers().filter((m) => m.role === "cs_agent");
       const bulk = storage.getOpenAndPendingReplyByAgent(brandId);
       const team = agents.map((m) => {

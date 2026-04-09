@@ -1,4 +1,5 @@
 import db, { initDatabase, hashPassword } from "./db";
+import { evaluateContactOverdue, evaluateContactUrgency } from "./services/contact-classification";
 import * as aiLogsRepo from "./repos/ai-logs-repo";
 import type { User, Contact, ContactWithPreview, Message, Setting, KnowledgeFile, TeamMember, MarketingRule, Brand, Channel, ChannelWithBrand, ImageAsset, AiLog, AgentStatus, AssignmentRecord, AgentBrandAssignment, AgentBrandRole, ActiveOrderContext } from "@shared/schema";
 import { CONTACT_STATUS_ALLOWED } from "@shared/schema";
@@ -1292,21 +1293,38 @@ export class SQLiteStorage implements IStorage {
       `SELECT COUNT(*) as c FROM contacts c WHERE ${brandCond} AND c.status IN ('closed','resolved') AND c.closed_at IS NOT NULL AND date(c.closed_at) = ?`
     ).get(...params, today) as { c: number };
     const lastSender = SQLiteStorage.lastMessageSenderSubquery();
-    const overdueRow = db.prepare(
-      `SELECT COUNT(*) as c FROM contacts c WHERE ${brandCond} AND c.status NOT IN ('closed','resolved') AND c.last_message_at IS NOT NULL AND datetime(c.last_message_at) <= datetime('now','-1 hour') AND LOWER(${lastSender}) = 'user'`
-    ).get(...params) as { c: number };
-    const urgentRow = db.prepare(
-      `SELECT COUNT(*) as c FROM contacts c WHERE ${brandCond} AND c.status NOT IN ('closed','resolved') AND (c.status = 'high_risk' OR (c.case_priority IS NOT NULL AND c.case_priority <= 2))`
-    ).get(...params) as { c: number };
     const vipRow = db.prepare(
       `SELECT COUNT(*) as c FROM contacts c WHERE ${brandCond} AND c.status NOT IN ('closed','resolved') AND c.vip_level > 0 AND LOWER(${lastSender}) = 'user'`
     ).get(...params) as { c: number };
+
+    const now = new Date();
+    const openForClassification = db.prepare(
+      `SELECT c.status, c.case_priority, c.vip_level, c.tags, c.last_message_sender_type, c.last_message_at, c.response_sla_deadline_at
+       FROM contacts c
+       WHERE ${brandCond} AND c.status NOT IN ('closed','resolved')`
+    ).all(...params) as {
+      status: string;
+      case_priority: number | null;
+      vip_level: number | null;
+      tags: string | null;
+      last_message_sender_type: string | null;
+      last_message_at: string | null;
+      response_sla_deadline_at: string | null;
+    }[];
+    let urgentCount = 0;
+    let overdueCount = 0;
+    for (const row of openForClassification) {
+      const contact = row;
+      if (evaluateContactUrgency({ contact, now }).isUrgent) urgentCount++;
+      if (evaluateContactOverdue({ contact, now })) overdueCount++;
+    }
+
     return {
       today_new: todayNewRow?.c ?? 0,
       unassigned: unassignedRow?.c ?? 0,
       closed_today: closedTodayRow?.c ?? 0,
-      overdue: overdueRow?.c ?? 0,
-      urgent_simple: urgentRow?.c ?? 0,
+      overdue: overdueCount,
+      urgent_simple: urgentCount,
       vip_unhandled: vipRow?.c ?? 0,
     };
   }
@@ -1320,21 +1338,37 @@ export class SQLiteStorage implements IStorage {
     const closedTodayRow = db.prepare(
       "SELECT COUNT(*) as c FROM contacts WHERE assigned_agent_id = ? AND status IN ('closed','resolved') AND closed_at IS NOT NULL AND date(closed_at) = ?"
     ).get(agentId, today) as { c: number };
-    const overdueRow = db.prepare(
-      `SELECT COUNT(*) as c FROM contacts c WHERE c.assigned_agent_id = ? AND c.status NOT IN ('closed','resolved') AND c.last_message_at IS NOT NULL AND datetime(c.last_message_at) <= datetime('now','-1 hour') AND LOWER(${lastSender}) = 'user'`
-    ).get(agentId) as { c: number };
     const trackingRow = db.prepare(
       "SELECT COUNT(*) as c FROM agent_contact_flags WHERE agent_id = ? AND flag = 'tracking'"
     ).get(agentId) as { c: number };
-    const urgentRow = db.prepare(
-      "SELECT COUNT(*) as c FROM contacts WHERE assigned_agent_id = ? AND status NOT IN ('closed','resolved') AND (status = 'high_risk' OR (case_priority IS NOT NULL AND case_priority <= 2))"
-    ).get(agentId) as { c: number };
+
+    const now = new Date();
+    const mineOpen = db.prepare(
+      `SELECT c.status, c.case_priority, c.vip_level, c.tags, c.last_message_sender_type, c.last_message_at, c.response_sla_deadline_at
+       FROM contacts c
+       WHERE c.assigned_agent_id = ? AND c.status NOT IN ('closed','resolved')`
+    ).all(agentId) as {
+      status: string;
+      case_priority: number | null;
+      vip_level: number | null;
+      tags: string | null;
+      last_message_sender_type: string | null;
+      last_message_at: string | null;
+      response_sla_deadline_at: string | null;
+    }[];
+    let urgentCount = 0;
+    let overdueCount = 0;
+    for (const row of mineOpen) {
+      if (evaluateContactUrgency({ contact: row, now }).isUrgent) urgentCount++;
+      if (evaluateContactOverdue({ contact: row, now })) overdueCount++;
+    }
+
     return {
       pending_reply: pendingRow?.c ?? 0,
       closed_today: closedTodayRow?.c ?? 0,
-      overdue: overdueRow?.c ?? 0,
+      overdue: overdueCount,
       tracking: trackingRow?.c ?? 0,
-      urgent_simple: urgentRow?.c ?? 0,
+      urgent_simple: urgentCount,
     };
   }
 

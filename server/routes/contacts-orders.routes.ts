@@ -113,6 +113,7 @@ import {
   downloadLineContent,
   downloadExternalImage,
 } from "../services/messaging.service";
+import { evaluateContactOverdue, evaluateContactUrgency } from "../services/contact-classification";
 
 const HOME_SHIPPING_KEYWORDS = ["宅酈", "宅酈到府", "到府", "home", "delivery"];
 /** 超商/門市關鍵字（不含宅配） */
@@ -129,33 +130,6 @@ const FULFILLMENT_NEW_KW = ["新訂單"];
 const FB_VERIFY_TOKEN = process.env.FB_VERIFY_TOKEN || "omnichannel_fb_verify_2024";
 
 export function registerContactsOrdersRoutes(app: Express): void {
-    /** 緊急/逾期標記用於 UI 排序與 status/case_priority 建議 */
-    const URGENT_TAGS = ["緊急", "加急", "急件", "優先"];
-    const OVERDUE_MS = 60 * 60 * 1000;
-    const isUrgentContact = (c: any): boolean => {
-      if (["closed", "resolved"].includes(c.status)) return false;
-      if (c.status === "high_risk" || (c.case_priority != null && c.case_priority <= 2)) return true;
-      try {
-        const tags = JSON.parse(c.tags || "[]");
-        if (Array.isArray(tags) && URGENT_TAGS.some((t: string) => tags.includes(t))) return true;
-      } catch (_) {}
-      if (c.vip_level > 0 && String(c.last_message_sender_type || "").toLowerCase() === "user" && c.last_message_at) {
-        const t = new Date(String(c.last_message_at).replace(" ", "T")).getTime();
-        if (Date.now() - t > OVERDUE_MS) return true;
-      }
-      if (c.response_sla_deadline_at) {
-        const deadline = new Date(String(c.response_sla_deadline_at).replace(" ", "T")).getTime();
-        if (Date.now() > deadline) return true;
-      }
-      return false;
-    };
-    const isOverdueContact = (c: any): boolean => {
-      if (["closed", "resolved"].includes(c.status)) return false;
-      if (String(c.last_message_sender_type || "").toLowerCase() !== "user" || !c.last_message_at) return false;
-      const t = new Date(String(c.last_message_at).replace(" ", "T")).getTime();
-      return Date.now() - t > OVERDUE_MS;
-    };
-
     /** AI 建議用：依關鍵字建議 issue_type / status / priority（下方為 Unicode 關鍵字） */
     const RETURN_REFUND_KW = ["\u9000", "\u63db", "\u9000\u6b3e", "\u9000\u8ca8"];
     const COMPLAINT_KW = ["\u5ba2\u8a34", "\u62b1\u6028", "\u6295\u8a34", "\u7533\u8a34"];
@@ -184,6 +158,7 @@ export function registerContactsOrdersRoutes(app: Express): void {
 
     app.get("/api/contacts", authMiddleware, (req: any, res) => {
       const routeStart = Date.now();
+      const now = new Date();
       const brandId = req.query.brand_id ? parseInt(req.query.brand_id as string) : undefined;
       const assignedToMe = req.query.assigned_to_me === "1" || req.query.assigned_to_me === "true";
       const needReplyFirst = req.query.need_reply_first === "1" || req.query.need_reply_first === "true";
@@ -211,8 +186,8 @@ export function registerContactsOrdersRoutes(app: Express): void {
         try {
           return {
             ...c,
-            is_urgent: isUrgentContact(c),
-            is_overdue: isOverdueContact(c),
+            is_urgent: evaluateContactUrgency({ contact: c, now }).isUrgent,
+            is_overdue: evaluateContactOverdue({ contact: c, now }),
           };
         } catch (err) {
           return { ...c, is_urgent: false, is_overdue: false };
