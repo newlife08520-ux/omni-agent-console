@@ -117,23 +117,71 @@ export async function runIdleCloseJob(storage: IStorage, idleHours: number = IDL
     }
 
     const closingText = CLOSING_MESSAGES[scenario];
+
+    const chId = c.channel_id != null ? Number(c.channel_id) : NaN;
+    const channel = Number.isFinite(chId) && chId > 0 ? storage.getChannel(chId) : undefined;
+    let skipClosingPush = false;
+    if (!channel) {
+      console.warn("[idle-close] channel not found, skip closing message", { contactId: c.id, channelId: c.channel_id });
+      skipClosingPush = true;
+    } else if ((channel.is_ai_enabled ?? 0) !== 1) {
+      console.log("[idle-close] channel AI disabled, skip closing message push", {
+        contactId: c.id,
+        channelId: channel.id,
+        channelName: channel.channel_name,
+        scenario,
+      });
+      storage.createSystemAlert({
+        alert_type: "idle_close_skipped_ai_disabled",
+        details: JSON.stringify({
+          contactId: c.id,
+          channelId: channel.id,
+          channelName: channel.channel_name,
+          reason: "channel_ai_disabled",
+          scenario,
+          wouldHaveSentMessage: closingText,
+          timestamp: new Date().toISOString(),
+        }),
+        brand_id: c.brand_id ?? channel.brand_id,
+        contact_id: c.id,
+      });
+      skipClosingPush = true;
+    }
+
     storage.updateContactStatus(c.id, "closed");
     storage.updateContactClosed(c.id, 0, "idle_24h");
     storage.updateContactConversationFields(c.id, { resolution_status: "closed", close_reason: "idle_24h" });
 
+    const updatedAfterClose = storage.getContact(c.id);
+    const willPushClosingMessage = Boolean(closingText && !skipClosingPush);
+    const willPushRatingFlex = Boolean(
+      updatedAfterClose &&
+        isRatingEligible({ contact: updatedAfterClose, state: null }) &&
+        isAutomatedRatingFlexAllowedForContact(updatedAfterClose, storage) &&
+        updatedAfterClose.platform === "line" &&
+        getLineTokenForContact(updatedAfterClose as any),
+    );
+    console.log("[idle-close] decision", {
+      contactId: c.id,
+      scenario,
+      channelAiEnabled: channel?.is_ai_enabled ?? null,
+      willPushClosingMessage,
+      willPushRatingFlex,
+    });
+
     let aiMsg: { id: number } | null = null;
-    if (closingText) {
+    if (closingText && !skipClosingPush) {
       aiMsg = storage.createMessage(c.id, c.platform, "ai", closingText) as { id: number };
     }
 
     try {
-      if (closingText && c.platform === "line" && c.platform_user_id) {
+      if (willPushClosingMessage && c.platform === "line" && c.platform_user_id) {
         const token = getLineTokenForContact(c as any);
         if (token) {
           await pushLineMessage(c.platform_user_id, [{ type: "text", text: closingText }], token);
           console.log(`[idle-close] LINE 結案訊息已推送 contact=${c.id}`);
         }
-      } else if (closingText && c.platform === "messenger" && c.platform_user_id) {
+      } else if (willPushClosingMessage && c.platform === "messenger" && c.platform_user_id) {
         const token = getFbTokenForContact(c as any);
         if (token) {
           await sendFBMessage(token, c.platform_user_id, closingText);
@@ -150,7 +198,7 @@ export async function runIdleCloseJob(storage: IStorage, idleHours: number = IDL
     }
 
     try {
-      const updatedContact = storage.getContact(c.id);
+      const updatedContact = updatedAfterClose ?? storage.getContact(c.id);
       if (
         updatedContact &&
         isRatingEligible({ contact: updatedContact, state: null }) &&
@@ -184,7 +232,7 @@ export async function runIdleCloseJob(storage: IStorage, idleHours: number = IDL
       contactId: c.id,
       closed: true,
       scenario,
-      messageSent: closingText || null,
+      messageSent: skipClosingPush ? null : closingText || null,
       closeReason: "idle_24h",
     });
   }
