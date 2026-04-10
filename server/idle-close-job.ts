@@ -1,9 +1,9 @@
 /**
  * 24 小時閒置結案：客戶最後一則訊息後 24 小時未回覆則走結案流程。
- * 排除：轉人工／高風險／needs_human／已指派但客服尚未回覆等（見 isInHandoffOrPendingHumanReply）。
+ * 排除：轉人工／高風險／已指派但客服尚未回覆等（見 isInHandoffOrPendingHumanReply）；待分配 needs_human 無指派另案排除。
  * 結案分流：一般諮詢 / 待補單號 / 退換貨待填表 / handoff 不關閉。
  *
- * Phase 106.15：滿 24h 的「到期瞬間」若落在非營業時間（含週末），順延至下一營業日開門才結案；
+ * Phase 106.15：滿 24h 的「到期瞬間」若落在非營業時間（含週末、國定假日），順延至下一營業日開門才結案；
  * 排程可持續執行本 job，由每筆 realCloseMoment 決定是否到點。
  */
 import type { IStorage } from "./storage";
@@ -64,9 +64,6 @@ function isInHandoffOrPendingHumanReply(contact: any): boolean {
   if (contact.status === "awaiting_human" || contact.status === "high_risk") {
     return true;
   }
-  if (contact.needs_human === 1) {
-    return true;
-  }
   const aid = contact.assigned_agent_id;
   const hasAgent = aid != null && Number(aid) > 0;
   const lastUser = String(contact.last_message_sender_type || "").toLowerCase() === "user";
@@ -123,7 +120,21 @@ export async function runIdleCloseJob(storage: IStorage, idleHours: number = IDL
     if (idleMs < idleHours * MS_PER_HOUR) continue;
 
     const lastUserAt = new Date(lastMessageMs);
-    if (isInHandoffOrPendingHumanReply(c)) {
+
+    const expireMoment = new Date(lastMessageMs + idleHours * MS_PER_HOUR);
+    const realCloseMoment = findNextBusinessMoment(expireMoment);
+    if (Date.now() < realCloseMoment.getTime()) {
+      console.log("[idle-close] postponed by business hours/holidays", {
+        contactId: c.id,
+        expireMoment: expireMoment.toISOString(),
+        realCloseMoment: realCloseMoment.toISOString(),
+        waitMoreMs: realCloseMoment.getTime() - Date.now(),
+      });
+      continue;
+    }
+
+    const scenario = getScenario(c, lastUserAt);
+    if (scenario === "handoff_no_close") {
       console.log("[idle-close] skip handoff contact", {
         contactId: c.id,
         status: c.status,
@@ -138,20 +149,6 @@ export async function runIdleCloseJob(storage: IStorage, idleHours: number = IDL
       });
       continue;
     }
-
-    const expireMoment = new Date(lastMessageMs + idleHours * MS_PER_HOUR);
-    const realCloseMoment = findNextBusinessMoment(expireMoment);
-    if (Date.now() < realCloseMoment.getTime()) {
-      console.log("[idle-close] postponed by business hours", {
-        contactId: c.id,
-        expireMoment: expireMoment.toISOString(),
-        realCloseMoment: realCloseMoment.toISOString(),
-        waitMoreMs: realCloseMoment.getTime() - Date.now(),
-      });
-      continue;
-    }
-
-    const scenario = getScenario(c, lastUserAt);
 
     console.log("[idle-close] ready to close", {
       contactId: c.id,

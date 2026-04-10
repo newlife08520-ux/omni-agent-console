@@ -19,6 +19,11 @@ uploads/
 data/
 data_coldstart/
 
+# 國定假日 JSON（與根目錄 data/ 分離；需納入版控）
+!server/data/
+!server/data/holidays/
+!server/data/holidays/*.json
+
 # uploads / generated files
 uploads/
 *.log

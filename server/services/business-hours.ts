@@ -1,7 +1,8 @@
-// === 營業時間設定 ===
-// 預設：週一~週五 09:00~18:00 (Asia/Taipei)
-// 可用環境變數覆寫，未來可移到 brand 設定
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
+// === 營業時間設定 ===
 export const BUSINESS_HOURS = {
   workDays: process.env.BUSINESS_WORK_DAYS
     ? process.env.BUSINESS_WORK_DAYS.split(",").map((s) => parseInt(s.trim(), 10))
@@ -10,6 +11,84 @@ export const BUSINESS_HOURS = {
   endHour: parseInt(process.env.BUSINESS_END_HOUR ?? "18", 10),
   timezone: process.env.BUSINESS_TIMEZONE ?? "Asia/Taipei",
 };
+
+// === 國定假日載入 ===
+interface HolidayEntry {
+  date: string;
+  name: string;
+}
+
+interface HolidayFile {
+  year: number;
+  holidays: HolidayEntry[];
+}
+
+const HOLIDAY_DATES = new Set<string>();
+const HOLIDAY_NAMES = new Map<string, string>();
+
+function resolveHolidaysDir(): string {
+  const fromCwd = path.join(process.cwd(), "server", "data", "holidays");
+  if (fs.existsSync(fromCwd)) return fromCwd;
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  return path.join(moduleDir, "..", "data", "holidays");
+}
+
+function loadHolidays(): void {
+  const holidaysDir = resolveHolidaysDir();
+
+  try {
+    if (!fs.existsSync(holidaysDir)) {
+      console.warn("[business-hours] holidays directory not found:", holidaysDir);
+      return;
+    }
+
+    const files = fs.readdirSync(holidaysDir).filter((f) => f.endsWith(".json"));
+    let totalLoaded = 0;
+
+    for (const file of files) {
+      try {
+        const content = fs.readFileSync(path.join(holidaysDir, file), "utf-8");
+        const data = JSON.parse(content) as HolidayFile;
+
+        if (!Array.isArray(data.holidays)) {
+          console.warn(`[business-hours] ${file} 格式錯誤：holidays 不是陣列`);
+          continue;
+        }
+
+        for (const h of data.holidays) {
+          if (!h.date || !/^\d{4}-\d{2}-\d{2}$/.test(h.date)) {
+            console.warn(`[business-hours] ${file} 跳過無效日期: ${h.date}`);
+            continue;
+          }
+          HOLIDAY_DATES.add(h.date);
+          HOLIDAY_NAMES.set(h.date, h.name ?? "國定假日");
+          totalLoaded++;
+        }
+
+        console.log(`[business-hours] 載入 ${file}: ${data.holidays.length} 筆`);
+      } catch (err) {
+        console.error(`[business-hours] 載入 ${file} 失敗:`, err);
+      }
+    }
+
+    console.log(`[business-hours] 國定假日總計載入 ${totalLoaded} 筆，涵蓋年份檔案 ${files.length} 個`);
+  } catch (err) {
+    console.error("[business-hours] 載入 holidays 失敗:", err);
+  }
+}
+
+loadHolidays();
+
+export function isHoliday(dateStr: string): boolean {
+  return HOLIDAY_DATES.has(dateStr);
+}
+
+export function getHolidayStats(): { totalDates: number; sampleDates: string[] } {
+  return {
+    totalDates: HOLIDAY_DATES.size,
+    sampleDates: Array.from(HOLIDAY_DATES).sort().slice(0, 10),
+  };
+}
 
 const WEEKDAY_SHORT_TO_NUM: Record<string, number> = {
   Sun: 0,
@@ -21,16 +100,14 @@ const WEEKDAY_SHORT_TO_NUM: Record<string, number> = {
   Sat: 6,
 };
 
-/**
- * 取得指定 Date 在目標時區的曆法與鐘面時分（用於營業判斷）
- */
-export function getTaipeiComponents(date: Date): {
+function getTaipeiComponents(date: Date): {
   year: number;
   month: number;
   day: number;
   dayOfWeek: number;
   hour: number;
   minute: number;
+  dateStr: string;
 } {
   const formatter = new Intl.DateTimeFormat("en-US", {
     timeZone: BUSINESS_HOURS.timezone,
@@ -50,14 +127,19 @@ export function getTaipeiComponents(date: Date): {
   if (Number.isNaN(hour)) hour = 0;
   if (hour === 24) hour = 0;
 
+  const year = parseInt(get("year"), 10);
+  const month = parseInt(get("month"), 10);
+  const day = parseInt(get("day"), 10);
   const wk = get("weekday");
+
   return {
-    year: parseInt(get("year"), 10),
-    month: parseInt(get("month"), 10),
-    day: parseInt(get("day"), 10),
+    year,
+    month,
+    day,
     dayOfWeek: WEEKDAY_SHORT_TO_NUM[wk] ?? 1,
     hour,
     minute: parseInt(get("minute"), 10) || 0,
+    dateStr: `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
   };
 }
 
@@ -75,51 +157,38 @@ export function taipeiWallToUtcDate(
   return new Date(Date.UTC(year, month - 1, day, hour - 8, minute, second));
 }
 
-function addCalendarDaysTaipei(
-  year: number,
-  month: number,
-  day: number,
-  daysToAdd: number,
-): { year: number; month: number; day: number; dayOfWeek: number } {
-  const noon = taipeiWallToUtcDate(year, month, day, 12, 0, 0);
-  const shifted = new Date(noon.getTime() + daysToAdd * 86400000);
-  const p = getTaipeiComponents(shifted);
-  return { year: p.year, month: p.month, day: p.day, dayOfWeek: p.dayOfWeek };
-}
-
-/**
- * 判斷某個時間點是否在營業時間內（含起始整點、不含結束整點：9:00–17:59 為營業）
- */
 export function isWithinBusinessHours(date: Date): boolean {
-  const { dayOfWeek, hour } = getTaipeiComponents(date);
-  const isWorkDay = BUSINESS_HOURS.workDays.includes(dayOfWeek);
-  const isWorkHour = hour >= BUSINESS_HOURS.startHour && hour < BUSINESS_HOURS.endHour;
-  return isWorkDay && isWorkHour;
+  const taipei = getTaipeiComponents(date);
+
+  if (isHoliday(taipei.dateStr)) return false;
+  if (!BUSINESS_HOURS.workDays.includes(taipei.dayOfWeek)) return false;
+  if (taipei.hour < BUSINESS_HOURS.startHour || taipei.hour >= BUSINESS_HOURS.endHour) return false;
+
+  return true;
 }
 
-/**
- * 給定一個時間點：
- * - 若已在營業時間內 → 回傳該時刻（新 Date 複本）
- * - 否則 → 下一個「營業日 startHour:00」的瞬間（台北牆上時間）
- */
 export function findNextBusinessMoment(from: Date): Date {
   if (isWithinBusinessHours(from)) {
     return new Date(from.getTime());
   }
 
+  const MAX_HOURS = 30 * 24;
   const { startHour, workDays } = BUSINESS_HOURS;
-  const fp = getTaipeiComponents(from);
+  let cursor = new Date(from.getTime());
 
-  for (let add = 0; add < 14; add++) {
-    const { year: y, month: m, day: d, dayOfWeek } = addCalendarDaysTaipei(fp.year, fp.month, fp.day, add);
-    if (!workDays.includes(dayOfWeek)) continue;
+  for (let i = 0; i < MAX_HOURS; i++) {
+    cursor = new Date(cursor.getTime() + 60 * 60 * 1000);
+    const taipei = getTaipeiComponents(cursor);
 
-    const open = taipeiWallToUtcDate(y, m, d, startHour, 0, 0);
-    if (open.getTime() >= from.getTime()) {
-      return open;
+    const isWorkDay = workDays.includes(taipei.dayOfWeek);
+    const isNotHoliday = !isHoliday(taipei.dateStr);
+    const isStartHour = taipei.hour === startHour;
+
+    if (isWorkDay && isNotHoliday && isStartHour) {
+      return taipeiWallToUtcDate(taipei.year, taipei.month, taipei.day, startHour, 0, 0);
     }
   }
 
-  console.warn("[business-hours] findNextBusinessMoment 超過 14 天仍無結果，回傳 from+14d");
-  return new Date(from.getTime() + 14 * 24 * 60 * 60 * 1000);
+  console.warn("[business-hours] findNextBusinessMoment 超過 30 天還沒找到");
+  return new Date(from.getTime() + 30 * 24 * 60 * 60 * 1000);
 }

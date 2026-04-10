@@ -61,6 +61,7 @@ import {
 import { lookupShoplineOrdersByPhoneExact, syncShoplineProductsToCatalog } from "../shopline";
 import * as assignment from "../assignment";
 import { runIdleCloseJob, getIdleCloseHours } from "../idle-close-job";
+import { getHolidayStats, BUSINESS_HOURS } from "../services/business-hours";
 import {
   detectIntentLevel,
   classifyOrderNumber,
@@ -890,6 +891,14 @@ export function registerCoreRoutes(app: Express): void {
       const hours = getIdleCloseHours(storage);
       runIdleCloseJob(storage, hours).catch((err) => console.error("[idle-close] 手動觸發失敗:", err));
       return res.json({ ok: true, message: "idle close triggered, see server logs" });
+    });
+
+    app.get("/api/admin/business-hours-status", superAdminOrDebugToken, (_req, res) => {
+      return res.json({
+        ok: true,
+        businessHours: BUSINESS_HOURS,
+        holidays: getHolidayStats(),
+      });
     });
 
     /** super_admin：從 docs/persona 同步 Global + 品牌 system_prompt 至 DB（路徑用 process.cwd，避免 CJS bundle 下 import.meta 不可用） */
