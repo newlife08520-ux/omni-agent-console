@@ -1,12 +1,13 @@
 /**
  * 24 小時閒置結案：客戶最後一則訊息後 24 小時未回覆則走結案流程。
- * 排除：已轉人工(awaiting_human)、高風險(high_risk)。
- * 結案分流：一般諮詢 / 待補單號 / 退換貨待填表 / 已轉人工不關閉。
+ * 排除：轉人工／高風險／needs_human／已指派但客服尚未回覆等（見 isInHandoffOrPendingHumanReply）。
+ * 結案分流：一般諮詢 / 待補單號 / 退換貨待填表 / handoff 不關閉。
  *
- * 僅在「上班時段」執行：假日、下班後、午休不跑閒置結案，避免「假日沒人回 → 被迫結案」。
+ * Phase 106.15：滿 24h 的「到期瞬間」若落在非營業時間（含週末），順延至下一營業日開門才結案；
+ * 排程可持續執行本 job，由每筆 realCloseMoment 決定是否到點。
  */
 import type { IStorage } from "./storage";
-import { getUnavailableReason } from "./assignment";
+import { findNextBusinessMoment } from "./services/business-hours";
 import { pushLineMessage, sendFBMessage, getLineTokenForContact, getFbTokenForContact, sendRatingFlexMessage } from "./services/messaging.service";
 import { broadcastSSE } from "./services/sse.service";
 import { isRatingEligible, isAutomatedRatingFlexAllowedForContact } from "./rating-eligibility";
@@ -59,11 +60,27 @@ function parseContactTags(contact: any): string[] {
     : contact.tags) as string[];
 }
 
+function isInHandoffOrPendingHumanReply(contact: any): boolean {
+  if (contact.status === "awaiting_human" || contact.status === "high_risk") {
+    return true;
+  }
+  if (contact.needs_human === 1) {
+    return true;
+  }
+  const aid = contact.assigned_agent_id;
+  const hasAgent = aid != null && Number(aid) > 0;
+  const lastUser = String(contact.last_message_sender_type || "").toLowerCase() === "user";
+  if (hasAgent && lastUser && (contact.last_human_reply_at == null || String(contact.last_human_reply_at).trim() === "")) {
+    return true;
+  }
+  return false;
+}
+
 function getScenario(contact: any, _lastUserAt: Date): IdleCloseScenario {
   const tags = parseContactTags(contact);
 
   let scenario: IdleCloseScenario;
-  if (contact.status === "awaiting_human" || contact.status === "high_risk") {
+  if (isInHandoffOrPendingHumanReply(contact)) {
     scenario = "handoff_no_close";
   } else if (tags.some((t: string) => t === "待訂單編號" || t === "待補單號")) {
     scenario = "waiting_order_info";
@@ -89,32 +106,59 @@ function getScenario(contact: any, _lastUserAt: Date): IdleCloseScenario {
 }
 
 export async function runIdleCloseJob(storage: IStorage, idleHours: number = IDLE_HOURS_DEFAULT): Promise<IdleCloseResult[]> {
-  const reason = getUnavailableReason();
-  if (reason === "weekend" || reason === "after_hours") {
-    return [];
-  }
-
-  const cutoffTime = Date.now() - idleHours * MS_PER_HOUR;
   const results: IdleCloseResult[] = [];
 
   const contacts = storage.getContacts(undefined, undefined, undefined, 5000);
   for (const c of contacts) {
     if (c.status === "closed" || c.status === "resolved") continue;
-    if (c.status === "awaiting_human" || c.status === "high_risk") continue;
     /** 待分配（需人工但尚未指派）：不自動結案，留給主管分配或手動結案，避免品牌案件全變成已結案 */
     if (c.needs_human === 1 && !(c as any).assigned_agent_id) continue;
     const lastAt = c.last_message_at;
     if (!lastAt) continue;
-    const lastUserAt = new Date(String(lastAt).replace(" ", "T"));
-    if (lastUserAt.getTime() > cutoffTime) continue;
     const lastSender = (c as any).last_message_sender_type;
     if (String(lastSender || "").toLowerCase() !== "user") continue;
 
-    const scenario = getScenario(c, lastUserAt);
-    if (scenario === "handoff_no_close") {
-      results.push({ contactId: c.id, closed: false, scenario, messageSent: null, closeReason: "handoff_no_auto_close" });
+    const lastMessageMs = new Date(String(lastAt).replace(" ", "T")).getTime();
+    const idleMs = Date.now() - lastMessageMs;
+    if (idleMs < idleHours * MS_PER_HOUR) continue;
+
+    const lastUserAt = new Date(lastMessageMs);
+    if (isInHandoffOrPendingHumanReply(c)) {
+      console.log("[idle-close] skip handoff contact", {
+        contactId: c.id,
+        status: c.status,
+        needs_human: c.needs_human,
+      });
+      results.push({
+        contactId: c.id,
+        closed: false,
+        scenario: "handoff_no_close",
+        messageSent: null,
+        closeReason: "handoff_no_auto_close",
+      });
       continue;
     }
+
+    const expireMoment = new Date(lastMessageMs + idleHours * MS_PER_HOUR);
+    const realCloseMoment = findNextBusinessMoment(expireMoment);
+    if (Date.now() < realCloseMoment.getTime()) {
+      console.log("[idle-close] postponed by business hours", {
+        contactId: c.id,
+        expireMoment: expireMoment.toISOString(),
+        realCloseMoment: realCloseMoment.toISOString(),
+        waitMoreMs: realCloseMoment.getTime() - Date.now(),
+      });
+      continue;
+    }
+
+    const scenario = getScenario(c, lastUserAt);
+
+    console.log("[idle-close] ready to close", {
+      contactId: c.id,
+      lastMessageAt: c.last_message_at,
+      expireMoment: expireMoment.toISOString(),
+      realCloseMoment: realCloseMoment.toISOString(),
+    });
 
     const closingText = CLOSING_MESSAGES[scenario];
 

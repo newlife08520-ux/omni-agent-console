@@ -60,6 +60,7 @@ import {
 } from "../order-multi-selector";
 import { lookupShoplineOrdersByPhoneExact, syncShoplineProductsToCatalog } from "../shopline";
 import * as assignment from "../assignment";
+import { runIdleCloseJob, getIdleCloseHours } from "../idle-close-job";
 import {
   detectIntentLevel,
   classifyOrderNumber,
@@ -881,6 +882,14 @@ export function registerCoreRoutes(app: Express): void {
         console.error("[Deep Sync] 載入模組失敗:", e);
       }
       return res.json({ ok: true, message: "deep sync triggered, see server logs for progress" });
+    });
+
+    /** super_admin 或 ADMIN_DEBUG_TOKEN：手動觸發閒置結案掃描（fire-and-forget） */
+    app.post("/api/admin/trigger-idle-close-now", superAdminOrDebugToken, (_req, res) => {
+      console.log("[idle-close] 手動觸發");
+      const hours = getIdleCloseHours(storage);
+      runIdleCloseJob(storage, hours).catch((err) => console.error("[idle-close] 手動觸發失敗:", err));
+      return res.json({ ok: true, message: "idle close triggered, see server logs" });
     });
 
     /** super_admin：從 docs/persona 同步 Global + 品牌 system_prompt 至 DB（路徑用 process.cwd，避免 CJS bundle 下 import.meta 不可用） */
