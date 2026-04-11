@@ -135,6 +135,82 @@ const FB_VERIFY_TOKEN = process.env.FB_VERIFY_TOKEN || "omnichannel_fb_verify_20
 
 const productCatalogUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
+/** 與 GET /api/admin/contact-state/:id 共用（lookup 批次端點亦使用） */
+type AdminContactStatePayload = {
+  ok: true;
+  contact: {
+    id: number;
+    brand_id: number | null;
+    channel_id: number | null;
+    display_name: string;
+    needs_human: number;
+    status: string;
+    human_reason: string | null;
+    waiting_for_customer: string | null;
+    customer_goal_locked: string | null;
+    product_scope_locked: string | null;
+    resolution_status: string | null;
+    return_stage: number | null;
+    ai_muted_until: string | null;
+    assigned_agent_id: number | null;
+    assigned_at: string | null;
+    first_assigned_at: string | null;
+    last_human_reply_at: string | null;
+    assignment_status: string | null;
+    needs_assignment: number | null;
+    consecutive_timeouts: number | null;
+    created_at: string;
+  };
+  diagnosis: {
+    will_be_treated_as_in_handoff: boolean;
+    is_ai_muted: boolean;
+    has_form_waiting: boolean;
+  };
+};
+
+function buildAdminContactStatePayload(contactId: number): AdminContactStatePayload | null {
+  const contact = storage.getContact(contactId);
+  if (!contact) return null;
+  const aiMuted = storage.isAiMuted(contact.id);
+  const handoffRelevant: AdminContactStatePayload["contact"] = {
+    id: contact.id,
+    brand_id: contact.brand_id,
+    channel_id: contact.channel_id,
+    display_name: contact.display_name,
+    needs_human: contact.needs_human,
+    status: contact.status,
+    human_reason: contact.human_reason ?? null,
+    waiting_for_customer: contact.waiting_for_customer ?? null,
+    customer_goal_locked: contact.customer_goal_locked ?? null,
+    product_scope_locked: contact.product_scope_locked ?? null,
+    resolution_status: contact.resolution_status ?? null,
+    return_stage: contact.return_stage ?? null,
+    ai_muted_until: (contact as { ai_muted_until?: string | null }).ai_muted_until ?? null,
+    assigned_agent_id: contact.assigned_agent_id ?? null,
+    assigned_at: contact.assigned_at ?? null,
+    first_assigned_at: contact.first_assigned_at ?? null,
+    last_human_reply_at: contact.last_human_reply_at ?? null,
+    assignment_status: contact.assignment_status ?? null,
+    needs_assignment: contact.needs_assignment ?? null,
+    consecutive_timeouts: (contact as { consecutive_timeouts?: number }).consecutive_timeouts ?? null,
+    created_at: contact.created_at,
+  };
+  return {
+    ok: true,
+    contact: handoffRelevant,
+    diagnosis: {
+      will_be_treated_as_in_handoff:
+        contact.needs_human === 1 ||
+        contact.status === "awaiting_human" ||
+        contact.status === "high_risk",
+      is_ai_muted: aiMuted,
+      has_form_waiting: !!(contact.waiting_for_customer && String(contact.waiting_for_customer).trim()),
+    },
+  };
+}
+
+const DEFAULT_LOOKUP_CONTACT_NAMES = "Jie,詠全,林芷蕎,剉麻那,童永志,鍵億管線";
+
 export function registerCoreRoutes(app: Express): void {
     app.get("/api/health", (_req, res) => {
       res.json({ ok: true });
@@ -734,44 +810,127 @@ export function registerCoreRoutes(app: Express): void {
       const id = parseIdParam(req.params.id);
       if (id == null) return res.status(400).json({ error: "invalid id" });
       try {
-        const contact = storage.getContact(id);
-        if (!contact) return res.status(404).json({ error: "contact not found" });
-        const aiMuted = storage.isAiMuted(contact.id);
-        const handoffRelevant = {
-          id: contact.id,
-          brand_id: contact.brand_id,
-          channel_id: contact.channel_id,
-          display_name: contact.display_name,
-          needs_human: contact.needs_human,
-          status: contact.status,
-          human_reason: contact.human_reason ?? null,
-          waiting_for_customer: contact.waiting_for_customer ?? null,
-          customer_goal_locked: contact.customer_goal_locked ?? null,
-          product_scope_locked: contact.product_scope_locked ?? null,
-          resolution_status: contact.resolution_status ?? null,
-          return_stage: contact.return_stage ?? null,
-          ai_muted_until: (contact as { ai_muted_until?: string | null }).ai_muted_until ?? null,
-          assigned_agent_id: contact.assigned_agent_id ?? null,
-          assigned_at: contact.assigned_at ?? null,
-          first_assigned_at: contact.first_assigned_at ?? null,
-          last_human_reply_at: contact.last_human_reply_at ?? null,
-          assignment_status: contact.assignment_status ?? null,
-          needs_assignment: contact.needs_assignment ?? null,
-          consecutive_timeouts: (contact as { consecutive_timeouts?: number }).consecutive_timeouts ?? null,
-          created_at: contact.created_at,
-        };
-        return res.json({
-          ok: true,
-          contact: handoffRelevant,
-          diagnosis: {
-            will_be_treated_as_in_handoff:
-              contact.needs_human === 1 ||
-              contact.status === "awaiting_human" ||
-              contact.status === "high_risk",
-            is_ai_muted: aiMuted,
-            has_form_waiting: !!(contact.waiting_for_customer && String(contact.waiting_for_customer).trim()),
-          },
-        });
+        const payload = buildAdminContactStatePayload(id);
+        if (!payload) return res.status(404).json({ error: "contact not found" });
+        return res.json(payload);
+      } catch (e: any) {
+        return res.status(500).json({ error: String(e?.message ?? e) });
+      }
+    });
+
+    /**
+     * super_admin 或 ADMIN_DEBUG_TOKEN：依 LINE display_name（LIKE）在指定品牌下批次查聯絡人，並附完整 contact-state。
+     * 預設 names 免帶參數即可查老闆常用名單；?names= 逗號分隔可覆蓋。?brand= 可覆蓋品牌過濾（單一 LIKE 子字串）。
+     */
+    app.get("/api/admin/lookup-contacts-by-names", superAdminOrDebugToken, (req, res) => {
+      try {
+        const rawQ = req.query.names;
+        let nameList: string[];
+        if (typeof rawQ === "string" && rawQ.trim()) {
+          nameList = rawQ
+            .split(",")
+            .map(s => s.trim())
+            .filter(Boolean);
+        } else {
+          nameList = DEFAULT_LOOKUP_CONTACT_NAMES.split(",").map(s => s.trim()).filter(Boolean);
+        }
+
+        const brandOverride =
+          typeof req.query.brand === "string" && req.query.brand.trim() ? req.query.brand.trim() : null;
+
+        const stmtDefault = db.prepare(`
+          SELECT
+            c.id AS contact_id,
+            b.name AS brand_name,
+            COALESCE(ch.is_ai_enabled, 0) AS channel_ai_enabled
+          FROM contacts c
+          INNER JOIN brands b ON c.brand_id = b.id
+          LEFT JOIN channels ch ON c.channel_id = ch.id
+          WHERE (LOWER(COALESCE(b.name, '')) LIKE '%aquila%' OR b.name LIKE '%天鷹座%')
+            AND c.display_name LIKE ?
+          ORDER BY c.id ASC
+        `);
+
+        const stmtBrand = db.prepare(`
+          SELECT
+            c.id AS contact_id,
+            b.name AS brand_name,
+            COALESCE(ch.is_ai_enabled, 0) AS channel_ai_enabled
+          FROM contacts c
+          INNER JOIN brands b ON c.brand_id = b.id
+          LEFT JOIN channels ch ON c.channel_id = ch.id
+          WHERE b.name LIKE ?
+            AND c.display_name LIKE ?
+          ORDER BY c.id ASC
+        `);
+
+        const matched: {
+          name: string;
+          contact_id: number;
+          display_name: string;
+          brand_name: string;
+          channel: string;
+          status: string;
+          needs_human: number;
+          ai_muted: 0 | 1;
+          waiting_for_customer: string | null;
+          resolution_status: string | null;
+          close_reason: string | null;
+          last_message_at: string | null;
+          channel_ai_enabled: 0 | 1;
+          will_be_treated_as_in_handoff: boolean;
+          full_state: AdminContactStatePayload;
+        }[] = [];
+
+        const not_found: string[] = [];
+
+        for (const name of nameList) {
+          const likePat = `%${name}%`;
+          const rows = brandOverride
+            ? (stmtBrand.all(`%${brandOverride}%`, likePat) as {
+                contact_id: number;
+                brand_name: string;
+                channel_ai_enabled: number;
+              }[])
+            : (stmtDefault.all(likePat) as {
+                contact_id: number;
+                brand_name: string;
+                channel_ai_enabled: number;
+              }[]);
+
+          if (rows.length === 0) {
+            not_found.push(name);
+            continue;
+          }
+
+          for (const row of rows) {
+            const fullState = buildAdminContactStatePayload(row.contact_id);
+            if (!fullState) continue;
+            const c = storage.getContact(row.contact_id);
+            if (!c) continue;
+            const plat = (c.platform || "line").toLowerCase();
+            const channelLabel = plat === "line" ? "LINE" : plat === "facebook" || plat === "fb" ? "FACEBOOK" : plat.toUpperCase();
+            matched.push({
+              name,
+              contact_id: row.contact_id,
+              display_name: c.display_name,
+              brand_name: row.brand_name,
+              channel: channelLabel,
+              status: c.status,
+              needs_human: c.needs_human,
+              ai_muted: fullState.diagnosis.is_ai_muted ? 1 : 0,
+              waiting_for_customer: c.waiting_for_customer ?? null,
+              resolution_status: c.resolution_status ?? null,
+              close_reason: c.close_reason ?? null,
+              last_message_at: c.last_message_at ?? null,
+              channel_ai_enabled: row.channel_ai_enabled === 1 ? 1 : 0,
+              will_be_treated_as_in_handoff: fullState.diagnosis.will_be_treated_as_in_handoff,
+              full_state: fullState,
+            });
+          }
+        }
+
+        return res.json({ matched, not_found });
       } catch (e: any) {
         return res.status(500).json({ error: String(e?.message ?? e) });
       }
