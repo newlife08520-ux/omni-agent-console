@@ -943,10 +943,15 @@ export function registerCoreRoutes(app: Express): void {
           name: string;
           system_prompt: string;
           return_form_url: string;
+          shopline_store_domain: string;
+          shopline_api_token: string;
         };
         const brandRows = db
           .prepare(
-            "SELECT id, name, system_prompt, COALESCE(return_form_url, '') AS return_form_url FROM brands ORDER BY id ASC"
+            `SELECT id, name, system_prompt, COALESCE(return_form_url, '') AS return_form_url,
+              COALESCE(shopline_store_domain, '') AS shopline_store_domain,
+              COALESCE(shopline_api_token, '') AS shopline_api_token
+             FROM brands ORDER BY id ASC`
           )
           .all() as BrandRow[];
 
@@ -1030,6 +1035,16 @@ export function registerCoreRoutes(app: Express): void {
           const ready_to_enable_ai =
             system_prompt_length > 0 && hasContentSource && hasAnyToken;
 
+          const slDomain = String(b.shopline_store_domain ?? "").trim();
+          const slToken = String(b.shopline_api_token ?? "").trim();
+          const credential_fields_present: string[] = [];
+          const credential_fields_missing: string[] = [];
+          if (slDomain) credential_fields_present.push("shopline_store_domain");
+          else credential_fields_missing.push("shopline_store_domain");
+          if (slToken) credential_fields_present.push("shopline_api_token");
+          else credential_fields_missing.push("shopline_api_token");
+          const has_shopline_credentials = credential_fields_present.length === 2;
+
           return {
             id: b.id,
             name: b.name ?? "",
@@ -1043,6 +1058,16 @@ export function registerCoreRoutes(app: Express): void {
             product_catalog_with_faq,
             orders_total,
             orders_by_source,
+            shopline_status: {
+              has_credentials: has_shopline_credentials,
+              credential_fields_present,
+              credential_fields_missing,
+              last_sync_attempted_at: null,
+              last_sync_succeeded_at: null,
+              last_sync_error: null,
+              products_synced_count: product_catalog_count,
+              orders_synced_count: shopline,
+            },
             channels,
             ready_to_enable_ai,
             warnings,
