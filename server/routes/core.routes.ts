@@ -1056,6 +1056,193 @@ export function registerCoreRoutes(app: Express): void {
     });
 
     /**
+     * super_admin 或 ADMIN_DEBUG_TOKEN：將來源品牌的 product_catalog、knowledge_files 複製到目標品牌（不動 brands.system_prompt／return_form_url、不碰訂單表）。
+     * Query 或 JSON body：from、to（預設 1→2）、dry_run（預設 true 僅預覽）。
+     */
+    app.post("/api/admin/clone-brand-config", superAdminOrDebugToken, (req, res) => {
+      try {
+        const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? (req.body as Record<string, unknown>) : {};
+        const rawFrom = req.query.from ?? body.from;
+        const rawTo = req.query.to ?? body.to;
+        const rawDry = req.query.dry_run ?? body.dry_run;
+
+        const fromId =
+          rawFrom !== undefined && String(rawFrom).trim() !== "" ? parseInt(String(rawFrom), 10) : 1;
+        const toId =
+          rawTo !== undefined && String(rawTo).trim() !== "" ? parseInt(String(rawTo), 10) : 2;
+        if (!Number.isFinite(fromId) || !Number.isFinite(toId) || fromId < 1 || toId < 1) {
+          return res.status(400).json({ error: "invalid from/to" });
+        }
+        if (fromId === toId) {
+          return res.status(400).json({ error: "from and to must differ" });
+        }
+
+        let dryRun = true;
+        if (rawDry !== undefined && String(rawDry).trim() !== "") {
+          const s = String(rawDry).toLowerCase();
+          dryRun = !(s === "false" || s === "0" || s === "no");
+        }
+
+        const brandFrom = db.prepare("SELECT id, name FROM brands WHERE id = ?").get(fromId) as
+          | { id: number; name: string }
+          | undefined;
+        const brandTo = db.prepare("SELECT id, name FROM brands WHERE id = ?").get(toId) as
+          | { id: number; name: string }
+          | undefined;
+        if (!brandFrom || !brandTo) {
+          return res.status(404).json({ error: "brand not found" });
+        }
+
+        const countPc = (bid: number) =>
+          (db.prepare("SELECT COUNT(*) AS c FROM product_catalog WHERE brand_id = ?").get(bid) as { c: number }).c;
+        const countKf = (bid: number) =>
+          (db.prepare("SELECT COUNT(*) AS c FROM knowledge_files WHERE brand_id = ?").get(bid) as { c: number }).c;
+
+        const fromPc = countPc(fromId);
+        const fromKf = countKf(fromId);
+        const toPcBefore = countPc(toId);
+        const toKfBefore = countKf(toId);
+
+        const actions = [
+          `DELETE ${toPcBefore} rows from product_catalog where brand_id=${toId}`,
+          `INSERT ${fromPc} rows into product_catalog (brand_id=${toId})`,
+          `DELETE ${toKfBefore} rows from knowledge_files where brand_id=${toId}`,
+          `INSERT ${fromKf} rows into knowledge_files (brand_id=${toId})`,
+        ];
+
+        const payload = {
+          dry_run: dryRun,
+          from_brand: {
+            id: brandFrom.id,
+            name: brandFrom.name ?? "",
+            product_catalog: fromPc,
+            knowledge_files: fromKf,
+          },
+          to_brand_before: {
+            id: brandTo.id,
+            name: brandTo.name ?? "",
+            product_catalog: toPcBefore,
+            knowledge_files: toKfBefore,
+          },
+          to_brand_after_preview: { product_catalog: fromPc, knowledge_files: fromKf },
+          actions,
+          executed: false as boolean,
+        };
+
+        if (dryRun) {
+          return res.json(payload);
+        }
+
+        const insertPc = db.prepare(
+          `INSERT INTO product_catalog (
+            brand_id, product_id, title, keywords, order_prefix, page_id, url, image_url,
+            description_short, faq, category, tags, price, is_popular, is_available, created_at, updated_at
+          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+        );
+        const insertKf = db.prepare(
+          `INSERT INTO knowledge_files (
+            filename, original_name, size, created_at, brand_id, content, category, intent, allowed_modes, forbidden_modes, tone
+          ) VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+        );
+
+        const runClone = db.transaction(() => {
+          const rowsPc = db
+            .prepare(
+              `SELECT product_id, title, keywords, order_prefix, page_id, url, image_url,
+                description_short, faq, category, tags, price, is_popular, is_available, created_at, updated_at
+               FROM product_catalog WHERE brand_id = ?`
+            )
+            .all(fromId) as {
+              product_id: string;
+              title: string;
+              keywords: string | null;
+              order_prefix: string | null;
+              page_id: string | null;
+              url: string | null;
+              image_url: string | null;
+              description_short: string | null;
+              faq: string | null;
+              category: string | null;
+              tags: string | null;
+              price: number | null;
+              is_popular: number | null;
+              is_available: number | null;
+              created_at: string | null;
+              updated_at: string | null;
+            }[];
+
+          const rowsKf = db
+            .prepare(
+              `SELECT filename, original_name, size, created_at, content, category, intent, allowed_modes, forbidden_modes, tone
+               FROM knowledge_files WHERE brand_id = ?`
+            )
+            .all(fromId) as {
+              filename: string;
+              original_name: string;
+              size: number | null;
+              created_at: string;
+              content: string | null;
+              category: string | null;
+              intent: string | null;
+              allowed_modes: string | null;
+              forbidden_modes: string | null;
+              tone: string | null;
+            }[];
+
+          db.prepare("DELETE FROM product_catalog WHERE brand_id = ?").run(toId);
+          for (const r of rowsPc) {
+            insertPc.run(
+              toId,
+              r.product_id ?? "",
+              r.title ?? "",
+              r.keywords ?? "",
+              r.order_prefix ?? "",
+              r.page_id ?? "",
+              r.url ?? "",
+              r.image_url ?? "",
+              r.description_short ?? "",
+              r.faq ?? "",
+              r.category ?? "",
+              r.tags ?? "",
+              r.price ?? 0,
+              r.is_popular ?? 0,
+              r.is_available ?? 1,
+              r.created_at ?? null,
+              r.updated_at ?? null
+            );
+          }
+
+          db.prepare("DELETE FROM knowledge_files WHERE brand_id = ?").run(toId);
+          for (const r of rowsKf) {
+            insertKf.run(
+              r.filename ?? "",
+              r.original_name ?? "",
+              r.size ?? 0,
+              r.created_at,
+              toId,
+              r.content ?? null,
+              r.category ?? null,
+              r.intent ?? null,
+              r.allowed_modes ?? null,
+              r.forbidden_modes ?? null,
+              r.tone ?? null
+            );
+          }
+        });
+
+        runClone();
+
+        return res.json({
+          ...payload,
+          dry_run: false,
+          executed: true,
+        });
+      } catch (e: any) {
+        return res.status(500).json({ error: String(e?.message ?? e) });
+      }
+    });
+
+    /**
      * super_admin 或 ADMIN_DEBUG_TOKEN：將聯絡人從「黏住」狀態打回 AI 可回模式（僅 UPDATE contacts，不刪 messages／ai_logs）。
      * status 解除值與 ai-reply／webhook 解鎖一致：`ai_handling`（見 grep updateContactStatus(..., "ai_handling")）。
      */
