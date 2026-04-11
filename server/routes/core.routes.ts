@@ -936,6 +936,125 @@ export function registerCoreRoutes(app: Express): void {
       }
     });
 
+    app.get("/api/admin/brand-readiness", superAdminOrDebugToken, (_req, res) => {
+      try {
+        type BrandRow = {
+          id: number;
+          name: string;
+          system_prompt: string;
+          return_form_url: string;
+        };
+        const brandRows = db
+          .prepare(
+            "SELECT id, name, system_prompt, COALESCE(return_form_url, '') AS return_form_url FROM brands ORDER BY id ASC"
+          )
+          .all() as BrandRow[];
+
+        const kCountStmt = db.prepare("SELECT COUNT(*) AS c FROM knowledge_files WHERE brand_id = ?");
+        const kContentStmt = db.prepare(
+          "SELECT COUNT(*) AS c FROM knowledge_files WHERE brand_id = ? AND content IS NOT NULL AND trim(content) <> ''"
+        );
+        const kSampleStmt = db.prepare(
+          `SELECT id, original_name, COALESCE(category, '') AS category, COALESCE(intent, '') AS intent,
+            length(COALESCE(content, '')) AS content_length
+           FROM knowledge_files WHERE brand_id = ? ORDER BY datetime(created_at) DESC LIMIT 5`
+        );
+        const pcCountStmt = db.prepare("SELECT COUNT(*) AS c FROM product_catalog WHERE brand_id = ?");
+        const pcFaqStmt = db.prepare(
+          "SELECT COUNT(*) AS c FROM product_catalog WHERE brand_id = ? AND faq IS NOT NULL AND trim(faq) <> ''"
+        );
+        const ordStmt = db.prepare(
+          "SELECT source, COUNT(*) AS c FROM orders_normalized WHERE brand_id = ? GROUP BY source"
+        );
+        const chStmt = db.prepare(
+          "SELECT id, platform, COALESCE(is_ai_enabled, 0) AS is_ai_enabled, COALESCE(access_token, '') AS access_token FROM channels WHERE brand_id = ? ORDER BY id ASC"
+        );
+
+        const brandsPayload = brandRows.map((b) => {
+          const sp = b.system_prompt ?? "";
+          const system_prompt_length = sp.length;
+          const system_prompt_preview = sp.slice(0, 200);
+
+          const knowledge_files_count = (kCountStmt.get(b.id) as { c: number }).c;
+          const knowledge_files_with_content = (kContentStmt.get(b.id) as { c: number }).c;
+
+          const sampleRows = kSampleStmt.all(b.id) as {
+            id: number;
+            original_name: string;
+            category: string;
+            intent: string;
+            content_length: number;
+          }[];
+          const knowledge_files_sample = sampleRows.map((r) => ({
+            id: r.id,
+            original_name: r.original_name ?? "",
+            category: r.category ?? "",
+            intent: r.intent ?? "",
+            content_length: Number(r.content_length) || 0,
+          }));
+
+          const product_catalog_count = (pcCountStmt.get(b.id) as { c: number }).c;
+          const product_catalog_with_faq = (pcFaqStmt.get(b.id) as { c: number }).c;
+
+          const ordRows = ordStmt.all(b.id) as { source: string; c: number }[];
+          let superlanding = 0;
+          let shopline = 0;
+          for (const r of ordRows) {
+            if (r.source === "superlanding") superlanding = r.c;
+            else if (r.source === "shopline") shopline = r.c;
+          }
+          const orders_total = superlanding + shopline;
+          const orders_by_source = { superlanding, shopline };
+
+          const chRows = chStmt.all(b.id) as {
+            id: number;
+            platform: string;
+            is_ai_enabled: number;
+            access_token: string;
+          }[];
+          const channels = chRows.map((ch) => ({
+            id: ch.id,
+            platform: ch.platform,
+            is_ai_enabled: ch.is_ai_enabled,
+            has_token: !!(ch.access_token && String(ch.access_token).trim()),
+          }));
+
+          const hasAnyToken = channels.some((c) => c.has_token);
+          const hasContentSource = knowledge_files_with_content > 0 || product_catalog_count > 0;
+
+          const warnings: string[] = [];
+          if (system_prompt_length <= 0) warnings.push("system_prompt 為空");
+          if (!hasContentSource) warnings.push("knowledge_files 為 0");
+          if (!hasAnyToken) warnings.push("無渠道已設定 token");
+
+          const ready_to_enable_ai =
+            system_prompt_length > 0 && hasContentSource && hasAnyToken;
+
+          return {
+            id: b.id,
+            name: b.name ?? "",
+            system_prompt_length,
+            system_prompt_preview,
+            return_form_url: b.return_form_url ?? "",
+            knowledge_files_count,
+            knowledge_files_with_content,
+            knowledge_files_sample,
+            product_catalog_count,
+            product_catalog_with_faq,
+            orders_total,
+            orders_by_source,
+            channels,
+            ready_to_enable_ai,
+            warnings,
+          };
+        });
+
+        return res.json({ brands: brandsPayload });
+      } catch (e: any) {
+        return res.status(500).json({ error: String(e?.message ?? e) });
+      }
+    });
+
     /**
      * super_admin 或 ADMIN_DEBUG_TOKEN：將聯絡人從「黏住」狀態打回 AI 可回模式（僅 UPDATE contacts，不刪 messages／ai_logs）。
      * status 解除值與 ai-reply／webhook 解鎖一致：`ai_handling`（見 grep updateContactStatus(..., "ai_handling")）。
