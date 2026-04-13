@@ -25,7 +25,7 @@ import { isRatingEligible } from "../rating-eligibility";
 import db from "../db";
 import { fetchOrders, lookupOrderById, lookupOrdersByDateAndFilter, fetchPages, lookupOrdersByPageAndPhone, ensurePagesCacheLoaded, refreshPagesCache, getCachedPages, getCachedPagesAge, buildProductCatalogPrompt, getSuperLandingConfig } from "../superlanding";
 import type { SuperLandingConfig } from "../superlanding";
-import type { OrderInfo, Contact, ContactStatus, IssueType, MetaCommentTemplate, MetaComment } from "@shared/schema";
+import type { OrderInfo, Contact, ContactStatus, IssueType, MetaCommentTemplate, MetaComment, AiLog, Message } from "@shared/schema";
 import {
   unifiedLookupById,
   unifiedLookupByProductAndPhone,
@@ -207,6 +207,117 @@ function buildAdminContactStatePayload(contactId: number): AdminContactStatePayl
       has_form_waiting: !!(contact.waiting_for_customer && String(contact.waiting_for_customer).trim()),
     },
   };
+}
+
+const EXPORT_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function safeJsonParseStringArray(raw: string | null | undefined): string[] {
+  if (raw == null || !String(raw).trim()) return [];
+  try {
+    const v = JSON.parse(String(raw));
+    return Array.isArray(v) ? v.map((x) => String(x)) : [];
+  } catch {
+    return [];
+  }
+}
+
+function buildAiDecisionExportRow(row: AiLog) {
+  return {
+    id: row.id,
+    created_at: row.created_at,
+    message_id: row.message_id,
+    tools_called: safeJsonParseStringArray(row.tools_called),
+    knowledge_hits: safeJsonParseStringArray(row.knowledge_hits),
+    selected_scenario: row.selected_scenario ?? null,
+    matched_intent: row.matched_intent ?? null,
+    route_source: row.route_source ?? null,
+    route_confidence: row.route_confidence ?? null,
+    reply_source: row.reply_source ?? null,
+    plan_mode: row.plan_mode ?? null,
+    reason_if_bypassed: row.reason_if_bypassed ?? null,
+    prompt_summary: row.prompt_summary,
+    result_summary: row.result_summary,
+    model: row.model,
+    response_time_ms: row.response_time_ms,
+    transfer_triggered: row.transfer_triggered === 1,
+    transfer_reason: row.transfer_reason ?? null,
+    tools_available_json: row.tools_available_json ?? null,
+    response_source_trace: row.response_source_trace ?? null,
+    phase1_config_ref: row.phase1_config_ref ?? null,
+    token_usage: row.token_usage,
+    reply_renderer: row.reply_renderer ?? null,
+    prompt_profile: row.prompt_profile ?? null,
+  };
+}
+
+function conversationExportToMarkdown(payload: {
+  brand_id: number;
+  date: string;
+  contacts: {
+    contact_id: number;
+    display_name: string;
+    platform: string;
+    platform_user_id: string;
+    contact_state: { contact: AdminContactStatePayload["contact"]; diagnosis: AdminContactStatePayload["diagnosis"] };
+    messages: Message[];
+    ai_decisions: ReturnType<typeof buildAiDecisionExportRow>[];
+  }[];
+}): string {
+  const lines: string[] = [];
+  lines.push("# 對話匯出");
+  lines.push("");
+  lines.push(`- brand_id: **${payload.brand_id}**`);
+  lines.push(`- date: **${payload.date}**`);
+  lines.push(`- 聯絡人數: **${payload.contacts.length}**`);
+  lines.push("");
+  lines.push("> 訊息列僅含當日（與 `date` 參數同一曆日）之 `messages`；`contact_state` 為匯出當下快照。");
+  lines.push("");
+  for (const c of payload.contacts) {
+    lines.push(`## Contact ${c.contact_id} — ${c.display_name} (${c.platform})`);
+    lines.push("");
+    lines.push(`- platform_user_id: \`${c.platform_user_id}\``);
+    lines.push("");
+    lines.push("### contact_state");
+    const st = c.contact_state.contact;
+    const dg = c.contact_state.diagnosis;
+    lines.push(`| 欄位 | 值 |`);
+    lines.push(`| --- | --- |`);
+    lines.push(`| needs_human | ${st.needs_human} |`);
+    lines.push(`| status | ${st.status} |`);
+    lines.push(`| human_reason | ${st.human_reason ?? ""} |`);
+    lines.push(`| waiting_for_customer | ${st.waiting_for_customer ?? ""} |`);
+    lines.push(`| resolution_status | ${st.resolution_status ?? ""} |`);
+    lines.push(`| will_be_treated_as_in_handoff | ${dg.will_be_treated_as_in_handoff} |`);
+    lines.push(`| is_ai_muted | ${dg.is_ai_muted} |`);
+    lines.push(`| has_form_waiting | ${dg.has_form_waiting} |`);
+    lines.push("");
+    lines.push("### 當日訊息（依時間）");
+    for (const m of c.messages) {
+      const body = (m.content || "").replace(/\r?\n/g, "\n> ");
+      lines.push(`- **${m.created_at}** [${m.sender_type}] (${m.message_type})`);
+      lines.push(`  ${body || "(empty)"}`);
+    }
+    lines.push("");
+    lines.push("### AI 決策 / meta（當日 ai_logs）");
+    if (c.ai_decisions.length === 0) {
+      lines.push("_(無)_");
+    } else {
+      for (const a of c.ai_decisions) {
+        lines.push(`#### log #${a.id} @ ${a.created_at}`);
+        lines.push(`- **tools_called**: ${a.tools_called.join(", ") || "(無)"}`);
+        lines.push(`- **selected_scenario**: ${a.selected_scenario ?? ""}`);
+        lines.push(`- **matched_intent**: ${a.matched_intent ?? ""}`);
+        lines.push(`- **reply_source / plan_mode**: ${a.reply_source ?? ""} / ${a.plan_mode ?? ""}`);
+        lines.push(`- **prompt_summary（摘要）**: ${a.prompt_summary || ""}`);
+        lines.push(`- **result_summary**: ${a.result_summary || ""}`);
+        lines.push("");
+      }
+    }
+    lines.push("");
+    lines.push("---");
+    lines.push("");
+  }
+  return lines.join("\n");
 }
 
 const DEFAULT_LOOKUP_CONTACT_NAMES = "Jie,詠全,林芷蕎,剉麻那,童永志,鍵億管線";
@@ -813,6 +924,111 @@ export function registerCoreRoutes(app: Express): void {
         const payload = buildAdminContactStatePayload(id);
         if (!payload) return res.status(404).json({ error: "contact not found" });
         return res.json(payload);
+      } catch (e: any) {
+        return res.status(500).json({ error: String(e?.message ?? e) });
+      }
+    });
+
+    /**
+     * super_admin 或 ADMIN_DEBUG_TOKEN：依品牌 + 日期匯出「當日曾發訊息」之聯絡人、當日訊息時間軸、contact_state 快照、ai_logs 決策 meta。
+     * Query: brand_id（必填）, date=YYYY-MM-DD（必填）, format=json|markdown（選填，預設 json）, token=...
+     */
+    app.get("/api/admin/conversation-export", superAdminOrDebugToken, (req, res) => {
+      try {
+        const rawBrand = req.query.brand_id;
+        const brandId =
+          typeof rawBrand === "string"
+            ? parseInt(rawBrand, 10)
+            : Array.isArray(rawBrand)
+              ? parseInt(String(rawBrand[0]), 10)
+              : NaN;
+        if (!Number.isFinite(brandId) || brandId < 1) {
+          return res.status(400).json({ error: "invalid or missing brand_id" });
+        }
+        const rawDate = req.query.date;
+        const dateStr =
+          typeof rawDate === "string"
+            ? rawDate.trim()
+            : Array.isArray(rawDate)
+              ? String(rawDate[0] ?? "").trim()
+              : "";
+        if (!dateStr || !EXPORT_DATE_RE.test(dateStr)) {
+          return res.status(400).json({ error: "invalid or missing date (expected YYYY-MM-DD)" });
+        }
+        const rawFmt = req.query.format;
+        const fmt =
+          typeof rawFmt === "string"
+            ? rawFmt.trim().toLowerCase()
+            : Array.isArray(rawFmt)
+              ? String(rawFmt[0] ?? "").trim().toLowerCase()
+              : "json";
+        const wantMarkdown = fmt === "markdown" || fmt === "md";
+
+        const idRows = db
+          .prepare(
+            `
+          SELECT DISTINCT m.contact_id AS id
+          FROM messages m
+          INNER JOIN contacts c ON c.id = m.contact_id
+          WHERE c.brand_id = ?
+            AND date(m.created_at) = ?
+          ORDER BY m.contact_id ASC
+        `
+          )
+          .all(brandId, dateStr) as { id: number }[];
+
+        const msgStmt = db.prepare(
+          `SELECT * FROM messages WHERE contact_id = ? AND date(created_at) = ? ORDER BY datetime(created_at) ASC, id ASC`
+        );
+        const aiStmt = db.prepare(
+          `SELECT * FROM ai_logs WHERE contact_id = ? AND date(created_at) = ? AND (brand_id IS NULL OR brand_id = ?) ORDER BY datetime(created_at) ASC, id ASC`
+        );
+
+        const contactsPayload: {
+          contact_id: number;
+          display_name: string;
+          platform: string;
+          platform_user_id: string;
+          contact_state: { contact: AdminContactStatePayload["contact"]; diagnosis: AdminContactStatePayload["diagnosis"] };
+          messages: Message[];
+          ai_decisions: ReturnType<typeof buildAiDecisionExportRow>[];
+        }[] = [];
+
+        for (const row of idRows) {
+          const contact = storage.getContact(row.id);
+          if (!contact || contact.brand_id !== brandId) continue;
+          const state = buildAdminContactStatePayload(row.id);
+          if (!state) continue;
+          const messages = msgStmt.all(row.id, dateStr) as Message[];
+          const aiRows = aiStmt.all(row.id, dateStr, brandId) as AiLog[];
+          contactsPayload.push({
+            contact_id: contact.id,
+            display_name: contact.display_name,
+            platform: contact.platform,
+            platform_user_id: contact.platform_user_id,
+            contact_state: { contact: state.contact, diagnosis: state.diagnosis },
+            messages,
+            ai_decisions: aiRows.map((r) => buildAiDecisionExportRow(r)),
+          });
+        }
+
+        const jsonBody = {
+          ok: true as const,
+          brand_id: brandId,
+          date: dateStr,
+          contacts: contactsPayload,
+        };
+
+        if (wantMarkdown) {
+          const md = conversationExportToMarkdown({
+            brand_id: brandId,
+            date: dateStr,
+            contacts: contactsPayload,
+          });
+          res.setHeader("Content-Type", "text/markdown; charset=utf-8");
+          return res.status(200).send(md);
+        }
+        return res.json(jsonBody);
       } catch (e: any) {
         return res.status(500).json({ error: String(e?.message ?? e) });
       }
