@@ -7,13 +7,32 @@
  * 排程可持續執行本 job，由每筆 realCloseMoment 決定是否到點。
  */
 import type { IStorage } from "./storage";
-import { findNextBusinessMoment } from "./services/business-hours";
+import {
+  BUSINESS_HOURS,
+  findNextBusinessMoment,
+  getTaipeiComponents,
+  isHoliday,
+  isWithinBusinessHours,
+} from "./services/business-hours";
 import { pushLineMessage, sendFBMessage, getLineTokenForContact, getFbTokenForContact, sendRatingFlexMessage } from "./services/messaging.service";
 import { broadcastSSE } from "./services/sse.service";
 import { isRatingEligible, isAutomatedRatingFlexAllowedForContact } from "./rating-eligibility";
 
 const IDLE_HOURS_DEFAULT = 24;
 const MS_PER_HOUR = 60 * 60 * 1000;
+
+function formatTaipeiWallClock(d: Date): string {
+  return d.toLocaleString("sv-SE", {
+    timeZone: BUSINESS_HOURS.timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
 
 export type IdleCloseScenario = "general" | "waiting_order_info" | "waiting_return_form" | "handoff_no_close";
 
@@ -123,7 +142,18 @@ export async function runIdleCloseJob(storage: IStorage, idleHours: number = IDL
 
     const expireMoment = new Date(lastMessageMs + idleHours * MS_PER_HOUR);
     const realCloseMoment = findNextBusinessMoment(expireMoment);
-    if (Date.now() < realCloseMoment.getTime()) {
+    const tpExpire = getTaipeiComponents(expireMoment);
+    const postpone = Date.now() < realCloseMoment.getTime();
+    console.log("[idle-close-debug]", {
+      contactId: c.id,
+      expireMoment: formatTaipeiWallClock(expireMoment),
+      realCloseMoment: formatTaipeiWallClock(realCloseMoment),
+      "isWithinBusinessHours(expireMoment)": isWithinBusinessHours(expireMoment),
+      "isHoliday(expireMoment)": isHoliday(tpExpire.dateStr),
+      dayOfWeek: tpExpire.dayOfWeek,
+      decision: postpone ? "postponed" : "proceed",
+    });
+    if (postpone) {
       console.log("[idle-close] postponed by business hours/holidays", {
         contactId: c.id,
         expireMoment: expireMoment.toISOString(),

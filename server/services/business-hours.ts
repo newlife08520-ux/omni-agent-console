@@ -100,7 +100,7 @@ const WEEKDAY_SHORT_TO_NUM: Record<string, number> = {
   Sat: 6,
 };
 
-function getTaipeiComponents(date: Date): {
+export function getTaipeiComponents(date: Date): {
   year: number;
   month: number;
   day: number;
