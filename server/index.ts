@@ -128,6 +128,18 @@ app.use((req, res, next) => {
       store = new MemStore({ checkPeriod: 86400000 });
     }
 
+    /** Railway / 負載平衡探針：必須在 session 之前，避免 Redis session 讀取阻塞導致 health 逾時 */
+    const sendLivenessHealth = (res: Response) => {
+      res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+      res.set("Pragma", "no-cache");
+      res.status(200).json({ ok: true });
+    };
+    app.get("/api/health", (_req, res) => sendLivenessHealth(res));
+    app.head("/api/health", (_req, res) => {
+      res.set("Cache-Control", "no-store");
+      res.status(200).end();
+    });
+
     app.use(
       session({
         store,

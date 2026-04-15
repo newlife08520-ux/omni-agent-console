@@ -324,9 +324,7 @@ function conversationExportToMarkdown(payload: {
 const DEFAULT_LOOKUP_CONTACT_NAMES = "Jie,詠全,林芷蕎,剉麻那,童永志,鍵億管線";
 
 export function registerCoreRoutes(app: Express): void {
-    app.get("/api/health", (_req, res) => {
-      res.json({ ok: true });
-    });
+    /** GET/HEAD /api/health 改由 server/index.ts 在 session 之前註冊，避免探針被 Redis session 拖死 */
 
     app.get("/api/debug/status", (_req, res) => {
       try {
