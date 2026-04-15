@@ -15,6 +15,7 @@
  *   但因 Redis lock per-contact，同一 contact 不會並行。
  */
 import os from "os";
+import db, { getDbPath } from "../db";
 import { storage } from "../storage";
 import {
   startAiReplyWorker,
@@ -69,6 +70,15 @@ function main() {
     console.error("[Worker] INTERNAL_API_SECRET is required. Exiting.");
     process.exit(1);
   }
+
+  const dbPath = getDbPath();
+  const contactCount = (db.prepare("SELECT COUNT(*) AS n FROM contacts").get() as { n: number }).n;
+  const channelCount = (db.prepare("SELECT COUNT(*) AS n FROM channels").get() as { n: number }).n;
+  const journalMode = db.pragma("journal_mode", { simple: true });
+  console.log(`[Worker] DB path resolved to: ${dbPath}`);
+  console.log(`[Worker] DB contact count: ${contactCount}`);
+  console.log(`[Worker] DB channel count: ${channelCount}`);
+  console.log(`[Worker] DB journal_mode: ${journalMode}`);
 
   startAiReplyWorker(async (job) => {
     const redis = getWorkerRedis();
