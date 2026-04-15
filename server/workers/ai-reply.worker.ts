@@ -9,36 +9,28 @@
  *   INTERNAL_API_URL       — 預設 http://localhost:8080
  *   INTERNAL_API_SECRET    — 必填，與 API server 一致
  *
- * 正式環境部署：
+ * 正式環境（Phase 106.24 起）：預設改由主站 in-process 消費佇列，本進程僅在停用 in-process
+ * 或除錯時使用。Railway 可停用獨立 worker service。
+ *
+ * 正式環境部署（僅獨立 worker 模式）：
  *   只跑一份 worker instance，concurrency=5，加 BullMQ limiter 雙重保險。
  *   若需擴展，增加 instance 數量，總並發 = instance 數 × concurrency。
  *   但因 Redis lock per-contact，同一 contact 不會並行。
  */
 import os from "os";
-import db, { getDbPath } from "../db";
 import { storage } from "../storage";
 import {
   startAiReplyWorker,
   getWorkerRedis,
-  consumePendingMessages,
-  rescheduleIfPending,
-  acquireLock,
-  releaseLock,
   WORKER_HEARTBEAT_KEY,
   WORKER_HEARTBEAT_TTL_S,
 } from "../queue/ai-reply.queue";
+import { executeAiReplyQueueJob, logStandaloneWorkerDbDiagnostics, type RunAiReplyPayload } from "./ai-reply-worker-shared";
 
 const INTERNAL_API_URL = (process.env.INTERNAL_API_URL || "http://localhost:8080").replace(/\/$/, "");
 const INTERNAL_API_SECRET = process.env.INTERNAL_API_SECRET || "";
 
-async function callInternalRunAiReply(payload: {
-  contactId: number;
-  message: string;
-  channelToken?: string | null;
-  matchedBrandId?: number;
-  platform?: string;
-  enqueueTimestampMs?: number;
-}): Promise<void> {
+async function callInternalRunAiReply(payload: RunAiReplyPayload): Promise<void> {
   if (!INTERNAL_API_SECRET) {
     throw new Error("INTERNAL_API_SECRET is required");
   }
@@ -71,70 +63,9 @@ function main() {
     process.exit(1);
   }
 
-  const dbPath = getDbPath();
-  const contactCount = (db.prepare("SELECT COUNT(*) AS n FROM contacts").get() as { n: number }).n;
-  const channelCount = (db.prepare("SELECT COUNT(*) AS n FROM channels").get() as { n: number }).n;
-  const journalMode = db.pragma("journal_mode", { simple: true });
-  console.log(`[Worker] DB path resolved to: ${dbPath}`);
-  console.log(`[Worker] DB contact count: ${contactCount}`);
-  console.log(`[Worker] DB channel count: ${channelCount}`);
-  console.log(`[Worker] DB journal_mode: ${journalMode}`);
+  logStandaloneWorkerDbDiagnostics();
 
-  startAiReplyWorker(async (job) => {
-    const redis = getWorkerRedis();
-    if (!redis) throw new Error("Worker Redis connection not available");
-
-    const platform = job.data.platform || "line";
-    const contactId = job.data.contactId;
-
-    const pending = await consumePendingMessages(redis, platform, contactId);
-    if (!pending || !pending.mergedText.trim()) {
-      console.log("[Worker] no pending messages for", platform, contactId);
-      return;
-    }
-
-    const { mergedText, eventIds, deliveryKey } = pending;
-    console.log("[Worker] processing:", deliveryKey, "platform:", platform, "contact:", contactId, "events:", eventIds.length, "text length:", mergedText.length);
-
-    if (storage.isAiReplyDeliverySent(deliveryKey)) {
-      console.log("[Worker] already sent, skip:", deliveryKey);
-      return;
-    }
-
-    const acquired = await acquireLock(redis, platform, contactId);
-    if (!acquired) {
-      throw new Error(`lock not acquired for ${platform}:${contactId}, will retry`);
-    }
-
-    try {
-      if (storage.isAiReplyDeliverySent(deliveryKey)) {
-        console.log("[Worker] already sent (post-lock check), skip:", deliveryKey);
-        return;
-      }
-
-      storage.createAiReplyDeliveryIfMissing(deliveryKey, platform, contactId, eventIds, mergedText);
-
-      try {
-        const enq = job.data.enqueuedAtMs ?? (job.timestamp as number);
-        await callInternalRunAiReply({
-          contactId,
-          message: mergedText,
-          channelToken: job.data.channelToken ?? undefined,
-          matchedBrandId: job.data.matchedBrandId,
-          platform,
-          enqueueTimestampMs: typeof enq === "number" ? enq : undefined,
-        });
-        storage.markAiReplyDeliverySent(deliveryKey);
-        console.log("[Worker] sent:", deliveryKey);
-      } catch (err: any) {
-        storage.markAiReplyDeliveryFailed(deliveryKey, err?.message || "unknown");
-        throw err;
-      }
-    } finally {
-      await releaseLock(redis, platform, contactId);
-      await rescheduleIfPending(redis, platform, contactId);
-    }
-  });
+  startAiReplyWorker((job) => executeAiReplyQueueJob(job, callInternalRunAiReply));
 
   const redis = getWorkerRedis();
   if (redis) {
@@ -145,7 +76,9 @@ function main() {
         pid: process.pid,
         hostname: os.hostname(),
       });
-      redis.set(WORKER_HEARTBEAT_KEY, payload, "EX", WORKER_HEARTBEAT_TTL_S).catch((err) => console.error("[Worker] heartbeat write failed:", err?.message));
+      redis.set(WORKER_HEARTBEAT_KEY, payload, "EX", WORKER_HEARTBEAT_TTL_S).catch((err) =>
+        console.error("[Worker] heartbeat write failed:", err?.message)
+      );
     };
     writeHeartbeat();
     setInterval(writeHeartbeat, 30_000);

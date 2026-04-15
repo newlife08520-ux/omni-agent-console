@@ -277,8 +277,8 @@ let worker: Worker<AiReplyJobData> | null = null;
 let workerConn: IORedis | null = null;
 
 /**
- * 啟動 Worker。
- * 僅由獨立 worker 進程呼叫（server/workers/ai-reply.worker.ts），API 進程只 enqueue。
+ * 啟動 BullMQ Worker（單例）。
+ * 由獨立進程（ai-reply.worker.ts）或主站 in-process（ENABLE_INPROCESS_WORKER≠false）呼叫；API 僅 enqueue。
  * 全域並發由 concurrency + limiter 雙重控制。
  */
 export function startAiReplyWorker(processor: AiReplyJobProcessor): Worker<AiReplyJobData> {

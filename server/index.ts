@@ -7,6 +7,7 @@ import { createClient } from "redis";
 import RedisStore from "connect-redis";
 import path from "path";
 import fs from "fs";
+import os from "os";
 import * as assignment from "./assignment";
 import { getUploadsDir, getDataDir } from "./data-dir";
 import db from "./db";
@@ -174,8 +175,77 @@ app.use((req, res, next) => {
       process.exit(1);
     });
 
-    httpServer.listen(port, "0.0.0.0", () => {
+    httpServer.listen(port, "0.0.0.0", async () => {
       log(`serving on port ${port}`);
+
+      // Phase 106.24：主站 in-process 消費 ai-reply 佇列（預設啟用；設 ENABLE_INPROCESS_WORKER=false 可改回獨立 worker）
+      const inProcessWorkerEnabled = process.env.ENABLE_INPROCESS_WORKER !== "false";
+      console.log(`[Server] in-process worker enabled: ${inProcessWorkerEnabled}`);
+      try {
+        if (inProcessWorkerEnabled && redisUrl && process.env.INTERNAL_API_SECRET?.trim()) {
+          const internalSecret = process.env.INTERNAL_API_SECRET.trim();
+          const { logInProcessWorkerDbDiagnostics, executeAiReplyQueueJob } = await import(
+            "./workers/ai-reply-worker-shared"
+          );
+          const {
+            startAiReplyWorker,
+            getWorkerRedis,
+            WORKER_HEARTBEAT_KEY,
+            WORKER_HEARTBEAT_TTL_S,
+          } = await import("./queue/ai-reply.queue");
+          logInProcessWorkerDbDiagnostics();
+
+          const callRunAiReplyLoopback = async (
+            payload: import("./workers/ai-reply-worker-shared").RunAiReplyPayload
+          ): Promise<void> => {
+            const res = await fetch(`http://127.0.0.1:${port}/internal/run-ai-reply`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "X-Internal-Secret": internalSecret },
+              body: JSON.stringify(payload),
+            });
+            if (res.status === 504) {
+              console.log(
+                "[Server] in-process worker: internal API soft timeout (504) contactId=" +
+                  payload.contactId +
+                  " — fallback message already pushed by routes layer; job completes without retry"
+              );
+              return;
+            }
+            if (!res.ok) {
+              const errText = await res.text().catch(() => "");
+              throw new Error(`internal/run-ai-reply ${res.status}: ${errText.slice(0, 300)}`);
+            }
+          };
+
+          startAiReplyWorker((job) => executeAiReplyQueueJob(job, callRunAiReplyLoopback));
+
+          const workerRedis = getWorkerRedis();
+          if (workerRedis) {
+            const writeHeartbeat = () => {
+              const payload = JSON.stringify({
+                worker_id: `in-process:pid:${process.pid}`,
+                timestamp: Date.now(),
+                pid: process.pid,
+                hostname: os.hostname(),
+              });
+              workerRedis
+                .set(WORKER_HEARTBEAT_KEY, payload, "EX", WORKER_HEARTBEAT_TTL_S)
+                .catch((err: Error) => console.error("[Server] worker heartbeat write failed:", err?.message));
+            };
+            writeHeartbeat();
+            setInterval(writeHeartbeat, 30_000);
+          }
+          console.log("[Server] in-process ai-reply BullMQ worker started (BullMQ consumer in API process).");
+        } else if (inProcessWorkerEnabled && !redisUrl) {
+          console.warn("[Server] in-process worker not started: REDIS_URL unset");
+        } else if (inProcessWorkerEnabled && !process.env.INTERNAL_API_SECRET?.trim()) {
+          console.error(
+            "[Server] in-process worker not started: INTERNAL_API_SECRET unset (required for loopback /internal/run-ai-reply)"
+          );
+        }
+      } catch (e) {
+        console.error("[Server] in-process worker bootstrap failed:", e);
+      }
 
       // Phase 106.20：LINE channel access token 健康檢查（/v2/bot/info），每 30 分鐘；首次延後 90 秒避開啟動尖峰
       const runLineHealth = () => {
