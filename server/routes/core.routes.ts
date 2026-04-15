@@ -1307,6 +1307,8 @@ export function registerCoreRoutes(app: Express): void {
           "line_quota_exceeded",
           "line_push_5xx",
           "line_push_network_error",
+          "line_outbound_missing_token",
+          "line_outbound_invalid_args",
           "fb_send_failed",
           "fb_channel_ai_auto_disabled",
           "line_channel_ai_auto_disabled",

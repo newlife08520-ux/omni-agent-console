@@ -81,7 +81,11 @@ async function fetchLineMessagingWithRetry(url: string, body: object, token: str
   return res;
 }
 
-async function processLineSendFailure(status: number, errText: string, meta: LineSendMeta): Promise<never> {
+/**
+ * Phase 106.20.1：寫入告警與 log 後 **不 throw**，避免 webhook／AI 管線整段中斷（LINE 仍應回 200）。
+ * 呼叫端若需判斷成敗，請改看 DB system_alerts 或後續導入回傳型別。
+ */
+async function processLineSendFailure(status: number, errText: string, meta: LineSendMeta): Promise<void> {
   const { channelId, brandId, api, destLabel } = meta;
   const snippet = errText.slice(0, 500);
   console.error(`[LINE] ${api} failed status=${status} dest=${destLabel} channel_id=${channelId ?? "?"} body:`, snippet);
@@ -119,7 +123,8 @@ async function processLineSendFailure(status: number, errText: string, meta: Lin
       }),
       brand_id: brandId ?? undefined,
     });
-    throw new Error(`LINE ${api} HTTP ${status}: token invalid or forbidden`);
+    console.warn(`[106.20.1 gentle] LINE ${api} HTTP ${status} — alerts written, not throwing`);
+    return;
   }
 
   if (status === 429) {
@@ -136,7 +141,8 @@ async function processLineSendFailure(status: number, errText: string, meta: Lin
       }),
       brand_id: brandId ?? undefined,
     });
-    throw new Error(`LINE ${api} HTTP 429: quota exceeded`);
+    console.warn(`[106.20.1 gentle] LINE ${api} HTTP 429 — alerts written, not throwing`);
+    return;
   }
 
   if (status >= 500 && status < 600) {
@@ -153,7 +159,8 @@ async function processLineSendFailure(status: number, errText: string, meta: Lin
       }),
       brand_id: brandId ?? undefined,
     });
-    throw new Error(`LINE ${api} HTTP ${status} (after retry)`);
+    console.warn(`[106.20.1 gentle] LINE ${api} HTTP ${status} (after retry) — alerts written, not throwing`);
+    return;
   }
 
   safeAlert({
@@ -169,7 +176,7 @@ async function processLineSendFailure(status: number, errText: string, meta: Lin
     }),
     brand_id: brandId ?? undefined,
   });
-  throw new Error(`LINE ${api} HTTP ${status}: ${snippet.slice(0, 160)}`);
+  console.warn(`[106.20.1 gentle] LINE ${api} HTTP ${status} — alerts written, not throwing`);
 }
 
 type FbSendMeta = { channelId: number | null; brandId: number | null; recipientId: string };
@@ -194,7 +201,8 @@ async function fetchFbMessageWithRetry(pageAccessToken: string, recipientId: str
   return res;
 }
 
-async function processFbSendFailure(status: number, errText: string, meta: FbSendMeta): Promise<never> {
+/** Phase 106.20.1：同 LINE，告警後不 throw，避免上層管線崩潰。 */
+async function processFbSendFailure(status: number, errText: string, meta: FbSendMeta): Promise<void> {
   const snippet = errText.slice(0, 500);
   const { channelId, brandId, recipientId } = meta;
   console.error(`[FB] send failed status=${status} recipient=${recipientId} channel_id=${channelId ?? "?"} body:`, snippet);
@@ -232,7 +240,7 @@ async function processFbSendFailure(status: number, errText: string, meta: FbSen
     }),
     brand_id: brandId ?? undefined,
   });
-  throw new Error(`FB API ${status}: ${snippet.slice(0, 200)}`);
+  console.warn(`[106.20.1 gentle] FB send HTTP ${status} — alerts written, not throwing`);
 }
 
 /**
@@ -434,11 +442,21 @@ export async function replyToLine(
   const resolvedToken = token ?? null;
   if (!resolvedToken?.trim()) {
     console.error("[LINE] replyToLine missing token");
-    throw new Error("LINE replyToLine: missing access token");
+    safeAlert({
+      alert_type: "line_outbound_missing_token",
+      details: JSON.stringify({ api: "reply", reason: "missing_channel_token", timestamp: new Date().toISOString() }),
+    });
+    console.warn("[106.20.1 gentle] replyToLine skipped — no token");
+    return;
   }
   if (!replyToken?.trim()) {
     console.error("[LINE] replyToLine missing replyToken");
-    throw new Error("LINE replyToLine: missing replyToken");
+    safeAlert({
+      alert_type: "line_outbound_invalid_args",
+      details: JSON.stringify({ api: "reply", reason: "missing_reply_token", timestamp: new Date().toISOString() }),
+    });
+    console.warn("[106.20.1 gentle] replyToLine skipped — no replyToken");
+    return;
   }
   const blockReason = lineMessagesBlockedReason(messages);
   if (blockReason) {
@@ -503,7 +521,17 @@ export async function pushLineMessage(
   const resolvedToken = token ?? null;
   if (!resolvedToken?.trim()) {
     console.error("[LINE] pushLineMessage missing token");
-    throw new Error("LINE pushLineMessage: missing access token");
+    safeAlert({
+      alert_type: "line_outbound_missing_token",
+      details: JSON.stringify({
+        api: "push",
+        reason: "missing_channel_token",
+        userIdPrefix: userId?.slice?.(0, 12),
+        timestamp: new Date().toISOString(),
+      }),
+    });
+    console.warn("[106.20.1 gentle] pushLineMessage skipped — no token");
+    return;
   }
   const blockReason = lineMessagesBlockedReason(messages);
   if (blockReason) {
@@ -539,9 +567,6 @@ export async function pushLineMessage(
       await processLineSendFailure(res.status, errText, meta);
     }
   } catch (err: unknown) {
-    if (err instanceof Error && (err.message.startsWith("LINE ") || err.message.includes("HTTP"))) {
-      throw err;
-    }
     const e = err as { message?: string; cause?: unknown };
     console.error("[LINE] pushLineMessage network error error.message:", e?.message, "error.cause:", e?.cause);
     safeAlert({
@@ -556,7 +581,7 @@ export async function pushLineMessage(
       }),
       brand_id: meta.brandId ?? undefined,
     });
-    throw err instanceof Error ? err : new Error(String(err));
+    console.warn("[106.20.1 gentle] pushLineMessage network error — alert written, not throwing");
   }
 }
 
@@ -592,9 +617,6 @@ export async function sendFBMessage(
       await processFbSendFailure(res.status, errText, fbMeta);
     }
   } catch (err: unknown) {
-    if (err instanceof Error && err.message.startsWith("FB API ")) {
-      throw err;
-    }
     const e = err as { message?: string };
     console.error("[FB] sendFBMessage network error:", e?.message);
     safeAlert({
@@ -608,7 +630,7 @@ export async function sendFBMessage(
       }),
       brand_id: fbMeta.brandId ?? undefined,
     });
-    throw err instanceof Error ? err : new Error(String(err));
+    console.warn("[106.20.1 gentle] sendFBMessage network error — alert written, not throwing");
   }
 }
 
