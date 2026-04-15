@@ -9,6 +9,20 @@ import { uploadDir } from "../middlewares/upload.middleware";
 /** Phase 106.2：集中擋空訊息；呼叫端可判斷 skipped（不 throw） */
 export type MessagingOutboundSkipped = { skipped: true; reason: "empty_text" | "empty_messages" };
 
+/** Phase 106.21：已成功送達 LINE／Messenger，可安全寫入客戶可見的 AI 訊息 */
+export type MessagingDeliveredOk = { delivered: true };
+/** Phase 106.21：未送達（已寫 system_alerts／log，gentle 不 throw） */
+export type MessagingDeliveredFail = {
+  delivered: false;
+  reason: "missing_token" | "invalid_args" | "api_error" | "network";
+  httpStatus?: number;
+};
+export type MessagingOutboundResult = MessagingOutboundSkipped | MessagingDeliveredOk | MessagingDeliveredFail;
+
+export function isMessagingDelivered(r: MessagingOutboundResult): r is MessagingDeliveredOk {
+  return (r as MessagingDeliveredOk).delivered === true;
+}
+
 /** Phase 106.20：最近一次 LINE /v2/bot/info 健康檢查結果（記憶體，重啟清空） */
 export type LineTokenHealthEntry = {
   ok: boolean;
@@ -438,7 +452,7 @@ export async function replyToLine(
   replyToken: string,
   messages: object[],
   token?: string | null
-): Promise<void | MessagingOutboundSkipped> {
+): Promise<MessagingOutboundResult> {
   const resolvedToken = token ?? null;
   if (!resolvedToken?.trim()) {
     console.error("[LINE] replyToLine missing token");
@@ -447,7 +461,7 @@ export async function replyToLine(
       details: JSON.stringify({ api: "reply", reason: "missing_channel_token", timestamp: new Date().toISOString() }),
     });
     console.warn("[106.20.1 gentle] replyToLine skipped — no token");
-    return;
+    return { delivered: false, reason: "missing_token" };
   }
   if (!replyToken?.trim()) {
     console.error("[LINE] replyToLine missing replyToken");
@@ -456,7 +470,7 @@ export async function replyToLine(
       details: JSON.stringify({ api: "reply", reason: "missing_reply_token", timestamp: new Date().toISOString() }),
     });
     console.warn("[106.20.1 gentle] replyToLine skipped — no replyToken");
-    return;
+    return { delivered: false, reason: "invalid_args" };
   }
   const blockReason = lineMessagesBlockedReason(messages);
   if (blockReason) {
@@ -490,11 +504,10 @@ export async function replyToLine(
     if (!res.ok) {
       const errText = await res.text().catch(() => "");
       await processLineSendFailure(res.status, errText, meta);
+      return { delivered: false, reason: "api_error", httpStatus: res.status };
     }
+    return { delivered: true };
   } catch (err: unknown) {
-    if (err instanceof Error && (err.message.startsWith("LINE ") || err.message.includes("HTTP"))) {
-      throw err;
-    }
     const e = err as { message?: string; cause?: unknown };
     console.error("[LINE] replyToLine network error error.message:", e?.message, "error.cause:", e?.cause);
     safeAlert({
@@ -509,7 +522,8 @@ export async function replyToLine(
       }),
       brand_id: meta.brandId ?? undefined,
     });
-    throw err instanceof Error ? err : new Error(String(err));
+    console.warn("[106.20.1 gentle] replyToLine network error — alert written, not throwing");
+    return { delivered: false, reason: "network" };
   }
 }
 
@@ -517,7 +531,7 @@ export async function pushLineMessage(
   userId: string,
   messages: object[],
   token?: string | null
-): Promise<void | MessagingOutboundSkipped> {
+): Promise<MessagingOutboundResult> {
   const resolvedToken = token ?? null;
   if (!resolvedToken?.trim()) {
     console.error("[LINE] pushLineMessage missing token");
@@ -531,7 +545,7 @@ export async function pushLineMessage(
       }),
     });
     console.warn("[106.20.1 gentle] pushLineMessage skipped — no token");
-    return;
+    return { delivered: false, reason: "missing_token" };
   }
   const blockReason = lineMessagesBlockedReason(messages);
   if (blockReason) {
@@ -565,7 +579,9 @@ export async function pushLineMessage(
     if (!res.ok) {
       const errText = await res.text().catch(() => "");
       await processLineSendFailure(res.status, errText, meta);
+      return { delivered: false, reason: "api_error", httpStatus: res.status };
     }
+    return { delivered: true };
   } catch (err: unknown) {
     const e = err as { message?: string; cause?: unknown };
     console.error("[LINE] pushLineMessage network error error.message:", e?.message, "error.cause:", e?.cause);
@@ -582,6 +598,7 @@ export async function pushLineMessage(
       brand_id: meta.brandId ?? undefined,
     });
     console.warn("[106.20.1 gentle] pushLineMessage network error — alert written, not throwing");
+    return { delivered: false, reason: "network" };
   }
 }
 
@@ -589,7 +606,7 @@ export async function sendFBMessage(
   pageAccessToken: string,
   recipientId: string,
   text: string
-): Promise<void | MessagingOutboundSkipped> {
+): Promise<MessagingOutboundResult> {
   if (text == null || typeof text !== "string" || !text.trim()) {
     const stack = sliceCallerStack();
     console.warn("[FB send] BLOCKED empty message", {
@@ -604,6 +621,10 @@ export async function sendFBMessage(
     });
     return { skipped: true, reason: "empty_text" };
   }
+  if (!String(pageAccessToken ?? "").trim()) {
+    console.error("[FB] sendFBMessage missing page access token");
+    return { delivered: false, reason: "missing_token" };
+  }
   const ctx = resolveMessengerChannelByAccessToken(pageAccessToken);
   const fbMeta: FbSendMeta = {
     channelId: ctx?.id ?? null,
@@ -615,7 +636,9 @@ export async function sendFBMessage(
     if (!res.ok) {
       const errText = await res.text().catch(() => "");
       await processFbSendFailure(res.status, errText, fbMeta);
+      return { delivered: false, reason: "api_error", httpStatus: res.status };
     }
+    return { delivered: true };
   } catch (err: unknown) {
     const e = err as { message?: string };
     console.error("[FB] sendFBMessage network error:", e?.message);
@@ -631,17 +654,23 @@ export async function sendFBMessage(
       brand_id: fbMeta.brandId ?? undefined,
     });
     console.warn("[106.20.1 gentle] sendFBMessage network error — alert written, not throwing");
+    return { delivered: false, reason: "network" };
   }
 }
 
 export async function sendRatingFlexMessage(
   contact: { id: number; platform_user_id: string; channel_id?: number | null },
   ratingType: "human" | "ai" = "human"
-): Promise<void> {
+): Promise<boolean> {
   const token = getLineTokenForContact(contact);
-  if (!token) return;
+  if (!token) return false;
   const flexMsg = buildRatingFlexMessage(contact.id, ratingType);
-  await pushLineMessage(contact.platform_user_id, [flexMsg], token);
+  const r = await pushLineMessage(contact.platform_user_id, [flexMsg], token);
+  if (!isMessagingDelivered(r)) {
+    console.warn("[106.21] sendRatingFlexMessage push not delivered contact=", contact.id);
+    return false;
+  }
+  return true;
 }
 
 export async function downloadLineContent(

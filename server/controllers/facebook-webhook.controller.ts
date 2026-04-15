@@ -10,7 +10,7 @@ import { recordAutoReplyBlocked } from "../auto-reply-blocked";
 import { shouldEscalateImageSupplement } from "../safe-after-sale-classifier";
 import { applyHandoff } from "../services/handoff";
 import { resolveOpenAIModel } from "../openai-model";
-import type { MessagingOutboundSkipped } from "../services/messaging.service";
+import type { MessagingOutboundResult } from "../services/messaging.service";
 
 export interface FacebookWebhookDeps {
   storage: IStorage;
@@ -19,7 +19,7 @@ export interface FacebookWebhookDeps {
     pageAccessToken: string,
     recipientId: string,
     text: string
-  ) => Promise<void | MessagingOutboundSkipped>;
+  ) => Promise<MessagingOutboundResult>;
   downloadExternalImage: (imageUrl: string) => Promise<string | null>;
   handleImageVisionFirst: (imageFilePath: string, contactId: number) => Promise<{ reply: string; usedFallback: boolean; intent?: string; confidence?: string }>;
   enqueueDebouncedAiReply: (platform: string, contactId: number, message: string, inboundEventId: string, channelToken: string | null, matchedBrandId?: number) => Promise<void>;

@@ -33,7 +33,8 @@ import { classifyOrderNumber } from "../intent-and-order";
 import { applyHandoff, normalizeHandoffReason } from "./handoff";
 import { finalizeLlmToolJsonString } from "../tool-llm-sanitize";
 import { orderFeatureFlags } from "../order-feature-flags";
-import type { MessagingOutboundSkipped } from "./messaging.service";
+import type { MessagingOutboundResult } from "./messaging.service";
+import { isMessagingDelivered } from "./messaging.service";
 import * as assignment from "../assignment";
 import { getTransferUnavailableSystemMessage } from "../transfer-unavailable-message";
 import {
@@ -177,12 +178,12 @@ export interface ToolExecutorDeps {
     userId: string,
     messages: object[],
     token?: string | null
-  ) => Promise<void | MessagingOutboundSkipped>;
+  ) => Promise<MessagingOutboundResult>;
   sendFBMessage: (
     pageAccessToken: string,
     recipientId: string,
     text: string
-  ) => Promise<void | MessagingOutboundSkipped>;
+  ) => Promise<MessagingOutboundResult>;
   broadcastSSE: (eventType: string, data: unknown) => void;
   imageFileToDataUri?: (imageFilePath: string) => Promise<string | null>;
   getTransferUnavailableSystemMessage?: (
@@ -220,15 +221,20 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
     const imageUrl = `${host}/api/image-assets/file/${asset.filename}`;
 
     if (context?.platform === "messenger" && context?.platformUserId && context?.channelToken) {
+      let allFbOk = true;
       if (textMessage) {
-        await sendFBMessage(context.channelToken, context.platformUserId, textMessage);
+        const r1 = await sendFBMessage(context.channelToken, context.platformUserId, textMessage);
+        allFbOk = isMessagingDelivered(r1);
       }
-      await sendFBMessage(
-        context.channelToken,
-        context.platformUserId,
-        `[圖片：${asset.display_name}] ${imageUrl}`
-      );
-      if (context.contactId) {
+      if (allFbOk) {
+        const r2 = await sendFBMessage(
+          context.channelToken,
+          context.platformUserId,
+          `[圖片：${asset.display_name}] ${imageUrl}`
+        );
+        allFbOk = isMessagingDelivered(r2);
+      }
+      if (allFbOk && context.contactId) {
         const c = storage.getContact(context.contactId);
         const bid = c?.brand_id ?? undefined;
         if (textMessage) {
@@ -257,8 +263,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
         originalContentUrl: imageUrl,
         previewImageUrl: imageUrl,
       });
-      await pushLineMessage(context.platformUserId, messages, context.channelToken);
-      if (context.contactId) {
+      const rLine = await pushLineMessage(context.platformUserId, messages, context.channelToken);
+      if (isMessagingDelivered(rLine) && context.contactId) {
         const c = storage.getContact(context.contactId);
         const bid = c?.brand_id ?? undefined;
         if (textMessage) {

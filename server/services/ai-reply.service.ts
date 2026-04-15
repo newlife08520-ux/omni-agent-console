@@ -40,7 +40,8 @@ import {
 import { packDeterministicMultiOrderToolResult } from "../order-multi-renderer";
 import { tryOrderFastPath, extractOrderIdFromMixedSentence } from "../order-fast-path";
 import { formatOrderOnePage, payKindForOrder } from "../order-reply-utils";
-import type { MessagingOutboundSkipped } from "./messaging.service";
+import type { MessagingOutboundResult, MessagingOutboundSkipped } from "./messaging.service";
+import { isMessagingDelivered } from "./messaging.service";
 import { normalizeCustomerFacingOrderReply } from "../customer-reply-normalizer";
 import { isValidOrderDeterministicPayload } from "../deterministic-order-contract";
 import { orderFeatureFlags } from "../order-feature-flags";
@@ -330,12 +331,12 @@ export interface AiReplyDeps {
     userId: string,
     messages: object[],
     token?: string | null
-  ) => Promise<void | MessagingOutboundSkipped>;
+  ) => Promise<MessagingOutboundResult>;
   sendFBMessage: (
     pageAccessToken: string,
     recipientId: string,
     text: string
-  ) => Promise<void | MessagingOutboundSkipped>;
+  ) => Promise<MessagingOutboundResult>;
   toolExecutor: { executeToolCall: (toolName: string, args: Record<string, string>, context?: ToolCallContext) => Promise<string> };
   getTransferUnavailableSystemMessage: (reason: "weekend" | "lunch" | "after_hours" | "all_paused" | null) => string;
   getLineTokenForContact: (contact: { channel_id?: number | null; brand_id?: number | null }) => string | null;
@@ -369,6 +370,48 @@ export function createAiReplyService(deps: AiReplyDeps) {
 
   function formTypeToZh(formType: "cancel" | "return" | "exchange"): string {
     return formType === "cancel" ? "取消" : formType === "return" ? "退貨" : "換貨";
+  }
+
+  /** Phase 106.21：Push 失敗時不寫客戶可見 AI 訊息，另寫告警供 admin 查 */
+  function recordAiReplyPushDbSkipped(contactId: number, brandId: number | null | undefined, context: string): void {
+    try {
+      storage.createSystemAlert({
+        alert_type: "ai_reply_push_failed_skip_db",
+        details: JSON.stringify({ contact_id: contactId, context, timestamp: new Date().toISOString() }),
+        brand_id: brandId ?? undefined,
+        contact_id: contactId,
+      });
+    } catch {
+      /* ignore */
+    }
+    console.warn("[106.21] skip customer-visible AI DB row (push not delivered)", { contactId, context });
+  }
+
+  /** 文字 Push／Messenger 送達後再寫 DB；失敗回 false（已記錄 line_* / fb_* alert） */
+  async function pushTextToCustomerOrFalse(
+    contactPlatform: string,
+    platformUserId: string,
+    text: string,
+    channelToken: string | null | undefined,
+    contactId: number,
+    brandId: number | null | undefined,
+    context: string
+  ): Promise<boolean> {
+    const tok = channelToken != null ? String(channelToken).trim() : "";
+    if (!tok) {
+      recordAiReplyPushDbSkipped(contactId, brandId, `${context}:no_channel_token`);
+      return false;
+    }
+    if (contactPlatform === "messenger") {
+      const r = await sendFBMessage(tok, platformUserId, text);
+      if (isMessagingDelivered(r)) return true;
+      recordAiReplyPushDbSkipped(contactId, brandId, `${context}:messenger_push_failed`);
+      return false;
+    }
+    const r = await pushLineMessage(platformUserId, [{ type: "text", text }], tok);
+    if (isMessagingDelivered(r)) return true;
+    recordAiReplyPushDbSkipped(contactId, brandId, `${context}:line_push_failed`);
+    return false;
   }
 
   function mergeStreamDelta(
@@ -678,19 +721,27 @@ ${contextStr}
       if (finalContact?.needs_human) return;
 
       const reply = responseMessage?.content || "不好意思，系統暫時無法回覆，請稍後再試或轉接人工客服。";
-      const aiMsg = storage.createMessage(contactId, contactPlatform, "ai", reply);
-      broadcastSSE("new_message", { contact_id: contactId, message: aiMsg, brand_id: contact?.brand_id });
-      broadcastSSE("contacts_updated", { brand_id: contact?.brand_id });
-
+      let deliveredVision = false;
       if (contactPlatform === "messenger") {
         const fbToken = contact?.channel_id ? storage.getChannel(contact.channel_id)?.access_token : null;
-        if (fbToken) await sendFBMessage(fbToken, contact!.platform_user_id, reply);
+        if (fbToken) {
+          const r = await sendFBMessage(fbToken, contact!.platform_user_id, reply);
+          deliveredVision = isMessagingDelivered(r);
+        }
       } else {
         const token = lineToken || getLineTokenForContact(contact || {});
         if (token && contact) {
-          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: reply }], token);
+          const r = await pushLineMessage(contact.platform_user_id, [{ type: "text", text: reply }], token);
+          deliveredVision = isMessagingDelivered(r);
         }
       }
+      if (!deliveredVision) {
+        recordAiReplyPushDbSkipped(contactId, contact?.brand_id ?? undefined, "image_vision_reply");
+        return;
+      }
+      const aiMsg = storage.createMessage(contactId, contactPlatform, "ai", reply);
+      broadcastSSE("new_message", { contact_id: contactId, message: aiMsg, brand_id: contact?.brand_id });
+      broadcastSSE("contacts_updated", { brand_id: contact?.brand_id });
     } catch (err) {
       console.error("OpenAI Vision analysis error:", err);
       storage.createMessage(contactId, contactPlatform, "ai", "不好意思，系統遇到問題，我幫您轉接人工客服處理。");
@@ -813,17 +864,25 @@ ${contextStr}
         broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
         const handoffReplyLegal = buildHandoffReply({ customerEmotion: "high_risk", brandId: effectiveBrandId || undefined });
         const handoffTextLegal = getHandoffReplyForCustomer(handoffReplyLegal, assignment.getUnavailableReason());
-        const aiMsgRisk = storage.createMessage(contact.id, contact.platform, "ai", handoffTextLegal);
-        broadcastSSE("new_message", { contact_id: contact.id, message: aiMsgRisk, brand_id: contact.brand_id });
-        broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-        if (contact.platform === "messenger" && channelToken) {
-          await sendFBMessage(channelToken, contact.platform_user_id, handoffTextLegal);
-        } else if (channelToken) {
-          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: handoffTextLegal }], channelToken);
+        const pushedRisk = await pushTextToCustomerOrFalse(
+          contact.platform || "line",
+          contact.platform_user_id,
+          handoffTextLegal,
+          channelToken,
+          contact.id,
+          effectiveBrandId ?? contact.brand_id ?? null,
+          "high_risk_short_circuit"
+        );
+        let aiMsgRisk: { id: number } | null = null;
+        if (pushedRisk) {
+          aiMsgRisk = storage.createMessage(contact.id, contact.platform, "ai", handoffTextLegal) as { id: number };
+          broadcastSSE("new_message", { contact_id: contact.id, message: aiMsgRisk, brand_id: contact.brand_id });
+          broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
         }
 
         storage.createAiLog({
           contact_id: contact.id,
+          message_id: aiMsgRisk?.id,
           brand_id: effectiveBrandId || undefined,
           prompt_summary: `?????: ${userMessage.slice(0, 100)}`,
           knowledge_hits: [],
@@ -862,13 +921,20 @@ ${contextStr}
         const replyText = replyTextRaw.replace(/\{after_sale_line_url\}/g, lineUrl).trim();
         if (replyText) {
           const contactPlatform = platform || contact.platform || "line";
-          const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", replyText);
-          broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: contact.brand_id });
-          broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-          if (contactPlatform === "messenger" && channelToken) {
-            await sendFBMessage(channelToken, contact.platform_user_id, replyText);
-          } else if (channelToken) {
-            await pushLineMessage(contact.platform_user_id, [{ type: "text", text: replyText }], channelToken);
+          const pushedSafe = await pushTextToCustomerOrFalse(
+            contactPlatform,
+            contact.platform_user_id,
+            replyText,
+            channelToken,
+            contact.id,
+            effectiveBrandId ?? contact.brand_id ?? null,
+            "safe_confirm_template"
+          );
+          let aiMsg: { id: number } | null = null;
+          if (pushedSafe) {
+            aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", replyText) as { id: number };
+            broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: contact.brand_id });
+            broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
           }
           if (safeConfirmDm.suggest_human) {
             applyHandoff({ contactId: contact.id, reason: "policy_exception", source: "webhook_safe_confirm_template", brandId: effectiveBrandId || undefined });
@@ -884,7 +950,7 @@ ${contextStr}
             : `safe_confirm_template: ${tplCategory}`;
           storage.createAiLog({
             contact_id: contact.id,
-            message_id: aiMsg.id,
+            message_id: aiMsg?.id,
             brand_id: effectiveBrandId || undefined,
             prompt_summary: userMessage.slice(0, 150),
             knowledge_hits: [],
@@ -1101,17 +1167,24 @@ ${contextStr}
             `[order_fast_path_hit=true] fast_path_type=${fpEarly.fastPathType} used_llm=0 contact=${contact.id}`
           );
           const contactPlatformFp = platform || contact.platform || "line";
-          const aiMsgFp = storage.createMessage(contact.id, contactPlatformFp, "ai", fpReply);
-          broadcastSSE("new_message", { contact_id: contact.id, message: aiMsgFp, brand_id: contact.brand_id });
-          broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-          if (contactPlatformFp === "messenger" && channelToken) {
-            await sendFBMessage(channelToken, contact.platform_user_id, fpReply);
-          } else if (channelToken) {
-            await pushLineMessage(contact.platform_user_id, [{ type: "text", text: fpReply }], channelToken);
+          const pushedFp = await pushTextToCustomerOrFalse(
+            contactPlatformFp,
+            contact.platform_user_id,
+            fpReply,
+            channelToken,
+            contact.id,
+            effectiveBrandId ?? contact.brand_id ?? null,
+            "order_fast_path"
+          );
+          let aiMsgFp: { id: number } | null = null;
+          if (pushedFp) {
+            aiMsgFp = storage.createMessage(contact.id, contactPlatformFp, "ai", fpReply) as { id: number };
+            broadcastSSE("new_message", { contact_id: contact.id, message: aiMsgFp, brand_id: contact.brand_id });
+            broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
           }
           storage.createAiLog({
             contact_id: contact.id,
-            message_id: aiMsgFp.id,
+            message_id: aiMsgFp?.id,
             brand_id: effectiveBrandId || undefined,
             prompt_summary: `order_fast_path:${fpEarly.fastPathType}:${(userMessage || "").slice(0, 60)}`,
             knowledge_hits: [],
@@ -1177,17 +1250,24 @@ ${contextStr}
         const handoffReplyAwk = buildHandoffReply({ customerEmotion: state.customer_emotion, brandId: effectiveBrandId || undefined });
         const handoffTextAwk = getHandoffReplyForCustomer(handoffReplyAwk, assignment.getUnavailableReason());
         const contactPlatformAwk = platform || contact.platform || "line";
-        const aiMsgAwk = storage.createMessage(contact.id, contactPlatformAwk, "ai", handoffTextAwk);
-        broadcastSSE("new_message", { contact_id: contact.id, message: aiMsgAwk, brand_id: effectiveBrandId || contact.brand_id });
-        broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-        if (contactPlatformAwk === "messenger" && channelToken) {
-          await sendFBMessage(channelToken, contact.platform_user_id, handoffTextAwk);
-        } else if (channelToken) {
-          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: handoffTextAwk }], channelToken);
+        const pushedAwk2 = await pushTextToCustomerOrFalse(
+          contactPlatformAwk,
+          contact.platform_user_id,
+          handoffTextAwk,
+          channelToken,
+          contact.id,
+          effectiveBrandId ?? contact.brand_id ?? null,
+          "awkward_repeat_handoff"
+        );
+        let aiMsgAwk: { id: number } | null = null;
+        if (pushedAwk2) {
+          aiMsgAwk = storage.createMessage(contact.id, contactPlatformAwk, "ai", handoffTextAwk) as { id: number };
+          broadcastSSE("new_message", { contact_id: contact.id, message: aiMsgAwk, brand_id: effectiveBrandId || contact.brand_id });
+          broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
         }
         storage.createAiLog({
           contact_id: contact.id,
-          message_id: aiMsgAwk.id,
+          message_id: aiMsgAwk?.id,
           brand_id: effectiveBrandId || undefined,
           prompt_summary: `awkward_repeat_handoff: ${awkwardCheck.reason ?? "unknown"} - ${userMessage.slice(0, 60)}`,
           knowledge_hits: [],
@@ -1234,17 +1314,24 @@ ${contextStr}
         const unavailableReason = assignment.getUnavailableReason();
         const handoffTextToSend = getHandoffReplyForCustomer(handoffReply, unavailableReason);
         const contactPlatform = platform || contact.platform || "line";
-        const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", handoffTextToSend);
-        broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: effectiveBrandId || contact.brand_id });
-        broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-        if (contactPlatform === "messenger" && channelToken) {
-          await sendFBMessage(channelToken, contact.platform_user_id, handoffTextToSend);
-        } else if (channelToken) {
-          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: handoffTextToSend }], channelToken);
+        const pushedHandoffPlan = await pushTextToCustomerOrFalse(
+          contactPlatform,
+          contact.platform_user_id,
+          handoffTextToSend,
+          channelToken,
+          contact.id,
+          effectiveBrandId ?? contact.brand_id ?? null,
+          "plan_handoff"
+        );
+        let aiMsg: { id: number } | null = null;
+        if (pushedHandoffPlan) {
+          aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", handoffTextToSend) as { id: number };
+          broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: effectiveBrandId || contact.brand_id });
+          broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
         }
         storage.createAiLog({
           contact_id: contact.id,
-          message_id: aiMsg.id,
+          message_id: aiMsg?.id,
           brand_id: effectiveBrandId || undefined,
           prompt_summary: `handoff_short_circuit: ${userMessage.slice(0, 80)}`,
           knowledge_hits: [],
@@ -1379,20 +1466,27 @@ ${contextStr}
         if (!found || (!found.orderId && !found.phone)) {
           const contactPlatform = platform || contact.platform || "line";
           const alreadyHandoffText = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, assignment.getUnavailableReason());
-          const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", alreadyHandoffText);
-          broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: effectiveBrandId || contact.brand_id });
-          broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-          if (contactPlatform === "messenger" && channelToken) {
-            await sendFBMessage(channelToken, contact.platform_user_id, alreadyHandoffText);
-          } else if (channelToken) {
-            await pushLineMessage(contact.platform_user_id, [{ type: "text", text: alreadyHandoffText }], channelToken);
+          const pushedAlready = await pushTextToCustomerOrFalse(
+            contactPlatform,
+            contact.platform_user_id,
+            alreadyHandoffText,
+            channelToken,
+            contact.id,
+            effectiveBrandId ?? contact.brand_id ?? null,
+            "already_provided_not_found"
+          );
+          let aiMsg: { id: number } | null = null;
+          if (pushedAlready) {
+            aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", alreadyHandoffText) as { id: number };
+            broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: effectiveBrandId || contact.brand_id });
+            broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
           }
           console.log("[Webhook AI] needs_human=1 source=already_provided_not_found msg=" + (userMessage || "").slice(0, 60));
           applyHandoff({ contactId: contact.id, reason: "repeat_unresolved", source: "webhook_already_provided_not_found", brandId: effectiveBrandId || undefined });
           assignment.assignCase(contact.id);
           storage.createAiLog({
             contact_id: contact.id,
-            message_id: aiMsg.id,
+            message_id: aiMsg?.id,
             brand_id: effectiveBrandId || undefined,
             prompt_summary: `already_provided_not_found: ${userMessage.slice(0, 60)}`,
             knowledge_hits: [],
@@ -1602,17 +1696,24 @@ ${contextStr}
               console.log("final_normalizer_changed=false normalizer_rules=disabled_flag");
             }
             const contactPlatformM = platform || contact.platform || "line";
-            const aiMsgM = storage.createMessage(contact.id, contactPlatformM, "ai", multiAns);
-            broadcastSSE("new_message", { contact_id: contact.id, message: aiMsgM, brand_id: contact.brand_id });
-            broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-            if (channelToken && contactPlatformM === "messenger") {
-              await sendFBMessage(channelToken, contact.platform_user_id, multiAns);
-            } else if (channelToken) {
-              await pushLineMessage(contact.platform_user_id, [{ type: "text", text: multiAns }], channelToken);
+            const pushedMulti2 = await pushTextToCustomerOrFalse(
+              contactPlatformM,
+              contact.platform_user_id,
+              multiAns,
+              channelToken,
+              contact.id,
+              effectiveBrandId ?? contact.brand_id ?? null,
+              "multi_order_router_inner"
+            );
+            let aiMsgM: { id: number } | null = null;
+            if (pushedMulti2) {
+              aiMsgM = storage.createMessage(contact.id, contactPlatformM, "ai", multiAns) as { id: number };
+              broadcastSSE("new_message", { contact_id: contact.id, message: aiMsgM, brand_id: contact.brand_id });
+              broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
             }
             storage.createAiLog({
               contact_id: contact.id,
-              message_id: aiMsgM.id,
+              message_id: aiMsgM?.id,
               brand_id: effectiveBrandId || undefined,
               prompt_summary: `multi_order_followup: ${msgM.slice(0, 40)}`,
               knowledge_hits: [],
@@ -1710,17 +1811,24 @@ ${contextStr}
                 reply29 = nr29.text;
               }
               const plat29 = platform || contact.platform || "line";
-              const ai29 = storage.createMessage(contact.id, plat29, "ai", reply29);
-              broadcastSSE("new_message", { contact_id: contact.id, message: ai29, brand_id: effectiveBrandId || contact.brand_id });
-              broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-              if (channelToken && plat29 === "messenger") {
-                await sendFBMessage(channelToken, contact.platform_user_id, reply29);
-              } else if (channelToken) {
-                await pushLineMessage(contact.platform_user_id, [{ type: "text", text: reply29 }], channelToken);
+              const pushed29 = await pushTextToCustomerOrFalse(
+                plat29,
+                contact.platform_user_id,
+                reply29,
+                channelToken,
+                contact.id,
+                effectiveBrandId ?? contact.brand_id ?? null,
+                "phase29_more_orders"
+              );
+              let ai29: { id: number } | null = null;
+              if (pushed29) {
+                ai29 = storage.createMessage(contact.id, plat29, "ai", reply29) as { id: number };
+                broadcastSSE("new_message", { contact_id: contact.id, message: ai29, brand_id: effectiveBrandId || contact.brand_id });
+                broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
               }
               storage.createAiLog({
                 contact_id: contact.id,
-                message_id: ai29.id,
+                message_id: ai29?.id,
                 brand_id: effectiveBrandId || undefined,
                 prompt_summary: `phase29_more_orders: ${msg29.slice(0, 50)}`,
                 knowledge_hits: [],
@@ -1801,23 +1909,30 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           returnFormReply = returnFormFallback;
         }
 
-        storage.updateContactConversationFields(contact.id, {
-          return_stage: 1,
-          resolution_status: "awaiting_customer",
-          waiting_for_customer: "return_form_submit",
-        });
         const contactPlatformRf = platform || contact.platform || "line";
-        const aiMsgRf = storage.createMessage(contact.id, contactPlatformRf, "ai", returnFormReply);
-        broadcastSSE("new_message", { contact_id: contact.id, message: aiMsgRf, brand_id: effectiveBrandId || contact.brand_id });
-        broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-        if (contactPlatformRf === "messenger" && channelToken) {
-          await sendFBMessage(channelToken, contact.platform_user_id, returnFormReply);
-        } else if (channelToken) {
-          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: returnFormReply }], channelToken);
+        const pushedRf = await pushTextToCustomerOrFalse(
+          contactPlatformRf,
+          contact.platform_user_id,
+          returnFormReply,
+          channelToken,
+          contact.id,
+          effectiveBrandId ?? contact.brand_id ?? null,
+          "return_form_first"
+        );
+        let aiMsgRf: { id: number } | null = null;
+        if (pushedRf) {
+          storage.updateContactConversationFields(contact.id, {
+            return_stage: 1,
+            resolution_status: "awaiting_customer",
+            waiting_for_customer: "return_form_submit",
+          });
+          aiMsgRf = storage.createMessage(contact.id, contactPlatformRf, "ai", returnFormReply) as { id: number };
+          broadcastSSE("new_message", { contact_id: contact.id, message: aiMsgRf, brand_id: effectiveBrandId || contact.brand_id });
+          broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
         }
         storage.createAiLog({
           contact_id: contact.id,
-          message_id: aiMsgRf.id,
+          message_id: aiMsgRf?.id,
           brand_id: effectiveBrandId || undefined,
           prompt_summary: `return_form_first: ${userMessage.slice(0, 80)}`,
           knowledge_hits: [],
@@ -2155,13 +2270,19 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
                 "quick_ack_" + scenarioKey.toLowerCase(),
                 lookupAckText
               );
-              const ackMsg = storage.createMessage(contact.id, contact.platform || "line", "ai", lookupAckFinal);
-              broadcastSSE("new_message", { contact_id: contact.id, message: ackMsg, brand_id: effectiveBrandId || contact.brand_id });
-              broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-              if (channelToken && contact.platform === "messenger") {
-                sendFBMessage(channelToken, contact.platform_user_id, lookupAckFinal).catch(() => {});
-              } else if (channelToken) {
-                pushLineMessage(contact.platform_user_id, [{ type: "text", text: lookupAckFinal }], channelToken).catch(() => {});
+              const okAck = await pushTextToCustomerOrFalse(
+                contact.platform || "line",
+                contact.platform_user_id,
+                lookupAckFinal,
+                channelToken,
+                contact.id,
+                effectiveBrandId ?? contact.brand_id ?? null,
+                "lookup_quick_ack_claude"
+              );
+              if (okAck) {
+                const ackMsg = storage.createMessage(contact.id, contact.platform || "line", "ai", lookupAckFinal);
+                broadcastSSE("new_message", { contact_id: contact.id, message: ackMsg, brand_id: effectiveBrandId || contact.brand_id });
+                broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
               }
             }
 
@@ -2447,22 +2568,37 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             if (timeoutCount >= 2) {
               applyHandoff({ contactId: contact.id, reason: "timeout_escalation", source: "webhook_ai_timeout", brandId: effectiveBrandId || undefined });
               const comfortMsg = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, assignment.getUnavailableReason());
-              storage.createMessage(contact.id, contact.platform, "ai", comfortMsg);
-              if (platform === "messenger") {
-                sendFBMessage(channelToken || "", contact.platform_user_id, comfortMsg).catch(() => {});
-              } else if (channelToken) {
-                pushLineMessage(contact.platform_user_id, [{ type: "text", text: comfortMsg }], channelToken).catch(() => {});
+              const platT = platform || contact.platform || "line";
+              const okComfort1 = await pushTextToCustomerOrFalse(
+                platT,
+                contact.platform_user_id,
+                comfortMsg,
+                channelToken,
+                contact.id,
+                effectiveBrandId ?? contact.brand_id ?? null,
+                "openai_first_llm_timeout_handoff"
+              );
+              if (okComfort1) {
+                storage.createMessage(contact.id, contact.platform, "ai", comfortMsg);
               }
               broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
             } else {
               const comfortMsg = "不好意思讓您久等了，系統正在處理中，請稍等一下。";
-              storage.createMessage(contact.id, contact.platform, "ai", comfortMsg);
-              if (platform === "messenger") {
-                sendFBMessage(channelToken || "", contact.platform_user_id, comfortMsg).catch(() => {});
-              } else if (channelToken) {
-                pushLineMessage(contact.platform_user_id, [{ type: "text", text: comfortMsg }], channelToken).catch(() => {});
+              const platT2 = platform || contact.platform || "line";
+              const okComfort2 = await pushTextToCustomerOrFalse(
+                platT2,
+                contact.platform_user_id,
+                comfortMsg,
+                channelToken,
+                contact.id,
+                effectiveBrandId ?? contact.brand_id ?? null,
+                "openai_first_llm_timeout_soft"
+              );
+              if (okComfort2) {
+                const cm = storage.createMessage(contact.id, contact.platform, "ai", comfortMsg);
+                broadcastSSE("new_message", { contact_id: contact.id, message: cm, brand_id: contact.brand_id });
               }
-              broadcastSSE("new_message", { contact_id: contact.id, brand_id: contact.brand_id });
+              broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
             }
             return;
           }
@@ -2513,13 +2649,19 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
               "quick_ack_" + scenarioKey.toLowerCase(),
               lookupAckText
             );
-            const ackMsg = storage.createMessage(contact.id, contact.platform || "line", "ai", lookupAckFinal);
-            broadcastSSE("new_message", { contact_id: contact.id, message: ackMsg, brand_id: effectiveBrandId || contact.brand_id });
-            broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-            if (channelToken && contact.platform === "messenger") {
-              sendFBMessage(channelToken, contact.platform_user_id, lookupAckFinal).catch(() => {});
-            } else if (channelToken) {
-              pushLineMessage(contact.platform_user_id, [{ type: "text", text: lookupAckFinal }], channelToken).catch(() => {});
+            const okAckOai = await pushTextToCustomerOrFalse(
+              contact.platform || "line",
+              contact.platform_user_id,
+              lookupAckFinal,
+              channelToken,
+              contact.id,
+              effectiveBrandId ?? contact.brand_id ?? null,
+              "lookup_quick_ack_openai"
+            );
+            if (okAckOai) {
+              const ackMsg = storage.createMessage(contact.id, contact.platform || "line", "ai", lookupAckFinal);
+              broadcastSSE("new_message", { contact_id: contact.id, message: ackMsg, brand_id: effectiveBrandId || contact.brand_id });
+              broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
             }
           }
 
@@ -2730,11 +2872,18 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
               if (loopTimeoutCount >= 2) {
                 applyHandoff({ contactId: contact.id, reason: "timeout_escalation", source: "webhook_ai_loop_timeout", brandId: effectiveBrandId || undefined });
                 const comfortMsg = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, assignment.getUnavailableReason());
-                storage.createMessage(contact.id, contact.platform, "ai", comfortMsg);
-                if (platform === "messenger") {
-                  sendFBMessage(channelToken || "", contact.platform_user_id, comfortMsg).catch(() => {});
-                } else if (channelToken) {
-                  pushLineMessage(contact.platform_user_id, [{ type: "text", text: comfortMsg }], channelToken).catch(() => {});
+                const platL = platform || contact.platform || "line";
+                const okLoopComfort = await pushTextToCustomerOrFalse(
+                  platL,
+                  contact.platform_user_id,
+                  comfortMsg,
+                  channelToken,
+                  contact.id,
+                  effectiveBrandId ?? contact.brand_id ?? null,
+                  "openai_second_llm_loop_timeout_handoff"
+                );
+                if (okLoopComfort) {
+                  storage.createMessage(contact.id, contact.platform, "ai", comfortMsg);
                 }
                 broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
               }
@@ -2769,17 +2918,24 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
         const unavailableReasonPost = assignment.getUnavailableReason();
         const handoffTextToSendPost = getHandoffReplyForCustomer(handoffReply, unavailableReasonPost);
         const contactPlatform = platform || contact.platform || "line";
-        const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", handoffTextToSendPost);
-        broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: contact.brand_id });
-        broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-        if (contactPlatform === "messenger" && channelToken) {
-          await sendFBMessage(channelToken, contact.platform_user_id, handoffTextToSendPost);
-        } else if (channelToken) {
-          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: handoffTextToSendPost }], channelToken);
+        const pushedPost = await pushTextToCustomerOrFalse(
+          contactPlatform,
+          contact.platform_user_id,
+          handoffTextToSendPost,
+          channelToken,
+          contact.id,
+          effectiveBrandId ?? contact.brand_id ?? null,
+          "post_generation_handoff"
+        );
+        let aiMsg: { id: number } | null = null;
+        if (pushedPost) {
+          aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", handoffTextToSendPost) as { id: number };
+          broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: contact.brand_id });
+          broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
         }
         storage.createAiLog({
           contact_id: contact.id,
-          message_id: aiMsg.id,
+          message_id: aiMsg?.id,
           brand_id: effectiveBrandId || undefined,
           prompt_summary: userMessage.slice(0, 200),
           knowledge_hits: knowledgeHits,
@@ -2900,47 +3056,57 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
         }
         const totalMs = Date.now() - startTime;
         const finalRenderer = secondLlmSkipped ? (deterministicToolMeta.renderer || "deterministic_tool") : "llm";
-        console.log("[AI Latency] contact", contact.id, "reply_sent_total_ms", totalMs, "tools=" + (toolsCalled.length ? toolsCalled.join(",") : "none"));
+        console.log("[AI Latency] contact", contact.id, "llm_pipeline_done_ms", totalMs, "tools=" + (toolsCalled.length ? toolsCalled.join(",") : "none"));
         console.log(
           `[phase26_latency] first_customer_visible_reply_ms=${firstCustomerVisibleReplyMs} final_reply_sent_ms=${totalMs} second_llm_skipped=${secondLlmSkipped} final_renderer=${finalRenderer} prompt_profile=${enrichedPack.prompt_profile}`
         );
         const contactPlatform = platform || contact.platform || "line";
-        const aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", reply);
-        broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: contact.brand_id });
-        broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
-        if (contactPlatform === "messenger" && channelToken) {
-          await sendFBMessage(channelToken, contact.platform_user_id, reply);
-        } else {
-          await pushLineMessage(contact.platform_user_id, [{ type: "text", text: reply }], channelToken);
-        }
-
-        const outboundForm = detectOutboundFormTypeFromReply(reply);
-        if (outboundForm) {
-          storage.updateContactConversationFields(contact.id, {
-            waiting_for_customer: `${outboundForm}_form_submit`,
-          });
-          const formZh = formTypeToZh(outboundForm);
-          storage.createCaseNotification(contact.id, "in_app", {
-            type: "form_pending",
-            form_type: outboundForm,
-            message: `客戶已收到 ${formZh} 表單，等待回填`,
-          });
-          console.log(`[form_tracking] contact=${contact.id} form=${outboundForm} waiting`);
+        const pushedMain = await pushTextToCustomerOrFalse(
+          contactPlatform,
+          contact.platform_user_id,
+          reply,
+          channelToken,
+          contact.id,
+          effectiveBrandId ?? contact.brand_id ?? null,
+          "main_llm_reply"
+        );
+        let aiMsg: { id: number } | null = null;
+        if (pushedMain) {
+          aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", reply) as { id: number };
+          broadcastSSE("new_message", { contact_id: contact.id, message: aiMsg, brand_id: contact.brand_id });
           broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+          const outboundForm = detectOutboundFormTypeFromReply(reply);
+          if (outboundForm) {
+            storage.updateContactConversationFields(contact.id, {
+              waiting_for_customer: `${outboundForm}_form_submit`,
+            });
+            const formZh = formTypeToZh(outboundForm);
+            storage.createCaseNotification(contact.id, "in_app", {
+              type: "form_pending",
+              form_type: outboundForm,
+              message: `客戶已收到 ${formZh} 表單，等待回填`,
+            });
+            console.log(`[form_tracking] contact=${contact.id} form=${outboundForm} waiting`);
+            broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
+          }
+        } else {
+          console.warn("[106.21] main LLM reply not persisted (push failed) contact=", contact.id);
         }
 
         const anyLlm = usedFirstLlmTelemetry > 0 || usedSecondLlmTelemetry > 0;
         const replySourceFinal = secondLlmSkipped ? "deterministic_tool" : "llm";
+        const resultSummaryMain =
+          (reply.slice(0, 260) + (pushedMain ? "" : " | push_not_delivered_skip_db")).slice(0, 320);
         storage.createAiLog({
           contact_id: contact.id,
-          message_id: aiMsg.id,
+          message_id: aiMsg?.id,
           brand_id: effectiveBrandId || undefined,
           prompt_summary: userMessage.slice(0, 200),
           knowledge_hits: knowledgeHits,
           tools_called: toolsCalled,
           transfer_triggered: transferTriggered,
           transfer_reason: transferReason,
-          result_summary: reply.slice(0, 300),
+          result_summary: resultSummaryMain,
           token_usage: totalTokens,
           model: mainConversationModelForLog,
           response_time_ms: Date.now() - startTime,

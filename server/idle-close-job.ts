@@ -14,7 +14,14 @@ import {
   isHoliday,
   isWithinBusinessHours,
 } from "./services/business-hours";
-import { pushLineMessage, sendFBMessage, getLineTokenForContact, getFbTokenForContact, sendRatingFlexMessage } from "./services/messaging.service";
+import {
+  pushLineMessage,
+  sendFBMessage,
+  getLineTokenForContact,
+  getFbTokenForContact,
+  sendRatingFlexMessage,
+  isMessagingDelivered,
+} from "./services/messaging.service";
 import { broadcastSSE } from "./services/sse.service";
 import { isRatingEligible, isAutomatedRatingFlexAllowedForContact } from "./rating-eligibility";
 
@@ -241,26 +248,44 @@ export async function runIdleCloseJob(storage: IStorage, idleHours: number = IDL
     });
 
     let aiMsg: { id: number } | null = null;
-    if (closingText && !skipClosingPush) {
-      aiMsg = storage.createMessage(c.id, c.platform, "ai", closingText) as { id: number };
-    }
+    /** Phase 106.21：無結案語要推時視為 true；有結案語時僅在 push 成功後為 true（評價邀請亦依此 gate） */
+    let closingPushDelivered = !willPushClosingMessage;
 
     try {
       if (willPushClosingMessage && c.platform === "line" && c.platform_user_id) {
         const token = getLineTokenForContact(c as any);
         if (token) {
-          await pushLineMessage(c.platform_user_id, [{ type: "text", text: closingText }], token);
-          console.log(`[idle-close] LINE 結案訊息已推送 contact=${c.id}`);
+          const r = await pushLineMessage(c.platform_user_id, [{ type: "text", text: closingText }], token);
+          if (isMessagingDelivered(r)) {
+            closingPushDelivered = true;
+            aiMsg = storage.createMessage(c.id, c.platform, "ai", closingText) as { id: number };
+            console.log(`[idle-close] LINE 結案訊息已推送 contact=${c.id}`);
+          } else {
+            closingPushDelivered = false;
+            console.warn(`[106.21][idle-close] LINE 結案 push 未送達，不寫入客戶可見 AI 訊息 contact=${c.id}`);
+          }
+        } else {
+          closingPushDelivered = false;
         }
       } else if (willPushClosingMessage && c.platform === "messenger" && c.platform_user_id) {
         const token = getFbTokenForContact(c as any);
         if (token) {
-          await sendFBMessage(token, c.platform_user_id, closingText);
-          console.log(`[idle-close] FB 結案訊息已推送 contact=${c.id}`);
+          const r = await sendFBMessage(token, c.platform_user_id, closingText);
+          if (isMessagingDelivered(r)) {
+            closingPushDelivered = true;
+            aiMsg = storage.createMessage(c.id, c.platform, "ai", closingText) as { id: number };
+            console.log(`[idle-close] FB 結案訊息已推送 contact=${c.id}`);
+          } else {
+            closingPushDelivered = false;
+            console.warn(`[106.21][idle-close] FB 結案 push 未送達 contact=${c.id}`);
+          }
+        } else {
+          closingPushDelivered = false;
         }
       }
     } catch (e) {
       console.error(`[idle-close] 推送結案訊息失敗 contact=${c.id}:`, e);
+      closingPushDelivered = false;
     }
 
     if (aiMsg != null && c.brand_id != null) {
@@ -271,6 +296,7 @@ export async function runIdleCloseJob(storage: IStorage, idleHours: number = IDL
     try {
       const updatedContact = updatedAfterClose ?? storage.getContact(c.id);
       if (
+        closingPushDelivered &&
         updatedContact &&
         isRatingEligible({ contact: updatedContact, state: null }) &&
         isAutomatedRatingFlexAllowedForContact(updatedContact, storage) &&
@@ -280,11 +306,9 @@ export async function runIdleCloseJob(storage: IStorage, idleHours: number = IDL
         if (token) {
           let ratingSent = false;
           if (updatedContact.needs_human === 1 && updatedContact.cs_rating == null) {
-            await sendRatingFlexMessage(updatedContact as any, "human");
-            ratingSent = true;
+            ratingSent = await sendRatingFlexMessage(updatedContact as any, "human");
           } else if (!ratingSent && updatedContact.ai_rating == null) {
-            await sendRatingFlexMessage(updatedContact as any, "ai");
-            ratingSent = true;
+            ratingSent = await sendRatingFlexMessage(updatedContact as any, "ai");
           }
           if (ratingSent) {
             const now = new Date().toISOString().replace("T", " ").substring(0, 19);
@@ -303,7 +327,7 @@ export async function runIdleCloseJob(storage: IStorage, idleHours: number = IDL
       contactId: c.id,
       closed: true,
       scenario,
-      messageSent: skipClosingPush ? null : closingText || null,
+      messageSent: skipClosingPush ? null : closingPushDelivered ? closingText : null,
       closeReason: "idle_24h",
     });
   }

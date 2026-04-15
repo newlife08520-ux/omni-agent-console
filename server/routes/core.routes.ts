@@ -1313,6 +1313,7 @@ export function registerCoreRoutes(app: Express): void {
           "fb_channel_ai_auto_disabled",
           "line_channel_ai_auto_disabled",
           "line_token_health_check_failed",
+          "ai_reply_push_failed_skip_db",
         ] as const;
         const placeholders = alertTypes.map(() => "?").join(", ");
         const rows = db

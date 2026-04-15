@@ -3,7 +3,8 @@
  * 僅查單（ORDER_LOOKUP）與售後（AFTER_SALES）送出；一般問候（GENERAL）與商品諮詢不送。
  */
 import { brandMessage } from "../phase2-output";
-import type { MessagingOutboundSkipped } from "./messaging.service";
+import type { MessagingOutboundResult } from "./messaging.service";
+import { isMessagingDelivered } from "./messaging.service";
 
 /** 是否應送 Quick Ack（與工具回合內查單 ack 共用條件） */
 export function shouldSendQuickAck(params: {
@@ -62,12 +63,12 @@ export type QuickAckChannelDeps = {
     userId: string,
     messages: object[],
     token?: string | null
-  ) => Promise<void | MessagingOutboundSkipped>;
+  ) => Promise<MessagingOutboundResult>;
   sendFBMessage: (
     pageAccessToken: string,
     recipientId: string,
     text: string
-  ) => Promise<void | MessagingOutboundSkipped>;
+  ) => Promise<MessagingOutboundResult>;
 };
 
 /**
@@ -122,14 +123,21 @@ export async function sendQuickAckIfNeeded(
   const defaultAck = pickRandomAck(scenario);
   const quickAckText = brandMessage(brandId, "quick_ack_" + scenario.toLowerCase(), defaultAck);
   const contactPlatformAck = platform || "line";
+  let pushOk = false;
+  if (channelToken && contactPlatformAck === "messenger") {
+    const r = await deps.sendFBMessage(channelToken, platformUserId, quickAckText);
+    pushOk = isMessagingDelivered(r);
+  } else if (channelToken) {
+    const r = await deps.pushLineMessage(platformUserId, [{ type: "text", text: quickAckText }], channelToken);
+    pushOk = isMessagingDelivered(r);
+  }
+  if (!pushOk) {
+    console.warn("[106.21] quick_ack skipped DB (push not delivered) contact=", contactId);
+    return { sent: false, ackMs: null, firstVisibleMs: null };
+  }
   const ackMsg = deps.createMessage(contactId, contactPlatformAck, "ai", quickAckText);
   deps.broadcastSSE("new_message", { contact_id: contactId, message: ackMsg, brand_id: brandId || contactBrandId });
   deps.broadcastSSE("contacts_updated", { brand_id: contactBrandId ?? undefined });
-  if (channelToken && contactPlatformAck === "messenger") {
-    deps.sendFBMessage(channelToken, platformUserId, quickAckText).catch(() => {});
-  } else if (channelToken) {
-    deps.pushLineMessage(platformUserId, [{ type: "text", text: quickAckText }], channelToken).catch(() => {});
-  }
 
   const ackMs = Date.now() - startTime;
   console.log(
