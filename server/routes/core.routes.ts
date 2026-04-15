@@ -111,6 +111,7 @@ import { maskSensitiveInfo } from "../utils/mask-sensitive-info";
 import {
   getLineTokenForContact,
   getFbTokenForContact,
+  getLineTokenHealthForReadiness,
   replyToLine,
   pushLineMessage,
   sendFBMessage,
@@ -1287,10 +1288,53 @@ export function registerCoreRoutes(app: Express): void {
             channels,
             ready_to_enable_ai,
             warnings,
+            line_token_health: getLineTokenHealthForReadiness(b.id),
           };
         });
 
         return res.json({ brands: brandsPayload });
+      } catch (e: any) {
+        return res.status(500).json({ error: String(e?.message ?? e) });
+      }
+    });
+
+    /** Phase 106.20：近 24 小時 push／發送失敗與 token 相關 system_alerts（需 super_admin 或 ?token=ADMIN_DEBUG_TOKEN） */
+    app.get("/api/admin/recent-push-failures", superAdminOrDebugToken, (_req, res) => {
+      try {
+        const alertTypes = [
+          "line_push_4xx",
+          "line_token_invalid",
+          "line_quota_exceeded",
+          "line_push_5xx",
+          "line_push_network_error",
+          "fb_send_failed",
+          "fb_channel_ai_auto_disabled",
+          "line_channel_ai_auto_disabled",
+          "line_token_health_check_failed",
+        ] as const;
+        const placeholders = alertTypes.map(() => "?").join(", ");
+        const rows = db
+          .prepare(
+            `SELECT id, alert_type, details, brand_id, contact_id, created_at
+             FROM system_alerts
+             WHERE alert_type IN (${placeholders})
+               AND datetime(created_at) >= datetime('now', '-24 hours')
+             ORDER BY datetime(created_at) DESC
+             LIMIT 500`
+          )
+          .all(...alertTypes) as {
+          id: number;
+          alert_type: string;
+          details: string;
+          brand_id: number | null;
+          contact_id: number | null;
+          created_at: string;
+        }[];
+        return res.json({
+          window_hours: 24,
+          count: rows.length,
+          alerts: rows,
+        });
       } catch (e: any) {
         return res.status(500).json({ error: String(e?.message ?? e) });
       }

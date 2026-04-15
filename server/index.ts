@@ -177,6 +177,17 @@ app.use((req, res, next) => {
     httpServer.listen(port, "0.0.0.0", () => {
       log(`serving on port ${port}`);
 
+      // Phase 106.20：LINE channel access token 健康檢查（/v2/bot/info），每 30 分鐘；首次延後 90 秒避開啟動尖峰
+      const runLineHealth = () => {
+        import("./services/messaging.service")
+          .then(({ runLineTokenHealthChecks }) =>
+            runLineTokenHealthChecks().catch((e) => console.error("[LINE token health] scheduled run failed:", e))
+          )
+          .catch((e) => console.error("[LINE token health] module load failed:", e));
+      };
+      setTimeout(runLineHealth, 90_000);
+      setInterval(runLineHealth, 30 * 60 * 1000);
+
       // 逾時重分配定時器：僅在 ENABLE_SYNC=true 時執行，避免低 RAM 環境下與其他背景任務疊加負載（預設關閉）。
       if (process.env.ENABLE_SYNC === "true") {
         setInterval(() => {

@@ -9,6 +9,301 @@ import { uploadDir } from "../middlewares/upload.middleware";
 /** Phase 106.2：集中擋空訊息；呼叫端可判斷 skipped（不 throw） */
 export type MessagingOutboundSkipped = { skipped: true; reason: "empty_text" | "empty_messages" };
 
+/** Phase 106.20：最近一次 LINE /v2/bot/info 健康檢查結果（記憶體，重啟清空） */
+export type LineTokenHealthEntry = {
+  ok: boolean;
+  checkedAt: string;
+  httpStatus?: number;
+  error?: string;
+};
+
+const lastLineTokenHealthByChannel = new Map<number, LineTokenHealthEntry>();
+
+export function getLineTokenHealthForReadiness(brandId: number): {
+  line_channels: { channel_id: number; ok: boolean | null; checked_at: string | null; http_status?: number; error?: string }[];
+} {
+  const channels = storage.getChannelsByBrand(brandId).filter((c) => c.platform === "line" && c.is_active === 1);
+  return {
+    line_channels: channels.map((c) => {
+      const s = lastLineTokenHealthByChannel.get(c.id);
+      return {
+        channel_id: c.id,
+        ok: s != null ? s.ok : null,
+        checked_at: s?.checkedAt ?? null,
+        http_status: s?.httpStatus,
+        error: s?.error,
+      };
+    }),
+  };
+}
+
+function resolveLineChannelByAccessToken(token: string | null | undefined): { id: number; brand_id: number } | null {
+  const t = String(token ?? "").trim();
+  if (!t) return null;
+  const ch = storage.getChannels().find((c) => c.platform === "line" && String(c.access_token ?? "").trim() === t);
+  return ch ? { id: ch.id, brand_id: ch.brand_id } : null;
+}
+
+function resolveMessengerChannelByAccessToken(token: string | null | undefined): { id: number; brand_id: number } | null {
+  const t = String(token ?? "").trim();
+  if (!t) return null;
+  const ch = storage.getChannels().find((c) => c.platform === "messenger" && String(c.access_token ?? "").trim() === t);
+  return ch ? { id: ch.id, brand_id: ch.brand_id } : null;
+}
+
+function safeAlert(data: { alert_type: string; details: string; brand_id?: number; contact_id?: number }): void {
+  try {
+    storage.createSystemAlert(data);
+  } catch {
+    /* ignore */
+  }
+}
+
+type LineSendMeta = {
+  api: "push" | "reply";
+  channelId: number | null;
+  brandId: number | null;
+  destLabel: string;
+};
+
+async function fetchLineMessagingWithRetry(url: string, body: object, token: string): Promise<Response> {
+  const doFetch = () =>
+    fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    });
+  let res = await doFetch();
+  if (res.status >= 500 && res.status < 600) {
+    await new Promise((r) => setTimeout(r, 1000));
+    res = await doFetch();
+  }
+  return res;
+}
+
+async function processLineSendFailure(status: number, errText: string, meta: LineSendMeta): Promise<never> {
+  const { channelId, brandId, api, destLabel } = meta;
+  const snippet = errText.slice(0, 500);
+  console.error(`[LINE] ${api} failed status=${status} dest=${destLabel} channel_id=${channelId ?? "?"} body:`, snippet);
+
+  if (status === 401 || status === 403) {
+    console.error(`[URGENT] LINE token invalid/forbidden — disabling channel AI channel_id=${channelId} status=${status}`);
+    if (channelId != null) {
+      await storage.updateChannel(channelId, { is_ai_enabled: 0 });
+      safeAlert({
+        alert_type: "line_channel_ai_auto_disabled",
+        details: JSON.stringify({
+          priority: "high",
+          channel_id: channelId,
+          brand_id: brandId,
+          status,
+          api,
+          reason: "token_invalid_or_forbidden",
+          body: snippet,
+          timestamp: new Date().toISOString(),
+        }),
+        brand_id: brandId ?? undefined,
+      });
+    }
+    safeAlert({
+      alert_type: "line_token_invalid",
+      details: JSON.stringify({
+        priority: "high",
+        channel_id: channelId,
+        brand_id: brandId,
+        status,
+        api,
+        destLabel,
+        body: snippet,
+        timestamp: new Date().toISOString(),
+      }),
+      brand_id: brandId ?? undefined,
+    });
+    throw new Error(`LINE ${api} HTTP ${status}: token invalid or forbidden`);
+  }
+
+  if (status === 429) {
+    safeAlert({
+      alert_type: "line_quota_exceeded",
+      details: JSON.stringify({
+        channel_id: channelId,
+        brand_id: brandId,
+        status,
+        api,
+        destLabel,
+        body: snippet,
+        timestamp: new Date().toISOString(),
+      }),
+      brand_id: brandId ?? undefined,
+    });
+    throw new Error(`LINE ${api} HTTP 429: quota exceeded`);
+  }
+
+  if (status >= 500 && status < 600) {
+    safeAlert({
+      alert_type: "line_push_5xx",
+      details: JSON.stringify({
+        channel_id: channelId,
+        brand_id: brandId,
+        status,
+        api,
+        destLabel,
+        body: snippet,
+        timestamp: new Date().toISOString(),
+      }),
+      brand_id: brandId ?? undefined,
+    });
+    throw new Error(`LINE ${api} HTTP ${status} (after retry)`);
+  }
+
+  safeAlert({
+    alert_type: "line_push_4xx",
+    details: JSON.stringify({
+      channel_id: channelId,
+      brand_id: brandId,
+      status,
+      api,
+      destLabel,
+      body: snippet,
+      timestamp: new Date().toISOString(),
+    }),
+    brand_id: brandId ?? undefined,
+  });
+  throw new Error(`LINE ${api} HTTP ${status}: ${snippet.slice(0, 160)}`);
+}
+
+type FbSendMeta = { channelId: number | null; brandId: number | null; recipientId: string };
+
+async function fetchFbMessageWithRetry(pageAccessToken: string, recipientId: string, text: string): Promise<Response> {
+  const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${encodeURIComponent(pageAccessToken)}`;
+  const body = JSON.stringify({
+    recipient: { id: recipientId },
+    message: { text },
+  });
+  const doFetch = () =>
+    fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+  let res = await doFetch();
+  if (res.status >= 500 && res.status < 600) {
+    await new Promise((r) => setTimeout(r, 1000));
+    res = await doFetch();
+  }
+  return res;
+}
+
+async function processFbSendFailure(status: number, errText: string, meta: FbSendMeta): Promise<never> {
+  const snippet = errText.slice(0, 500);
+  const { channelId, brandId, recipientId } = meta;
+  console.error(`[FB] send failed status=${status} recipient=${recipientId} channel_id=${channelId ?? "?"} body:`, snippet);
+
+  if (status === 401 || status === 403) {
+    console.error(`[URGENT] FB page token invalid/forbidden — disabling channel AI channel_id=${channelId} status=${status}`);
+    if (channelId != null) {
+      await storage.updateChannel(channelId, { is_ai_enabled: 0 });
+      safeAlert({
+        alert_type: "fb_channel_ai_auto_disabled",
+        details: JSON.stringify({
+          priority: "high",
+          channel_id: channelId,
+          brand_id: brandId,
+          status,
+          reason: "token_invalid_or_forbidden",
+          body: snippet,
+          timestamp: new Date().toISOString(),
+        }),
+        brand_id: brandId ?? undefined,
+      });
+    }
+  }
+
+  safeAlert({
+    alert_type: "fb_send_failed",
+    details: JSON.stringify({
+      priority: status === 401 || status === 403 ? "high" : "normal",
+      channel_id: channelId,
+      brand_id: brandId,
+      status,
+      recipientId,
+      body: snippet,
+      timestamp: new Date().toISOString(),
+    }),
+    brand_id: brandId ?? undefined,
+  });
+  throw new Error(`FB API ${status}: ${snippet.slice(0, 200)}`);
+}
+
+/**
+ * Phase 106.20：每個 active LINE 渠道呼叫 /v2/bot/info；失敗寫入 system_alerts。
+ */
+export async function runLineTokenHealthChecks(): Promise<void> {
+  const channels = storage
+    .getChannels()
+    .filter((c) => c.platform === "line" && c.is_active === 1 && String(c.access_token ?? "").trim());
+  const nowIso = new Date().toISOString();
+  for (const ch of channels) {
+    const token = String(ch.access_token).trim();
+    try {
+      const res = await fetch("https://api.line.me/v2/bot/info", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const errText = await res.text().catch(() => "");
+      if (res.ok) {
+        lastLineTokenHealthByChannel.set(ch.id, { ok: true, checkedAt: nowIso, httpStatus: res.status });
+        continue;
+      }
+      lastLineTokenHealthByChannel.set(ch.id, {
+        ok: false,
+        checkedAt: nowIso,
+        httpStatus: res.status,
+        error: errText.slice(0, 200),
+      });
+      safeAlert({
+        alert_type: "line_token_health_check_failed",
+        details: JSON.stringify({
+          channel_id: ch.id,
+          brand_id: ch.brand_id,
+          status: res.status,
+          body: errText.slice(0, 300),
+          timestamp: nowIso,
+        }),
+        brand_id: ch.brand_id,
+      });
+      if (res.status === 401 || res.status === 403) {
+        console.error(`[URGENT] LINE health check token dead channel_id=${ch.id} status=${res.status}`);
+        await storage.updateChannel(ch.id, { is_ai_enabled: 0 });
+        safeAlert({
+          alert_type: "line_channel_ai_auto_disabled",
+          details: JSON.stringify({
+            priority: "high",
+            source: "health_check",
+            channel_id: ch.id,
+            brand_id: ch.brand_id,
+            status: res.status,
+            timestamp: nowIso,
+          }),
+          brand_id: ch.brand_id,
+        });
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      lastLineTokenHealthByChannel.set(ch.id, { ok: false, checkedAt: nowIso, error: msg });
+      safeAlert({
+        alert_type: "line_token_health_check_failed",
+        details: JSON.stringify({
+          channel_id: ch.id,
+          brand_id: ch.brand_id,
+          error: msg,
+          timestamp: nowIso,
+        }),
+        brand_id: ch.brand_id,
+      });
+    }
+  }
+}
+
 function sliceCallerStack(): string {
   return new Error().stack?.split("\n").slice(2, 8).join("\n") || "unknown";
 }
@@ -137,9 +432,13 @@ export async function replyToLine(
   token?: string | null
 ): Promise<void | MessagingOutboundSkipped> {
   const resolvedToken = token ?? null;
-  if (!resolvedToken || !replyToken) {
-    console.error("[LINE] replyToLine ???Token ? replyToken ??");
-    return;
+  if (!resolvedToken?.trim()) {
+    console.error("[LINE] replyToLine missing token");
+    throw new Error("LINE replyToLine: missing access token");
+  }
+  if (!replyToken?.trim()) {
+    console.error("[LINE] replyToLine missing replyToken");
+    throw new Error("LINE replyToLine: missing replyToken");
   }
   const blockReason = lineMessagesBlockedReason(messages);
   if (blockReason) {
@@ -157,19 +456,42 @@ export async function replyToLine(
     });
     return { skipped: true, reason: blockReason === "empty_messages" ? "empty_messages" : "empty_text" };
   }
+  const ctx = resolveLineChannelByAccessToken(resolvedToken);
+  const meta: LineSendMeta = {
+    api: "reply",
+    channelId: ctx?.id ?? null,
+    brandId: ctx?.brand_id ?? null,
+    destLabel: `replyToken:${replyToken.slice(0, 12)}…`,
+  };
   try {
-    const res = await fetch("https://api.line.me/v2/bot/message/reply", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${resolvedToken}` },
-      body: JSON.stringify({ replyToken, messages }),
-    });
+    const res = await fetchLineMessagingWithRetry(
+      "https://api.line.me/v2/bot/message/reply",
+      { replyToken, messages },
+      resolvedToken
+    );
     if (!res.ok) {
       const errText = await res.text().catch(() => "");
-      console.error("[LINE] reply ?? ? Status:", res.status, "body:", errText);
+      await processLineSendFailure(res.status, errText, meta);
     }
   } catch (err: unknown) {
+    if (err instanceof Error && (err.message.startsWith("LINE ") || err.message.includes("HTTP"))) {
+      throw err;
+    }
     const e = err as { message?: string; cause?: unknown };
-    console.error("[LINE] replyToLine ?? ? error.message:", e?.message, "error.cause:", e?.cause);
+    console.error("[LINE] replyToLine network error error.message:", e?.message, "error.cause:", e?.cause);
+    safeAlert({
+      alert_type: "line_push_network_error",
+      details: JSON.stringify({
+        api: "reply",
+        channel_id: meta.channelId,
+        brand_id: meta.brandId,
+        destLabel: meta.destLabel,
+        error: String(e?.message ?? err),
+        timestamp: new Date().toISOString(),
+      }),
+      brand_id: meta.brandId ?? undefined,
+    });
+    throw err instanceof Error ? err : new Error(String(err));
   }
 }
 
@@ -179,9 +501,9 @@ export async function pushLineMessage(
   token?: string | null
 ): Promise<void | MessagingOutboundSkipped> {
   const resolvedToken = token ?? null;
-  if (!resolvedToken) {
-    console.error("[LINE] pushLineMessage ???Token ??");
-    return;
+  if (!resolvedToken?.trim()) {
+    console.error("[LINE] pushLineMessage missing token");
+    throw new Error("LINE pushLineMessage: missing access token");
   }
   const blockReason = lineMessagesBlockedReason(messages);
   if (blockReason) {
@@ -199,19 +521,42 @@ export async function pushLineMessage(
     });
     return { skipped: true, reason: blockReason === "empty_messages" ? "empty_messages" : "empty_text" };
   }
+  const ctx = resolveLineChannelByAccessToken(resolvedToken);
+  const meta: LineSendMeta = {
+    api: "push",
+    channelId: ctx?.id ?? null,
+    brandId: ctx?.brand_id ?? null,
+    destLabel: `to:${userId.slice(0, 12)}…`,
+  };
   try {
-    const res = await fetch("https://api.line.me/v2/bot/message/push", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${resolvedToken}` },
-      body: JSON.stringify({ to: userId, messages }),
-    });
+    const res = await fetchLineMessagingWithRetry(
+      "https://api.line.me/v2/bot/message/push",
+      { to: userId, messages },
+      resolvedToken
+    );
     if (!res.ok) {
       const errText = await res.text().catch(() => "");
-      console.error("[LINE] push ?? ? Status:", res.status, "body:", errText);
+      await processLineSendFailure(res.status, errText, meta);
     }
   } catch (err: unknown) {
+    if (err instanceof Error && (err.message.startsWith("LINE ") || err.message.includes("HTTP"))) {
+      throw err;
+    }
     const e = err as { message?: string; cause?: unknown };
-    console.error("[LINE] pushLineMessage ?? ? error.message:", e?.message, "error.cause:", e?.cause);
+    console.error("[LINE] pushLineMessage network error error.message:", e?.message, "error.cause:", e?.cause);
+    safeAlert({
+      alert_type: "line_push_network_error",
+      details: JSON.stringify({
+        api: "push",
+        channel_id: meta.channelId,
+        brand_id: meta.brandId,
+        destLabel: meta.destLabel,
+        error: String(e?.message ?? err),
+        timestamp: new Date().toISOString(),
+      }),
+      brand_id: meta.brandId ?? undefined,
+    });
+    throw err instanceof Error ? err : new Error(String(err));
   }
 }
 
@@ -234,18 +579,36 @@ export async function sendFBMessage(
     });
     return { skipped: true, reason: "empty_text" };
   }
-  const res = await fetch(`https://graph.facebook.com/v19.0/me/messages?access_token=${encodeURIComponent(pageAccessToken)}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      recipient: { id: recipientId },
-      message: { text },
-    }),
-  });
-  if (!res.ok) {
-    const errText = await res.text();
-    console.error("[FB] send message failed:", res.status, errText);
-    throw new Error(`FB API ${res.status}: ${errText.slice(0, 200)}`);
+  const ctx = resolveMessengerChannelByAccessToken(pageAccessToken);
+  const fbMeta: FbSendMeta = {
+    channelId: ctx?.id ?? null,
+    brandId: ctx?.brand_id ?? null,
+    recipientId,
+  };
+  try {
+    const res = await fetchFbMessageWithRetry(pageAccessToken, recipientId, text);
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      await processFbSendFailure(res.status, errText, fbMeta);
+    }
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message.startsWith("FB API ")) {
+      throw err;
+    }
+    const e = err as { message?: string };
+    console.error("[FB] sendFBMessage network error:", e?.message);
+    safeAlert({
+      alert_type: "fb_send_failed",
+      details: JSON.stringify({
+        channel_id: fbMeta.channelId,
+        brand_id: fbMeta.brandId,
+        recipientId,
+        error: String(e?.message ?? err),
+        timestamp: new Date().toISOString(),
+      }),
+      brand_id: fbMeta.brandId ?? undefined,
+    });
+    throw err instanceof Error ? err : new Error(String(err));
   }
 }
 
@@ -255,16 +618,8 @@ export async function sendRatingFlexMessage(
 ): Promise<void> {
   const token = getLineTokenForContact(contact);
   if (!token) return;
-  try {
-    const flexMsg = buildRatingFlexMessage(contact.id, ratingType);
-    await fetch("https://api.line.me/v2/bot/message/push", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-      body: JSON.stringify({ to: contact.platform_user_id, messages: [flexMsg] }),
-    });
-  } catch (err) {
-    console.error("LINE rating flex message push failed:", err);
-  }
+  const flexMsg = buildRatingFlexMessage(contact.id, ratingType);
+  await pushLineMessage(contact.platform_user_id, [flexMsg], token);
 }
 
 export async function downloadLineContent(
