@@ -1482,6 +1482,113 @@ export function registerCoreRoutes(app: Express): void {
       }
     });
 
+    // Phase 106.24.2-drain temporary — remove route after validation（清 completed job hash + completed 索引 + pending，勿長留）
+    /**
+     * Phase 106.24.2-drain（臨時救火）：清掉卡住 jobId 去重的舊 completed job hash 等。
+     * GET /api/admin/bullmq-drain-completed?token=ADMIN_DEBUG_TOKEN（或已登入 super_admin）
+     *
+     * 會做：SCAN `bull:ai-reply:ai-reply:line:*` 逐 key DEL；DEL `bull:ai-reply:completed`；SCAN `ai-reply:pending:*` 逐 key DEL。
+     * 不動：bull:ai-reply:id、meta、events、stalled-check、wait/active/delayed 等 index。
+     */
+    app.get("/api/admin/bullmq-drain-completed", superAdminOrDebugToken, async (_req, res) => {
+      const raw = getRedisClient() as unknown as {
+        scanIterator?: (opts: { MATCH: string; COUNT?: number }) => AsyncIterable<string>;
+        type?: (key: string) => Promise<string>;
+        del?: (...keys: string[]) => Promise<number>;
+        exists?: (key: string) => Promise<number>;
+        lLen?: (key: string) => Promise<number>;
+        zCard?: (key: string) => Promise<number>;
+        sCard?: (key: string) => Promise<number>;
+      } | null;
+
+      if (!raw || typeof raw.scanIterator !== "function" || typeof raw.del !== "function") {
+        return res.status(503).json({
+          error: "redis_unavailable",
+          message: "主站未注入 Redis 或 client 不支援 scanIterator/del",
+        });
+      }
+
+      const SCAN_COUNT = 200;
+      const DRAIN_MAX_KEYS = 5000;
+
+      const scanAndDel = async (
+        match: string
+      ): Promise<{ match: string; keys_seen: number; del_ok: number; del_errors: { key: string; error: string }[] }> => {
+        const delErrors: { key: string; error: string }[] = [];
+        let keysSeen = 0;
+        let delOk = 0;
+        for await (const key of raw.scanIterator!({ MATCH: match, COUNT: SCAN_COUNT })) {
+          keysSeen++;
+          if (keysSeen > DRAIN_MAX_KEYS) break;
+          try {
+            const n = await raw.del!(key);
+            if (n > 0) delOk++;
+          } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : String(e);
+            if (delErrors.length < 80) delErrors.push({ key, error: msg });
+          }
+        }
+        return { match, keys_seen: keysSeen, del_ok: delOk, del_errors: delErrors };
+      };
+
+      try {
+        const jobHashLine = await scanAndDel("bull:ai-reply:ai-reply:line:*");
+        const jobHashMessenger = await scanAndDel("bull:ai-reply:ai-reply:messenger:*");
+
+        const completedKey = "bull:ai-reply:completed";
+        let completed_existed = false;
+        let completed_type: string | null = null;
+        let completed_cardinality_before: number | null = null;
+        let completed_del_ok: boolean | null = null;
+        let completed_del_error: string | null = null;
+
+        const ex = await raw.exists!(completedKey);
+        if (ex) {
+          completed_existed = true;
+          completed_type = await raw.type!(completedKey);
+          try {
+            if (completed_type === "list" && raw.lLen) completed_cardinality_before = await raw.lLen(completedKey);
+            else if (completed_type === "zset" && raw.zCard) completed_cardinality_before = await raw.zCard(completedKey);
+            else if (completed_type === "set" && raw.sCard) completed_cardinality_before = await raw.sCard(completedKey);
+          } catch {
+            completed_cardinality_before = null;
+          }
+          try {
+            await raw.del!(completedKey);
+            completed_del_ok = true;
+          } catch (e: unknown) {
+            completed_del_ok = false;
+            completed_del_error = e instanceof Error ? e.message : String(e);
+          }
+        }
+
+        const pendingDrain = await scanAndDel("ai-reply:pending:*");
+
+        return res.json({
+          note: "Phase 106.24.2-drain temporary — remove route after validation",
+          timestamp: new Date().toISOString(),
+          scan_count_hint: SCAN_COUNT,
+          drain_max_keys_per_pattern: DRAIN_MAX_KEYS,
+          deleted_hashes: {
+            bull_ai_reply_ai_reply_line: jobHashLine,
+            bull_ai_reply_ai_reply_messenger: jobHashMessenger,
+            total_del_ok: jobHashLine.del_ok + jobHashMessenger.del_ok,
+          },
+          bull_ai_reply_completed: {
+            key: completedKey,
+            existed: completed_existed,
+            type: completed_type,
+            cardinality_before: completed_cardinality_before,
+            del_ok: completed_del_ok,
+            del_error: completed_del_error,
+          },
+          deleted_pending: pendingDrain,
+        });
+      } catch (e: unknown) {
+        return res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+      }
+    });
+
     /**
      * super_admin 或 ADMIN_DEBUG_TOKEN：將來源品牌的 product_catalog、knowledge_files 複製到目標品牌（不動 brands.system_prompt／return_form_url、不碰訂單表）。
      * Query 或 JSON body：from、to（預設 1→2）、dry_run（預設 true 僅預覽）。
