@@ -1342,6 +1342,147 @@ export function registerCoreRoutes(app: Express): void {
     });
 
     /**
+     * Phase 106.24.1-debug（臨時）：BullMQ + debounce pending 一覽。驗完請刪除此路由。
+     * GET /api/admin/bullmq-inspect?token=ADMIN_DEBUG_TOKEN（或已登入 super_admin）
+     */
+    app.get("/api/admin/bullmq-inspect", superAdminOrDebugToken, async (_req, res) => {
+      const raw = getRedisClient() as unknown as {
+        scanIterator?: (opts: { MATCH: string; COUNT?: number }) => AsyncIterable<string>;
+        type?: (key: string) => Promise<string>;
+        exists?: (key: string) => Promise<number>;
+        hGetAll?: (key: string) => Promise<Record<string, string>>;
+        lLen?: (key: string) => Promise<number>;
+        lRange?: (key: string, start: number, stop: number) => Promise<string[]>;
+        sMembers?: (key: string) => Promise<string[]>;
+        zRangeWithScores?: (key: string, min: string, max: string) => Promise<{ value: string; score: number }[]>;
+      } | null;
+
+      if (!raw || typeof raw.scanIterator !== "function") {
+        return res.status(503).json({
+          error: "redis_unavailable",
+          message: "主站未注入 Redis 或 client 不支援 scanIterator，無法檢視 BullMQ",
+        });
+      }
+
+      const MAX_HASH_CHARS = 12_000;
+      const MAX_LIST_ITEMS = 8;
+      const MAX_SCAN_KEYS = 500;
+
+      const summarizeHash = (h: Record<string, string>) => {
+        const state = h.state ?? h.stalledReason ?? null;
+        const jobId = h.id ?? h.jobId ?? null;
+        const timestamp = h.timestamp ?? h.processedOn ?? h.finishedOn ?? null;
+        let full = JSON.stringify(h);
+        if (full.length > MAX_HASH_CHARS) full = full.slice(0, MAX_HASH_CHARS) + "…(truncated)";
+        return { state, jobId, timestamp, fields: Object.keys(h), preview: full };
+      };
+
+      const readKeyPayload = async (key: string): Promise<Record<string, unknown>> => {
+        const t = (await raw.type!(key)) as string;
+        const base: Record<string, unknown> = { key, type: t };
+        try {
+          if (t === "hash") {
+            const h = await raw.hGetAll!(key);
+            base.hash = summarizeHash(h);
+          } else if (t === "list") {
+            const len = await raw.lLen!(key);
+            const items = await raw.lRange!(key, 0, MAX_LIST_ITEMS - 1);
+            base.length = len;
+            base.head_items = items;
+          } else if (t === "set") {
+            const members = await raw.sMembers!(key);
+            base.cardinality = members.length;
+            base.members = members.slice(0, 200);
+          } else if (t === "zset") {
+            const z = await raw.zRangeWithScores!(key, "0", "-1");
+            base.cardinality = z.length;
+            base.entries = z.slice(0, 200);
+          } else if (t === "stream") {
+            const xlen = (raw as unknown as { xLen?: (k: string) => Promise<number> }).xLen?.(key);
+            if (xlen != null) base.length = await xlen;
+            const xr = (raw as unknown as { xRange?: (k: string, s: string, e: string, o: { COUNT: number }) => Promise<unknown[]> })
+              .xRange?.(key, "-", "+", { COUNT: 5 });
+            base.head_entries = xr ?? [];
+          } else if (t === "string") {
+            const g = (raw as unknown as { get?: (k: string) => Promise<string | null> }).get?.(key);
+            if (g) base.value_preview = String(await g).slice(0, 500);
+          } else if (t === "none") {
+            base.note = "key does not exist";
+          }
+        } catch (e: unknown) {
+          base.read_error = e instanceof Error ? e.message : String(e);
+        }
+        return base;
+      };
+
+      try {
+        const bullKeys: string[] = [];
+        let n = 0;
+        for await (const key of raw.scanIterator({ MATCH: "bull:ai-reply:*", COUNT: 200 })) {
+          bullKeys.push(key);
+          n++;
+          if (n >= MAX_SCAN_KEYS) break;
+        }
+        bullKeys.sort();
+
+        const bullKeyDetails: Record<string, unknown>[] = [];
+        for (const key of bullKeys) {
+          bullKeyDetails.push(await readKeyPayload(key));
+        }
+
+        const indexKeyNames = [
+          "bull:ai-reply:active",
+          "bull:ai-reply:wait",
+          "bull:ai-reply:waiting",
+          "bull:ai-reply:delayed",
+          "bull:ai-reply:stalled",
+          "bull:ai-reply:paused",
+          "bull:ai-reply:meta",
+        ];
+        const bull_index_queues: Record<string, unknown> = {};
+        for (const k of indexKeyNames) {
+          const ex = await raw.exists!(k);
+          if (!ex) {
+            bull_index_queues[k] = { exists: false };
+            continue;
+          }
+          bull_index_queues[k] = await readKeyPayload(k);
+        }
+
+        const pendingKeys: string[] = [];
+        let pn = 0;
+        for await (const key of raw.scanIterator({ MATCH: "ai-reply:pending:*", COUNT: 200 })) {
+          pendingKeys.push(key);
+          pn++;
+          if (pn >= MAX_SCAN_KEYS) break;
+        }
+        pendingKeys.sort();
+
+        const ai_reply_pending: {
+          key: string;
+          length: number;
+          latest_items: string[];
+        }[] = [];
+        for (const pk of pendingKeys) {
+          const len = await raw.lLen!(pk);
+          const latest = await raw.lRange!(pk, 0, MAX_LIST_ITEMS - 1);
+          ai_reply_pending.push({ key: pk, length: len, latest_items: latest });
+        }
+
+        return res.json({
+          note: "Phase 106.24.1-debug temporary — remove route after validation",
+          timestamp: new Date().toISOString(),
+          scan_match_bull_ai_reply_count: bullKeys.length,
+          bull_ai_reply_keys: bullKeyDetails,
+          bull_index_queues,
+          ai_reply_pending_lists: ai_reply_pending,
+        });
+      } catch (e: unknown) {
+        return res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+      }
+    });
+
+    /**
      * super_admin 或 ADMIN_DEBUG_TOKEN：將來源品牌的 product_catalog、knowledge_files 複製到目標品牌（不動 brands.system_prompt／return_form_url、不碰訂單表）。
      * Query 或 JSON body：from、to（預設 1→2）、dry_run（預設 true 僅預覽）。
      */
