@@ -81,8 +81,9 @@ export function getAiReplyQueue(): Queue<AiReplyJobData> {
     queue = new Queue<AiReplyJobData>(QUEUE_NAME, {
       connection: getSharedProducerRedis() as import("bullmq").ConnectionOptions,
       defaultJobOptions: {
-        removeOnComplete: { count: 1000 },
-        removeOnFail: { count: 500 },
+        /** Phase 106.25：固定 jobId 下，completed 殘留 hash 會讓 Queue.add silent no-op；改為跑完立刻清 */
+        removeOnComplete: true,
+        removeOnFail: { count: 100 },
         attempts: 3,
         backoff: { type: "exponential", delay: 2000 },
       },
@@ -213,15 +214,12 @@ export async function enqueueDebouncedAiReply(
     const existing = await q.getJob(jid);
     if (existing) {
       const state = await existing.getState();
-      if (state === "delayed") {
-        await existing.remove();
-      } else if (state === "active") {
-        /** 併發保護：AI 思考中不重排新 job，僅累積在 pending；完成後 worker 會 rescheduleIfPending */
-        console.log("[Queue] job active, new message buffered in pending:", jid);
-        return;
-      } else if (state === "waiting") {
-        /** 已在佇列：不重複觸發，worker 執行時會一次讀取最新 pending 合併內容 */
-        console.log("[Queue] job waiting, pending updated:", jid);
+      /** Phase 106.25：completed/failed/delayed 殘留 hash 會讓 Queue.add silent no-op → 主動 remove 再 add */
+      if (state === "delayed" || state === "completed" || state === "failed") {
+        await existing.remove().catch(() => {});
+      } else if (state === "active" || state === "waiting" || state === "prioritized") {
+        /** AI 思考中或已在佇列：僅累積在 pending，由 worker 完成後 rescheduleIfPending */
+        console.log("[Queue] job active/waiting, new message buffered in pending:", jid);
         return;
       }
     }
@@ -246,9 +244,13 @@ export async function addAiReplyJob(data: {
     const existing = await q.getJob(jid);
     if (existing) {
       const state = await existing.getState();
-      if (state === "active" || state === "waiting") {
+      if (state === "active" || state === "waiting" || state === "prioritized") {
         console.log("[Queue] addAiReplyJob skip, job already active/waiting:", jid);
         return null;
+      }
+      /** Phase 106.25：completed/failed/delayed 殘留 hash 會讓同 jobId 的 add silent no-op → 主動 remove */
+      if (state === "completed" || state === "failed" || state === "delayed") {
+        await existing.remove().catch(() => {});
       }
     }
     const job = await q.add(
@@ -343,9 +345,21 @@ export async function rescheduleIfPending(
     const q = getAiReplyQueue();
     const jid = jobId(platform, contactId);
     try {
+      const existing = await q.getJob(jid);
+      if (existing) {
+        const state = await existing.getState();
+        /** Phase 106.25：跑完的 job 若 jobId 殘留會卡住 add；主動 remove 再 add */
+        if (state === "completed" || state === "failed" || state === "delayed") {
+          await existing.remove().catch(() => {});
+        } else if (state === "active" || state === "waiting" || state === "prioritized") {
+          return;
+        }
+      }
       await q.add("reply", { contactId, channelToken: null, platform }, { jobId: jid, delay: DEBOUNCE_MS });
       console.log("[Worker] rescheduled pending job:", jid, "items:", len);
-    } catch (_e) { /* jobId may already exist */ }
+    } catch (_e) {
+      console.error("[Worker] reschedule error:", _e);
+    }
   }
 }
 

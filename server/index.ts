@@ -210,22 +210,25 @@ app.use((req, res, next) => {
           const callRunAiReplyLoopback = async (
             payload: import("./workers/ai-reply-worker-shared").RunAiReplyPayload
           ): Promise<void> => {
-            const res = await fetch(`http://127.0.0.1:${port}/internal/run-ai-reply`, {
+            const url = `http://127.0.0.1:${port}/internal/run-ai-reply`;
+            const res = await fetch(url, {
               method: "POST",
               headers: { "Content-Type": "application/json", "X-Internal-Secret": internalSecret },
               body: JSON.stringify(payload),
             });
+
+            /** 504：routes 層 soft timeout 已推罐頭給客人，worker 不需 retry */
             if (res.status === 504) {
               console.log(
-                "[Server] in-process worker: internal API soft timeout (504) contactId=" +
-                  payload.contactId +
-                  " — fallback message already pushed by routes layer; job completes without retry"
+                "[Loopback] soft timeout 504, fallback already pushed. contactId:",
+                payload.contactId
               );
               return;
             }
+
             if (!res.ok) {
               const errText = await res.text().catch(() => "");
-              throw new Error(`internal/run-ai-reply ${res.status}: ${errText.slice(0, 300)}`);
+              throw new Error(`[Loopback] HTTP ${res.status}: ${errText.slice(0, 300)}`);
             }
           };
 
