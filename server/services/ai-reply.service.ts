@@ -756,7 +756,19 @@ ${contextStr}
     platform?: string,
     aiOpts?: { enqueueTimestampMs?: number }
   ) {
-    const geminiApiKeyRequired = storage.getSetting("gemini_api_key")?.trim();
+    const __diagGeminiKey = storage.getSetting("gemini_api_key");
+    console.log("[AI-DIAG] autoReplyWithAI ENTER", {
+      contactId: contact?.id,
+      brandId: contact?.brand_id,
+      platform,
+      messageLength: userMessage?.length,
+      hasGeminiKey: !!__diagGeminiKey?.trim(),
+      geminiKeyLength: __diagGeminiKey?.length ?? 0,
+      isAiMuted: contact?.id != null ? storage.isAiMuted(contact.id) : null,
+      channelToken: channelToken ? "SET" : "EMPTY",
+      matchedBrandId: brandId,
+    });
+    const geminiApiKeyRequired = __diagGeminiKey?.trim();
     if (!geminiApiKeyRequired) return;
 
     const apiKey = storage.getSetting("openai_api_key");
