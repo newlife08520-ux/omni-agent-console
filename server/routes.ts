@@ -78,14 +78,17 @@ export async function registerRoutes(
   app.post("/internal/run-ai-reply", (req, res) => {
     const secret = req.headers["x-internal-secret"];
     if (secret !== process.env.INTERNAL_API_SECRET) {
+      console.error("[Loopback Error] 403 Forbidden: Secret mismatch");
       return res.status(403).json({ message: "Forbidden" });
     }
     const { contactId, message, channelToken, matchedBrandId, platform, enqueueTimestampMs } = req.body || {};
     if (!contactId || message == null) {
+      console.error("[Loopback Error] 400 Bad Request: missing contactId or message");
       return res.status(400).json({ message: "contactId and message required" });
     }
     const contact = storage.getContact(Number(contactId));
     if (!contact) {
+      console.error("[Loopback Error] 404 Not Found: contact not found contactId=" + contactId);
       return res.status(404).json({ message: "contact not found" });
     }
     const runStartMs = Date.now();

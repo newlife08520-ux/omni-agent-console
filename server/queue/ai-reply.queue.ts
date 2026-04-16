@@ -214,11 +214,10 @@ export async function enqueueDebouncedAiReply(
     const existing = await q.getJob(jid);
     if (existing) {
       const state = await existing.getState();
-      /** Phase 106.25：completed/failed/delayed 殘留 hash 會讓 Queue.add silent no-op → 主動 remove 再 add */
+      /** Phase 106.25：completed/failed/delayed 殘留 hash 會讓 Queue.add silent no-op → 主動 remove 讓出 jobId */
       if (state === "delayed" || state === "completed" || state === "failed") {
-        await existing.remove().catch(() => {});
+        await existing.remove().catch((err: Error) => console.warn(`[Queue] remove old job failed:`, err.message));
       } else if (state === "active" || state === "waiting" || state === "prioritized") {
-        /** AI 思考中或已在佇列：僅累積在 pending，由 worker 完成後 rescheduleIfPending */
         console.log("[Queue] job active/waiting, new message buffered in pending:", jid);
         return;
       }
@@ -248,9 +247,9 @@ export async function addAiReplyJob(data: {
         console.log("[Queue] addAiReplyJob skip, job already active/waiting:", jid);
         return null;
       }
-      /** Phase 106.25：completed/failed/delayed 殘留 hash 會讓同 jobId 的 add silent no-op → 主動 remove */
+      /** Phase 106.25：completed/failed/delayed 殘留 hash 會讓同 jobId 的 add silent no-op → 主動 remove 讓出 jobId */
       if (state === "completed" || state === "failed" || state === "delayed") {
-        await existing.remove().catch(() => {});
+        await existing.remove().catch((err: Error) => console.warn(`[Queue] remove old job failed:`, err.message));
       }
     }
     const job = await q.add(
@@ -348,17 +347,18 @@ export async function rescheduleIfPending(
       const existing = await q.getJob(jid);
       if (existing) {
         const state = await existing.getState();
-        /** Phase 106.25：跑完的 job 若 jobId 殘留會卡住 add；主動 remove 再 add */
-        if (state === "completed" || state === "failed" || state === "delayed") {
-          await existing.remove().catch(() => {});
-        } else if (state === "active" || state === "waiting" || state === "prioritized") {
+        if (state === "active" || state === "waiting" || state === "prioritized") {
           return;
+        }
+        /** Phase 106.25：跑完的 job 若 jobId 殘留會卡住 add；主動 remove 讓出 jobId */
+        if (state === "completed" || state === "failed" || state === "delayed") {
+          await existing.remove().catch((err: Error) => console.warn(`[Queue] remove old job failed:`, err.message));
         }
       }
       await q.add("reply", { contactId, channelToken: null, platform }, { jobId: jid, delay: DEBOUNCE_MS });
       console.log("[Worker] rescheduled pending job:", jid, "items:", len);
     } catch (_e) {
-      console.error("[Worker] reschedule error:", _e);
+      console.error("[Worker] reschedule error:", (_e as Error)?.message);
     }
   }
 }

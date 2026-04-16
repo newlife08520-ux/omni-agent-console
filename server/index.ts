@@ -219,16 +219,14 @@ app.use((req, res, next) => {
 
             /** 504：routes 層 soft timeout 已推罐頭給客人，worker 不需 retry */
             if (res.status === 504) {
-              console.log(
-                "[Loopback] soft timeout 504, fallback already pushed. contactId:",
-                payload.contactId
-              );
+              console.log("[Loopback] soft timeout 504, assuming fallback pushed by routes. contactId:", payload.contactId);
               return;
             }
 
             if (!res.ok) {
               const errText = await res.text().catch(() => "");
-              throw new Error(`[Loopback] HTTP ${res.status}: ${errText.slice(0, 300)}`);
+              /** Phase 106.25：非 2xx 必須拋錯讓 worker 進入 failed/retry；不可靜默 return */
+              throw new Error(`Loopback HTTP ${res.status}: ${errText.slice(0, 300)}`);
             }
           };
 
