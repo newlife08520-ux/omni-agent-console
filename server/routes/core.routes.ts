@@ -1589,6 +1589,229 @@ export function registerCoreRoutes(app: Express): void {
       }
     });
 
+    // Phase 106.25.3-diag temporary — remove route after validation（一次性 production 全狀態 read-only 診斷）
+    /**
+     * GET /api/admin/full-diag?token=ADMIN_DEBUG_TOKEN（或已登入 super_admin）
+     * 一次回傳：env / build / channels / brands / settings.gemini_api_key / contact 4211 + 最近訊息 / ai_logs / worker heartbeat
+     * 全部 read-only；token 與 API key 一律遮罩。
+     */
+    app.get("/api/admin/full-diag", superAdminOrDebugToken, async (req, res) => {
+      const safe = async <T>(fn: () => T | Promise<T>): Promise<T | { error: string }> => {
+        try {
+          return await fn();
+        } catch (e: unknown) {
+          return { error: e instanceof Error ? e.message : String(e) };
+        }
+      };
+      const maskPrefix = (s: string | null | undefined, n: number): string => {
+        const v = (s ?? "").toString();
+        if (!v) return "";
+        return v.slice(0, Math.max(0, n));
+      };
+
+      const targetContactRaw = req.query.contact_id;
+      const targetContactId =
+        typeof targetContactRaw === "string" && targetContactRaw.trim() !== ""
+          ? Math.max(1, parseInt(targetContactRaw, 10) || 4211)
+          : 4211;
+
+      const out: Record<string, unknown> = {
+        note: "Phase 106.25.3-diag temporary - remove after validation",
+        timestamp: new Date().toISOString(),
+        target_contact_id: targetContactId,
+      };
+
+      out.env = await safe(() => ({
+        NODE_ENV: process.env.NODE_ENV ?? "",
+        ENABLE_INPROCESS_WORKER: process.env.ENABLE_INPROCESS_WORKER ?? "(unset, defaults to true)",
+        has_INTERNAL_API_SECRET: !!process.env.INTERNAL_API_SECRET?.trim(),
+        has_REDIS_URL: !!process.env.REDIS_URL?.trim(),
+        PORT: process.env.PORT ?? "",
+        APP_DOMAIN: process.env.APP_DOMAIN ?? "",
+        RAILWAY_GIT_COMMIT_SHA: process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 12) ?? "",
+      }));
+
+      out.build = await safe(() => {
+        const candidates = [
+          path.resolve(process.cwd(), "dist", "index.cjs"),
+          path.resolve(__dirname, "..", "..", "dist", "index.cjs"),
+          path.resolve(__dirname, "..", "index.cjs"),
+        ];
+        let bundlePath: string | null = null;
+        for (const p of candidates) {
+          try {
+            if (fs.existsSync(p)) {
+              bundlePath = p;
+              break;
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+        let aiDiagCount = 0;
+        let aiDiagPresent = false;
+        let bundleSize: number | null = null;
+        let bundleMtime: string | null = null;
+        if (bundlePath) {
+          try {
+            const stat = fs.statSync(bundlePath);
+            bundleSize = stat.size;
+            bundleMtime = stat.mtime.toISOString();
+            const buf = fs.readFileSync(bundlePath, "utf8");
+            const matches = buf.match(/AI-DIAG/g);
+            aiDiagCount = matches ? matches.length : 0;
+            aiDiagPresent = aiDiagCount > 0;
+          } catch (e: unknown) {
+            return {
+              bundle_path: bundlePath,
+              bundle_read_error: e instanceof Error ? e.message : String(e),
+            };
+          }
+        }
+        const versionPath = path.resolve(process.cwd(), "dist", "public", "version.json");
+        let version: unknown = null;
+        try {
+          if (fs.existsSync(versionPath)) {
+            version = JSON.parse(fs.readFileSync(versionPath, "utf8"));
+          }
+        } catch {
+          /* ignore */
+        }
+        return {
+          bundle_path: bundlePath,
+          bundle_size: bundleSize,
+          bundle_mtime: bundleMtime,
+          ai_diag_present: aiDiagPresent,
+          ai_diag_count_in_bundle: aiDiagCount,
+          version_json: version,
+        };
+      });
+
+      out.channels = await safe(() => {
+        const all = storage.getChannels();
+        return all.map((c: { id: number; brand_id: number; brand_name?: string; channel_name: string; platform: string; bot_id?: string; access_token?: string; channel_secret?: string; is_active: number; is_ai_enabled?: number }) => ({
+          id: c.id,
+          brand_id: c.brand_id,
+          brand_name: c.brand_name ?? null,
+          name: c.channel_name,
+          platform: c.platform,
+          bot_id: c.bot_id || "",
+          is_active: c.is_active,
+          is_ai_enabled: c.is_ai_enabled ?? 0,
+          access_token_prefix: maskPrefix(c.access_token, 10),
+          access_token_length: (c.access_token ?? "").length,
+          channel_secret_prefix: maskPrefix(c.channel_secret, 4),
+          channel_secret_length: (c.channel_secret ?? "").length,
+        }));
+      });
+
+      out.brands = await safe(() => {
+        const all = storage.getBrands();
+        return all.map((b: { id: number; name: string; slug?: string; is_ai_enabled?: number }) => ({
+          id: b.id,
+          name: b.name,
+          slug: b.slug ?? null,
+          is_ai_enabled: (b as unknown as { is_ai_enabled?: number }).is_ai_enabled ?? null,
+        }));
+      });
+
+      out.settings_gemini_key = await safe(() => {
+        const v = storage.getSetting("gemini_api_key");
+        return {
+          exists: !!v && v.trim().length > 0,
+          length: (v ?? "").length,
+          prefix: maskPrefix(v, 6),
+        };
+      });
+
+      const contactRow = await safe(() => storage.getContact(targetContactId));
+      out[`contact_${targetContactId}`] = await safe(() => {
+        if (!contactRow || (contactRow as { error?: string }).error) {
+          return { exists: false, error: (contactRow as { error?: string })?.error ?? null };
+        }
+        const c = contactRow as unknown as Record<string, unknown> & { id: number };
+        const isMuted = (() => {
+          try {
+            return storage.isAiMuted(c.id);
+          } catch {
+            return null;
+          }
+        })();
+        const sanitized: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(c)) {
+          if (/token|secret|password/i.test(k) && typeof v === "string") {
+            sanitized[k] = `[masked:${v.length}chars]`;
+          } else {
+            sanitized[k] = v;
+          }
+        }
+        return {
+          exists: true,
+          brand_id: c.brand_id ?? null,
+          platform: c.platform ?? null,
+          needs_human: c.needs_human ?? null,
+          is_ai_muted: isMuted,
+          status: c.status ?? null,
+          all_columns: sanitized,
+        };
+      });
+
+      out[`contact_${targetContactId}_recent_messages`] = await safe(() => {
+        const ms = storage.getMessages(targetContactId, { limit: 5 });
+        return ms.map((m: { id: number; sender_type: string; content: string; message_type?: string; created_at: string }) => ({
+          id: m.id,
+          sender_type: m.sender_type,
+          message_type: m.message_type ?? "text",
+          content_preview: (m.content ?? "").slice(0, 50),
+          content_length: (m.content ?? "").length,
+          created_at: m.created_at,
+        }));
+      });
+
+      out[`contact_${targetContactId}_recent_ai_logs`] = await safe(() => {
+        const logs = storage.getAiLogs(targetContactId) as unknown as Array<Record<string, unknown>>;
+        const last5 = logs.slice(-5);
+        return last5.map((l) => ({
+          id: (l.id as number | undefined) ?? null,
+          result_summary: String(l.result_summary ?? "").slice(0, 200),
+          reason_if_bypassed: (l.reason_if_bypassed as string | null | undefined) ?? null,
+          reply_source: (l.reply_source as string | null | undefined) ?? null,
+          used_llm: (l.used_llm as number | null | undefined) ?? null,
+          transfer_triggered: (l.transfer_triggered as number | boolean | null | undefined) ?? null,
+          model: (l.model as string | null | undefined) ?? null,
+          response_time_ms: (l.response_time_ms as number | null | undefined) ?? null,
+          created_at: (l.created_at as string | null | undefined) ?? null,
+        }));
+      });
+
+      out.worker_heartbeat = await safe(async () => {
+        const status = await getWorkerHeartbeatStatus();
+        const raw = getRedisClient() as unknown as { get?: (k: string) => Promise<string | null> } | null;
+        let heartbeat_payload: unknown = null;
+        if (raw && typeof raw.get === "function") {
+          try {
+            const v = await raw.get(WORKER_HEARTBEAT_KEY);
+            if (v) {
+              try {
+                heartbeat_payload = JSON.parse(v);
+              } catch {
+                heartbeat_payload = v;
+              }
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+        return {
+          alive: status?.alive ?? false,
+          age_sec: status?.ageSec ?? null,
+          payload: heartbeat_payload,
+        };
+      });
+
+      return res.json(out);
+    });
+
     /**
      * super_admin 或 ADMIN_DEBUG_TOKEN：將來源品牌的 product_catalog、knowledge_files 複製到目標品牌（不動 brands.system_prompt／return_form_url、不碰訂單表）。
      * Query 或 JSON body：from、to（預設 1→2）、dry_run（預設 true 僅預覽）。
