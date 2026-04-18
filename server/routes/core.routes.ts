@@ -1591,8 +1591,9 @@ export function registerCoreRoutes(app: Express): void {
 
     // Phase 106.25.3-diag temporary — remove route after validation（一次性 production 全狀態 read-only 診斷）
     /**
-     * GET /api/admin/full-diag?token=ADMIN_DEBUG_TOKEN（或已登入 super_admin）
-     * 一次回傳：env / build / channels / brands / settings.gemini_api_key / contact 4211 + 最近訊息 / ai_logs / worker heartbeat
+     * GET /api/admin/full-diag?token=ADMIN_DEBUG_TOKEN（或已登入 super_admin）&contact_id=4211
+     * 回傳結構見 Phase 106.25.3-diag JSON 規格：env、bundle_check、channels、brands、settings_keys_state、
+     * contact_{id}、訊息／ai_logs／ai_reply_deliveries／system_alerts／recent_contacts、worker_heartbeat。
      * 全部 read-only；token 與 API key 一律遮罩。
      */
     app.get("/api/admin/full-diag", superAdminOrDebugToken, async (req, res) => {
@@ -1608,6 +1609,22 @@ export function registerCoreRoutes(app: Express): void {
         if (!v) return "";
         return v.slice(0, Math.max(0, n));
       };
+      const settingKeyState = (key: string): "SET" | "EMPTY" => {
+        const v = storage.getSetting(key);
+        return v != null && String(v).trim() !== "" ? "SET" : "EMPTY";
+      };
+      const countSubstr = (haystack: string, needle: string): number => {
+        if (!needle) return 0;
+        let n = 0;
+        let i = 0;
+        while (i <= haystack.length - needle.length) {
+          const j = haystack.indexOf(needle, i);
+          if (j === -1) break;
+          n++;
+          i = j + needle.length;
+        }
+        return n;
+      };
 
       const targetContactRaw = req.query.contact_id;
       const targetContactId =
@@ -1616,22 +1633,19 @@ export function registerCoreRoutes(app: Express): void {
           : 4211;
 
       const out: Record<string, unknown> = {
-        note: "Phase 106.25.3-diag temporary - remove after validation",
+        note: "Phase 106.25.3-diag temporary",
         timestamp: new Date().toISOString(),
-        target_contact_id: targetContactId,
       };
 
       out.env = await safe(() => ({
         NODE_ENV: process.env.NODE_ENV ?? "",
-        ENABLE_INPROCESS_WORKER: process.env.ENABLE_INPROCESS_WORKER ?? "(unset, defaults to true)",
+        ENABLE_INPROCESS_WORKER: process.env.ENABLE_INPROCESS_WORKER ?? "(unset)",
         has_INTERNAL_API_SECRET: !!process.env.INTERNAL_API_SECRET?.trim(),
         has_REDIS_URL: !!process.env.REDIS_URL?.trim(),
         PORT: process.env.PORT ?? "",
-        APP_DOMAIN: process.env.APP_DOMAIN ?? "",
-        RAILWAY_GIT_COMMIT_SHA: process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 12) ?? "",
       }));
 
-      out.build = await safe(() => {
+      out.bundle_check = await safe(() => {
         const candidates = [
           path.resolve(process.cwd(), "dist", "index.cjs"),
           path.resolve(__dirname, "..", "..", "dist", "index.cjs"),
@@ -1648,95 +1662,103 @@ export function registerCoreRoutes(app: Express): void {
             /* ignore */
           }
         }
-        let aiDiagCount = 0;
-        let aiDiagPresent = false;
-        let bundleSize: number | null = null;
-        let bundleMtime: string | null = null;
-        if (bundlePath) {
-          try {
-            const stat = fs.statSync(bundlePath);
-            bundleSize = stat.size;
-            bundleMtime = stat.mtime.toISOString();
-            const buf = fs.readFileSync(bundlePath, "utf8");
-            const matches = buf.match(/AI-DIAG/g);
-            aiDiagCount = matches ? matches.length : 0;
-            aiDiagPresent = aiDiagCount > 0;
-          } catch (e: unknown) {
-            return {
-              bundle_path: bundlePath,
-              bundle_read_error: e instanceof Error ? e.message : String(e),
-            };
-          }
+        if (!bundlePath) {
+          return {
+            ai_diag_enter_in_bundle: 0,
+            run_ai_reply_start_in_bundle: 0,
+            dist_index_cjs_mtime: null as string | null,
+          };
         }
-        const versionPath = path.resolve(process.cwd(), "dist", "public", "version.json");
-        let version: unknown = null;
         try {
-          if (fs.existsSync(versionPath)) {
-            version = JSON.parse(fs.readFileSync(versionPath, "utf8"));
-          }
-        } catch {
-          /* ignore */
+          const stat = fs.statSync(bundlePath);
+          const buf = fs.readFileSync(bundlePath, "utf8");
+          return {
+            ai_diag_enter_in_bundle: countSubstr(buf, "[AI-DIAG] ENTER"),
+            run_ai_reply_start_in_bundle: countSubstr(buf, "run-ai-reply start"),
+            dist_index_cjs_mtime: stat.mtime.toISOString(),
+          };
+        } catch (e: unknown) {
+          return {
+            error: e instanceof Error ? e.message : String(e),
+            ai_diag_enter_in_bundle: 0,
+            run_ai_reply_start_in_bundle: 0,
+            dist_index_cjs_mtime: null as string | null,
+          };
         }
-        return {
-          bundle_path: bundlePath,
-          bundle_size: bundleSize,
-          bundle_mtime: bundleMtime,
-          ai_diag_present: aiDiagPresent,
-          ai_diag_count_in_bundle: aiDiagCount,
-          version_json: version,
-        };
       });
 
       out.channels = await safe(() => {
         const all = storage.getChannels();
-        return all.map((c: { id: number; brand_id: number; brand_name?: string; channel_name: string; platform: string; bot_id?: string; access_token?: string; channel_secret?: string; is_active: number; is_ai_enabled?: number }) => ({
-          id: c.id,
-          brand_id: c.brand_id,
-          brand_name: c.brand_name ?? null,
-          name: c.channel_name,
-          platform: c.platform,
-          bot_id: c.bot_id || "",
-          is_active: c.is_active,
-          is_ai_enabled: c.is_ai_enabled ?? 0,
-          access_token_prefix: maskPrefix(c.access_token, 10),
-          access_token_length: (c.access_token ?? "").length,
-          channel_secret_prefix: maskPrefix(c.channel_secret, 4),
-          channel_secret_length: (c.channel_secret ?? "").length,
-        }));
+        return all.map(
+          (c: {
+            id: number;
+            brand_id: number;
+            channel_name: string;
+            platform: string;
+            bot_id?: string;
+            access_token?: string;
+            channel_secret?: string;
+            is_active: number;
+            is_ai_enabled?: number;
+          }) => {
+            const atLen = (c.access_token ?? "").length;
+            const csLen = (c.channel_secret ?? "").length;
+            return {
+              id: c.id,
+              brand_id: c.brand_id,
+              platform: c.platform,
+              name: c.channel_name,
+              bot_id: c.bot_id || "",
+              access_token_prefix: maskPrefix(c.access_token, 10),
+              access_token_length: atLen,
+              access_token_state: atLen > 0 ? ("SET" as const) : ("EMPTY" as const),
+              channel_secret_state: csLen > 0 ? ("SET" as const) : ("EMPTY" as const),
+              is_ai_enabled: c.is_ai_enabled ?? 0,
+              is_active: c.is_active,
+            };
+          }
+        );
       });
 
       out.brands = await safe(() => {
         const all = storage.getBrands();
-        return all.map((b: { id: number; name: string; slug?: string; is_ai_enabled?: number }) => ({
+        return all.map((b: { id: number; name: string; is_ai_enabled?: number }) => ({
           id: b.id,
           name: b.name,
-          slug: b.slug ?? null,
-          is_ai_enabled: (b as unknown as { is_ai_enabled?: number }).is_ai_enabled ?? null,
+          is_ai_enabled: (b as unknown as { is_ai_enabled?: number }).is_ai_enabled ?? 0,
         }));
       });
 
-      out.settings_gemini_key = await safe(() => {
-        const v = storage.getSetting("gemini_api_key");
-        return {
-          exists: !!v && v.trim().length > 0,
-          length: (v ?? "").length,
-          prefix: maskPrefix(v, 6),
-        };
-      });
+      out.settings_keys_state = await safe(() => ({
+        gemini_api_key: settingKeyState("gemini_api_key"),
+        openai_api_key: settingKeyState("openai_api_key"),
+        test_mode: settingKeyState("test_mode"),
+      }));
 
-      const contactRow = await safe(() => storage.getContact(targetContactId));
-      out[`contact_${targetContactId}`] = await safe(() => {
-        if (!contactRow || (contactRow as { error?: string }).error) {
-          return { exists: false, error: (contactRow as { error?: string })?.error ?? null };
+      const contactKey = `contact_${targetContactId}`;
+      out[contactKey] = await safe(() => {
+        const contactRow = storage.getContact(targetContactId);
+        if (!contactRow) {
+          return {
+            exists: false,
+            brand_id: null,
+            channel_id: null,
+            platform: null,
+            platform_user_id: null,
+            needs_human: null,
+            is_ai_muted_from_storage: null,
+            case_status: null,
+            last_message_at: null,
+            full_row_no_secrets: null as Record<string, unknown> | null,
+          };
         }
         const c = contactRow as unknown as Record<string, unknown> & { id: number };
-        const isMuted = (() => {
-          try {
-            return storage.isAiMuted(c.id);
-          } catch {
-            return null;
-          }
-        })();
+        let isMuted: boolean | null = null;
+        try {
+          isMuted = storage.isAiMuted(c.id);
+        } catch {
+          isMuted = null;
+        }
         const sanitized: Record<string, unknown> = {};
         for (const [k, v] of Object.entries(c)) {
           if (/token|secret|password/i.test(k) && typeof v === "string") {
@@ -1748,54 +1770,117 @@ export function registerCoreRoutes(app: Express): void {
         return {
           exists: true,
           brand_id: c.brand_id ?? null,
+          channel_id: c.channel_id ?? null,
           platform: c.platform ?? null,
+          platform_user_id: c.platform_user_id ?? null,
           needs_human: c.needs_human ?? null,
-          is_ai_muted: isMuted,
-          status: c.status ?? null,
-          all_columns: sanitized,
+          is_ai_muted_from_storage: isMuted,
+          case_status: c.status ?? null,
+          last_message_at: c.last_message_at ?? null,
+          full_row_no_secrets: sanitized,
         };
       });
 
-      out[`contact_${targetContactId}_recent_messages`] = await safe(() => {
+      const msgKey = `contact_${targetContactId}_recent_messages`;
+      out[msgKey] = await safe(() => {
         const ms = storage.getMessages(targetContactId, { limit: 5 });
-        return ms.map((m: { id: number; sender_type: string; content: string; message_type?: string; created_at: string }) => ({
-          id: m.id,
-          sender_type: m.sender_type,
-          message_type: m.message_type ?? "text",
-          content_preview: (m.content ?? "").slice(0, 50),
-          content_length: (m.content ?? "").length,
-          created_at: m.created_at,
-        }));
+        return ms.map((m: { sender_type: string; content: string; created_at: string }) => {
+          const st = m.sender_type;
+          const direction = st === "user" ? "inbound" : "outbound";
+          return {
+            direction,
+            sender_type: st,
+            content: (m.content ?? "").slice(0, 60),
+            created_at: m.created_at,
+          };
+        });
       });
 
-      out[`contact_${targetContactId}_recent_ai_logs`] = await safe(() => {
+      const aiLogKey = `contact_${targetContactId}_recent_ai_logs`;
+      out[aiLogKey] = await safe(() => {
         const logs = storage.getAiLogs(targetContactId) as unknown as Array<Record<string, unknown>>;
-        const last5 = logs.slice(-5);
-        return last5.map((l) => ({
-          id: (l.id as number | undefined) ?? null,
+        const newest5 = logs.slice(0, 5);
+        return newest5.map((l) => ({
           result_summary: String(l.result_summary ?? "").slice(0, 200),
           reason_if_bypassed: (l.reason_if_bypassed as string | null | undefined) ?? null,
-          reply_source: (l.reply_source as string | null | undefined) ?? null,
-          used_llm: (l.used_llm as number | null | undefined) ?? null,
-          transfer_triggered: (l.transfer_triggered as number | boolean | null | undefined) ?? null,
-          model: (l.model as string | null | undefined) ?? null,
-          response_time_ms: (l.response_time_ms as number | null | undefined) ?? null,
           created_at: (l.created_at as string | null | undefined) ?? null,
         }));
       });
 
+      out.ai_reply_deliveries_recent = await safe(() => {
+        const has = db
+          .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'ai_reply_deliveries'")
+          .get() as { name: string } | undefined;
+        if (!has) return [];
+        const rows = db
+          .prepare(
+            `SELECT delivery_key, contact_id, status,
+                    substr(COALESCE(last_error,''),1,120) AS last_error,
+                    created_at, sent_at
+             FROM ai_reply_deliveries
+             ORDER BY datetime(created_at) DESC
+             LIMIT 10`
+          )
+          .all() as {
+            delivery_key: string;
+            contact_id: number;
+            status: string;
+            last_error: string;
+            created_at: string;
+            sent_at: string | null;
+          }[];
+        return rows;
+      });
+
+      out.system_alerts_recent = await safe(() => {
+        return db
+          .prepare(
+            `SELECT id, alert_type, substr(COALESCE(details,''),1,160) AS details,
+                    contact_id, brand_id, created_at
+             FROM system_alerts
+             ORDER BY datetime(created_at) DESC
+             LIMIT 20`
+          )
+          .all() as {
+            id: number;
+            alert_type: string;
+            details: string;
+            contact_id: number | null;
+            brand_id: number | null;
+            created_at: string;
+          }[];
+      });
+
+      out.recent_contacts = await safe(() => {
+        return db
+          .prepare(
+            `SELECT id, platform, brand_id, channel_id, last_message_at
+             FROM contacts
+             ORDER BY last_message_at IS NULL, datetime(last_message_at) DESC
+             LIMIT 10`
+          )
+          .all() as {
+            id: number;
+            platform: string;
+            brand_id: number | null;
+            channel_id: number | null;
+            last_message_at: string | null;
+          }[];
+      });
+
       out.worker_heartbeat = await safe(async () => {
         const status = await getWorkerHeartbeatStatus();
-        const raw = getRedisClient() as unknown as { get?: (k: string) => Promise<string | null> } | null;
-        let heartbeat_payload: unknown = null;
-        if (raw && typeof raw.get === "function") {
+        const redis = getRedisClient() as unknown as { get?: (k: string) => Promise<string | null> } | null;
+        let rawTimestamp: number | null = null;
+        if (redis && typeof redis.get === "function") {
           try {
-            const v = await raw.get(WORKER_HEARTBEAT_KEY);
+            const v = await redis.get(WORKER_HEARTBEAT_KEY);
             if (v) {
               try {
-                heartbeat_payload = JSON.parse(v);
+                const parsed = JSON.parse(v) as { timestamp?: number };
+                if (typeof parsed.timestamp === "number") rawTimestamp = parsed.timestamp;
               } catch {
-                heartbeat_payload = v;
+                /* ignore */
               }
             }
           } catch {
@@ -1805,7 +1890,7 @@ export function registerCoreRoutes(app: Express): void {
         return {
           alive: status?.alive ?? false,
           age_sec: status?.ageSec ?? null,
-          payload: heartbeat_payload,
+          raw_timestamp: rawTimestamp,
         };
       });
 
