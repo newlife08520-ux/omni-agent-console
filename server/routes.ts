@@ -1,3 +1,4 @@
+// Phase 106.25.4 temporary - remove after validation
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
@@ -29,6 +30,8 @@ import { registerSettingsBrandsRoutes } from "./routes/settings-brands.routes";
 import { registerMetaCommentsRoutes } from "./routes/meta-comments.routes";
 import { registerContactsOrdersRoutes } from "./routes/contacts-orders.routes";
 import { registerSandboxRoutes } from "./routes/sandbox.routes";
+import db from "./db";
+import { superAdminOrDebugToken } from "./middlewares/auth.middleware";
 
 const FB_VERIFY_TOKEN = process.env.FB_VERIFY_TOKEN || "omnichannel_fb_verify_2024";
 
@@ -52,6 +55,41 @@ export async function registerRoutes(
   }
 
   registerCoreRoutes(app);
+
+  /** 與 core.routes 內 inspect / drain / full-diag 同權限之一站式 admin（Phase 106.25.4 one-off） */
+  app.get("/api/admin/brand-enable-ai", superAdminOrDebugToken, (req, res) => {
+    try {
+      const raw = req.query.brand_id;
+      if (raw === undefined || String(raw).trim() === "") {
+        return res.status(400).json({ error: "brand_id required" });
+      }
+      const brandId = parseInt(String(raw), 10);
+      if (!Number.isFinite(brandId) || brandId < 1 || brandId > 2147483647) {
+        return res.status(400).json({ error: "invalid brand_id" });
+      }
+      const before = db
+        .prepare("SELECT id, name, is_ai_enabled FROM brands WHERE id = ?")
+        .get(brandId) as { id: number; name: string; is_ai_enabled: number } | undefined;
+      if (!before) {
+        return res.status(404).json({ error: "brand not found" });
+      }
+      db.prepare("UPDATE brands SET is_ai_enabled = 1 WHERE id = ?").run(brandId);
+      const after = db
+        .prepare("SELECT id, name, is_ai_enabled FROM brands WHERE id = ?")
+        .get(brandId) as { id: number; name: string; is_ai_enabled: number };
+      const changed = before.is_ai_enabled !== after.is_ai_enabled;
+      return res.json({
+        note: "Phase 106.25.4 - one-off brand AI enable (remove after validation)",
+        brand_id: brandId,
+        before,
+        after,
+        changed,
+      });
+    } catch (e: unknown) {
+      return res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
   registerSettingsBrandsRoutes(app);
   registerMetaCommentsRoutes(app);
   registerContactsOrdersRoutes(app);
