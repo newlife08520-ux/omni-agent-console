@@ -1720,13 +1720,42 @@ export function registerCoreRoutes(app: Express): void {
         );
       });
 
-      out.brands = await safe(() => {
-        const all = storage.getBrands();
-        return all.map((b: { id: number; name: string; is_ai_enabled?: number }) => ({
-          id: b.id,
-          name: b.name,
-          is_ai_enabled: (b as unknown as { is_ai_enabled?: number }).is_ai_enabled ?? 0,
+      out.brands_table_columns = await safe(() => {
+        const pragma = db.prepare("PRAGMA table_info(brands)").all() as {
+          cid: number;
+          name: string;
+          type: string;
+          notnull: number;
+          dflt_value: string | null;
+          pk: number;
+        }[];
+        return pragma.map((r) => ({
+          cid: r.cid,
+          name: r.name,
+          type: r.type,
+          notnull: r.notnull,
+          dflt_value: r.dflt_value,
+          pk: r.pk,
         }));
+      });
+
+      out.brands = await safe(() => {
+        const colRows = db.prepare("PRAGMA table_info(brands)").all() as { name: string }[];
+        const colNames = colRows.map((r) => r.name).filter((n) => /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(n));
+        if (colNames.length === 0) return [];
+        const sql = `SELECT ${colNames.join(", ")} FROM brands ORDER BY id ASC`;
+        const rows = db.prepare(sql).all() as Record<string, unknown>[];
+        return rows.map((row) => {
+          const o: Record<string, unknown> = {};
+          for (const [k, v] of Object.entries(row)) {
+            if (typeof v === "string" && /access_key|api_token|secret|password|token$/i.test(k)) {
+              o[k] = v.length > 0 ? `[masked:${v.length}chars]` : v;
+            } else {
+              o[k] = v;
+            }
+          }
+          return o;
+        });
       });
 
       out.settings_keys_state = await safe(() => ({
