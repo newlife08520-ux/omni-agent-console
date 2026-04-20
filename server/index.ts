@@ -311,7 +311,7 @@ app.use((req, res, next) => {
 
       if (process.env.ENABLE_ORDER_SYNC === "true") {
         import("./scripts/sync-orders-normalized")
-          .then(({ runOrderSync }) => {
+          .then(({ runOrderSync, runDeepOrderSync }) => {
             setTimeout(() => {
               console.log("[OrderSync] 首次同步：一頁近 3 天 + Shopline 近 1 天...");
               Promise.all([
@@ -338,18 +338,17 @@ app.use((req, res, next) => {
               );
             }, 60 * 60 * 1000);
 
-            // Phase 106.30: Deep Sync cron disabled — 9561 筆同步會卡住 Node event loop 導致 Gemini HTTP 請求 timeout
-            // 如果需要手動觸發 Deep Sync，用 POST /api/admin/trigger-deep-sync
-            // cron.schedule("0 4 * * *", () => runDeepOrderSync(), { timezone: "Asia/Taipei" });
-            // cron.schedule("30 12 * * *", () => runDeepOrderSync(), { timezone: "Asia/Taipei" });
-            // cron.schedule("0 18 * * *", () => runDeepOrderSync(), { timezone: "Asia/Taipei" });
-            // cron.schedule("0 23 * * *", () => runDeepOrderSync(), { timezone: "Asia/Taipei" });
+            // Phase 106.32：Deep Sync 已於 runOrderSync 內分批 yield；定時排程恢復。手動觸發：POST /api/admin/trigger-deep-sync
+            cron.schedule("0 4 * * *", () => runDeepOrderSync(), { timezone: "Asia/Taipei" });
+            cron.schedule("30 12 * * *", () => runDeepOrderSync(), { timezone: "Asia/Taipei" });
+            cron.schedule("0 18 * * *", () => runDeepOrderSync(), { timezone: "Asia/Taipei" });
+            cron.schedule("0 23 * * *", () => runDeepOrderSync(), { timezone: "Asia/Taipei" });
 
             console.log(
-              "[Deep Sync] Phase 106.30：定時排程已停用（僅能手動 POST /api/admin/trigger-deep-sync）"
+              "[Deep Sync] 排程已註冊：04:00 / 12:30 / 18:00 / 23:00 (Asia/Taipei)；啟動後自動 Deep 仍停用，請用手動 API"
             );
 
-            // Phase 106.30: 啟動後 60 秒首次 Deep Sync 已停用（同上，避免 event loop 阻塞）
+            // Phase 106.30/106.32：啟動後 60 秒首次 Deep Sync 保持停用（避免一開機就深層同步）；需要時 POST /api/admin/trigger-deep-sync
             // setTimeout(() => {
             //   console.log("[Deep Sync] 啟動後首次同步");
             //   runDeepOrderSync().catch((err) => console.error("[Deep Sync] 首次同步失敗:", err));

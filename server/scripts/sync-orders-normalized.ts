@@ -133,6 +133,10 @@ export async function runOrderSync(options?: {
             upsertOrderNormalized(brand.id, "superlanding", order);
             total++;
           }
+          // Phase 106.32：每頁（最多 200 筆）同步寫入後讓出 event loop，避免 Deep Sync 長跑卡住 AI（Gemini）HTTP
+          if (orders.length > 0) {
+            await new Promise((r) => setTimeout(r, 200));
+          }
           if (orders.length < perPage) break;
           page++;
           if (page > maxPages) break;
@@ -163,12 +167,18 @@ export async function runOrderSync(options?: {
           perPage: 100,
         });
         let n = 0;
+        let shoplineWritten = 0;
         for (const o of orders) {
           const t = new Date(o.created_at || o.order_created_at || 0).getTime();
           if (t < w.startMs) continue;
           if (w.endMs != null && t > w.endMs) continue;
           upsertOrderNormalized(brand.id, "shopline", o);
           n++;
+          shoplineWritten++;
+          // Phase 106.32：Shopline 為整段列表一次寫入（可達數千筆），每 200 筆讓出 event loop
+          if (shoplineWritten > 0 && shoplineWritten % 200 === 0) {
+            await new Promise((r) => setTimeout(r, 100));
+          }
         }
         console.log(`[Sync Shopline] Brand ${brand.id} pages=${pagesFetched} 寫入 ${n} 筆（時間窗內）`);
         totalSynced += n;
@@ -194,6 +204,7 @@ const deepSyncLocks = new Map<string, boolean>();
 
 /**
  * Phase 106.8：近 45 天深度同步；多 brand 序列化、brand 間隔 30 秒；無 SL／Shopline 設定的 brand 跳過。
+ * Phase 106.32：實際大量 upsert 在 `runOrderSync` 內已分批 `await` yield，避免阻塞 event loop。
  */
 export async function runDeepOrderSync(): Promise<void> {
   console.log("[Deep Sync] === 啟動 45 天深度同步 ===");
