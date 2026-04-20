@@ -27,11 +27,13 @@ export function serveStatic(app: Express) {
 
   app.use(express.static(distPath));
 
-  // fall through to index.html for SPA client routes only（絕不攔截 /api/*、/uploads/*）
+  // fall through to index.html for SPA client routes only（絕不攔截 /api/*、/uploads/*、/internal/*）
   // 否則 LINE 下載的圖片 URL（/uploads/...）會被誤送 index.html，後台聊天室圖片破圖。
+  // Phase 106.26：/internal/*（含 POST /internal/run-ai-reply）若被送 index.html，worker loopback 會誤判 200 成功而從未進 autoReplyWithAI。
   app.use((req, res, next) => {
     if (req.path.startsWith("/api/")) return next();
     if (req.path === "/uploads" || req.path.startsWith("/uploads/")) return next();
+    if (req.path.startsWith("/internal")) return next();
     res.sendFile(path.resolve(distPath, "index.html"));
   });
 }

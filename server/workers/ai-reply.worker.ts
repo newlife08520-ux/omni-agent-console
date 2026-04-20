@@ -51,6 +51,13 @@ async function callInternalRunAiReply(payload: RunAiReplyPayload): Promise<void>
     const errText = await res.text().catch(() => "");
     throw new Error(`internal/run-ai-reply ${res.status}: ${errText.slice(0, 300)}`);
   }
+
+  /** Phase 106.26：與 in-process loopback 一致，防 SPA / 代理回 HTML 卻 200 */
+  const contentType = res.headers.get("content-type") || "";
+  if (!contentType.includes("application/json")) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`internal/run-ai-reply non-JSON (content-type=${contentType}): ${body.slice(0, 200)}`);
+  }
 }
 
 function main() {

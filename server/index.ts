@@ -228,6 +228,13 @@ app.use((req, res, next) => {
               /** Phase 106.25：非 2xx 必須拋錯讓 worker 進入 failed/retry；不可靜默 return */
               throw new Error(`Loopback HTTP ${res.status}: ${errText.slice(0, 300)}`);
             }
+
+            /** Phase 106.26：SPA fallback 曾回 HTML 200，必須拒絕非 JSON 以免誤判成功 */
+            const contentType = res.headers.get("content-type") || "";
+            if (!contentType.includes("application/json")) {
+              const body = await res.text().catch(() => "");
+              throw new Error(`Loopback non-JSON response (content-type=${contentType}): ${body.slice(0, 200)}`);
+            }
           };
 
           startAiReplyWorker((job) => executeAiReplyQueueJob(job, callRunAiReplyLoopback));
