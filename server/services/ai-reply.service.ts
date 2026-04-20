@@ -756,16 +756,30 @@ ${contextStr}
     platform?: string,
     aiOpts?: { enqueueTimestampMs?: number }
   ) {
+    /** Phase 106.29 temporary — remove after debug：逐步計時，定位 45s 超時卡點 */
+    const __diagStart = Date.now();
+    const __diagStep = (label: string) => {
+      const elapsed = Date.now() - __diagStart;
+      console.log(`[AI-STEP ${elapsed}ms] ${label} contactId=${contact?.id}`);
+    };
+    __diagStep("ENTER");
+
+    __diagStep("before read gemini_key");
     const geminiApiKeyRequired = storage.getSetting("gemini_api_key")?.trim();
+    __diagStep("after read gemini_key");
     if (!geminiApiKeyRequired) {
+      __diagStep("RETURN reason=no_gemini_key");
       return;
     }
 
+    __diagStep("before read openai_api_key");
     const apiKey = storage.getSetting("openai_api_key");
+    __diagStep("after read openai_api_key");
 
     const startTime = Date.now();
     const queueWaitMs =
       aiOpts?.enqueueTimestampMs != null ? Math.max(0, startTime - aiOpts.enqueueTimestampMs) : 0;
+    __diagStep(`after timing init queueWaitMs=${queueWaitMs}`);
     console.log("[reply-trace] auto_reply_entry", {
       contactId: contact.id,
       brandId: contact.brand_id ?? brandId,
@@ -784,11 +798,15 @@ ${contextStr}
     }
     const effectiveBrandIdForLog = contact.brand_id || brandId;
 
+    __diagStep("before getContact freshCheck");
     const freshCheck = storage.getContact(contact.id);
+    __diagStep("after getContact freshCheck");
+    __diagStep("before getMessages for handoff_unlock slice(-6)");
     const recentBodiesForHandoffUnlock = storage
       .getMessages(contact.id)
       .slice(-6)
       .map((m) => String(m.content || ""));
+    __diagStep("after getMessages for handoff_unlock");
 
     /** Phase 106.7：人工排隊中仍進主 LLM；保留舊有「連結／表單／明確要 AI」等自動解鎖行為 */
     if (freshCheck && (freshCheck.status === "awaiting_human" || freshCheck.status === "high_risk")) {
@@ -815,8 +833,10 @@ ${contextStr}
         broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
       }
     }
+    __diagStep("before gate isAiMuted");
     if (storage.isAiMuted(contact.id)) {
       console.log(`[AI Mute] Contact ${contact.id} ??????? - ??`);
+      __diagStep("RETURN reason=ai_muted");
       storage.createAiLog({
         contact_id: contact.id,
         brand_id: effectiveBrandIdForLog || undefined,
@@ -849,14 +869,19 @@ ${contextStr}
     let phase1ModelOverride: string | undefined;
 
     try {
+      __diagStep("try_block_start");
       const effectiveBrandId = contact.brand_id || brandId;
+      __diagStep("before read brand for phase1_flags");
       phase1Flags = parsePhase1BrandFlags(effectiveBrandId ? storage.getBrand(effectiveBrandId) : undefined);
+      __diagStep("after read brand phase1_flags");
       phase1ModelOverride = isPhase1Active(phase1Flags) ? phase1Flags.ai_model_override : undefined;
 
       storage.updateContactStatus(contact.id, "ai_handling");
       broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
 
+      __diagStep("before detectHighRisk");
       const riskCheck = detectHighRisk(userMessage);
+      __diagStep("after detectHighRisk");
       if (riskCheck.level === "legal_risk") {
         console.log("[Webhook AI] needs_human=1 source=high_risk_short_circuit reasons=" + riskCheck.reasons.join(","));
         console.log(`[AI Risk] ??/??????: ${riskCheck.reasons.join(", ")}`);
@@ -866,6 +891,7 @@ ${contextStr}
         broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
         const handoffReplyLegal = buildHandoffReply({ customerEmotion: "high_risk", brandId: effectiveBrandId || undefined });
         const handoffTextLegal = getHandoffReplyForCustomer(handoffReplyLegal, assignment.getUnavailableReason());
+        __diagStep("before LINE push (high_risk_short_circuit)");
         const pushedRisk = await pushTextToCustomerOrFalse(
           contact.platform || "line",
           contact.platform_user_id,
@@ -875,6 +901,7 @@ ${contextStr}
           effectiveBrandId ?? contact.brand_id ?? null,
           "high_risk_short_circuit"
         );
+        __diagStep(`after LINE push (high_risk_short_circuit) pushed=${!!pushedRisk}`);
         let aiMsgRisk: { id: number } | null = null;
         if (pushedRisk) {
           aiMsgRisk = storage.createMessage(contact.id, contact.platform, "ai", handoffTextLegal) as { id: number };
@@ -900,11 +927,14 @@ ${contextStr}
           plan_mode: null,
           reason_if_bypassed: "high_risk",
         });
+        __diagStep("RETURN reason=high_risk");
         return;
       }
 
       // [已確認無需改動] safe_confirm 模板已傳 contact.brand_id 至 getMetaCommentTemplateByCategory／getMetaPageSettingsList
+      __diagStep("before safe_confirm classifier");
       const safeConfirmDm = classifyMessageForSafeAfterSale(userMessage);
+      __diagStep("after safe_confirm classifier");
       if (safeConfirmDm.matched && !isLinkRequestMessage(userMessage)) {
         const categoryByType: Record<string, string> = {
           fraud_impersonation: "fraud_impersonation",
@@ -923,6 +953,7 @@ ${contextStr}
         const replyText = replyTextRaw.replace(/\{after_sale_line_url\}/g, lineUrl).trim();
         if (replyText) {
           const contactPlatform = platform || contact.platform || "line";
+          __diagStep("before LINE push (safe_confirm_template)");
           const pushedSafe = await pushTextToCustomerOrFalse(
             contactPlatform,
             contact.platform_user_id,
@@ -932,6 +963,7 @@ ${contextStr}
             effectiveBrandId ?? contact.brand_id ?? null,
             "safe_confirm_template"
           );
+          __diagStep(`after LINE push (safe_confirm_template) pushed=${!!pushedSafe}`);
           let aiMsg: { id: number } | null = null;
           if (pushedSafe) {
             aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", replyText) as { id: number };
@@ -977,6 +1009,7 @@ ${contextStr}
             phase1_config_ref: isPhase1Active(phase1Flags) ? JSON.stringify({ v: "1.5_safe_confirm" }) : undefined,
           });
         }
+        __diagStep("RETURN reason=safe_confirm");
         return;
       }
 
@@ -1012,7 +1045,9 @@ ${contextStr}
       const priority = computeCasePriority(intentLevel, [...currentTags, ...suggested]);
       storage.updateContactCasePriority(contact.id, priority);
 
+      __diagStep("before getMessages contact history slice(-30)");
       const recentMessages = storage.getMessages(contact.id).slice(-30);
+      __diagStep("after getMessages contact history slice(-30)");
       const recentAiMessages = recentMessages.filter((m) => m.sender_type === "ai").map((m) => m.content || "");
       const lastUserMsg = recentMessages.filter((m) => m.sender_type === "user").pop();
       const lastAiMsg = recentMessages.filter((m) => m.sender_type === "ai").pop();
@@ -1055,6 +1090,7 @@ ${contextStr}
               route_source: preHardForPlan.route_source,
             }
           : null;
+      __diagStep("before buildReplyPlan");
       const plan = buildReplyPlan({
         state,
         returnFormUrl,
@@ -1063,6 +1099,7 @@ ${contextStr}
         latestUserMessage: userMessage,
         phase1PreRoute: isPhase1Active(phase1Flags) && phase1Flags.hybrid_router ? phase1PreSnapshot : null,
       });
+      __diagStep(`after buildReplyPlan mode=${plan.mode}`);
       if (!isOrderLookupFamily(plan.mode)) {
         storage.clearActiveOrderContext(contact.id);
       }
@@ -1078,6 +1115,7 @@ ${contextStr}
         isPhase1Active(phase1Flags) &&
         (phase1Flags.hybrid_router || phase1Flags.scenario_isolation || phase1Flags.tool_whitelist)
       ) {
+        __diagStep("before phase1 hybrid_router / scenario map");
         const routerInput: HybridRouterInput = {
           userMessage,
           recentUserTexts: recentUserMsgs.slice(-5),
@@ -1091,6 +1129,9 @@ ${contextStr}
         phase1Route = phase1Flags.hybrid_router
           ? await runHybridIntentRouter(routerInput)
           : mapPlanToPhase1Scenario(routerInput);
+        __diagStep(
+          `after phase1 route scenario=${phase1Route?.selected_scenario ?? "null"} hybrid=${!!phase1Flags.hybrid_router}`
+        );
       }
 
       const computePhase1TraceLogExtras = (responseSourceTrace: string): Record<string, unknown> => {
@@ -1132,6 +1173,7 @@ ${contextStr}
         plan.mode !== "return_form_first" &&
         orderFeatureFlags.orderFastPath
       ) {
+        __diagStep("before tryOrderFastPath");
         const fpEarly = await tryOrderFastPath({
           userMessage,
           brandId: effectiveBrandId || undefined,
@@ -1141,6 +1183,7 @@ ${contextStr}
           planMode: plan.mode,
           recentUserMessages: recentUserMsgs,
         });
+        __diagStep(`after tryOrderFastPath hit=${!!fpEarly}`);
         if (fpEarly) {
           let fpReply = fpEarly.reply;
           if (orderFeatureFlags.orderFinalNormalizer) {
@@ -1169,6 +1212,7 @@ ${contextStr}
             `[order_fast_path_hit=true] fast_path_type=${fpEarly.fastPathType} used_llm=0 contact=${contact.id}`
           );
           const contactPlatformFp = platform || contact.platform || "line";
+          __diagStep("before LINE push (order_fast_path)");
           const pushedFp = await pushTextToCustomerOrFalse(
             contactPlatformFp,
             contact.platform_user_id,
@@ -1178,6 +1222,7 @@ ${contextStr}
             effectiveBrandId ?? contact.brand_id ?? null,
             "order_fast_path"
           );
+          __diagStep(`after LINE push (order_fast_path) pushed=${!!pushedFp}`);
           let aiMsgFp: { id: number } | null = null;
           if (pushedFp) {
             aiMsgFp = storage.createMessage(contact.id, contactPlatformFp, "ai", fpReply) as { id: number };
@@ -1209,6 +1254,7 @@ ${contextStr}
             queue_wait_ms: queueWaitMs,
             ...computePhase1TraceLogExtras("order_fast_path"),
           });
+          __diagStep("RETURN reason=order_fast_path");
           return;
         }
       }
@@ -1252,6 +1298,7 @@ ${contextStr}
         const handoffReplyAwk = buildHandoffReply({ customerEmotion: state.customer_emotion, brandId: effectiveBrandId || undefined });
         const handoffTextAwk = getHandoffReplyForCustomer(handoffReplyAwk, assignment.getUnavailableReason());
         const contactPlatformAwk = platform || contact.platform || "line";
+        __diagStep("before LINE push (awkward_repeat_handoff)");
         const pushedAwk2 = await pushTextToCustomerOrFalse(
           contactPlatformAwk,
           contact.platform_user_id,
@@ -1261,6 +1308,7 @@ ${contextStr}
           effectiveBrandId ?? contact.brand_id ?? null,
           "awkward_repeat_handoff"
         );
+        __diagStep(`after LINE push (awkward_repeat_handoff) pushed=${!!pushedAwk2}`);
         let aiMsgAwk: { id: number } | null = null;
         if (pushedAwk2) {
           aiMsgAwk = storage.createMessage(contact.id, contactPlatformAwk, "ai", handoffTextAwk) as { id: number };
@@ -1286,6 +1334,7 @@ ${contextStr}
           reason_if_bypassed: `awkward_repeat: ${awkwardCheck.reason ?? "unknown"}`,
           ...computePhase1TraceLogExtras("handoff"),
         });
+        __diagStep("RETURN reason=awkward_repeat_handoff");
         return;
       }
 
@@ -1304,7 +1353,9 @@ ${contextStr}
           const reason = assignment.getUnavailableReason();
           storage.createMessage(contact.id, contact.platform, "system", getTransferUnavailableSystemMessage(reason));
         }
+        __diagStep("before getMessages for plan_handoff slice(-12)");
         const recentMessagesForHandoff = storage.getMessages(contact.id).slice(-12).map((m: any) => ({ sender_type: m.sender_type, content: m.content, message_type: m.message_type, image_url: m.image_url }));
+        __diagStep("after getMessages for plan_handoff");
         const orderInfoInRecent = searchOrderInfoInRecentMessages(recentMessagesForHandoff);
         const handoffReply = buildHandoffReply({
           customerEmotion: state.customer_emotion,
@@ -1316,6 +1367,7 @@ ${contextStr}
         const unavailableReason = assignment.getUnavailableReason();
         const handoffTextToSend = getHandoffReplyForCustomer(handoffReply, unavailableReason);
         const contactPlatform = platform || contact.platform || "line";
+        __diagStep("before LINE push (plan_handoff)");
         const pushedHandoffPlan = await pushTextToCustomerOrFalse(
           contactPlatform,
           contact.platform_user_id,
@@ -1325,6 +1377,7 @@ ${contextStr}
           effectiveBrandId ?? contact.brand_id ?? null,
           "plan_handoff"
         );
+        __diagStep(`after LINE push (plan_handoff) pushed=${!!pushedHandoffPlan}`);
         let aiMsg: { id: number } | null = null;
         if (pushedHandoffPlan) {
           aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", handoffTextToSend) as { id: number };
@@ -1350,6 +1403,7 @@ ${contextStr}
           reason_if_bypassed: "handoff_short_circuit",
           ...computePhase1TraceLogExtras("handoff"),
         });
+        __diagStep("RETURN reason=plan_mode_handoff");
         return;
       }
 
@@ -1397,6 +1451,7 @@ ${contextStr}
         storage.getContact(contact.id)?.customer_goal_locked ?? contact.customer_goal_locked ?? null;
       const contactSnapForPrompt = storage.getContact(contact.id) ?? contact;
       const inHumanHandoffQueue = isInHandoffQueue(contactSnapForPrompt);
+      __diagStep("before assembleEnrichedSystemPrompt (brand prompt)");
       const enrichedPack = await assembleEnrichedSystemPrompt(contact.brand_id || brandId || undefined, {
         planMode: plan.mode,
         userMessage,
@@ -1411,6 +1466,9 @@ ${contextStr}
         customerGoalLocked: customerGoalLockedSnap,
         inHumanHandoffQueue,
       });
+      __diagStep(
+        `after assembleEnrichedSystemPrompt profile=${enrichedPack.prompt_profile} chars=${enrichedPack.prompt_chars}`
+      );
       console.log(
         `[prompt_profile=${enrichedPack.prompt_profile}] prompt_chars=${enrichedPack.prompt_chars} catalog_included=${enrichedPack.includes.catalog} knowledge_included=${enrichedPack.includes.knowledge} image_included=${enrichedPack.includes.image} prompt_sections=${enrichedPack.sections.map((s) => s.key).join("|")} prompt_assembly_ms=${Date.now() - startTime}`
       );
@@ -1460,14 +1518,19 @@ ${contextStr}
       }
       // Hotfix????????? ? ?????1. ???? 2. ???? vision 3. linked order???????????
       if (isAlreadyProvidedMessage(userMessage)) {
+        __diagStep("before searchOrderInfoThreeLayers (already_provided)");
         const openaiForSearch = apiKey ? new OpenAI({ apiKey }) : null;
         const found = await searchOrderInfoThreeLayers(contact.id, recentMessages, {
           imageFileToDataUri,
           openai: openaiForSearch,
         });
+        __diagStep(
+          `after searchOrderInfoThreeLayers orderId=${found?.orderId ? "y" : "n"} phone=${found?.phone ? "y" : "n"}`
+        );
         if (!found || (!found.orderId && !found.phone)) {
           const contactPlatform = platform || contact.platform || "line";
           const alreadyHandoffText = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, assignment.getUnavailableReason());
+          __diagStep("before LINE push (already_provided_not_found)");
           const pushedAlready = await pushTextToCustomerOrFalse(
             contactPlatform,
             contact.platform_user_id,
@@ -1477,6 +1540,7 @@ ${contextStr}
             effectiveBrandId ?? contact.brand_id ?? null,
             "already_provided_not_found"
           );
+          __diagStep(`after LINE push (already_provided_not_found) pushed=${!!pushedAlready}`);
           let aiMsg: { id: number } | null = null;
           if (pushedAlready) {
             aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", alreadyHandoffText) as { id: number };
@@ -1505,6 +1569,7 @@ ${contextStr}
             reason_if_bypassed: "already_provided_not_found",
             ...computePhase1TraceLogExtras("handoff"),
           });
+          __diagStep("RETURN reason=already_provided_not_found");
           return;
         }
         const clueParts: string[] = [];
@@ -1621,6 +1686,7 @@ ${contextStr}
           const bid = effectiveBrandId;
           const slCfgEarly = getSuperLandingConfig(bid || undefined);
           if (pickResolve && bid && multiAns) {
+            __diagStep(`before unifiedLookupById multi_resolve order=${pickResolve.order_id}`);
             const res = await unifiedLookupById(
               slCfgEarly,
               pickResolve.order_id.toUpperCase(),
@@ -1628,6 +1694,7 @@ ${contextStr}
               undefined,
               false
             );
+            __diagStep(`after unifiedLookupById multi_resolve found=${!!res.found}`);
             if (res.found && res.orders[0]) {
               const o = res.orders[0];
               const st = getUnifiedStatusLabel(o.status, o.source || res.source);
@@ -1698,6 +1765,7 @@ ${contextStr}
               console.log("final_normalizer_changed=false normalizer_rules=disabled_flag");
             }
             const contactPlatformM = platform || contact.platform || "line";
+            __diagStep("before LINE push (multi_order_router_inner)");
             const pushedMulti2 = await pushTextToCustomerOrFalse(
               contactPlatformM,
               contact.platform_user_id,
@@ -1707,6 +1775,7 @@ ${contextStr}
               effectiveBrandId ?? contact.brand_id ?? null,
               "multi_order_router_inner"
             );
+            __diagStep(`after LINE push (multi_order_router_inner) pushed=${!!pushedMulti2}`);
             let aiMsgM: { id: number } | null = null;
             if (pushedMulti2) {
               aiMsgM = storage.createMessage(contact.id, contactPlatformM, "ai", multiAns) as { id: number };
@@ -1737,6 +1806,7 @@ ${contextStr}
               queue_wait_ms: queueWaitMs,
               ...computePhase1TraceLogExtras("multi_order_router"),
             });
+            __diagStep("RETURN reason=multi_order_router");
             return;
           }
         }
@@ -1778,6 +1848,7 @@ ${contextStr}
               : undefined;
           const slCfg29 = getSuperLandingConfig(bid29);
           try {
+            __diagStep("before unifiedLookupByPhoneGlobal (phase29_more_orders)");
             const result29 = await unifiedLookupByPhoneGlobal(
               slCfg29,
               act29.receiver_phone,
@@ -1787,6 +1858,7 @@ ${contextStr}
               true,
               shouldDisablePhoneOrderAgeFilter(msg29, recentUserMsgs)
             );
+            __diagStep(`after unifiedLookupByPhoneGlobal phase29 n_orders=${result29.orders.length}`);
             if (result29.orders.length > 1) {
               const src29 =
                 result29.source === "shopline" || result29.source === "superlanding"
@@ -1813,6 +1885,7 @@ ${contextStr}
                 reply29 = nr29.text;
               }
               const plat29 = platform || contact.platform || "line";
+              __diagStep("before LINE push (phase29_more_orders)");
               const pushed29 = await pushTextToCustomerOrFalse(
                 plat29,
                 contact.platform_user_id,
@@ -1822,6 +1895,7 @@ ${contextStr}
                 effectiveBrandId ?? contact.brand_id ?? null,
                 "phase29_more_orders"
               );
+              __diagStep(`after LINE push (phase29_more_orders) pushed=${!!pushed29}`);
               let ai29: { id: number } | null = null;
               if (pushed29) {
                 ai29 = storage.createMessage(contact.id, plat29, "ai", reply29) as { id: number };
@@ -1852,6 +1926,7 @@ ${contextStr}
                 queue_wait_ms: queueWaitMs,
                 ...computePhase1TraceLogExtras("deterministic_tool"),
               });
+              __diagStep("RETURN reason=phase29_more_orders_expand");
               return;
             }
           } catch (e29) {
@@ -1881,7 +1956,9 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
         const returnFormFallback =
           `了解，這邊先協助您處理。請先填寫退換貨表單，我們會盡快為您處理。${returnFormUrl ? `\n表單連結：${returnFormUrl}` : ""}\n填寫完成後專人會與您聯繫。`;
 
+        __diagStep("before getMessages return_form_first slice(-10)");
         const recent10Rf = storage.getMessages(contact.id).slice(-10);
+        __diagStep("after getMessages return_form_first");
         const histRf: AiMessage[] = [];
         for (const msg of recent10Rf) {
           if (msg.sender_type === "system") continue;
@@ -1897,6 +1974,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
         let rfTokens = 0;
         try {
           /** Phase 106.4：與主對話一致，一律 resolveMainConversationModel + callAiModel（Gemini） */
+          __diagStep("before call LLM (return_form_first)");
           const rfRes = await callAiModel({
             messages: rfMessages,
             maxTokens: 300,
@@ -1904,14 +1982,17 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             modelOverride: phase1ModelOverride,
           });
           rfTokens = rfRes.inputTokens + rfRes.outputTokens;
+          __diagStep(`after call LLM (return_form_first) tokens_used=${rfTokens}`);
           const t = (rfRes.content || "").trim();
           if (t) returnFormReply = t;
         } catch (rfErr) {
           console.error("[return_form_first] LLM failed, using fallback:", rfErr);
+          __diagStep("after call LLM (return_form_first) ERROR using fallback");
           returnFormReply = returnFormFallback;
         }
 
         const contactPlatformRf = platform || contact.platform || "line";
+        __diagStep("before LINE push (return_form_first)");
         const pushedRf = await pushTextToCustomerOrFalse(
           contactPlatformRf,
           contact.platform_user_id,
@@ -1921,6 +2002,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           effectiveBrandId ?? contact.brand_id ?? null,
           "return_form_first"
         );
+        __diagStep(`after LINE push (return_form_first) pushed=${!!pushedRf}`);
         let aiMsgRf: { id: number } | null = null;
         if (pushedRf) {
           storage.updateContactConversationFields(contact.id, {
@@ -1952,6 +2034,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           reason_if_bypassed: "return_form_first",
           ...computePhase1TraceLogExtras("return_form_first"),
         });
+        __diagStep("RETURN reason=return_form_first");
         return;
       }
 
@@ -2147,6 +2230,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
 
       const planModeForAck = plan.mode as string;
       const scenarioKey = phase1Route?.selected_scenario || "GENERAL";
+      __diagStep("before sendQuickAckIfNeeded");
       const quickAckResult = await sendQuickAckIfNeeded(
         {
           createMessage: (cid, plat, st, txt) => storage.createMessage(cid, plat, st, txt),
@@ -2170,6 +2254,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           queueWaitMs,
         }
       );
+      __diagStep(`after sendQuickAckIfNeeded sent=${!!quickAckResult.sent}`);
       if (quickAckResult.sent) {
         sentLookupAckThisTurn = true;
         lookupAckSentMs = quickAckResult.ackMs;
@@ -2177,6 +2262,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
       }
 
       if (claudeSeed) {
+        __diagStep("claudeSeed_main_path_enter");
         const claudeConversation: AiMessage[] = [...claudeSeed];
         try {
           const maxTokFirst = computeMainMaxTokens(String(plan.mode), toolLoopIsInHandoffQueue, false);
@@ -2187,6 +2273,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             hasOrderLookupTool: false,
             maxTokens: maxTokFirst,
           });
+          __diagStep("before call LLM (first pass main Gemini/Anthropic)");
           const rFirst = await callAiModel({
             messages: claudeConversation,
             tools: loopToolsForGemini,
@@ -2195,6 +2282,9 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             modelOverride: phase1ModelOverride,
           });
           totalTokens += rFirst.inputTokens + rFirst.outputTokens;
+          __diagStep(
+            `after call LLM (first pass main) tokens_used=${rFirst.inputTokens + rFirst.outputTokens} provider=${mainResolvedForTools.provider}`
+          );
           responseMessage = aiCallResultToOpenAiAssistantMessage(rFirst);
           usedClaudeMainPath = true;
           usedFirstLlmTelemetry = 1;
@@ -2272,6 +2362,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
                 "quick_ack_" + scenarioKey.toLowerCase(),
                 lookupAckText
               );
+              __diagStep("before LINE push (lookup_quick_ack_claude)");
               const okAck = await pushTextToCustomerOrFalse(
                 contact.platform || "line",
                 contact.platform_user_id,
@@ -2281,6 +2372,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
                 effectiveBrandId ?? contact.brand_id ?? null,
                 "lookup_quick_ack_claude"
               );
+              __diagStep(`after LINE push (lookup_quick_ack_claude) pushed=${!!okAck}`);
               if (okAck) {
                 const ackMsg = storage.createMessage(contact.id, contact.platform || "line", "ai", lookupAckFinal);
                 broadcastSSE("new_message", { contact_id: contact.id, message: ackMsg, brand_id: effectiveBrandId || contact.brand_id });
@@ -2328,13 +2420,16 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
                 try { fnArgs = JSON.parse(fn?.arguments ?? "{}"); } catch (_e) {}
                 toolsCalled.push(fnName);
                 const toolStartMs = Date.now();
+                __diagStep(`before tool call: ${fnName}`);
                 console.log(`[Webhook AI] ?? Tool: ${fnName}???:`, fnArgs);
                 try {
                   const toolResult = await callToolWithTimeout(fnName, fnArgs, toolCtx);
+                  __diagStep(`after tool call: ${fnName} in ${Date.now() - toolStartMs}ms`);
                   console.log("[AI Latency] contact", contact.id, "tool", fnName, "ms", Date.now() - toolStartMs);
                   return { toolCall, toolResult };
                 } catch (toolErr: any) {
                   if (toolErr?.message === "TOOL_TIMEOUT") {
+                    __diagStep(`after tool call: ${fnName} TIMEOUT >${TOOL_TIMEOUT_MS}ms`);
                     console.log(`[AI Timeout] ?? ${fnName} ?? (>${TOOL_TIMEOUT_MS}ms)`);
                     storage.createSystemAlert({ alert_type: "timeout_escalation", details: `?? ${fnName} ??`, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
                     return { toolCall, toolResult: JSON.stringify({ error: true, message: "查單工具執行逾時，請稍後再試或轉人工。" }) };
@@ -2502,6 +2597,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
               hasOrderLookupTool,
               maxTokens: maxTokNext,
             });
+            __diagStep(`before call LLM (after tools loop=${loopCount})`);
             const rNext = await callAiModel({
               messages: claudeConversation,
               tools: loopToolsForGemini,
@@ -2510,6 +2606,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
               modelOverride: phase1ModelOverride,
             });
             totalTokens += rNext.inputTokens + rNext.outputTokens;
+            __diagStep(`after call LLM (after tools) tokens_used=${rNext.inputTokens + rNext.outputTokens} loop=${loopCount}`);
             lastGeminiModelParts =
               mainResolvedForTools.provider === "google" ? rNext.geminiModelParts : undefined;
             responseMessage = aiCallResultToOpenAiAssistantMessage(rNext);
@@ -2523,8 +2620,10 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             }
           }
         } catch (claudeErr) {
+          __diagStep(`claudeSeed_main_path_catch will_fallback_openai=${mainResolvedForTools.provider !== "google"}`);
           if (mainResolvedForTools.provider === "google") {
             console.error("[AI] Gemini 工具路徑失敗（已停用改走 OpenAI fallback）：", claudeErr);
+            __diagStep("RETURN reason=gemini_tool_path_throw_to_outer_catch");
             clearTimeout(streamTimeout);
             throw claudeErr;
           }
@@ -2547,6 +2646,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
       // [Phase 106.4] 預設永遠走 Gemini（callAiModel）。僅當 AI_PROVIDER=openai 且未走通 Anthropic/Gemini 種子時才啟用下列 OpenAI 串流（保留以備回退）。
       if (!usedClaudeMainPath && AI_PROVIDER_MAIN === "openai") {
         try {
+          __diagStep("before call LLM OpenAI stream (first pass)");
           responseMessage = await runOpenAIStream(
             getOpenAI(),
             {
@@ -2560,6 +2660,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             contact.brand_id ?? undefined,
             streamAbortController.signal
           );
+          __diagStep("after call LLM OpenAI stream (first pass)");
         } catch (timeoutErr: any) {
           clearTimeout(streamTimeout);
           if (timeoutErr?.name === "AbortError" || timeoutErr?.message?.includes("abort")) {
@@ -2571,6 +2672,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
               applyHandoff({ contactId: contact.id, reason: "timeout_escalation", source: "webhook_ai_timeout", brandId: effectiveBrandId || undefined });
               const comfortMsg = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, assignment.getUnavailableReason());
               const platT = platform || contact.platform || "line";
+              __diagStep("before LINE push (openai_first_llm_timeout_handoff)");
               const okComfort1 = await pushTextToCustomerOrFalse(
                 platT,
                 contact.platform_user_id,
@@ -2580,6 +2682,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
                 effectiveBrandId ?? contact.brand_id ?? null,
                 "openai_first_llm_timeout_handoff"
               );
+              __diagStep(`after LINE push (openai_first_llm_timeout_handoff) pushed=${!!okComfort1}`);
               if (okComfort1) {
                 storage.createMessage(contact.id, contact.platform, "ai", comfortMsg);
               }
@@ -2587,6 +2690,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             } else {
               const comfortMsg = "不好意思讓您久等了，系統正在處理中，請稍等一下。";
               const platT2 = platform || contact.platform || "line";
+              __diagStep("before LINE push (openai_first_llm_timeout_soft)");
               const okComfort2 = await pushTextToCustomerOrFalse(
                 platT2,
                 contact.platform_user_id,
@@ -2596,12 +2700,14 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
                 effectiveBrandId ?? contact.brand_id ?? null,
                 "openai_first_llm_timeout_soft"
               );
+              __diagStep(`after LINE push (openai_first_llm_timeout_soft) pushed=${!!okComfort2}`);
               if (okComfort2) {
                 const cm = storage.createMessage(contact.id, contact.platform, "ai", comfortMsg);
                 broadcastSSE("new_message", { contact_id: contact.id, message: cm, brand_id: contact.brand_id });
               }
               broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
             }
+            __diagStep("RETURN reason=openai_first_llm_timeout_or_abort");
             return;
           }
           throw timeoutErr;
@@ -2651,6 +2757,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
               "quick_ack_" + scenarioKey.toLowerCase(),
               lookupAckText
             );
+            __diagStep("before LINE push (lookup_quick_ack_openai)");
             const okAckOai = await pushTextToCustomerOrFalse(
               contact.platform || "line",
               contact.platform_user_id,
@@ -2660,6 +2767,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
               effectiveBrandId ?? contact.brand_id ?? null,
               "lookup_quick_ack_openai"
             );
+            __diagStep(`after LINE push (lookup_quick_ack_openai) pushed=${!!okAckOai}`);
             if (okAckOai) {
               const ackMsg = storage.createMessage(contact.id, contact.platform || "line", "ai", lookupAckFinal);
               broadcastSSE("new_message", { contact_id: contact.id, message: ackMsg, brand_id: effectiveBrandId || contact.brand_id });
@@ -2707,13 +2815,16 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
               try { fnArgs = JSON.parse(fn?.arguments ?? "{}"); } catch (_e) {}
               toolsCalled.push(fnName);
               const toolStartMs = Date.now();
+              __diagStep(`before tool call (OpenAI path): ${fnName}`);
               console.log(`[Webhook AI] ?? Tool: ${fnName}???:`, fnArgs);
               try {
                 const toolResult = await callToolWithTimeout(fnName, fnArgs, toolCtxOai);
+                __diagStep(`after tool call (OpenAI path): ${fnName} in ${Date.now() - toolStartMs}ms`);
                 console.log("[AI Latency] contact", contact.id, "tool", fnName, "ms", Date.now() - toolStartMs);
                 return { toolCall, toolResult };
               } catch (toolErr: any) {
                 if (toolErr?.message === "TOOL_TIMEOUT") {
+                  __diagStep(`after tool call (OpenAI path): ${fnName} TIMEOUT >${TOOL_TIMEOUT_MS}ms`);
                   console.log(`[AI Timeout] ?? ${fnName} ?? (>${TOOL_TIMEOUT_MS}ms)`);
                   storage.createSystemAlert({ alert_type: "timeout_escalation", details: `?? ${fnName} ??`, brand_id: effectiveBrandId || undefined, contact_id: contact.id });
                   return { toolCall, toolResult: JSON.stringify({ error: true, message: "查單工具執行逾時，請稍後再試或轉人工。" }) };
@@ -2844,6 +2955,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           const loopTimer = setTimeout(() => loopAbort.abort(), AI_TIMEOUT_MS);
           usedSecondLlmTelemetry = 1;
           try {
+            __diagStep(`before call LLM OpenAI stream (tool loop round=${loopCount})`);
             responseMessage = await runOpenAIStream(
               getOpenAI(),
               {
@@ -2857,6 +2969,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
               contact.brand_id ?? undefined,
               loopAbort.signal
             );
+            __diagStep(`after call LLM OpenAI stream (tool loop round=${loopCount})`);
             {
               const c2 = responseMessage?.content;
               console.log("[reply-trace] second_llm_done", {
@@ -2875,6 +2988,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
                 applyHandoff({ contactId: contact.id, reason: "timeout_escalation", source: "webhook_ai_loop_timeout", brandId: effectiveBrandId || undefined });
                 const comfortMsg = getHandoffReplyForCustomer(HANDOFF_MANDATORY_OPENING, assignment.getUnavailableReason());
                 const platL = platform || contact.platform || "line";
+                __diagStep("before LINE push (openai_second_llm_loop_timeout_handoff)");
                 const okLoopComfort = await pushTextToCustomerOrFalse(
                   platL,
                   contact.platform_user_id,
@@ -2884,11 +2998,13 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
                   effectiveBrandId ?? contact.brand_id ?? null,
                   "openai_second_llm_loop_timeout_handoff"
                 );
+                __diagStep(`after LINE push (openai_second_llm_loop_timeout_handoff) pushed=${!!okLoopComfort}`);
                 if (okLoopComfort) {
                   storage.createMessage(contact.id, contact.platform, "ai", comfortMsg);
                 }
                 broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
               }
+              __diagStep("LOOP_BREAK reason=openai_second_llm_loop_timeout_abort");
               break;
             }
             throw loopTimeoutErr;
@@ -2920,6 +3036,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
         const unavailableReasonPost = assignment.getUnavailableReason();
         const handoffTextToSendPost = getHandoffReplyForCustomer(handoffReply, unavailableReasonPost);
         const contactPlatform = platform || contact.platform || "line";
+        __diagStep("before LINE push (post_generation_handoff)");
         const pushedPost = await pushTextToCustomerOrFalse(
           contactPlatform,
           contact.platform_user_id,
@@ -2929,6 +3046,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           effectiveBrandId ?? contact.brand_id ?? null,
           "post_generation_handoff"
         );
+        __diagStep(`after LINE push (post_generation_handoff) pushed=${!!pushedPost}`);
         let aiMsg: { id: number } | null = null;
         if (pushedPost) {
           aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", handoffTextToSendPost) as { id: number };
@@ -2960,6 +3078,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             replySource: "handoff",
           }),
         });
+        __diagStep("RETURN reason=post_generation_handoff");
         return;
       }
 
@@ -3063,6 +3182,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           `[phase26_latency] first_customer_visible_reply_ms=${firstCustomerVisibleReplyMs} final_reply_sent_ms=${totalMs} second_llm_skipped=${secondLlmSkipped} final_renderer=${finalRenderer} prompt_profile=${enrichedPack.prompt_profile}`
         );
         const contactPlatform = platform || contact.platform || "line";
+        __diagStep("before LINE push (main_llm_reply)");
         const pushedMain = await pushTextToCustomerOrFalse(
           contactPlatform,
           contact.platform_user_id,
@@ -3072,6 +3192,7 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           effectiveBrandId ?? contact.brand_id ?? null,
           "main_llm_reply"
         );
+        __diagStep(`after LINE push (main_llm_reply) pushed=${!!pushedMain}`);
         let aiMsg: { id: number } | null = null;
         if (pushedMain) {
           aiMsg = storage.createMessage(contact.id, contactPlatform, "ai", reply) as { id: number };
@@ -3133,8 +3254,12 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             replySource: replySourceFinal,
           }),
         });
+        __diagStep("FINISH normal");
+      } else {
+        __diagStep("FINISH no_reply_text_skip_push");
       }
     } catch (err) {
+      __diagStep(`RETURN reason=try_catch_error msg=${String((err as Error)?.message || err).slice(0, 120)}`);
       console.error("[Webhook AI] ??????:", err);
       storage.createAiLog({
         contact_id: contact.id,
