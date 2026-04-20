@@ -756,17 +756,8 @@ ${contextStr}
     platform?: string,
     aiOpts?: { enqueueTimestampMs?: number }
   ) {
-    console.log("[AI-DIAG] ENTER", {
-      contactId: contact?.id,
-      brandId: contact?.brand_id,
-      platform,
-      userMessageLength: userMessage?.length,
-      channelToken: channelToken ? "SET" : "EMPTY",
-      matchedBrandId: brandId,
-    });
     const geminiApiKeyRequired = storage.getSetting("gemini_api_key")?.trim();
     if (!geminiApiKeyRequired) {
-      console.log("[AI-DIAG] RETURN reason=no_gemini_key", { contactId: contact?.id });
       return;
     }
 
@@ -842,7 +833,6 @@ ${contextStr}
         plan_mode: null,
         reason_if_bypassed: "ai_muted",
       });
-      console.log("[AI-DIAG] RETURN reason=ai_muted", { contactId: contact?.id });
       return;
     }
 
@@ -910,7 +900,6 @@ ${contextStr}
           plan_mode: null,
           reason_if_bypassed: "high_risk",
         });
-        console.log("[AI-DIAG] RETURN reason=high_risk", { contactId: contact?.id });
         return;
       }
 
@@ -988,7 +977,6 @@ ${contextStr}
             phase1_config_ref: isPhase1Active(phase1Flags) ? JSON.stringify({ v: "1.5_safe_confirm" }) : undefined,
           });
         }
-        console.log("[AI-DIAG] RETURN reason=safe_confirm", { contactId: contact?.id });
         return;
       }
 
@@ -1221,7 +1209,6 @@ ${contextStr}
             queue_wait_ms: queueWaitMs,
             ...computePhase1TraceLogExtras("order_fast_path"),
           });
-          console.log("[AI-DIAG] RETURN reason=order_fast_path", { contactId: contact?.id });
           return;
         }
       }
@@ -1299,7 +1286,6 @@ ${contextStr}
           reason_if_bypassed: `awkward_repeat: ${awkwardCheck.reason ?? "unknown"}`,
           ...computePhase1TraceLogExtras("handoff"),
         });
-        console.log("[AI-DIAG] RETURN reason=handoff_awkward_repeat", { contactId: contact?.id });
         return;
       }
 
@@ -1364,7 +1350,6 @@ ${contextStr}
           reason_if_bypassed: "handoff_short_circuit",
           ...computePhase1TraceLogExtras("handoff"),
         });
-        console.log("[AI-DIAG] RETURN reason=handoff_short_circuit", { contactId: contact?.id });
         return;
       }
 
@@ -1520,7 +1505,6 @@ ${contextStr}
             reason_if_bypassed: "already_provided_not_found",
             ...computePhase1TraceLogExtras("handoff"),
           });
-          console.log("[AI-DIAG] RETURN reason=handoff_already_provided", { contactId: contact?.id });
           return;
         }
         const clueParts: string[] = [];
@@ -1753,7 +1737,6 @@ ${contextStr}
               queue_wait_ms: queueWaitMs,
               ...computePhase1TraceLogExtras("multi_order_router"),
             });
-            console.log("[AI-DIAG] RETURN reason=multi_order_router", { contactId: contact?.id });
             return;
           }
         }
@@ -1869,7 +1852,6 @@ ${contextStr}
                 queue_wait_ms: queueWaitMs,
                 ...computePhase1TraceLogExtras("deterministic_tool"),
               });
-              console.log("[AI-DIAG] RETURN reason=deterministic_tool", { contactId: contact?.id });
               return;
             }
           } catch (e29) {
@@ -1970,7 +1952,6 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           reason_if_bypassed: "return_form_first",
           ...computePhase1TraceLogExtras("return_form_first"),
         });
-        console.log("[AI-DIAG] RETURN reason=return_form_first", { contactId: contact?.id });
         return;
       }
 
@@ -2621,7 +2602,6 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
               }
               broadcastSSE("contacts_updated", { brand_id: contact.brand_id });
             }
-            console.log("[AI-DIAG] RETURN reason=first_llm_timeout_soft", { contactId: contact?.id });
             return;
           }
           throw timeoutErr;
@@ -2980,7 +2960,6 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
             replySource: "handoff",
           }),
         });
-        console.log("[AI-DIAG] RETURN reason=handoff_main_2973", { contactId: contact?.id });
         return;
       }
 
@@ -3155,7 +3134,6 @@ ${returnFormUrl ? `3. 附上表單連結：${returnFormUrl}` : "3. 告知會由�
           }),
         });
       }
-      console.log("[AI-DIAG] FINISH reason=normal_complete", { contactId: contact?.id });
     } catch (err) {
       console.error("[Webhook AI] ??????:", err);
       storage.createAiLog({
