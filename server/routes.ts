@@ -1,6 +1,11 @@
+// Phase 106.37-urgent-diag temporary — remove after incident closed
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
+import db from "./db";
+import { superAdminOrDebugToken } from "./middlewares/auth.middleware";
+import { getRedisClient } from "./redis-client";
+import { WORKER_HEARTBEAT_KEY } from "./queue/ai-reply.queue";
 import * as metaCommentsStorage from "./meta-comments-storage";
 import { resolveCommentMetadata } from "./meta-comment-resolver";
 import { SHORT_IMAGE_FALLBACK } from "./safe-after-sale-classifier";
@@ -261,6 +266,211 @@ export async function registerRoutes(
 
   app.get("/api/webhook/facebook", (req, res) => handleFacebookVerify(req, res, fbWebhookDeps));
   app.post("/api/webhook/facebook", (req, res) => handleFacebookWebhook(req, res, fbWebhookDeps));
+
+  // ============================================================
+  // Phase 106.37-urgent-diag temporary — remove after incident closed
+  // GET /api/admin/urgent-diag?token=...
+  // 一次撈齊：contact 4211 / 最近訊息 / ai_reply_deliveries / system_alerts (近 2h)
+  //          / channels 完整列表 / recent_contacts / worker_heartbeat
+  // 敏感值全遮（access_token 只露前 10 字 + 長度）
+  // ============================================================
+  app.get("/api/admin/urgent-diag", superAdminOrDebugToken, async (_req, res) => {
+    const TARGET_CONTACT_ID = 4211;
+    const result: Record<string, unknown> = {
+      generated_at: new Date().toISOString(),
+      phase: "106.37-urgent-diag",
+      target_contact_id: TARGET_CONTACT_ID,
+    };
+
+    try {
+      // 1) contact 4211 full row
+      try {
+        const row = db.prepare("SELECT * FROM contacts WHERE id = ?").get(TARGET_CONTACT_ID);
+        result.contact_4211 = row ?? null;
+      } catch (e: any) {
+        result.contact_4211_error = String(e?.message ?? e);
+      }
+
+      // 2) contact 4211 最近 10 則 messages（sender_type, content 前 80, created_at）
+      try {
+        const rows = db
+          .prepare(
+            `SELECT id, sender_type, message_type, substr(content, 1, 80) AS content_head,
+                    length(content) AS content_len, created_at
+               FROM messages
+              WHERE contact_id = ?
+              ORDER BY id DESC
+              LIMIT 10`
+          )
+          .all(TARGET_CONTACT_ID);
+        result.recent_messages_4211 = rows;
+      } catch (e: any) {
+        result.recent_messages_4211_error = String(e?.message ?? e);
+      }
+
+      // 3) ai_reply_deliveries 最近 10 筆（含 4211 的）
+      try {
+        const recent = db
+          .prepare(
+            `SELECT delivery_key, platform, contact_id,
+                    substr(merged_text, 1, 80) AS merged_text_head,
+                    status, last_error, created_at, updated_at, sent_at
+               FROM ai_reply_deliveries
+              ORDER BY datetime(created_at) DESC
+              LIMIT 10`
+          )
+          .all();
+        const for4211 = db
+          .prepare(
+            `SELECT delivery_key, platform, contact_id,
+                    substr(merged_text, 1, 80) AS merged_text_head,
+                    status, last_error, created_at, updated_at, sent_at
+               FROM ai_reply_deliveries
+              WHERE contact_id = ?
+              ORDER BY datetime(created_at) DESC
+              LIMIT 10`
+          )
+          .all(TARGET_CONTACT_ID);
+        result.ai_reply_deliveries = {
+          recent_10: recent,
+          for_contact_4211: for4211,
+        };
+      } catch (e: any) {
+        result.ai_reply_deliveries_error = String(e?.message ?? e);
+      }
+
+      // 4) system_alerts 最近 2 小時（特別關注 timeout/sync/line_channel_ai 類）
+      try {
+        const all2h = db
+          .prepare(
+            `SELECT id, alert_type, details, brand_id, contact_id, created_at
+               FROM system_alerts
+              WHERE datetime(created_at) >= datetime('now', '-2 hours')
+              ORDER BY datetime(created_at) DESC
+              LIMIT 500`
+          )
+          .all() as Array<{
+            id: number;
+            alert_type: string;
+            details: string;
+            brand_id: number | null;
+            contact_id: number | null;
+            created_at: string;
+          }>;
+
+        const focusKeys = ["timeout", "sync", "line_channel_ai"];
+        const focused = all2h.filter((r) =>
+          focusKeys.some((k) => r.alert_type.toLowerCase().includes(k))
+        );
+        const byType: Record<string, number> = {};
+        for (const r of all2h) {
+          byType[r.alert_type] = (byType[r.alert_type] ?? 0) + 1;
+        }
+        result.system_alerts_2h = {
+          window_hours: 2,
+          total: all2h.length,
+          by_type: byType,
+          focused_count: focused.length,
+          focused,
+          all: all2h,
+        };
+      } catch (e: any) {
+        result.system_alerts_2h_error = String(e?.message ?? e);
+      }
+
+      // 5) channels 完整列表（id, name, is_ai_enabled, token_prefix(前10), token_length）
+      try {
+        const rows = db
+          .prepare(
+            `SELECT id, brand_id, platform, channel_name, bot_id,
+                    access_token, is_ai_enabled, is_active, created_at
+               FROM channels
+              ORDER BY id ASC`
+          )
+          .all() as Array<{
+            id: number;
+            brand_id: number;
+            platform: string;
+            channel_name: string;
+            bot_id: string;
+            access_token: string;
+            is_ai_enabled: number;
+            is_active: number;
+            created_at: string;
+          }>;
+        result.channels = rows.map((c) => {
+          const tok = c.access_token ?? "";
+          return {
+            id: c.id,
+            brand_id: c.brand_id,
+            platform: c.platform,
+            name: c.channel_name,
+            bot_id: c.bot_id,
+            is_ai_enabled: c.is_ai_enabled,
+            is_active: c.is_active,
+            token_prefix: tok ? tok.slice(0, 10) : "",
+            token_length: tok.length,
+            created_at: c.created_at,
+          };
+        });
+      } catch (e: any) {
+        result.channels_error = String(e?.message ?? e);
+      }
+
+      // 6) recent_contacts 最新 10 筆
+      try {
+        const rows = db
+          .prepare(
+            `SELECT id, platform, brand_id, channel_id, display_name, status,
+                    needs_human, last_message_at, created_at
+               FROM contacts
+              ORDER BY datetime(COALESCE(last_message_at, created_at)) DESC
+              LIMIT 10`
+          )
+          .all();
+        result.recent_contacts = rows;
+      } catch (e: any) {
+        result.recent_contacts_error = String(e?.message ?? e);
+      }
+
+      // 7) worker_heartbeat（alive, age_sec）
+      try {
+        const redisEnabled = !!process.env.REDIS_URL?.trim();
+        let alive = false;
+        let ageSec: number | null = null;
+        let lastSeenAt: string | null = null;
+        if (redisEnabled) {
+          const redis = getRedisClient();
+          if (redis) {
+            const raw = await redis.get(WORKER_HEARTBEAT_KEY);
+            if (raw) {
+              try {
+                const data = JSON.parse(raw) as { timestamp?: number };
+                if (typeof data?.timestamp === "number") {
+                  alive = true;
+                  ageSec = Math.round((Date.now() - data.timestamp) / 1000);
+                  lastSeenAt = new Date(data.timestamp).toISOString();
+                }
+              } catch (_e) {}
+            }
+          }
+        }
+        result.worker_heartbeat = {
+          redis_enabled: redisEnabled,
+          alive,
+          age_sec: ageSec,
+          last_seen_at: lastSeenAt,
+        };
+      } catch (e: any) {
+        result.worker_heartbeat_error = String(e?.message ?? e);
+      }
+
+      return res.json(result);
+    } catch (e: any) {
+      result.fatal_error = String(e?.message ?? e);
+      return res.status(500).json(result);
+    }
+  });
 
   return httpServer;
 }
