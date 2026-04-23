@@ -324,6 +324,8 @@ export interface OrderInfo {
   shipped_at?: string;
   order_created_at?: string;
   shipping_method?: string;
+  /** Shopline：delivery_type 等原始代碼，供與 shipping_method 併用辨識物流 */
+  shipping_type?: string;
   payment_method?: string;
   /** 一頁商店：是否已預付／已付款（prepaid）。若為 false 且為需先付款之方式，表示付款未成功 */
   prepaid?: boolean;

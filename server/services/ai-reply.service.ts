@@ -1,4 +1,4 @@
-﻿import path from "path";
+import path from "path";
 import fs from "fs";
 import OpenAI from "openai";
 import type { Contact, IssueType } from "@shared/schema";
@@ -39,7 +39,7 @@ import {
 } from "../order-service";
 import { packDeterministicMultiOrderToolResult } from "../order-multi-renderer";
 import { tryOrderFastPath, extractOrderIdFromMixedSentence } from "../order-fast-path";
-import { formatOrderOnePage, payKindForOrder } from "../order-reply-utils";
+import { formatOrderOnePage, payKindForOrder, customerFacingStatusLabel } from "../order-reply-utils";
 import type { MessagingOutboundResult, MessagingOutboundSkipped } from "./messaging.service";
 import { isMessagingDelivered } from "./messaging.service";
 import { normalizeCustomerFacingOrderReply } from "../customer-reply-normalizer";
@@ -523,9 +523,14 @@ export function createAiReplyService(deps: AiReplyDeps) {
               buyer_phone: order.buyer_phone,
               created_at: order.created_at,
               payment_method: order.payment_method,
+              payment_status: pk.kind,
               payment_status_label: pk.label,
+              prepaid: order.prepaid,
+              paid_at: order.paid_at ?? null,
               amount: order.final_total_order_amount,
               shipping_method: order.shipping_method,
+              shipping_type: order.shipping_type,
+              delivery_status_raw: order.delivery_status_raw,
               tracking_number: order.tracking_number,
               delivery_target_type: order.delivery_target_type,
               cvs_brand: order.cvs_brand,
@@ -533,8 +538,11 @@ export function createAiReplyService(deps: AiReplyDeps) {
               full_address: order.full_address,
               address: order.address,
               product_list: order.product_list,
-              status: statusLabel,
+              items_structured: order.items_structured,
+              status: customerFacingStatusLabel(statusLabel),
+              fulfillment_status_raw: order.status,
               shipped_at: order.shipped_at,
+              source: order.source || result.source,
             });
             storage.linkOrderForContact(contactId, order.global_order_id, "ai_lookup");
             storage.setActiveOrderContext(
@@ -1634,9 +1642,11 @@ ${contextStr}
               const pk = payKindForOrder(o, st, o.source || res.source);
               const onePagePayload = {
                 order_id: o.global_order_id,
-                status: st,
+                status: customerFacingStatusLabel(st),
+                fulfillment_status_raw: o.status,
                 amount: o.final_total_order_amount,
                 product_list: o.product_list,
+                items_structured: o.items_structured,
                 buyer_name: o.buyer_name,
                 buyer_phone: o.buyer_phone,
                 address: o.address,
@@ -1648,8 +1658,14 @@ ${contextStr}
                 created_at: o.created_at,
                 shipped_at: o.shipped_at,
                 shipping_method: o.shipping_method,
+                shipping_type: o.shipping_type,
+                delivery_status_raw: o.delivery_status_raw,
                 payment_method: o.payment_method,
+                payment_status: pk.kind,
                 payment_status_label: pk.label,
+                prepaid: o.prepaid,
+                paid_at: o.paid_at ?? null,
+                source: o.source || res.source,
               };
               const onePage = formatOrderOnePage(onePagePayload);
               multiAns = `${multiAns}\n${onePage}`;

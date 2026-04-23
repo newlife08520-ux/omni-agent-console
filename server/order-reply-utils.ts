@@ -4,6 +4,88 @@
  */
 import type { OrderInfo, ActiveOrderContext } from "@shared/schema";
 import { derivePaymentStatus, isCodPaymentMethod, type PaymentKind } from "./order-payment-utils";
+
+/** Phase 106.35 v2：formatOrderOnePage → buildOrderStatusFollowupHint 選填欄位 */
+export type BuildOrderStatusFollowupHintExtras = {
+  shippedAt?: string;
+  deliveryStatusRaw?: string;
+  /** 與第二參數併用：通常傳 shipping_method || shipping_type */
+  shippingMethod?: string;
+  source?: string;
+};
+
+const SHIPPED_DELIVERY_CODES = new Set([
+  "collected",
+  "request_accepted",
+  "arrived",
+  "shipped",
+  "delivered",
+  "partially_fulfilled",
+  "已發貨",
+  "已送達",
+]);
+
+function normalizeOrderStatusHint(s: string | null | undefined): string {
+  return String(s ?? "")
+    .trim()
+    .toLowerCase();
+}
+
+function normalizeDeliveryRawHint(s: string | null | undefined): string {
+  return String(s ?? "")
+    .trim()
+    .toLowerCase();
+}
+
+/** 分支 B：超商關鍵字（其餘視為宅配） */
+function isConvenienceBranchShipping(shipRaw: string): boolean {
+  const s = shipRaw || "";
+  const lower = s.toLowerCase();
+  if (
+    /超商|7-11|711|tw_711|seven|全家|fami|萊爾富|hilife|ok\s*mart|ok\s*超商|convenience|cvs|門市|pickup|to_store|取貨/i.test(
+      s
+    ) ||
+    /tw_family|tw_hilife|tw_ok|fmt|okm/i.test(lower)
+  ) {
+    return true;
+  }
+  if (/\bok\b/.test(lower) && /mart|超商/.test(s)) return true;
+  return false;
+}
+
+function isPreparingBranchF(
+  source: string | undefined,
+  rawStatus: string,
+  deliveryNorm: string,
+  payKind: PaymentKind
+): boolean {
+  if (payKind !== "success" && payKind !== "cod") return false;
+  const st = normalizeOrderStatusHint(rawStatus);
+  const d = deliveryNorm.trim().toLowerCase();
+  const zhPrep = /新訂單|待處理|確認中|已確認|待出貨|處理中/.test(rawStatus);
+
+  if (source === "shopline") {
+    if (d !== "pending" && d !== "") return false;
+    return (
+      st === "confirmed" ||
+      st === "pending" ||
+      st === "new_order" ||
+      st === "processing" ||
+      st === "awaiting_for_shipment" ||
+      zhPrep
+    );
+  }
+
+  return (
+    st === "new_order" ||
+    st === "pending" ||
+    st === "confirming" ||
+    st === "confirmed" ||
+    st === "awaiting_for_shipment" ||
+    st === "processing" ||
+    zhPrep
+  );
+}
 import { maskName, maskPhone } from "./tool-llm-sanitize";
 import { getUnifiedStatusLabel } from "./order-service";
 
@@ -56,68 +138,75 @@ export function customerFacingStatusLabel(rawStatus: string | null | undefined):
 }
 
 /**
- * 依訂單狀態 + 配送方式組配套提醒（僅單筆完整卡片使用，Phase 106.10）
- * Phase 106.34：併入 payKind，避免 LINE Pay／信用卡「未付款」仍出「正在安排出貨」；COD 維持原句。
+ * 依訂單狀態 + 物流 raw + 付款組配套提醒（僅單筆完整卡片使用）
+ * Phase 106.34：payKind（失敗／未付）
+ * Phase 106.35 v2：Shopline 以 delivery_status_raw（真實 API 英文碼）優先於狀態字串；分支 A～G
  */
 export function buildOrderStatusFollowupHint(
   rawStatus: string | null | undefined,
   shippingMethod: string | null | undefined,
-  payKind: PaymentKind
+  payKind: PaymentKind,
+  extras?: BuildOrderStatusFollowupHintExtras
 ): string {
-  if (!rawStatus) return "";
+  const orderSt = String(rawStatus ?? "").trim();
+  const deliveryRaw = extras?.deliveryStatusRaw;
+  const deliveryNorm = normalizeDeliveryRawHint(deliveryRaw);
+  const shipCombined = String(extras?.shippingMethod ?? shippingMethod ?? "").trim();
+  const source = extras?.source;
 
-  const s = rawStatus.toLowerCase().trim();
-  const ship = shippingMethod ?? "";
+  if (!orderSt && !deliveryNorm) return "";
 
-  const isHomeDelivery = /(宅配|宅急便|home|tcat|takkyu|hct|新竹|黑貓)/i.test(ship);
-  const isStorePickup = /(7-?11|seven|family|全家|店配|超商|cvs|store|萊爾富|hi[- ]?life|ok mart)/i.test(ship);
+  const st = normalizeOrderStatusHint(orderSt);
 
-  if (s === "shipped" || s === "shipping" || /已出貨|出貨中/.test(rawStatus)) {
-    if (isHomeDelivery) {
-      return "\n\n📦 已出貨囉～請留意司機電話通知，通常 1-2 天會送達唷！";
+  // --- 分支 A：已取消（訂單狀態優先）---
+  if (st === "cancelled" || st === "canceled" || orderSt.trim() === "已取消") {
+    return "\n\n您這筆訂單已取消唷～如果還是有需要商品，歡迎重新下單；若有付款相關問題，我們專員會再協助您確認。";
+  }
+
+  // --- 分支 B：已出貨／履約（delivery_status_raw）---
+  if (deliveryNorm && SHIPPED_DELIVERY_CODES.has(deliveryNorm)) {
+    const dateStr = extras?.shippedAt ? formatDateTaipei(extras.shippedAt, "YYYY-MM-DD") : "";
+    const hasDate = !!dateStr;
+    const cvs = isConvenienceBranchShipping(shipCombined);
+    if (cvs) {
+      if (hasDate) {
+        return `\n\n您這筆訂單已於 ${dateStr} 出貨到您選擇的門市唷～到店後會收到簡訊通知，記得在期限內領取。`;
+      }
+      return "\n\n您這筆訂單已出貨到您選擇的門市唷～到店後會收到簡訊通知，記得在期限內領取。";
     }
-    if (isStorePickup) {
-      return "\n\n📦 已出貨囉～商品到店後會收到取貨簡訊，記得 7 天內取貨唷！";
+    if (hasDate) {
+      return `\n\n您這筆訂單已於 ${dateStr} 出貨唷～實際送達時間依物流配送時程為準，如果需要追蹤編號可以告訴我。`;
     }
-    return "\n\n📦 已出貨囉～請留意後續通知唷！";
+    return "\n\n您這筆訂單已出貨唷～實際送達時間依物流配送時程為準，如果需要追蹤編號可以告訴我。";
   }
 
-  if (s === "awaiting_for_shipment" || s === "confirmed" || /待出貨|已確認/.test(rawStatus)) {
-    return "\n\n⏰ 已安排出貨中，預計 2-3 天內出貨唷～";
+  // --- 分支 C：退貨／逾期（delivery）---
+  if (deliveryNorm === "returning") {
+    return "\n\n您的訂單目前正在退貨處理中，請稍候唷～有進一步疑問歡迎告訴我。";
+  }
+  if (deliveryNorm === "returned") {
+    return "\n\n您的訂單已完成退貨處理唷～如果還需要商品歡迎重新下單。";
+  }
+  if (deliveryNorm === "expired") {
+    return "\n\n您這筆訂單超商取貨已逾期，會自動退回店家唷～如果還需要商品歡迎重新下單。";
   }
 
-  if (s === "replacement" || /換貨/.test(rawStatus)) {
-    return "\n\n🔄 換貨處理中，專員會盡快處理唷～";
+  // --- 分支 D：付款失敗 ---
+  if (payKind === "failed") {
+    return "\n\n您的訂單付款未成功，請重新下單或聯繫我們協助處理。";
   }
 
-  if (s === "delay_handling" || /延遲/.test(rawStatus)) {
-    return "\n\n⚠️ 出貨稍有延遲，專員處理中，造成不便請多包涵～";
+  // --- 分支 E：未付款（非 COD；cod 為獨立 PaymentKind 不會進此分支）---
+  if (payKind === "pending" || payKind === "unknown") {
+    return "\n\n您的訂單因為付款還未完成，我們暫時無法安排出貨唷～請完成付款後系統會自動處理；如果付款遇到問題需要取消重下，請告訴我。";
   }
 
-  if (
-    s === "canceled" ||
-    s === "cancelled" ||
-    s === "returned" ||
-    s === "refunded" ||
-    /已取消|已退貨|已退款/.test(rawStatus)
-  ) {
-    return "";
+  // --- 分支 F：準備中（已付或 COD）---
+  if (isPreparingBranchF(source, orderSt, deliveryNorm, payKind)) {
+    return "\n\n您這筆訂單已收到，正在為您安排～關於出貨時間，現貨商品大概 5 個工作天內會幫您安排寄出；預售商品可能會稍等 7-20 個工作天唷～";
   }
 
-  if (s === "new_order" || s === "pending" || s === "confirming" || /新訂單|待處理|確認中/.test(rawStatus)) {
-    if (payKind === "failed") {
-      return "\n\n您的訂單付款未成功，請重新下單或聯繫我們協助處理。";
-    }
-    if (payKind === "pending" || payKind === "unknown") {
-      return "\n\n您的訂單因為付款還未完成，我們暫時無法安排出貨。請完成付款後系統會自動處理；如果付款遇到問題需要取消重下，請告訴我。";
-    }
-    return "\n\n📝 訂單已收到，正在為您安排，請稍候唷～";
-  }
-
-  if (s === "refunding" || /退款中/.test(rawStatus)) {
-    return "\n\n💰 退款處理中，請耐心等候唷～";
-  }
-
+  // --- 分支 G：其他 ---
   return "";
 }
 
@@ -353,6 +442,9 @@ export function formatOrderOnePage(o: {
   paid_at?: string | null;
   /** API 原始 fulfillment status，供配套提醒（與對客 status 文案分離） */
   fulfillment_status_raw?: string | null;
+  /** Shopline：order_delivery.delivery_status 等 */
+  delivery_status_raw?: string;
+  shipping_type?: string;
 }): string {
   const lines: string[] = [];
 
@@ -451,11 +543,13 @@ export function formatOrderOnePage(o: {
   if (o.shipped_at) lines.push(`出貨時間：${o.shipped_at}`);
 
   const card = lines.join("\n");
-  const hint = buildOrderStatusFollowupHint(
-    o.fulfillment_status_raw ?? undefined,
-    o.shipping_method,
-    payKindForHint
-  );
+  const orderStatusForHint = String(o.fulfillment_status_raw ?? o.status ?? "").trim() || undefined;
+  const shipHint = String(o.shipping_method || o.shipping_type || "").trim() || undefined;
+  const hint = buildOrderStatusFollowupHint(orderStatusForHint, shipHint, payKindForHint, {
+    shippedAt: o.shipped_at,
+    deliveryStatusRaw: o.delivery_status_raw || undefined,
+    source: o.source,
+  });
   return card + hint;
 }
 

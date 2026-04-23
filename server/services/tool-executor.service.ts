@@ -690,6 +690,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           created_at: order.created_at,
           shipped_at: order.shipped_at,
           shipping_method: order.shipping_method,
+          shipping_type: order.shipping_type,
+          delivery_status_raw: order.delivery_status_raw,
           payment_method: order.payment_method,
           payment_status: pkId.kind,
           payment_status_label: pkId.label,
@@ -780,11 +782,14 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
               const order = localHits[0];
               const statusLabel = getUnifiedStatusLabel(order.status, order.source || orderSource);
               const payment_interpretation = getPaymentInterpretationForAI(order, statusLabel, order.source || orderSource);
+              const pkPp = payKindForOrder(order, statusLabel, order.source || orderSource);
               const orderPayload = {
                 order_id: order.global_order_id,
                 status: customerFacingStatusLabel(statusLabel),
+                fulfillment_status_raw: order.status,
                 amount: order.final_total_order_amount,
                 product_list: order.product_list,
+                items_structured: orderItemsStructuredPayload(order),
                 buyer_name: order.buyer_name,
                 buyer_phone: order.buyer_phone,
                 address: order.address,
@@ -796,10 +801,17 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
                 created_at: order.created_at,
                 shipped_at: order.shipped_at,
                 shipping_method: order.shipping_method,
+                shipping_type: order.shipping_type,
+                delivery_status_raw: order.delivery_status_raw,
                 payment_method: order.payment_method,
+                source: order.source || orderSource,
+                prepaid: order.prepaid,
+                paid_at: order.paid_at,
+                payment_status: pkPp.kind,
+                payment_status_label: pkPp.label,
+                payment_warning: paymentWarningFromKind(pkPp.kind, isCodPaymentMethod(order)),
               };
-              const pkPp = payKindForOrder(order, statusLabel, order.source || orderSource);
-              const orderPayloadL = { ...orderPayload, payment_status_label: pkPp.label };
+              const orderPayloadL = { ...orderPayload };
               const one_page_summary =
                 formatOrderOnePage(orderPayloadL) + ORDER_LOOKUP_LOCAL_CACHE_DISCLAIMER;
               if (context?.contactId) {
@@ -1110,13 +1122,23 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           const ol = {
             order_id: o0.global_order_id,
             status: customerFacingStatusLabel(st0),
+            fulfillment_status_raw: o0.status,
             amount: o0.final_total_order_amount,
             product_list: o0.product_list,
+            items_structured: orderItemsStructuredPayload(o0),
             buyer_name: o0.buyer_name,
             buyer_phone: o0.buyer_phone,
             created_at: o0.created_at,
+            shipped_at: o0.shipped_at,
+            payment_status: pk0.kind,
             payment_status_label: pk0.label,
+            prepaid: o0.prepaid,
+            paid_at: o0.paid_at,
+            payment_method: o0.payment_method,
+            source: o0.source || orderSource,
             shipping_method: o0.shipping_method,
+            shipping_type: o0.shipping_type,
+            delivery_status_raw: o0.delivery_status_raw,
             tracking_number: o0.tracking_number,
             full_address: o0.full_address,
             cvs_brand: o0.cvs_brand,
@@ -1174,6 +1196,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           return {
             order_id: o.global_order_id,
             status: customerFacingStatusLabel(st),
+            fulfillment_status_raw: o.status,
             amount: o.final_total_order_amount,
             product_list: o.product_list,
             buyer_name: o.buyer_name,
@@ -1187,6 +1210,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             created_at: o.created_at,
             shipped_at: o.shipped_at,
             shipping_method: o.shipping_method,
+            shipping_type: o.shipping_type,
+            delivery_status_raw: o.delivery_status_raw,
             payment_method: o.payment_method,
             source: src,
             items_structured: orderItemsStructuredPayload(o),
@@ -1194,6 +1219,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             payment_status_label: label,
             payment_interpretation: getPaymentInterpretationForAI(o, st, src),
             payment_warning: paymentWarningFromKind(kind, isCodPaymentMethod(o)),
+            prepaid: o.prepaid,
+            paid_at: o.paid_at,
           };
         });
 
@@ -1323,14 +1350,19 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             source: o0.source || dateOrderSource,
             amount: o0.final_total_order_amount,
             product_list: o0.product_list,
+            items_structured: orderItemsStructuredPayload(o0),
             buyer_name: o0.buyer_name,
             buyer_phone: o0.buyer_phone,
             created_at: o0.created_at,
+            shipped_at: o0.shipped_at,
             payment_method: o0.payment_method,
+            payment_status: pk0.kind,
             payment_status_label: pk0.label,
             prepaid: o0.prepaid,
             paid_at: o0.paid_at,
             shipping_method: o0.shipping_method,
+            shipping_type: o0.shipping_type,
+            delivery_status_raw: o0.delivery_status_raw,
             tracking_number: o0.tracking_number,
             full_address: o0.full_address,
             cvs_brand: o0.cvs_brand,
@@ -1393,6 +1425,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           return {
             order_id: o.global_order_id,
             status: customerFacingStatusLabel(st),
+            fulfillment_status_raw: o.status,
             amount: o.final_total_order_amount,
             product_list: o.product_list,
             buyer_name: o.buyer_name,
@@ -1406,6 +1439,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             created_at: o.created_at,
             shipped_at: o.shipped_at,
             shipping_method: o.shipping_method,
+            shipping_type: o.shipping_type,
+            delivery_status_raw: o.delivery_status_raw,
             payment_method: o.payment_method,
             source: src,
             items_structured: orderItemsStructuredPayload(o),
@@ -1413,6 +1448,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             payment_status_label: label,
             payment_interpretation: getPaymentInterpretationForAI(o, st, src),
             payment_warning: paymentWarningFromKind(kind, isCodPaymentMethod(o)),
+            prepaid: o.prepaid,
+            paid_at: o.paid_at,
           };
         });
 
@@ -1471,6 +1508,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           return {
             order_id: o.global_order_id,
             status: customerFacingStatusLabel(st),
+            fulfillment_status_raw: o.status,
             amount: o.final_total_order_amount,
             product_list: o.product_list,
             buyer_name: o.buyer_name,
@@ -1484,6 +1522,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             created_at: o.created_at,
             shipped_at: o.shipped_at,
             shipping_method: o.shipping_method,
+            shipping_type: o.shipping_type,
+            delivery_status_raw: o.delivery_status_raw,
             payment_method: o.payment_method,
             source: "superlanding" as const,
             items_structured: orderItemsStructuredPayload(o),
@@ -1491,6 +1531,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             payment_status_label: label,
             payment_interpretation: getPaymentInterpretationForAI(o, st, "superlanding"),
             payment_warning: paymentWarningFromKind(kind, isCodPaymentMethod(o)),
+            prepaid: o.prepaid,
+            paid_at: o.paid_at,
           };
         });
         const formattedList = formatOrdersToolFormattedList(orderSummaries);
@@ -1519,6 +1561,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             buyer_name: o0.buyer_name,
             buyer_phone: o0.buyer_phone,
             created_at: o0.created_at,
+            shipped_at: o0.shipped_at,
             payment_method: o0.payment_method,
             payment_status: pkMo.kind,
             payment_status_label: pkMo.label,
@@ -1526,6 +1569,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             paid_at: o0.paid_at,
             payment_warning: paymentWarningFromKind(pkMo.kind, isCodPaymentMethod(o0)),
             shipping_method: o0.shipping_method,
+            shipping_type: o0.shipping_type,
+            delivery_status_raw: o0.delivery_status_raw,
             tracking_number: o0.tracking_number,
             full_address: o0.full_address,
             cvs_brand: o0.cvs_brand,
@@ -1617,6 +1662,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           return {
             order_id: o.global_order_id,
             status: customerFacingStatusLabel(st),
+            fulfillment_status_raw: o.status,
             amount: o.final_total_order_amount,
             product_list: o.product_list,
             buyer_name: o.buyer_name,
@@ -1630,6 +1676,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             created_at: o.created_at,
             shipped_at: o.shipped_at,
             shipping_method: o.shipping_method,
+            shipping_type: o.shipping_type,
+            delivery_status_raw: o.delivery_status_raw,
             payment_method: o.payment_method,
             source: "shopline" as const,
             items_structured: orderItemsStructuredPayload(o),
@@ -1637,6 +1685,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             payment_status_label: label,
             payment_interpretation: getPaymentInterpretationForAI(o, st, "shopline"),
             payment_warning: paymentWarningFromKind(kind, isCodPaymentMethod(o)),
+            prepaid: o.prepaid,
+            paid_at: o.paid_at,
           };
         });
         const formattedList = formatOrdersToolFormattedList(orderSummaries);
@@ -1650,20 +1700,29 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           const opS = {
             order_id: o0.global_order_id,
             status: customerFacingStatusLabel(st0),
+            fulfillment_status_raw: o0.status,
             amount: o0.final_total_order_amount,
             product_list: o0.product_list,
             items_structured: orderItemsStructuredPayload(o0),
             buyer_name: o0.buyer_name,
             buyer_phone: o0.buyer_phone,
             created_at: o0.created_at,
+            shipped_at: o0.shipped_at,
+            payment_status: pkS.kind,
             payment_status_label: pkS.label,
+            prepaid: o0.prepaid,
+            paid_at: o0.paid_at,
+            payment_method: o0.payment_method,
             payment_warning: paymentWarningFromKind(pkS.kind, isCodPaymentMethod(o0)),
             shipping_method: o0.shipping_method,
+            shipping_type: o0.shipping_type,
+            delivery_status_raw: o0.delivery_status_raw,
             tracking_number: o0.tracking_number,
             full_address: o0.full_address,
             cvs_brand: o0.cvs_brand,
             cvs_store_name: o0.cvs_store_name,
             delivery_target_type: o0.delivery_target_type,
+            source: "shopline" as const,
           };
           const obS = formatOrderOnePage(opS);
           if (context?.contactId) {
@@ -1839,6 +1898,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           return {
             order_id: o.global_order_id,
             status: customerFacingStatusLabel(st),
+            fulfillment_status_raw: o.status,
             amount: o.final_total_order_amount,
             product_list: o.product_list,
             buyer_name: o.buyer_name,
@@ -1854,6 +1914,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             created_at: o.created_at,
             shipped_at: o.shipped_at,
             shipping_method: o.shipping_method,
+            shipping_type: o.shipping_type,
+            delivery_status_raw: o.delivery_status_raw,
             payment_method: o.payment_method,
             payment_status: kind,
             payment_status_label: label,
@@ -1861,6 +1923,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             payment_warning: paymentWarningFromKind(kind, isCodPaymentMethod(o)),
             items_structured: orderItemsStructuredPayload(o),
             source: src,
+            prepaid: o.prepaid,
+            paid_at: o.paid_at,
           };
         });
         const formattedList = formatOrdersToolFormattedList(orderSummaries);
@@ -2019,6 +2083,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             created_at: o0.created_at,
             shipped_at: o0.shipped_at,
             shipping_method: o0.shipping_method,
+            shipping_type: o0.shipping_type,
+            delivery_status_raw: o0.delivery_status_raw,
             payment_method: o0.payment_method,
             payment_status: pk.kind,
             payment_status_label: pk.label,
@@ -2062,6 +2128,8 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
                   created_at: o0.created_at,
                   shipped_at: o0.shipped_at,
                   shipping_method: o0.shipping_method,
+                  shipping_type: o0.shipping_type,
+                  delivery_status_raw: o0.delivery_status_raw,
                   payment_method: o0.payment_method,
                   payment_status: pk.kind,
                   payment_status_label: pk.label,

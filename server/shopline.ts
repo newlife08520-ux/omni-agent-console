@@ -299,6 +299,11 @@ function mapShoplineOrder(o: any): OrderInfo {
     shipped_at: orderDelivery?.shipped_at ?? o.shipped_at ?? o.fulfilled_at ?? "",
     order_created_at: o.created_at ?? o.order_created_at ?? "",
     shipping_method: shippingMethodStr,
+    shipping_type:
+      deliveryType ||
+      (typeof o.shipping_type === "string" && String(o.shipping_type).trim()
+        ? String(o.shipping_type).trim()
+        : undefined),
     payment_method: paymentMethodForInfo,
     prepaid: prepaidVal,
     paid_at: paidAtStr,
