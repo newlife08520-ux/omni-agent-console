@@ -16,6 +16,7 @@ import {
   shouldDisablePhoneOrderAgeFilter,
 } from "../order-service";
 import { shouldBypassLocalPhoneIndex } from "../order-lookup-policy";
+import { isCodPaymentMethod } from "../order-payment-utils";
 import { packDeterministicMultiOrderToolResult } from "../order-multi-renderer";
 import { getOrdersByPhone, lookupOrdersByProductAliasAndPhoneLocal, normalizePhone } from "../order-index";
 import {
@@ -136,9 +137,12 @@ function formatOrdersToolFormattedList(
     .join("\n");
 }
 
-function paymentWarningFromKind(kind: string): string {
+/** Phase 106.34：pending 僅在非 COD（LINE Pay／信用卡等）時警告；貨到付款未付為正常。 */
+function paymentWarningFromKind(kind: string, isCod: boolean): string {
   if (kind === "failed") return "【警告】此訂單付款失敗，絕對不可說會出貨";
-  if (kind === "pending") return "【注意】此訂單尚未付款，提醒客人先完成付款";
+  if (kind === "pending" && !isCod) {
+    return "【注意】此筆訂單尚未完成線上金流，未完成前無法安排出貨；請完成付款或聯繫客服協助。";
+  }
   return "";
 }
 
@@ -689,7 +693,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           payment_method: order.payment_method,
           payment_status: pkId.kind,
           payment_status_label: pkId.label,
-          payment_warning: paymentWarningFromKind(pkId.kind),
+          payment_warning: paymentWarningFromKind(pkId.kind, isCodPaymentMethod(order)),
           source: order.source || result.source,
           prepaid: order.prepaid,
           paid_at: order.paid_at,
@@ -839,7 +843,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
                 payment_status: kind,
                 payment_status_label: label,
                 payment_interpretation: getPaymentInterpretationForAI(o, st, src),
-                payment_warning: paymentWarningFromKind(kind),
+                payment_warning: paymentWarningFromKind(kind, isCodPaymentMethod(o)),
                 items_structured: orderItemsStructuredPayload(o),
                 created_at: o.created_at,
               };
@@ -1189,7 +1193,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             payment_status: kind,
             payment_status_label: label,
             payment_interpretation: getPaymentInterpretationForAI(o, st, src),
-            payment_warning: paymentWarningFromKind(kind),
+            payment_warning: paymentWarningFromKind(kind, isCodPaymentMethod(o)),
           };
         });
 
@@ -1315,12 +1319,17 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           const ob0 = formatOrderOnePage({
             order_id: o0.global_order_id,
             status: customerFacingStatusLabel(st0),
+            fulfillment_status_raw: o0.status,
+            source: o0.source || dateOrderSource,
             amount: o0.final_total_order_amount,
             product_list: o0.product_list,
             buyer_name: o0.buyer_name,
             buyer_phone: o0.buyer_phone,
             created_at: o0.created_at,
+            payment_method: o0.payment_method,
             payment_status_label: pk0.label,
+            prepaid: o0.prepaid,
+            paid_at: o0.paid_at,
             shipping_method: o0.shipping_method,
             tracking_number: o0.tracking_number,
             full_address: o0.full_address,
@@ -1358,7 +1367,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
               payment_status: pk0.kind,
               payment_status_label: pk0.label,
               payment_interpretation: getPaymentInterpretationForAI(o0, st0, o0.source || dateOrderSource),
-              payment_warning: paymentWarningFromKind(pk0.kind),
+              payment_warning: paymentWarningFromKind(pk0.kind, isCodPaymentMethod(o0)),
             },
           ];
           console.log("[AI Latency] tool lookup_order_by_date_and_contact done in", Date.now() - dateToolStartMs, "ms");
@@ -1403,7 +1412,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             payment_status: kind,
             payment_status_label: label,
             payment_interpretation: getPaymentInterpretationForAI(o, st, src),
-            payment_warning: paymentWarningFromKind(kind),
+            payment_warning: paymentWarningFromKind(kind, isCodPaymentMethod(o)),
           };
         });
 
@@ -1481,7 +1490,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             payment_status: kind,
             payment_status_label: label,
             payment_interpretation: getPaymentInterpretationForAI(o, st, "superlanding"),
-            payment_warning: paymentWarningFromKind(kind),
+            payment_warning: paymentWarningFromKind(kind, isCodPaymentMethod(o)),
           };
         });
         const formattedList = formatOrdersToolFormattedList(orderSummaries);
@@ -1502,14 +1511,20 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           const opMo = {
             order_id: o0.global_order_id,
             status: customerFacingStatusLabel(st0),
+            fulfillment_status_raw: o0.status,
+            source: o0.source,
             amount: o0.final_total_order_amount,
             product_list: o0.product_list,
             items_structured: orderItemsStructuredPayload(o0),
             buyer_name: o0.buyer_name,
             buyer_phone: o0.buyer_phone,
             created_at: o0.created_at,
+            payment_method: o0.payment_method,
+            payment_status: pkMo.kind,
             payment_status_label: pkMo.label,
-            payment_warning: paymentWarningFromKind(pkMo.kind),
+            prepaid: o0.prepaid,
+            paid_at: o0.paid_at,
+            payment_warning: paymentWarningFromKind(pkMo.kind, isCodPaymentMethod(o0)),
             shipping_method: o0.shipping_method,
             tracking_number: o0.tracking_number,
             full_address: o0.full_address,
@@ -1621,7 +1636,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             payment_status: kind,
             payment_status_label: label,
             payment_interpretation: getPaymentInterpretationForAI(o, st, "shopline"),
-            payment_warning: paymentWarningFromKind(kind),
+            payment_warning: paymentWarningFromKind(kind, isCodPaymentMethod(o)),
           };
         });
         const formattedList = formatOrdersToolFormattedList(orderSummaries);
@@ -1642,7 +1657,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             buyer_phone: o0.buyer_phone,
             created_at: o0.created_at,
             payment_status_label: pkS.label,
-            payment_warning: paymentWarningFromKind(pkS.kind),
+            payment_warning: paymentWarningFromKind(pkS.kind, isCodPaymentMethod(o0)),
             shipping_method: o0.shipping_method,
             tracking_number: o0.tracking_number,
             full_address: o0.full_address,
@@ -1843,7 +1858,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             payment_status: kind,
             payment_status_label: label,
             payment_interpretation: getPaymentInterpretationForAI(o, st, src),
-            payment_warning: paymentWarningFromKind(kind),
+            payment_warning: paymentWarningFromKind(kind, isCodPaymentMethod(o)),
             items_structured: orderItemsStructuredPayload(o),
             source: src,
           };
@@ -1986,6 +2001,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
           const onePagePayload = {
             order_id: o0.global_order_id,
             status: customerFacingStatusLabel(statusLabel0),
+            fulfillment_status_raw: o0.status,
             amount: o0.final_total_order_amount,
             product_list: o0.product_list,
             items_structured: orderItemsStructuredPayload(o0),
@@ -2006,7 +2022,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
             payment_method: o0.payment_method,
             payment_status: pk.kind,
             payment_status_label: pk.label,
-            payment_warning: paymentWarningFromKind(pk.kind),
+            payment_warning: paymentWarningFromKind(pk.kind, isCodPaymentMethod(o0)),
             source: o0.source || orderSource,
             prepaid: o0.prepaid,
             paid_at: o0.paid_at,
@@ -2028,6 +2044,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
                 const payload = {
                   order_id: o0.global_order_id,
                   status: customerFacingStatusLabel(st),
+                  fulfillment_status_raw: o0.status,
                   amount: o0.final_total_order_amount,
                   product_list: o0.product_list,
                   items_structured: orderItemsStructuredPayload(o0),
@@ -2048,7 +2065,7 @@ export function createToolExecutor(deps: ToolExecutorDeps) {
                   payment_method: o0.payment_method,
                   payment_status: pk.kind,
                   payment_status_label: pk.label,
-                  payment_warning: paymentWarningFromKind(pk.kind),
+                  payment_warning: paymentWarningFromKind(pk.kind, isCodPaymentMethod(o0)),
                   source: o0.source || orderSource,
                   prepaid: o0.prepaid,
                   paid_at: o0.paid_at,

@@ -57,10 +57,12 @@ export function customerFacingStatusLabel(rawStatus: string | null | undefined):
 
 /**
  * 依訂單狀態 + 配送方式組配套提醒（僅單筆完整卡片使用，Phase 106.10）
+ * Phase 106.34：併入 payKind，避免 LINE Pay／信用卡「未付款」仍出「正在安排出貨」；COD 維持原句。
  */
 export function buildOrderStatusFollowupHint(
   rawStatus: string | null | undefined,
-  shippingMethod: string | null | undefined
+  shippingMethod: string | null | undefined,
+  payKind: PaymentKind
 ): string {
   if (!rawStatus) return "";
 
@@ -103,6 +105,12 @@ export function buildOrderStatusFollowupHint(
   }
 
   if (s === "new_order" || s === "pending" || s === "confirming" || /新訂單|待處理|確認中/.test(rawStatus)) {
+    if (payKind === "failed") {
+      return "\n\n您的訂單付款未成功，請重新下單或聯繫我們協助處理。";
+    }
+    if (payKind === "pending" || payKind === "unknown") {
+      return "\n\n您的訂單因為付款還未完成，我們暫時無法安排出貨。請完成付款後系統會自動處理；如果付款遇到問題需要取消重下，請告訴我。";
+    }
     return "\n\n📝 訂單已收到，正在為您安排，請稍候唷～";
   }
 
@@ -374,6 +382,17 @@ export function formatOrderOnePage(o: {
     prepaid: o.prepaid,
     paid_at: o.paid_at ?? null,
   } as OrderInfo;
+  const srcRaw = String(o.source || "superlanding");
+  const srcForPayKind = srcRaw === "shopline" ? "shopline" : "superlanding";
+  const rawFulfillmentForPay = String(o.fulfillment_status_raw ?? "").trim() || String(o.status ?? "").trim();
+  const orderForPayKind = {
+    ...codProbe,
+    status: rawFulfillmentForPay,
+    global_order_id: String(o.order_id ?? ""),
+  } as OrderInfo;
+  const unifiedStatusForPayKind = getUnifiedStatusLabel(rawFulfillmentForPay, srcForPayKind);
+  const { kind: payKindForHint } = payKindForOrder(orderForPayKind, unifiedStatusForPayKind, srcForPayKind);
+
   const isCod =
     isCodPaymentMethod(codProbe) ||
     o.payment_status === "cod" ||
@@ -432,7 +451,11 @@ export function formatOrderOnePage(o: {
   if (o.shipped_at) lines.push(`出貨時間：${o.shipped_at}`);
 
   const card = lines.join("\n");
-  const hint = buildOrderStatusFollowupHint(o.fulfillment_status_raw ?? undefined, o.shipping_method);
+  const hint = buildOrderStatusFollowupHint(
+    o.fulfillment_status_raw ?? undefined,
+    o.shipping_method,
+    payKindForHint
+  );
   return card + hint;
 }
 
